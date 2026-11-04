@@ -39,6 +39,8 @@ The cross-episode character identity is the reason this exists rather than just 
 - Where it runs (my call): v1 runs on the GPU host under uv, against the shared card, selected by `CUDA_VISIBLE_DEVICES` in config. Before a GPU stage loads, the runner checks free VRAM on that card against the backend's declared need and waits (or fails with `--no-wait`) rather than colliding with llama.cpp or CI. doppio never depends on Kubernetes: the CLI on one machine with a GPU (or CPU, slowly) is the product. A k8s Job launcher requesting `nvidia.com/gpu` may come later as an optional extra; the job model already keeps all state in the series directory, so nothing changes but the launcher.
 - Python, managed with uv (`uv sync`, `uv run`), ruff, pyright, pre-commit, per the user's python-project conventions. License PolyForm Shield 1.0.0.
 - pyannote's gated models need a Hugging Face token with the model terms accepted.
+- ffmpeg and ffprobe are required external binaries, not assumed on the host (the GPU host has neither); the repo pins them through mise, and `doppio doctor` checks for them.
+- Test material (read-only, from the media library at `<media-export>/TV/`): Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Episodes are never written; doppio's work directory for them lives outside the share.
 - The GitHub repo, when it exists, comes from the infra Pulumi `repos` config, not `gh repo create`. Until then the project is a local git repo.
 
 ## Architecture
@@ -66,8 +68,9 @@ Each backend kind is a `typing.Protocol` in `backends/base.py`. The kinds:
 | Kind | Input | Output | First implementation (my call) | Next |
 |---|---|---|---|---|
 | `separation` | mixed audio | vocals, background | Demucs htdemucs (via `audio-separator` or `demucs`) | UVR MDX/Roformer models |
-| `asr` | vocals, language | segments with word timestamps | faster-whisper large-v3 | Parakeet (NeMo), whatever is best per language |
-| `align` | audio, text, language | word timestamps | WhisperX wav2vec2 alignment | Qwen3-ForcedAligner |
+| `asr` | vocals, language | segments with word timestamps | Qwen3-ASR-1.7B (zh/yue/ja/ko) and faster-whisper large-v3 (fallback, CPU path) | Parakeet-TDT-0.6B-v3 (European languages); OpenVINO and whisper.cpp runtimes for the Whisper backend |
+| `align` | audio, text, language | word timestamps | Qwen3-ForcedAligner-0.6B (its 11 languages) and WhisperX wav2vec2 (the rest) | |
+| `tag` | vocals or mix | time spans of events (BGM, laughter, applause, cry) and emotion | SenseVoice-Small (optional, CPU) | |
 | `diarize` | vocals | speaker turns | pyannote community-1 | |
 | `embed` | audio span | speaker embedding vector | speechbrain ECAPA-TDNN | pyannote embedding |
 | `translate` | cues + context + slot durations | English cues | `openai_compat` (chat completions) | `ctranslate2` NLLB/MADLAD for a no-LLM path |
@@ -85,12 +88,19 @@ One TOML file per series (`doppio.toml` in the series directory), layered over a
 target_language = "en"
 
 [asr]
-backend = "faster_whisper"
+backend = "faster_whisper"   # fallback for any language
 model = "large-v3"
 
-[asr.lang.ja]
-backend = "faster_whisper"
-model = "kotoba-whisper-v2"
+[asr.lang.ko]
+backend = "qwen3_asr"
+model = "Qwen/Qwen3-ASR-1.7B"
+
+[asr.lang.es]
+backend = "parakeet"
+model = "nvidia/parakeet-tdt-0.6b-v3"
+
+[align]
+backend = "qwen3_forced_aligner"  # falls back to wav2vec2 outside its 11 languages
 
 [translate]
 backend = "openai_compat"
@@ -114,6 +124,8 @@ borrow_silence_ms = 400
 ```
 
 Resolution order for a stage: per-language (or per-pair) override, then the series default, then the user default. The model names above are illustrative; the builder picks real defaults after testing.
+
+Why these ASR defaults: `docs/research/2026-11-04-asr-backends.md` compares thirteen candidates. A backend whose model emits no timestamps (Cohere Transcribe, Omnilingual) is still usable, because the `align` stage runs on any backend's text; the ASR interface reports whether its own timing is word-level so the runner can skip alignment.
 
 Source language is detected per episode (Whisper language ID on the first minutes of vocals) unless the config pins it. Per-segment language detection, for shows that mix languages (WeeaBlind's dub-only-foreign-segments option), is a later feature; the segment model leaves room for a per-segment `language` field.
 
@@ -184,17 +196,17 @@ Order, per the brief: length-constrained translation (above), TTS rate control w
 
 ### Mix and mux
 
-Background bed from separation, dub cues placed at their times, loudness-normalized (EBU R128) to match the original. Original vocals (my call, configurable): removed wherever a dubbed cue plays, and kept elsewhere, so laughs, screams, songs and lines the SDH filter dropped still sound like the original. An optional duck level keeps a quiet bleed of the original voice under the dub instead of removing it. Mux with ffmpeg: video copied, English dub as the default audio track, original audio kept, an ASS subtitle track with speaker names, and the original subtitle tracks kept.
+Background bed from separation, dub cues placed at their times, loudness-normalized (EBU R128) to match the original. Original vocals (my call, configurable): removed wherever a dubbed cue plays, and kept elsewhere, so laughs, screams, songs and lines the SDH filter dropped still sound like the original. When the optional `tag` stage ran, its BGM and singing spans keep the original vocals untouched (songs stay in the source language), and its laughter spans are never covered by a dub cue's removal window. An optional duck level keeps a quiet bleed of the original voice under the dub instead of removing it. Mux with ffmpeg: video copied, English dub as the default audio track, original audio kept, an ASS subtitle track with speaker names, and the original subtitle tracks kept.
 
 ## Milestones
 
 1. **Recon** (parallel with 2): read pyVideoTrans's diarization-to-voice path and note anything worth borrowing; read yt-dbl's job runner.
 2. **Skeleton**: config loader with per-language resolution, backend Protocols and entry-point registry, job manifest and cache keys, `extract` and `separate` stages.
-3. **ASR and diarization**: faster-whisper, WhisperX alignment, pyannote, ECAPA embeddings.
+3. **ASR and diarization**: Qwen3-ASR with Qwen3-ForcedAligner, faster-whisper with WhisperX alignment, pyannote, ECAPA embeddings. Score both ASR backends on Chimera E01 by character error rate against its Korean subtitle track (timing-insensitive text comparison after normalization), to confirm the Korean default with a number.
 4. **Registry test**: the registry, then two episodes of one show. Success is measured, not eyeballed: hand-label the speakers in a sample of turns from both episodes and report what fraction of recurring characters resolve to the same ID. This is the first result worth looking at. Bar (my call): a recurring character is one with clean speech in both episodes; pass is 90% of them resolving to one ID with no two characters merged into one. Under 75% sends the work back to embeddings and separation before milestone 5; between the two, tune the threshold and exemplar selection, then proceed.
 5. **Translate, TTS, time fit, mix**: an end-to-end dubbed episode.
 6. **Subtitle-first path.**
-7. **Second backends**: Parakeet ASR, a cloning TTS, ctranslate2 MT, to prove the plugin contract with a second implementation of each kind.
+7. **Second backends**: Parakeet ASR, the SenseVoice tagger, a cloning TTS, ctranslate2 MT, to prove the plugin contract with more than one implementation of each kind.
 
 ## Left to the builder
 
