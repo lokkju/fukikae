@@ -23,7 +23,8 @@ The cross-episode character identity is the reason this exists rather than just 
 - Real-time or streaming dubbing.
 - Lip sync or any video modification.
 - Target languages other than English. The interfaces take a target language parameter so this isn't foreclosed, but only English gets tested.
-- Windows or macOS support. Target is Linux with CUDA.
+- Windows or macOS support. Target is Linux with CUDA. Backends declare the devices they support (CUDA, CPU, and later OpenVINO or ROCm), so other hardware is a backend addition, not a redesign.
+- Depending on Kubernetes, a database server, or any other service an ordinary user wouldn't have.
 
 ## Anti-goals
 
@@ -35,7 +36,7 @@ The cross-episode character identity is the reason this exists rather than just 
 ## Constraints
 
 - Runs on a GPU host with two RTX 3090s (24 GB each). One is resident vLLM serving the LLM gateway; the other is shared with other GPU jobs (a llama.cpp server, CI). Stages load one model at a time and release VRAM before the next stage, so the whole pipeline fits on a single 24 GB card.
-- Where it runs (my call): v1 runs on the GPU host under uv, against the shared card, selected by `CUDA_VISIBLE_DEVICES` in config. Before a GPU stage loads, the runner checks free VRAM on that card against the backend's declared need and waits (or fails with `--no-wait`) rather than colliding with llama.cpp or CI. Packaging as a k8s Job requesting `nvidia.com/gpu` is post-v1; the job model already keeps all state in the series directory, so nothing changes but the launcher.
+- Where it runs (my call): v1 runs on the GPU host under uv, against the shared card, selected by `CUDA_VISIBLE_DEVICES` in config. Before a GPU stage loads, the runner checks free VRAM on that card against the backend's declared need and waits (or fails with `--no-wait`) rather than colliding with llama.cpp or CI. doppio never depends on Kubernetes: the CLI on one machine with a GPU (or CPU, slowly) is the product. A k8s Job launcher requesting `nvidia.com/gpu` may come later as an optional extra; the job model already keeps all state in the series directory, so nothing changes but the launcher.
 - Python, managed with uv (`uv sync`, `uv run`), ruff, pyright, pre-commit, per the user's python-project conventions. License PolyForm Shield 1.0.0.
 - pyannote's gated models need a Hugging Face token with the model terms accepted.
 - The GitHub repo, when it exists, comes from the infra Pulumi `repos` config, not `gh repo create`. Until then the project is a local git repo.
@@ -156,7 +157,16 @@ Extras (my call): a cluster becomes a registry character only if it has at least
 
 `doppio registry cluster <season-dir>` does the batch version from the brief: agglomerative clustering over every episode's cluster embeddings at once, to seed the registry for a season that's already on disk.
 
-CLI ops: `list`, `show`, `rename`, `merge`, `split` (by episode cluster), `voice` (assign), `lock`. Any op that changes an assignment invalidates the affected episodes' downstream stages through the manifest.
+### Actors
+
+A speaker embedding identifies a voice, and a voice belongs to an actor, not a character. One source-language actor often plays several characters (routine in anime), and the same actor turns up across series. So the registry has two entities:
+
+- **Actor**: owns the embeddings (centroid and exemplars). Optional name and an external ID (TMDB or AniDB person ID) for later metadata lookup.
+- **Character**: what gets an English voice. Belongs to a series and links to one actor (sometimes more, for recasts).
+
+v1 behavior (my call): matching runs against actors; a new actor gets one new character, so v1 behaves as one character per voice. Splitting one actor into several characters is a manual op in v1 (`registry split --by-character`, with the operator assigning turns or episodes). The schema has both tables from day one, so later work can add: cast lists from TMDB/AniDB to name characters and actors, a cross-series actor library (an actor recognized in a new show starts with a known identity), and disambiguating characters of the same actor from subtitle speaker names or scene context. Assigning a consistent English voice per source actor, rather than per character, becomes one config switch.
+
+CLI ops: `list`, `show`, `rename`, `merge`, `split` (by episode cluster, or by character), `voice` (assign), `lock`, `actor` (link, name, set external ID). Any op that changes an assignment invalidates the affected episodes' downstream stages through the manifest.
 
 Voice assignment default: each new character gets the next unused stock voice from a gender-matched pool (gender estimate from the embedding or pitch; the operator can override). Cloning is opt-in per character, with the reference clip picked automatically from the cleanest exemplar turns and replaceable by hand.
 
