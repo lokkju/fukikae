@@ -10,7 +10,7 @@ from fukikae.eval import autolabel
 from fukikae.eval.autolabel import Line, label_spans, parse_ass
 from fukikae.eval.cli import eval_app
 from fukikae.eval.speakers import load_labels, score, verdict
-from fukikae.media import probe
+from fukikae.media import MediaError, probe
 from fukikae.models import Assignments, ClusterAssignment
 
 HEADER = """[Script Info]
@@ -81,6 +81,38 @@ def test_choose_track_prefers_full_english(tmp_path: Path) -> None:
     assert len(parse_ass(path.read_text(encoding="utf-8"))) == 9
     idx2, _ = autolabel.choose_subtitle_track(src, pr, work, override=pr.subtitles[2].index)
     assert idx2 == pr.subtitles[2].index
+
+
+def test_choose_subtitle_track_all_flagged_forced_picks_most_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fairy Tail S01E11 as ffprobe reports it: its one English ASS is flagged forced."""
+    from fukikae.media import ProbeResult, SubTrack
+
+    body = {2: 1, 3: 4}
+
+    def fake(_source: Path, index: int, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        rows = "".join(
+            _dlg(f"0:00:{i:02d}.00", f"0:00:{i:02d}.50", "NATSU") for i in range(body[index])
+        )
+        dest.write_text(HEADER + rows, encoding="utf-8")
+
+    monkeypatch.setattr(autolabel, "_extract", fake)
+    one = ProbeResult(subtitles=[SubTrack(2, "ass", "eng", "English", True)])
+    idx, path = autolabel.choose_subtitle_track(Path("x.mkv"), one, tmp_path)
+    assert idx == 2 and len(parse_ass(path.read_text(encoding="utf-8"))) == 1
+    many = ProbeResult(
+        subtitles=[
+            SubTrack(2, "ass", "eng", "English", True),
+            SubTrack(3, "ass", "eng", "Forced", True),
+            SubTrack(4, "ass", "ger", None, True),
+        ]
+    )
+    assert autolabel.choose_subtitle_track(Path("x.mkv"), many, tmp_path)[0] == 3
+    none = ProbeResult(subtitles=[SubTrack(4, "ass", "ger", None, True)])
+    with pytest.raises(MediaError, match="English ASS"):
+        autolabel.choose_subtitle_track(Path("x.mkv"), none, tmp_path)
 
 
 def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

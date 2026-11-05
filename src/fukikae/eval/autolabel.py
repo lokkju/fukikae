@@ -62,7 +62,8 @@ def choose_subtitle_track(
     source: Path, pr: ProbeResult, work: Path, override: int | None = None
 ) -> tuple[int, Path]:
     """Extract the speaker-naming subtitle track to `work/eval/subtitles.ass`: `override`, else
-    the non-forced English ASS stream with the most named Dialogue lines."""
+    the non-forced English ASS stream with the most named Dialogue lines. When every English
+    ASS stream is flagged forced (a release that flags its only track), they compete instead."""
     out = work / "eval" / "subtitles.ass"
     if override is not None:
         if override not in {s.index for s in pr.subtitles}:
@@ -71,13 +72,12 @@ def choose_subtitle_track(
             )
         _extract(source, override, out)
         return override, out
-    cands: list[SubTrack] = [
-        s
-        for s in pr.subtitles
-        if s.codec in _ASS_CODECS and _norm_lang(s.language) == "eng" and not s.forced
+    english = [
+        s for s in pr.subtitles if s.codec in _ASS_CODECS and _norm_lang(s.language) == "eng"
     ]
+    cands = [s for s in english if not s.forced] or english
     if not cands:
-        raise MediaError("no non-forced English ASS subtitle stream; pass --subtitle-track")
+        raise MediaError("no English ASS subtitle stream; pass --subtitle-track")
     best: tuple[int, SubTrack, Path] | None = None
     for s in cands:
         tmp = work / "eval" / f"subtitles-{s.index}.ass"
@@ -109,9 +109,10 @@ def choose_text_track(
     override: int | None = None,
 ) -> tuple[int, Path]:
     """Extract the SDH or colour-coded text track to `work/eval/subtitles.srt`: `override`, else
-    among the non-forced text tracks that are marked SDH/CC in their title or in the episode's
-    source language (all of them when none is), the one with the most tagged (`sdh`) or
-    coloured (`colour`) lines."""
+    among the non-forced text tracks (all of them when every one is flagged forced, as on Grid)
+    those marked SDH/CC in their title, including `[CC]`, and in the episode's source language
+    (else either; else all of them), the one with the most tagged (`sdh`) or coloured
+    (`colour`) lines."""
     out = work / "eval" / "subtitles.srt"
     texts = [s for s in pr.subtitles if s.codec in _TEXT_CODECS]
     if override is not None:
@@ -122,13 +123,11 @@ def choose_text_track(
         _extract_text(source, override, out)
         return override, out
     want = _norm_lang(source_language)
-    cands: list[SubTrack] = [s for s in texts if not s.forced]
-    preferred = [
-        s
-        for s in cands
-        if _SDH_TITLE.search(s.title or "") or (want and _norm_lang(s.language) == want)
-    ]
-    cands = preferred or cands
+    cands: list[SubTrack] = [s for s in texts if not s.forced] or texts
+    marked = [s for s in cands if _SDH_TITLE.search(s.title or "")]
+    spoken = [s for s in cands if want and _norm_lang(s.language) == want]
+    both = [s for s in marked if s in spoken]
+    cands = both or sorted({*marked, *spoken}, key=lambda s: s.index) or cands
     if not cands:
         raise MediaError(f"no text subtitle stream for {kind} ground truth; pass --subtitle-track")
     best: tuple[int, SubTrack, Path] | None = None
