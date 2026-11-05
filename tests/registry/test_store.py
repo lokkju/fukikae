@@ -94,6 +94,7 @@ def test_delete_episode_recomputes(reg: Registry):
 
 def test_delete_last_episode_keeps_centroid(reg: Registry):
     aid, _ = reg.create_actor_with_character(unit(1, 0, 0))
+    reg.set_actor(aid, name="Ann")  # protected from pruning; keeps its last centroid
     reg.add_exemplars(aid, "e1", "c0", np.stack([unit(0, 1, 0)]), 3.0)
     reg.recompute_centroid(aid)
     reg.delete_episode("e1")
@@ -146,28 +147,61 @@ def test_foreign_keys_on(reg: Registry):
         reg.add_exemplars(999, "e1", "c0", np.stack([unit(1, 0)]), 1.0)
 
 
-def test_delete_exemplars_drops_one_cluster_and_recomputes(tmp_path):
-    with Registry(tmp_path / "r.sqlite") as reg:
-        aid, _ = reg.create_actor_with_character(np.array([1, 0, 0], dtype=np.float32))
-        reg.add_exemplars(aid, "e1", "A", np.array([[1, 0, 0]], dtype=np.float32), 5.0)
-        reg.add_exemplars(aid, "e1", "B", np.array([[0, 1, 0]], dtype=np.float32), 5.0)
-        reg.recompute_centroid(aid)
-        reg.delete_exemplars("e1", "B")
-        assert reg.exemplar_count(aid) == 1
-        c = reg.actors()[0].centroid
-        assert c is not None and abs(float(c[0]) - 1.0) < 1e-6
-        reg.delete_exemplars("e1", "A")  # none left: the last centroid stays
-        assert reg.exemplar_count(aid) == 0
-        assert reg.actors()[0].centroid is not None
+def _set_voice(path: Path, character_id: int) -> None:
+    con = sqlite3.connect(path)
+    con.execute("UPDATE characters SET voice = ? WHERE id = ?", ('{"v": 1}', character_id))
+    con.commit()
+    con.close()
 
 
-def test_relabel_exemplars_swaps_labels(tmp_path):
-    with Registry(tmp_path / "r.sqlite") as reg:
-        aid, _ = reg.create_actor_with_character(np.array([1, 0, 0], dtype=np.float32))
-        reg.add_exemplars(aid, "e1", "A", np.array([[1, 0, 0]], dtype=np.float32), 5.0)
-        reg.add_exemplars(aid, "e1", "B", np.array([[0, 1, 0]], dtype=np.float32), 5.0)
-        reg.relabel_exemplars("e1", {"A": "B", "B": "A"})
-        reg.delete_exemplars("e1", "A")  # was B's [0, 1, 0]
-        c = reg.actors()[0].centroid
-        assert reg.exemplar_count(aid) == 1
-        assert c is not None and abs(float(c[0]) - 1.0) < 1e-6
+def test_delete_episode_returns_orphans_and_prune_spares_protected(tmp_path: Path):
+    p = tmp_path / "r.sqlite"
+    with Registry(p) as reg:
+        ids = {}
+        for name in ("only", "shared", "locked", "named", "voiced", "charnamed"):
+            ids[name], _ = reg.create_actor_with_character(unit(1, 0, 0))
+            reg.add_exemplars(ids[name], "e1", name, np.stack([unit(1, 0, 0)]), 3.0)
+        reg.add_exemplars(ids["shared"], "e2", "x", np.stack([unit(0, 1, 0)]), 3.0)
+        reg.lock_actor(ids["locked"], True)
+        reg.set_actor(ids["named"], name="Ann")
+        voiced_cid = next(c.id for c in reg.characters() if c.actor_id == ids["voiced"])
+        named_cid = next(c.id for c in reg.characters() if c.actor_id == ids["charnamed"])
+        reg.rename_character(named_cid, "Hero")
+    _set_voice(p, voiced_cid)
+    with Registry(p) as reg:
+        orphans = reg.delete_episode("e1")
+        assert sorted(orphans) == sorted(ids[n] for n in ids if n != "shared")
+        deleted = reg.prune_actors(orphans)
+        assert deleted == [ids["only"]]
+        left = {a.id for a in reg.actors()}
+        assert left == {ids[n] for n in ids if n != "only"}
+        assert ids["only"] not in {c.actor_id for c in reg.characters()}
+
+
+def test_prune_actors_skips_actor_with_exemplars(reg: Registry):
+    aid, _ = reg.create_actor_with_character(unit(1, 0))
+    reg.add_exemplars(aid, "e1", "c0", np.stack([unit(1, 0)]), 3.0)
+    assert reg.prune_actors([aid]) == []
+    assert [a.id for a in reg.actors()] == [aid]
+
+
+def test_transaction_rolls_back_everything(reg: Registry):
+    with pytest.raises(RuntimeError), reg.transaction():
+        aid, _ = reg.create_actor_with_character(unit(1, 0))
+        reg.add_exemplars(aid, "e1", "c0", np.stack([unit(1, 0)]), 3.0)
+        raise RuntimeError("boom")
+    assert reg.actors() == [] and reg.characters() == []
+
+
+def test_deleted_ids_are_never_reused(tmp_path: Path):
+    p = tmp_path / "r.sqlite"
+    with Registry(p) as reg:
+        a1, c1 = reg.create_actor_with_character(unit(1, 0))
+        a2, c2 = reg.create_actor_with_character(unit(0, 1))
+        assert reg.prune_actors([a2]) == [a2]
+    with Registry(p) as reg:  # survives reopening
+        a3, c3 = reg.create_actor_with_character(unit(0, 1))
+        assert (a3, c3) == (a2 + 1, c2 + 1)
+        reg.add_exemplars(a1, "e1", "S0", np.stack([unit(1, 0)]), 3.0)
+        a4, c4 = reg.split_cluster(a1, "e1", "S0")
+        assert (a4, c4) == (a3 + 1, c3 + 1)

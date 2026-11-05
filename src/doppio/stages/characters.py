@@ -8,9 +8,18 @@ Reads ``04-diarize/turns.json`` and ``clusters.npz``; writes under ``05-characte
     they refer to are one artifact. The next run pins its clusters to these assignments by
     overlap in time, so a re-run never silently reassigns a character.
 
-Only ``matched`` and ``new`` clusters add exemplars; ``pinned`` ones did so on their
-earlier run, ``review`` and ``extra`` ones never do. The registry database lives in the
-workspace and is shared state outside the manifest's fingerprinting.
+Each run rebuilds the episode's exemplars from scratch in one registry transaction: it
+deletes them all, then adds the current rows of every ``matched``, ``new`` and ``pinned``
+cluster (``review`` and ``extra`` clusters never add any). An interrupted run therefore
+leaves the registry as it was, and a rerun never counts an exemplar twice.
+
+When there is no earlier run to pin to (the first run, a deleted ``assignments.json``, or
+``rematch``), actors whose exemplars all came from this episode are deleted before
+matching, so the episode is judged against the rest of the series and never against its
+own earlier result. An actor someone has curated (locked, named, or with a named or voiced
+character) is kept. On a pinned rerun such actors stay matchable, and are deleted only if
+no cluster claims them again. The registry database lives in the workspace and is shared
+state outside the manifest's fingerprinting.
 """
 
 from __future__ import annotations
@@ -21,13 +30,17 @@ from typing import Any
 from doppio.artifacts import read_json, write_json
 from doppio.config import Config
 from doppio.models import Assignments, ClusterAssignment, Diarization
-from doppio.registry.matching import load_clusters, match, mean_embedding, pin, pin_sources
+from doppio.registry.matching import load_clusters, match, mean_embedding, pin
 from doppio.registry.store import Registry
 from doppio.workspace import Episode, Workspace
 
 
 class CharactersStage:
     name = "characters"
+
+    def __init__(self, rematch: bool = False) -> None:
+        # rematch: ignore the previous assignments.json and match every cluster afresh
+        self.rematch = rematch
 
     def inputs(self, ep: Episode) -> list[Path]:
         d = ep.work / "04-diarize"
@@ -51,40 +64,41 @@ class CharactersStage:
 
         evidence, rows = load_clusters(clusters_path)
 
-        pinned: dict[str, ClusterAssignment] = {}
-        sources: dict[str, str] = {}
         previous: Assignments | None = None
-        if assignments_path.exists():
+        if not self.rematch and assignments_path.exists():
             previous = read_json(assignments_path, Assignments)
+        fresh = previous is None or previous.turns is None
+        pinned: dict[str, ClusterAssignment] = {}
         if previous is not None and previous.turns is not None:
-            prev_turns = Diarization(backend=turns.backend, turns=previous.turns)
-            pinned = pin(previous, prev_turns, turns)
-            sources = pin_sources(previous, prev_turns, turns)
+            pinned = pin(previous, Diarization(backend=turns.backend, turns=previous.turns), turns)
 
-        result: dict[str, ClusterAssignment] = {
-            ev.cluster: pinned[ev.cluster] for ev in evidence if ev.cluster in pinned
-        }
-        todo = [ev for ev in evidence if ev.cluster not in pinned]
-        with Registry(Workspace(ep.workspace_root).registry_path) as reg:
-            if previous is None or previous.turns is None:
-                # No earlier run to build on: drop any exemplars it left behind.
-                reg.delete_episode(ep.id)
-            else:
-                # Earlier clusters nothing inherits are matched afresh below: drop their
-                # exemplars first, or they would count twice. Exemplars follow the label.
-                inherited = set(sources.values())
-                for c in previous.clusters:
-                    if c.character_id is not None and c.cluster not in inherited:
-                        reg.delete_exemplars(ep.id, c.cluster)
-                reg.relabel_exemplars(ep.id, {src: cur for cur, src in sources.items()})
+        result: dict[str, ClusterAssignment] = {}
+        with Registry(Workspace(ep.workspace_root).registry_path) as reg, reg.transaction():
+            orphans = reg.delete_episode(ep.id)
+            known = {a.id for a in reg.actors()}
+            # A pin to an actor that no longer exists (deleted by hand) is matched afresh.
+            pinned = {k: v for k, v in pinned.items() if v.actor_id in known}
+            claimed = {v.actor_id for v in pinned.values() if v.actor_id is not None}
+            if fresh:
+                reg.prune_actors(orphans)
+            touched: set[int] = set()
+            for ev in evidence:
+                p = pinned.get(ev.cluster)
+                if p is None or p.actor_id is None:
+                    continue
+                if len(rows[ev.cluster]):
+                    reg.add_exemplars(
+                        p.actor_id, ep.id, ev.cluster, rows[ev.cluster], ev.clean_seconds
+                    )
+                    touched.add(p.actor_id)
+                result[ev.cluster] = p.model_copy(update={"clean_seconds": ev.clean_seconds})
             matched = match(
-                todo,
+                [ev for ev in evidence if ev.cluster not in result],
                 reg.actors(),
                 threshold,
                 cfg.registry.min_new_seconds,
                 characters=reg.characters(),
             )
-            touched: set[int] = set()
             for a in matched:
                 emb = rows[a.cluster]
                 if a.status == "new":
@@ -98,6 +112,7 @@ class CharactersStage:
                 result[a.cluster] = a
             for aid in sorted(touched):
                 reg.recompute_centroid(aid)
+            reg.prune_actors([a for a in orphans if a not in claimed])
 
         write_json(
             assignments_path,

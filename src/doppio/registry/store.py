@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS exemplars (
     embedding BLOB NOT NULL,
     seconds REAL
 );
+CREATE TABLE IF NOT EXISTS id_high_water (tbl TEXT PRIMARY KEY, last INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS exemplars_actor ON exemplars(actor_id);
 CREATE INDEX IF NOT EXISTS exemplars_episode ON exemplars(episode);
 """
@@ -109,6 +110,9 @@ class Registry:
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
+        if self._con.in_transaction:  # nested: the outermost transaction commits or rolls back
+            yield self._con
+            return
         self._con.execute("BEGIN IMMEDIATE")
         try:
             yield self._con
@@ -117,6 +121,12 @@ class Registry:
             raise
         else:
             self._con.execute("COMMIT")
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Group several writes into one transaction: all of them land, or none do."""
+        with self._tx():
+            yield
 
     def close(self) -> None:
         self._con.close()
@@ -171,14 +181,36 @@ class Registry:
 
     # writes
 
+    def _next_id(self, con: sqlite3.Connection, table: str) -> int:
+        """An id above any this table has ever held, so a deleted id is never handed out
+        again (assignments files and reports may still name it)."""
+        if table not in ("actors", "characters"):
+            raise ValueError(table)
+        row = con.execute("SELECT last FROM id_high_water WHERE tbl = ?", (table,)).fetchone()
+        top = con.execute(f"SELECT MAX(id) FROM {table}").fetchone()[0]  # noqa: S608
+        nid = max(row[0] if row else 0, top or 0) + 1
+        con.execute(
+            "INSERT INTO id_high_water(tbl, last) VALUES (?, ?)"
+            " ON CONFLICT(tbl) DO UPDATE SET last = excluded.last",
+            (table, nid),
+        )
+        return nid
+
+    def _insert_actor_with_character(
+        self, con: sqlite3.Connection, centroid: np.ndarray
+    ) -> tuple[int, int]:
+        aid = self._next_id(con, "actors")
+        con.execute(
+            "INSERT INTO actors(id, centroid) VALUES (?, ?)",
+            (aid, _to_blob(_normalized(centroid))),
+        )
+        cid = self._next_id(con, "characters")
+        con.execute("INSERT INTO characters(id, actor_id) VALUES (?, ?)", (cid, aid))
+        return aid, cid
+
     def create_actor_with_character(self, centroid: np.ndarray) -> tuple[int, int]:
         with self._tx() as con:
-            aid = con.execute(
-                "INSERT INTO actors(centroid) VALUES (?)", (_to_blob(_normalized(centroid)),)
-            ).lastrowid
-            cid = con.execute("INSERT INTO characters(actor_id) VALUES (?)", (aid,)).lastrowid
-        assert aid is not None and cid is not None
-        return aid, cid
+            return self._insert_actor_with_character(con, centroid)
 
     def add_exemplars(
         self, actor_id: int, episode: str, cluster: str, embeddings: np.ndarray, seconds: float
@@ -253,59 +285,54 @@ class Registry:
             con.execute("DELETE FROM actors WHERE id = ?", (drop,))
             self._recompute(con, keep)
 
-    def delete_exemplars(self, episode: str, cluster: str) -> None:
-        """Remove one cluster's exemplars in an episode and recompute the affected actors.
-
-        Like delete_episode, an actor left with none keeps its last centroid.
-        """
-        with self._tx() as con:
-            affected = [
-                r[0]
-                for r in con.execute(
-                    "SELECT DISTINCT actor_id FROM exemplars WHERE episode = ? AND cluster = ?",
-                    (episode, cluster),
-                )
-            ]
-            con.execute(
-                "DELETE FROM exemplars WHERE episode = ? AND cluster = ?", (episode, cluster)
-            )
-            for aid in affected:
-                self._recompute(con, aid)
-
-    def relabel_exemplars(self, episode: str, mapping: dict[str, str]) -> None:
-        """Rename clusters of an episode's exemplars at once (old -> new; swaps are fine)."""
-        moves = {o: n for o, n in mapping.items() if o != n}
-        if not moves:
-            return
-        tmp = "\x00"
-        with self._tx() as con:
-            for old, new in moves.items():
-                con.execute(
-                    "UPDATE exemplars SET cluster = ? WHERE episode = ? AND cluster = ?",
-                    (tmp + new, episode, old),
-                )
-            for new in moves.values():
-                con.execute(
-                    "UPDATE exemplars SET cluster = ? WHERE episode = ? AND cluster = ?",
-                    (new, episode, tmp + new),
-                )
-
-    def delete_episode(self, episode: str) -> None:
+    def delete_episode(self, episode: str) -> list[int]:
         """Remove an episode's exemplars and recompute each affected unlocked actor.
 
-        An actor left with no exemplars keeps its last centroid (it is not nulled),
-        because a later episode may still match it.
+        Returns the ids of the actors left with no exemplars: every exemplar they had came
+        from this episode. They keep their last centroid until `prune_actors` deletes them.
         """
         with self._tx() as con:
             affected = [
                 r[0]
                 for r in con.execute(
-                    "SELECT DISTINCT actor_id FROM exemplars WHERE episode = ?", (episode,)
+                    "SELECT DISTINCT actor_id FROM exemplars WHERE episode = ? ORDER BY actor_id",
+                    (episode,),
                 )
             ]
             con.execute("DELETE FROM exemplars WHERE episode = ?", (episode,))
             for aid in affected:
                 self._recompute(con, aid)
+            return [
+                aid
+                for aid in affected
+                if con.execute("SELECT 1 FROM exemplars WHERE actor_id = ?", (aid,)).fetchone()
+                is None
+            ]
+
+    def prune_actors(self, actor_ids: list[int]) -> list[int]:
+        """Delete those actors (and their characters) that have no exemplars, and return them.
+
+        An actor someone has curated is kept: one that is locked or named, or that has a
+        character with a name or a voice.
+        """
+        deleted: list[int] = []
+        with self._tx() as con:
+            for aid in sorted(set(actor_ids)):
+                row = con.execute("SELECT locked, name FROM actors WHERE id = ?", (aid,)).fetchone()
+                if row is None or row[0] or row[1] is not None:
+                    continue
+                if con.execute("SELECT 1 FROM exemplars WHERE actor_id = ?", (aid,)).fetchone():
+                    continue
+                if con.execute(
+                    "SELECT 1 FROM characters WHERE actor_id = ?"
+                    " AND (name IS NOT NULL OR voice IS NOT NULL)",
+                    (aid,),
+                ).fetchone():
+                    continue
+                con.execute("DELETE FROM characters WHERE actor_id = ?", (aid,))
+                con.execute("DELETE FROM actors WHERE id = ?", (aid,))
+                deleted.append(aid)
+        return deleted
 
     def split_cluster(self, actor_id: int, episode: str, cluster: str) -> tuple[int, int]:
         """Move one episode cluster's exemplars to a new actor with a new character.
@@ -322,13 +349,7 @@ class Registry:
             if not rows:
                 raise KeyError((actor_id, episode, cluster))
             mean = np.stack([np.frombuffer(r[1], dtype=np.float32) for r in rows]).mean(axis=0)
-            new_aid = con.execute(
-                "INSERT INTO actors(centroid) VALUES (?)", (_to_blob(_normalized(mean)),)
-            ).lastrowid
-            new_cid = con.execute(
-                "INSERT INTO characters(actor_id) VALUES (?)", (new_aid,)
-            ).lastrowid
-            assert new_aid is not None and new_cid is not None
+            new_aid, new_cid = self._insert_actor_with_character(con, mean)
             con.execute(
                 "UPDATE exemplars SET actor_id = ? WHERE actor_id = ? AND episode = ?"
                 " AND cluster = ?",
