@@ -88,3 +88,34 @@ def speakers_cmd(
     else:
         typer.echo("merged pairs: none")
     typer.echo(f"verdict: {speakers.verdict(s)}")
+
+
+@eval_app.command("auto-label")
+def auto_label_cmd(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    episodes: str = typer.Option(..., "--episodes", help="Comma-separated, e.g. S01E11,S01E12."),
+    out: Path = typer.Option(..., "--out", help="Output directory for labels.yaml."),
+    subtitle_track: int = typer.Option(
+        None, "--subtitle-track", help="Absolute stream index of an ASS track naming speakers."
+    ),
+    min_overlap: float = typer.Option(
+        0.6, "--min-overlap", min=0.0, max=1.0, help="Share of a span one name must cover."
+    ),
+    report: bool = typer.Option(
+        False, "--report", help="Print per-cluster purity and name spread."
+    ),
+) -> None:
+    """Label every clean span from the speaker names in the episodes' ASS subtitles."""
+    from fukikae.eval import autolabel
+    from fukikae.media import MediaError
+
+    refs = [e.strip() for e in episodes.split(",") if e.strip()]
+    try:
+        result = autolabel.auto_label(workspace, refs, out, subtitle_track, min_overlap)
+    except (FileNotFoundError, ValueError, MediaError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    kept = sum(1 for c in result.clips if c.label != autolabel.UNKNOWN)
+    typer.echo(f"wrote {len(result.clips)} spans ({kept} labeled) to {out / 'labels.yaml'}")
+    if report:
+        typer.echo(autolabel.format_report(result))
