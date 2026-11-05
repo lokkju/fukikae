@@ -104,7 +104,7 @@ ignore = ["S101"]
 flake8-bugbear.extend-immutable-calls = ["typer.Argument", "typer.Option"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "S603", "S607"]
+"tests/*" = ["S603", "S607"]
 
 [tool.ruff.format]
 quote-style = "double"
