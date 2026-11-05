@@ -1,4 +1,4 @@
-# doppio Foundation and Character Registry Implementation Plan
+# fukikae Foundation and Character Registry Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,18 +8,18 @@
 
 **Tech Stack:** Python 3.12, uv, typer, pydantic v2, numpy, scipy, sqlite3 (stdlib), pytest, ruff, pyright, pre-commit; ffmpeg/ffprobe via mise (`conda:ffmpeg`); backends: demucs, faster-whisper, torchaudio (wav2vec2 forced alignment), qwen-asr (Qwen3-ASR and Qwen3-ForcedAligner), pyannote.audio, speechbrain, nvidia-ml-py, jiwer.
 
-**Spec:** `docs/superpowers/specs/2026-11-04-doppio-design.md` (ASR choices: `docs/research/2026-11-04-asr-backends.md`). This plan covers spec milestones 2-4. Translation, TTS, time fitting, mix and the subtitle-first path are the next plan.
+**Spec:** `docs/superpowers/specs/2026-11-04-fukikae-design.md` (ASR choices: `docs/research/2026-11-04-asr-backends.md`). This plan covers spec milestones 2-4. Translation, TTS, time fitting, mix and the subtitle-first path are the next plan.
 
 ## Global Constraints
 
 - License PolyForm Shield 1.0.0 (`LICENSE`, `license = "LicenseRef-PolyForm-Shield-1.0.0"` in pyproject).
 - uv only: `uv sync`, `uv run`; never pip. Python `>=3.12`.
 - Never depend on Kubernetes or any service an ordinary user wouldn't have.
-- Model code lives only in `src/doppio/backends/<kind>/`; stages never import a model library.
+- Model code lives only in `src/fukikae/backends/<kind>/`; stages never import a model library.
 - ffmpeg and ffprobe come from `.mise/config.toml` (`ffmpeg = "latest"` resolves to `conda:ffmpeg`); never assume them on the host. Invoke them with argument lists, never a shell string.
 - Source media is read-only: nothing is ever written beside a source episode. Work directories live in the workspace.
-- Heavy backends are optional extras (`doppio[demucs]`, `[whisper]`, `[qwen]`, `[pyannote]`); the core package imports none of them at module load.
-- Test media is never committed. GPU and media tests are marked `@pytest.mark.gpu` / `@pytest.mark.media` and read `DOPPIO_TEST_MEDIA` (a directory made by `scripts/make-fixtures`); they skip when it is unset.
+- Heavy backends are optional extras (`fukikae[demucs]`, `[whisper]`, `[qwen]`, `[pyannote]`); the core package imports none of them at module load.
+- Test media is never committed. GPU and media tests are marked `@pytest.mark.gpu` / `@pytest.mark.media` and read `FUKIKAE_TEST_MEDIA` (a directory made by `scripts/make-fixtures`); they skip when it is unset.
 - New-character bar: 20 s of clean speech in the episode (`registry.min_new_seconds = 20.0`).
 - Milestone 4 bar: pass at >= 90% of recurring characters resolving to one ID with no two characters merged; < 75% means rework embeddings/separation.
 - Commit messages: Conventional Commits, no AI attribution. Commit after every task.
@@ -39,8 +39,8 @@
 ```
 pyproject.toml  LICENSE  README.md  CLAUDE.md  .pre-commit-config.yaml
 .mise/config.toml                      # python, uv, ffmpeg
-scripts/make-fixtures                  # cuts test clips from the Plex episodes into $DOPPIO_TEST_MEDIA
-src/doppio/
+scripts/make-fixtures                  # cuts test clips from the Plex episodes into $FUKIKAE_TEST_MEDIA
+src/fukikae/
   __init__.py  cli.py                  # typer root; subcommands registered from the modules below
   models.py                            # Word, Segment, Transcript, Turn, Separation, Assignment (pydantic)
   artifacts.py                         # atomic JSON/WAV writes, schema_version check
@@ -66,7 +66,7 @@ src/doppio/
     cli.py
   eval/
     asr.py  speakers.py  cli.py
-tests/ (mirrors src/doppio)
+tests/ (mirrors src/fukikae)
 ```
 
 ---
@@ -74,20 +74,21 @@ tests/ (mirrors src/doppio)
 ### Task 1: Project scaffold
 
 **Files:**
-- Create: `pyproject.toml`, `LICENSE`, `README.md`, `CLAUDE.md`, `.pre-commit-config.yaml`, `.mise/config.toml`, `.gitignore`, `src/doppio/__init__.py`, `src/doppio/cli.py`
+- Create: `pyproject.toml`, `LICENSE`, `README.md`, `CLAUDE.md`, `.pre-commit-config.yaml`, `.mise/config.toml`, `.gitignore`, `src/fukikae/__init__.py`, `src/fukikae/cli.py`
 - Test: `tests/test_cli.py`
 
 **Interfaces:**
-- Produces: `doppio.cli.app: typer.Typer`; console script `doppio`; `doppio.__version__: str`.
+- Produces: `fukikae.cli.app: typer.Typer`; console script `fukikae`; `fukikae.__version__: str`.
 
-Use the `lokkju:python-project` skill's conventions for pyproject, ruff, pyright and pre-commit. `.mise/config.toml`: `[tools] python = "3.12"`, `uv = "latest"`, `ffmpeg = "latest"`. pytest markers `gpu`, `media`, `slow` registered in pyproject; default `addopts = "-m 'not gpu and not media'"`. Optional extras as in Global Constraints (empty lists are fine until their task). `.gitignore` includes `.doppio/`.
+Use the `lokkju:python-project` skill's conventions for pyproject, ruff, pyright and pre-commit. `.mise/config.toml`: `[tools] python = "3.12"`, `uv = "latest"`, `ffmpeg = "latest"`. pytest markers `gpu`, `media`, `slow` registered in pyproject; default `addopts = "-m 'not gpu and not media'"`. Optional extras as in Global Constraints (empty lists are fine until their task). `.gitignore` includes `.fukikae/`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
 from typer.testing import CliRunner
-from doppio.cli import app
-from doppio import __version__
+from fukikae.cli import app
+from fukikae import __version__
+
 
 def test_version():
     r = CliRunner().invoke(app, ["--version"])
@@ -98,12 +99,12 @@ def test_version():
 - [ ] **Step 2:** `uv run pytest tests/test_cli.py -v` — Expected: FAIL (import error).
 - [ ] **Step 3:** Create the scaffold and the typer app with a `--version` callback.
 - [ ] **Step 4:** `uv run pytest -v && uv run ruff check && uv run pyright && mise exec -- ffprobe -version` — Expected: all pass, ffprobe prints a version.
-- [ ] **Step 5:** Commit `chore: scaffold doppio package`.
+- [ ] **Step 5:** Commit `chore: scaffold fukikae package`.
 
 ### Task 2: Shared models and atomic artifacts
 
 **Files:**
-- Create: `src/doppio/models.py`, `src/doppio/artifacts.py`
+- Create: `src/fukikae/models.py`, `src/fukikae/artifacts.py`
 - Test: `tests/test_models.py`, `tests/test_artifacts.py`
 
 **Interfaces:**
@@ -120,15 +121,25 @@ def test_version():
 
 ```python
 def test_transcript_roundtrip(tmp_path):
-    t = Transcript(language="ko", backend="x", word_timing=True,
-                   segments=[Segment(start=0.0, end=1.5, text="안녕", words=[Word(start=0.0, end=1.5, text="안녕")])])
+    t = Transcript(
+        language="ko",
+        backend="x",
+        word_timing=True,
+        segments=[
+            Segment(start=0.0, end=1.5, text="안녕", words=[Word(start=0.0, end=1.5, text="안녕")])
+        ],
+    )
     write_json(tmp_path / "t.json", t)
     assert read_json(tmp_path / "t.json", Transcript) == t
 
+
 def test_read_rejects_newer_schema(tmp_path):
-    (tmp_path / "t.json").write_text('{"schema_version": 99, "language": "ko", "backend": "x", "word_timing": false, "segments": []}')
+    (tmp_path / "t.json").write_text(
+        '{"schema_version": 99, "language": "ko", "backend": "x", "word_timing": false, "segments": []}'
+    )
     with pytest.raises(ArtifactVersionError):
         read_json(tmp_path / "t.json", Transcript)
+
 
 def test_atomic_path_leaves_nothing_on_error(tmp_path):
     target = tmp_path / "a.wav"
@@ -147,28 +158,33 @@ def test_atomic_path_leaves_nothing_on_error(tmp_path):
 ### Task 3: Config loading and per-language resolution
 
 **Files:**
-- Create: `src/doppio/config.py`
+- Create: `src/fukikae/config.py`
 - Test: `tests/test_config.py`
 
 **Interfaces:**
 - Produces:
   - `BackendConfig(backend: str, options: dict[str, Any])` (frozen dataclass); `options` is every key in the table except `backend`, `lang`, `pair`.
   - `Config` with `target_language: str = "en"`, `source_language: str | None`, `source: Path | None` (the series directory on the media share), `gpu_device: int = 0`, `registry: RegistrySettings(min_new_seconds=20.0, match_threshold: float)`, `raw: dict`.
-  - `load_config(workspace: Path, user_config: Path | None = None) -> Config`: user config default `~/.config/doppio/config.toml`; workspace file `doppio.toml`. Deep-merge user then workspace.
+  - `load_config(workspace: Path, user_config: Path | None = None) -> Config`: user config default `~/.config/fukikae/config.toml`; workspace file `fukikae.toml`. Deep-merge user then workspace.
   - `Config.resolve(kind: str, language: str | None = None, pair: str | None = None) -> BackendConfig`: per-pair table (`[kind.pair.ko-en]`) over per-language (`[kind.lang.ko]`) over the kind's base table. An override table that omits `backend` inherits it. Raises `ConfigError` naming the kind when no backend resolves.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 def test_language_override_wins(tmp_path):
-    (tmp_path / "doppio.toml").write_text('[asr]\nbackend="faster_whisper"\nmodel="large-v3"\n[asr.lang.ko]\nbackend="qwen3_asr"\nmodel="Qwen/Qwen3-ASR-1.7B"\n')
+    (tmp_path / "fukikae.toml").write_text(
+        '[asr]\nbackend="faster_whisper"\nmodel="large-v3"\n[asr.lang.ko]\nbackend="qwen3_asr"\nmodel="Qwen/Qwen3-ASR-1.7B"\n'
+    )
     c = load_config(tmp_path, user_config=None)
     assert c.resolve("asr", "ko") == BackendConfig("qwen3_asr", {"model": "Qwen/Qwen3-ASR-1.7B"})
     assert c.resolve("asr", "fr") == BackendConfig("faster_whisper", {"model": "large-v3"})
 
-def test_override_inherits_backend_and_options(tmp_path): ...
+
+def test_override_inherits_backend_and_options(tmp_path):
+    ...
     # [translate] backend="openai_compat" model="a" max_speed=1.25 ; [translate.pair.ko-en] model="b"
     # resolve("translate", pair="ko-en") == BackendConfig("openai_compat", {"model": "b", "max_speed": 1.25})
+
 
 def test_workspace_overrides_user_config(tmp_path): ...
 def test_missing_backend_raises(tmp_path): ...  # ConfigError mentions "diarize"
@@ -182,8 +198,8 @@ def test_missing_backend_raises(tmp_path): ...  # ConfigError mentions "diarize"
 ### Task 4: Backend protocols and entry-point loader
 
 **Files:**
-- Create: `src/doppio/backends/base.py`, `src/doppio/backends/loader.py`
-- Modify: `src/doppio/cli.py` (add `backends list`)
+- Create: `src/fukikae/backends/base.py`, `src/fukikae/backends/loader.py`
+- Modify: `src/fukikae/cli.py` (add `backends list`)
 - Test: `tests/backends/test_loader.py`
 
 **Interfaces:**
@@ -194,7 +210,7 @@ def test_missing_backend_raises(tmp_path): ...  # ConfigError mentions "diarize"
   - `Aligner.align(audio: Path, transcript: Transcript) -> Transcript` (returns `word_timing=True`)
   - `Diarizer.diarize(audio: Path) -> Diarization`
   - `Embedder.embed(audio: Path, spans: list[tuple[float, float]]) -> np.ndarray` (shape `(len(spans), dim)`, L2-normalized rows); `dim: int`
-- Produces in `loader.py`: `available(kind: str) -> dict[str, type[Backend]]` (entry point group `doppio.backends.<kind>`); `create(kind: str, cfg: BackendConfig, device: str) -> Backend` (raises `ConfigError` listing installed names on an unknown backend; raises `BackendUnavailable` with the extra to install when the entry point's import fails); `supports(cls, language: str) -> bool`.
+- Produces in `loader.py`: `available(kind: str) -> dict[str, type[Backend]]` (entry point group `fukikae.backends.<kind>`); `create(kind: str, cfg: BackendConfig, device: str) -> Backend` (raises `ConfigError` listing installed names on an unknown backend; raises `BackendUnavailable` with the extra to install when the entry point's import fails); `supports(cls, language: str) -> bool`.
 
 - [ ] **Step 1: Write the failing tests** using a fake entry point (monkeypatch `importlib.metadata.entry_points` to return an `EntryPoint` for `tests.backends.fakes:FakeTranscriber`):
 
@@ -203,11 +219,13 @@ def test_create_unknown_lists_installed(fake_eps):
     with pytest.raises(ConfigError, match="fake"):
         create("asr", BackendConfig("nope", {}), "cpu")
 
+
 def test_create_passes_options(fake_eps):
     b = create("asr", BackendConfig("fake", {"model": "m"}), "cpu")
     assert b.options == {"model": "m"}
 
-def test_import_failure_names_extra(broken_ep): ...  # BackendUnavailable mentions "doppio[whisper]"
+
+def test_import_failure_names_extra(broken_ep): ...  # BackendUnavailable mentions "fukikae[whisper]"
 def test_backends_list_cli(fake_eps): ...  # output contains "asr" and "fake"
 ```
 
@@ -219,7 +237,7 @@ def test_backends_list_cli(fake_eps): ...  # output contains "asr" and "fake"
 ### Task 5: Manifest, cache keys and the stage runner
 
 **Files:**
-- Create: `src/doppio/job.py`
+- Create: `src/fukikae/job.py`
 - Test: `tests/test_job.py`
 
 **Interfaces:**
@@ -227,19 +245,29 @@ def test_backends_list_cli(fake_eps): ...  # output contains "asr" and "fake"
 - Produces:
   - `class Stage(Protocol)`: `name: str`; `inputs(ep: Episode) -> list[Path]`; `outputs(ep: Episode) -> list[Path]`; `config_key(cfg: Config, ep: Episode) -> dict` (the resolved backend configs this stage uses, JSON-serializable); `run(ep: Episode, cfg: Config) -> None`.
   - `Manifest` (pydantic, `manifest.json` in the episode work dir): `stages: dict[str, StageRecord(key: str, status: Literal["done", "failed"], started: datetime, finished: datetime | None, error: str | None)]`.
-  - `cache_key(stage, ep, cfg) -> str`: sha256 over the stage name, `config_key` JSON (sorted keys) and each input's fingerprint. Fingerprint: for paths inside the workspace, sha256 of contents (cache by `(path, size, mtime_ns)` in `.doppio/hashcache.json` to avoid rehashing); for paths outside it (source media), `(resolved path, size, mtime_ns)`.
+  - `cache_key(stage, ep, cfg) -> str`: sha256 over the stage name, `config_key` JSON (sorted keys) and each input's fingerprint. Fingerprint: for paths inside the workspace, sha256 of contents (cache by `(path, size, mtime_ns)` in `.fukikae/hashcache.json` to avoid rehashing); for paths outside it (source media), `(resolved path, size, mtime_ns)`.
   - `run_stages(ep: Episode, cfg: Config, stages: Sequence[Stage], from_stage: str | None = None, to_stage: str | None = None) -> list[str]` (returns the names it ran). A stage runs when it is at or after `from_stage`, or its key differs from the manifest, or any output is missing. The manifest record is written only after `run` returns; on exception the record is `failed` with the error and the exception propagates.
 
 - [ ] **Step 1: Write the failing tests** with two fake stages (`a` writes `a.txt` from a config value; `b` reads `a.txt`, writes `b.txt`) and a call counter:
 
 ```python
-def test_second_run_skips(ep, cfg): run_stages(...); assert run_stages(...) == []
+def test_second_run_skips(ep, cfg):
+    run_stages(...)
+    assert run_stages(...) == []
+
+
 def test_config_change_reruns_downstream(ep, cfg): ...  # change a's option -> ["a", "b"]
-def test_same_output_content_stops_propagation(ep, cfg): ...  # a's key changes but writes identical a.txt -> ["a"]
+def test_same_output_content_stops_propagation(
+    ep, cfg
+): ...  # a's key changes but writes identical a.txt -> ["a"]
 def test_hand_edit_reruns_only_downstream(ep, cfg): ...  # edit a.txt -> ["b"]
 def test_from_stage_forces(ep, cfg): ...  # from_stage="b" -> ["b"]
-def test_failure_records_and_reraises(ep, cfg): ...  # b raises; manifest b.status == "failed"; a still "done"
-def test_interrupted_stage_reruns(ep, cfg): ...  # b raises KeyboardInterrupt after writing via atomic_path; b.txt absent; next run runs b
+def test_failure_records_and_reraises(
+    ep, cfg
+): ...  # b raises; manifest b.status == "failed"; a still "done"
+def test_interrupted_stage_reruns(
+    ep, cfg
+): ...  # b raises KeyboardInterrupt after writing via atomic_path; b.txt absent; next run runs b
 ```
 
 - [ ] **Step 2:** Run, expect FAIL.
@@ -250,7 +278,7 @@ def test_interrupted_stage_reruns(ep, cfg): ...  # b raises KeyboardInterrupt af
 ### Task 6: VRAM gate
 
 **Files:**
-- Create: `src/doppio/gpu.py`
+- Create: `src/fukikae/gpu.py`
 - Test: `tests/test_gpu.py`
 
 **Interfaces:**
@@ -263,56 +291,73 @@ def test_interrupted_stage_reruns(ep, cfg): ...  # b raises KeyboardInterrupt af
 ### Task 7: Workspace, episodes, media wrappers, extract stage, doctor
 
 **Files:**
-- Create: `src/doppio/workspace.py`, `src/doppio/media.py`, `src/doppio/stages/extract.py`, `src/doppio/doctor.py`, `scripts/make-fixtures`
-- Modify: `src/doppio/cli.py` (add `run`, `doctor`)
+- Create: `src/fukikae/workspace.py`, `src/fukikae/media.py`, `src/fukikae/stages/extract.py`, `src/fukikae/doctor.py`, `scripts/make-fixtures`
+- Modify: `src/fukikae/cli.py` (add `run`, `doctor`)
 - Test: `tests/test_workspace.py`, `tests/test_media.py`, `tests/stages/test_extract.py`
 
 **Interfaces:**
 - Produces:
-  - `Workspace(root: Path)`: `.config` (`load_config(root)`), `.work_dir(episode_id) -> Path` (`root/.doppio/episodes/<episode_id>`), `.registry_path -> Path` (`root/.doppio/registry/registry.sqlite`), `.find_episode(ref: str) -> Episode` (`ref` is a path or an `SxxEyy` searched under `config.source`).
+  - `Workspace(root: Path)`: `.config` (`load_config(root)`), `.work_dir(episode_id) -> Path` (`root/.fukikae/episodes/<episode_id>`), `.registry_path -> Path` (`root/.fukikae/registry/registry.sqlite`), `.find_episode(ref: str) -> Episode` (`ref` is a path or an `SxxEyy` searched under `config.source`).
   - `Episode(source: Path, id: str, work: Path)`; `id` is `S01E01` parsed from the filename (`[Ss](\d+)[Ee](\d+)`), else the stem slugified.
   - `media.probe(path) -> ProbeResult(audio: list[AudioTrack(index, codec, channels, language: str | None, title: str | None, default: bool)], subtitles: list[SubTrack(index, codec, language, title, forced: bool)])`.
   - `media.choose_audio_track(probe, source_language: str | None, override: int | None) -> AudioTrack`: override wins; else the first track whose language equals `source_language`; else the first non-English track; else the first track.
   - `media.run_ffmpeg(args: list[str]) -> None` (raises `MediaError` with stderr tail).
   - `ExtractStage` (`name="extract"`): writes `00-extract/audio.wav` (44.1 kHz, stereo downmix, pcm_s16le) from the chosen track; `config_key` includes the chosen track index.
   - `doctor()` checks ffmpeg/ffprobe on PATH, NVML visibility, HF token presence (`huggingface_hub.get_token()` is not None; never print it), installed backends per kind.
-  - `doppio run <workspace> <episode-ref> [--from STAGE] [--to STAGE] [--no-wait]`.
-  - `scripts/make-fixtures`: given `DOPPIO_TEST_MEDIA`, cuts 90 s clips (`S01E01-clip.mkv`, `S01E02-clip.mkv`, from 00:05:00) of the two Chimera episodes with stream copy, plus a full-episode symlink for each. It reads the episodes from `~/doppio-ws/media/Chimera (2021)/Season 1/` (the spec's test material; override with `DOPPIO_SOURCE_MEDIA`).
+  - `fukikae run <workspace> <episode-ref> [--from STAGE] [--to STAGE] [--no-wait]`.
+  - `scripts/make-fixtures`: given `FUKIKAE_TEST_MEDIA`, cuts 90 s clips (`S01E01-clip.mkv`, `S01E02-clip.mkv`, from 00:05:00) of the two Chimera episodes with stream copy, plus a full-episode symlink for each. It reads the episodes from `~/fukikae-ws/media/Chimera (2021)/Season 1/` (the spec's test material; override with `FUKIKAE_SOURCE_MEDIA`).
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 def test_episode_id_from_awkward_path(tmp_path):
-    p = tmp_path / "Chimera (2021)" / "Season 1" / "Chimera - S01E01 - A Strange Shadow WEBDL-1080p.mkv"
-    ...; assert ws.find_episode(str(p)).id == "S01E01"
+    p = (
+        tmp_path
+        / "Chimera (2021)"
+        / "Season 1"
+        / "Chimera - S01E01 - A Strange Shadow WEBDL-1080p.mkv"
+    )
+    ...
+    assert ws.find_episode(str(p)).id == "S01E01"
+
 
 def test_choose_track_prefers_source_language():
-    probe = ProbeResult(audio=[AudioTrack(1, "aac", 2, "eng", None, True), AudioTrack(2, "aac", 6, "jpn", None, False)], subtitles=[])
+    probe = ProbeResult(
+        audio=[
+            AudioTrack(1, "aac", 2, "eng", None, True),
+            AudioTrack(2, "aac", 6, "jpn", None, False),
+        ],
+        subtitles=[],
+    )
     assert choose_audio_track(probe, "ja", None).index == 2
-    assert choose_audio_track(probe, None, None).index == 2   # first non-English
+    assert choose_audio_track(probe, None, None).index == 2  # first non-English
+
 
 @pytest.mark.media
 def test_extract_on_readonly_source_with_spaces(tmp_path, readonly_copy):
     # readonly_copy: a fixture copying a generated 5 s 5.1 test tone mkv (made with ffmpeg lavfi) into
     # "dir (x)/it's a file.mkv" and chmod -R a-w on its directory
-    ...; run_stages(ep, cfg, [ExtractStage()])
+    ...
+    run_stages(ep, cfg, [ExtractStage()])
     info = soundfile.info(ep.work / "00-extract" / "audio.wav")
     assert (info.samplerate, info.channels) == (44100, 2)
-    assert sorted(readonly_copy.parent.iterdir()) == [readonly_copy]  # nothing written beside the source
+    assert sorted(readonly_copy.parent.iterdir()) == [
+        readonly_copy
+    ]  # nothing written beside the source
 ```
 
 (The 5.1 tone fixture uses `ffmpeg -f lavfi`, so this test needs ffmpeg but no Plex media; mark it `media` only because it shells out. Keep it running in CI-less local runs via `-m media`.)
 
 - [ ] **Step 2:** Run, expect FAIL.
 - [ ] **Step 3:** Implement.
-- [ ] **Step 4:** `uv run pytest -m "not gpu" -v` — Expected: PASS. `uv run doppio doctor` lists ffmpeg found.
+- [ ] **Step 4:** `uv run pytest -m "not gpu" -v` — Expected: PASS. `uv run fukikae doctor` lists ffmpeg found.
 - [ ] **Step 5:** Commit `feat: workspace, episode resolution, extract stage and doctor`.
 
 ### Task 8: Demucs separation backend and separate stage
 
 **Files:**
-- Create: `src/doppio/backends/separation/demucs.py`, `src/doppio/stages/separate.py`
-- Modify: `pyproject.toml` (extra `demucs`, entry point `doppio.backends.separation: demucs`)
+- Create: `src/fukikae/backends/separation/demucs.py`, `src/fukikae/stages/separate.py`
+- Modify: `pyproject.toml` (extra `demucs`, entry point `fukikae.backends.separation: demucs`)
 - Test: `tests/stages/test_separate.py`, `tests/backends/test_demucs.py`
 
 **Interfaces:**
@@ -327,7 +372,7 @@ def test_extract_on_readonly_source_with_spaces(tmp_path, readonly_copy):
 ### Task 9: Language stage, faster-whisper ASR, wav2vec2 aligner, ASR stage
 
 **Files:**
-- Create: `src/doppio/stages/language.py`, `src/doppio/backends/asr/faster_whisper.py`, `src/doppio/backends/align/wav2vec2.py`, `src/doppio/stages/asr.py`
+- Create: `src/fukikae/stages/language.py`, `src/fukikae/backends/asr/faster_whisper.py`, `src/fukikae/backends/align/wav2vec2.py`, `src/fukikae/stages/asr.py`
 - Modify: `pyproject.toml` (extra `whisper`: faster-whisper, torchaudio; entry points)
 - Test: `tests/stages/test_language.py`, `tests/stages/test_asr.py`, `tests/backends/test_faster_whisper.py`, `tests/backends/test_wav2vec2.py`
 
@@ -345,7 +390,7 @@ def test_extract_on_readonly_source_with_spaces(tmp_path, readonly_copy):
 ### Task 10: Qwen3-ASR and Qwen3-ForcedAligner backends
 
 **Files:**
-- Create: `src/doppio/backends/asr/qwen3.py`, `src/doppio/backends/align/qwen3.py`
+- Create: `src/fukikae/backends/asr/qwen3.py`, `src/fukikae/backends/align/qwen3.py`
 - Modify: `pyproject.toml` (extra `qwen`: `qwen-asr`; entry points `qwen3_asr`, `qwen3_forced_aligner`)
 - Test: `tests/backends/test_qwen3.py`
 
@@ -360,22 +405,22 @@ def test_extract_on_readonly_source_with_spaces(tmp_path, readonly_copy):
 ### Task 11: ASR evaluation against a subtitle track
 
 **Files:**
-- Create: `src/doppio/eval/asr.py`, `src/doppio/eval/cli.py`
-- Modify: `src/doppio/cli.py` (add `eval asr`), `pyproject.toml` (jiwer)
+- Create: `src/fukikae/eval/asr.py`, `src/fukikae/eval/cli.py`
+- Modify: `src/fukikae/cli.py` (add `eval asr`), `pyproject.toml` (jiwer)
 - Test: `tests/eval/test_asr.py`
 
 **Interfaces:**
-- Produces: `normalize(text: str, language: str) -> str` (strip ASS/HTML tags, SDH brackets `[...]`/`(...)`, music symbols, punctuation; collapse whitespace; for zh/ja/ko remove all whitespace); `cer(reference: str, hypothesis: str) -> float` (jiwer); `doppio eval asr <workspace> <episode> --subtitle-track N [--backend NAME ...]`: extracts the subtitle track text with ffmpeg (`-map 0:N -f srt`), runs the ASR stage once per listed backend into `eval/asr-<backend>/transcript.json` (outside the normal stage dirs so the pipeline's own artifact isn't replaced), and prints a table of backend, CER, runtime.
+- Produces: `normalize(text: str, language: str) -> str` (strip ASS/HTML tags, SDH brackets `[...]`/`(...)`, music symbols, punctuation; collapse whitespace; for zh/ja/ko remove all whitespace); `cer(reference: str, hypothesis: str) -> float` (jiwer); `fukikae eval asr <workspace> <episode> --subtitle-track N [--backend NAME ...]`: extracts the subtitle track text with ffmpeg (`-map 0:N -f srt`), runs the ASR stage once per listed backend into `eval/asr-<backend>/transcript.json` (outside the normal stage dirs so the pipeline's own artifact isn't replaced), and prints a table of backend, CER, runtime.
 
 - [ ] **Step 1: Write the failing tests**: `normalize("<i>[문 닫히는 소리]</i> 안녕 하세요!", "ko") == "안녕하세요"`; `cer("안녕하세요", "안녕하세요") == 0.0`; `cer("안녕하세요", "안녕하새요") == pytest.approx(0.2)`.
 - [ ] **Step 2–4:** fail, implement, pass.
 - [ ] **Step 5:** Commit `feat: asr evaluation against subtitle tracks`.
-- [ ] **Step 6: Run the spec's milestone-3 comparison** on full Chimera S01E01 (Korean srt is subtitle stream index from `media.probe`, language `kor`): `uv run doppio eval asr <ws> S01E01 --subtitle-track <n> --backend qwen3_asr --backend faster_whisper`. Record the table in `docs/results/2026-xx-xx-asr-chimera.md` and set the workspace's `[asr.lang.ko]` default to the winner. Commit `docs: chimera korean asr comparison`.
+- [ ] **Step 6: Run the spec's milestone-3 comparison** on full Chimera S01E01 (Korean srt is subtitle stream index from `media.probe`, language `kor`): `uv run fukikae eval asr <ws> S01E01 --subtitle-track <n> --backend qwen3_asr --backend faster_whisper`. Record the table in `docs/results/2026-xx-xx-asr-chimera.md` and set the workspace's `[asr.lang.ko]` default to the winner. Commit `docs: chimera korean asr comparison`.
 
 ### Task 12: Diarization and embedding backends, diarize stage
 
 **Files:**
-- Create: `src/doppio/backends/diarize/pyannote.py`, `src/doppio/backends/embed/ecapa.py`, `src/doppio/stages/diarize.py`
+- Create: `src/fukikae/backends/diarize/pyannote.py`, `src/fukikae/backends/embed/ecapa.py`, `src/fukikae/stages/diarize.py`
 - Modify: `pyproject.toml` (extra `pyannote`: pyannote.audio, speechbrain; entry points)
 - Test: `tests/stages/test_diarize.py`, `tests/backends/test_diarize_embed.py`
 
@@ -390,8 +435,15 @@ def test_extract_on_readonly_source_with_spaces(tmp_path, readonly_copy):
 
 ```python
 def test_clean_spans_drop_overlap_and_short():
-    turns = [Turn(start=0, end=5, speaker="A"), Turn(start=4, end=8, speaker="B"), Turn(start=10, end=11.5, speaker="A"), Turn(start=12, end=20, speaker="A")]
-    assert clean_spans(turns, "A") == [(12.1, 19.9)]      # 0-5 overlaps B; 10-11.5 too short after padding
+    turns = [
+        Turn(start=0, end=5, speaker="A"),
+        Turn(start=4, end=8, speaker="B"),
+        Turn(start=10, end=11.5, speaker="A"),
+        Turn(start=12, end=20, speaker="A"),
+    ]
+    assert clean_spans(turns, "A") == [
+        (12.1, 19.9)
+    ]  # 0-5 overlaps B; 10-11.5 too short after padding
 ```
 
   Stage test with fakes: `clusters.npz` holds a key per cluster including one with zero rows. `@pytest.mark.gpu`: on the Chimera clip, at least 2 clusters, embeddings unit-norm.
@@ -401,7 +453,7 @@ def test_clean_spans_drop_overlap_and_short():
 ### Task 13: Registry store
 
 **Files:**
-- Create: `src/doppio/registry/store.py`
+- Create: `src/fukikae/registry/store.py`
 - Test: `tests/registry/test_store.py`
 
 **Interfaces:**
@@ -418,7 +470,7 @@ def test_clean_spans_drop_overlap_and_short():
 ### Task 14: Matching, pinning and the characters stage
 
 **Files:**
-- Create: `src/doppio/registry/matching.py`, `src/doppio/stages/characters.py`
+- Create: `src/fukikae/registry/matching.py`, `src/fukikae/stages/characters.py`
 - Test: `tests/registry/test_matching.py`, `tests/stages/test_characters.py`
 
 **Interfaces:**
@@ -428,7 +480,7 @@ def test_clean_spans_drop_overlap_and_short():
   - `match(evidence: list[ClusterEvidence], actors: list[Actor], threshold: float, min_new_seconds: float) -> list[ClusterAssignment]`: cosine score against each actor centroid. Best score >= threshold → `matched` to that actor (and its first character). Below threshold with `clean_seconds >= min_new_seconds` → `new`. Otherwise → `extra` (actor and character `None`). When two clusters' best match is the same actor, the higher-scoring one is `matched` and the other `review` (with its score and the actor id, not merged).
   - `pin(previous: Assignments, previous_turns: Diarization, current_turns: Diarization) -> dict[str, ClusterAssignment]`: maps each current cluster to the previous cluster it overlaps most in time; when that overlap is > 50% of the current cluster's total turn time, it inherits the previous assignment with status `pinned`.
   - `CharactersStage` (`name="characters"`): if `05-characters/assignments.json` exists from an earlier run, pins first and matches only the unpinned clusters; creates actors/characters for `new`; adds exemplars for `matched` and `new`; writes `05-characters/assignments.json`. The previous turns are kept as `05-characters/turns.prev.json` for pinning.
-  - CLI `doppio registry rematch <workspace> <episode>`: deletes that episode's exemplars and assignments, reruns `characters`, prints each cluster whose character changed.
+  - CLI `fukikae registry rematch <workspace> <episode>`: deletes that episode's exemplars and assignments, reruns `characters`, prints each cluster whose character changed.
 
 - [ ] **Step 1: Write the failing tests**:
 
@@ -456,12 +508,12 @@ def test_rerun_after_registry_drift_keeps_assignment(): ...
 ### Task 15: Batch seeding with agglomerative clustering
 
 **Files:**
-- Create: `src/doppio/registry/cluster.py`, `src/doppio/registry/cli.py`
-- Modify: `src/doppio/cli.py` (mount `registry`)
+- Create: `src/fukikae/registry/cluster.py`, `src/fukikae/registry/cli.py`
+- Modify: `src/fukikae/cli.py` (mount `registry`)
 - Test: `tests/registry/test_cluster.py`
 
 **Interfaces:**
-- Produces: `seed_clusters(evidence: dict[str, list[ClusterEvidence]], distance_threshold: float, min_new_seconds: float) -> list[list[tuple[str, str]]]` (groups of `(episode, cluster)`; scipy `linkage(method="average", metric="cosine")` + `fcluster(criterion="distance")`; groups whose total clean seconds < `min_new_seconds` are dropped). CLI `doppio registry cluster <workspace> [--episodes S01E01,S01E02] [--threshold T]`: requires every listed episode's `diarize` stage done and an empty registry (refuses otherwise, telling the user to use per-episode matching), creates one actor+character per group, writes each episode's `assignments.json` with status `matched`. Also the CLI ops `list`, `show`, `rename`, `merge`, `split`, `lock`, `actor` over Task 13's methods (`split <workspace> --episode E --cluster C` moves that episode cluster's exemplars to a new actor with a new character, needing a `Registry.split_cluster(actor_id, episode, cluster) -> tuple[int, int]` added to the store in this task; splitting one actor into several characters without new embeddings, and the `voice` op, belong to the TTS plan); `merge` and `rename` print which episodes' downstream stages are now stale (it marks their `characters` record stale in each manifest by deleting it).
+- Produces: `seed_clusters(evidence: dict[str, list[ClusterEvidence]], distance_threshold: float, min_new_seconds: float) -> list[list[tuple[str, str]]]` (groups of `(episode, cluster)`; scipy `linkage(method="average", metric="cosine")` + `fcluster(criterion="distance")`; groups whose total clean seconds < `min_new_seconds` are dropped). CLI `fukikae registry cluster <workspace> [--episodes S01E01,S01E02] [--threshold T]`: requires every listed episode's `diarize` stage done and an empty registry (refuses otherwise, telling the user to use per-episode matching), creates one actor+character per group, writes each episode's `assignments.json` with status `matched`. Also the CLI ops `list`, `show`, `rename`, `merge`, `split`, `lock`, `actor` over Task 13's methods (`split <workspace> --episode E --cluster C` moves that episode cluster's exemplars to a new actor with a new character, needing a `Registry.split_cluster(actor_id, episode, cluster) -> tuple[int, int]` added to the store in this task; splitting one actor into several characters without new embeddings, and the `voice` op, belong to the TTS plan); `merge` and `rename` print which episodes' downstream stages are now stale (it marks their `characters` record stale in each manifest by deleting it).
 
 - [ ] **Step 1: Write the failing tests**: three episodes of synthetic evidence with two true speakers (noisy unit vectors around two centers) plus one 5-second outlier → two groups, outlier dropped; CLI refuses on a non-empty registry.
 - [ ] **Step 2–4:** fail, implement, pass.
@@ -470,15 +522,15 @@ def test_rerun_after_registry_drift_keeps_assignment(): ...
 ### Task 16: Speaker evaluation tools
 
 **Files:**
-- Create: `src/doppio/eval/speakers.py`
-- Modify: `src/doppio/eval/cli.py`
+- Create: `src/fukikae/eval/speakers.py`
+- Modify: `src/fukikae/eval/cli.py`
 - Test: `tests/eval/test_speakers.py`
 
 **Interfaces:**
 - Produces:
-  - `doppio eval sample <workspace> --episodes S01E01,S01E02 --per-cluster 4 --out DIR`: for each episode cluster with clean speech, exports up to 4 clean-span clips (`DIR/<episode>/<cluster>-<k>.wav`, 16 kHz mono, from `vocals_16k.wav`) and writes `DIR/labels.yaml` with one entry per clip: `{episode, cluster, clip, start, end, label: ""}`. Clips are named by episode cluster, never by registry ID, so labeling is blind to the system's answer.
+  - `fukikae eval sample <workspace> --episodes S01E01,S01E02 --per-cluster 4 --out DIR`: for each episode cluster with clean speech, exports up to 4 clean-span clips (`DIR/<episode>/<cluster>-<k>.wav`, 16 kHz mono, from `vocals_16k.wav`) and writes `DIR/labels.yaml` with one entry per clip: `{episode, cluster, clip, start, end, label: ""}`. Clips are named by episode cluster, never by registry ID, so labeling is blind to the system's answer.
   - `score(labels: list[LabeledClip], assignments: dict[str, Assignments]) -> SpeakerScore(recurring: int, consistent: int, merged_pairs: list[tuple[str, str]], fraction: float)`: a label is recurring when it appears in >= 2 episodes; it is consistent when all its clips' clusters map to one character id; a merged pair is two distinct labels whose clusters map to the same character id. Clips with label `""`, `"?"` or `"extra"` are ignored.
-  - `doppio eval speakers <workspace> --labels DIR/labels.yaml`: prints the score and the verdict against the spec bar: `pass` (>= 0.90 and no merged pairs), `tune` (0.75-0.90 or merges), `rework` (< 0.75).
+  - `fukikae eval speakers <workspace> --labels DIR/labels.yaml`: prints the score and the verdict against the spec bar: `pass` (>= 0.90 and no merged pairs), `tune` (0.75-0.90 or merges), `rework` (< 0.75).
 
 - [ ] **Step 1: Write the failing tests**: label "detective" in two episodes mapped to character 1 both times → consistent; "profiler" mapped to 2 and 3 → inconsistent; "surgeon" and "profiler" sharing character 2 → merged pair; fraction 0.5; verdict `rework`.
 - [ ] **Step 2–4:** fail, implement, pass.
@@ -487,10 +539,10 @@ def test_rerun_after_registry_drift_keeps_assignment(): ...
 ### Task 17: Milestone 4 run on Chimera S01E01-E02
 
 **Files:**
-- Create: `docs/results/<date>-registry-chimera.md`, the workspace's `doppio.toml` (outside the repo, e.g. `~/doppio-ws/chimera/`; record its contents in the results doc)
+- Create: `docs/results/<date>-registry-chimera.md`, the workspace's `fukikae.toml` (outside the repo, e.g. `~/fukikae-ws/chimera/`; record its contents in the results doc)
 
-- [ ] **Step 1:** Create the workspace with `source = "~/doppio-ws/media/Chimera (2021)"` (expanded to an absolute path), `source_language = "ko"`, the ASR default from Task 11, `gpu_device` set to the 3090 not running vLLM (check `nvidia-smi` for the card with the vLLM process).
-- [ ] **Step 2:** `uv run doppio run ~/doppio-ws/chimera S01E01 --to characters`, then `S01E02`. Expected: both complete; `S01E02/05-characters/assignments.json` has `matched` entries.
-- [ ] **Step 3:** `uv run doppio eval sample ~/doppio-ws/chimera --episodes S01E01,S01E02 --per-cluster 4 --out ~/doppio-ws/chimera/labels`. Labeling needs a person listening to the clips: hand `labels.yaml` to the operator as a queued action and wait.
-- [ ] **Step 4:** `uv run doppio eval speakers ~/doppio-ws/chimera --labels ~/doppio-ws/chimera/labels/labels.yaml`. If the verdict is `tune`, sweep `registry.match_threshold` (0.5-0.8 in 0.05 steps, `registry rematch` on S01E02 for each) and report the curve; set the best value as the default in `config.py`.
+- [ ] **Step 1:** Create the workspace with `source = "~/fukikae-ws/media/Chimera (2021)"` (expanded to an absolute path), `source_language = "ko"`, the ASR default from Task 11, `gpu_device` set to the 3090 not running vLLM (check `nvidia-smi` for the card with the vLLM process).
+- [ ] **Step 2:** `uv run fukikae run ~/fukikae-ws/chimera S01E01 --to characters`, then `S01E02`. Expected: both complete; `S01E02/05-characters/assignments.json` has `matched` entries.
+- [ ] **Step 3:** `uv run fukikae eval sample ~/fukikae-ws/chimera --episodes S01E01,S01E02 --per-cluster 4 --out ~/fukikae-ws/chimera/labels`. Labeling needs a person listening to the clips: hand `labels.yaml` to the operator as a queued action and wait.
+- [ ] **Step 4:** `uv run fukikae eval speakers ~/fukikae-ws/chimera --labels ~/fukikae-ws/chimera/labels/labels.yaml`. If the verdict is `tune`, sweep `registry.match_threshold` (0.5-0.8 in 0.05 steps, `registry rematch` on S01E02 for each) and report the curve; set the best value as the default in `config.py`.
 - [ ] **Step 5:** Write the results doc (scores, threshold curve, verdict, failure examples by cluster and timestamp) and commit `docs: chimera registry milestone results`.

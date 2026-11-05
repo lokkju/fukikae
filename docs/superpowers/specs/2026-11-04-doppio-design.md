@@ -1,4 +1,6 @@
-# doppio: automatic English dubbing for foreign-language TV
+# fukikae: automatic English dubbing for foreign-language TV
+
+Renamed from "doppio" to "fukikae" (吹き替え, Japanese for dubbing) on 2026-11-05, an operator decision.
 
 _Status: draft for review, 2026-11-04. Research behind it: `docs/research/2026-11-04-dubbing-research-brief.md`._
 
@@ -12,7 +14,7 @@ The cross-episode character identity is the reason this exists rather than just 
 
 1. A CLI that runs the whole pipeline on one episode, or on a season directory, unattended.
 2. Every model stage is a pluggable backend chosen in config, and the choice can differ per language: the STT model for Japanese can differ from the one for Spanish, the translator can differ per source/target pair, and the TTS backend and voice are chosen per character.
-3. Translation defaults to a lightweight model, not a frontier API. Any OpenAI-compatible endpoint works, so the homelab LLM gateway, a local vLLM or llama.cpp server, or a hosted API are all one backend with different settings. The gateway today serves only the resident 27B, so the default (my call) is a `managed` mode: doppio starts a llama.cpp server with a small GGUF translation model on its own card for the translate stage and stops it afterwards, like any other stage's model. Pointing `base_url` at the gateway or anywhere else skips that and needs no infra change.
+3. Translation defaults to a lightweight model, not a frontier API. Any OpenAI-compatible endpoint works, so the homelab LLM gateway, a local vLLM or llama.cpp server, or a hosted API are all one backend with different settings. The gateway today serves only the resident 27B, so the default (my call) is a `managed` mode: fukikae starts a llama.cpp server with a small GGUF translation model on its own card for the translate stage and stops it afterwards, like any other stage's model. Pointing `base_url` at the gateway or anywhere else skips that and needs no infra change.
 4. A season-level character registry that survives across episodes and resolves new diarization clusters to existing characters.
 5. A subtitle-first path that uses human English subtitles, when the release has them, instead of ASR plus machine translation.
 6. Every stage is resumable and idempotent, with its artifacts on disk, so a hand-corrected artifact can be fed back in and only downstream stages re-run.
@@ -36,11 +38,11 @@ The cross-episode character identity is the reason this exists rather than just 
 ## Constraints
 
 - Runs on ml-01: two RTX 3090s (24 GB each). One is resident vLLM serving the LLM gateway; the other is shared with the llama.cpp trial and GPU CI. Stages load one model at a time and release VRAM before the next stage, so the whole pipeline fits on a single 24 GB card.
-- Where it runs (my call): v1 runs on the ml-01 host under uv, against the shared card, selected by `CUDA_VISIBLE_DEVICES` in config. Before a GPU stage loads, the runner checks free VRAM on that card against the backend's declared need and waits (or fails with `--no-wait`) rather than colliding with llama.cpp or CI. doppio never depends on Kubernetes: the CLI on one machine with a GPU (or CPU, slowly) is the product. A k8s Job launcher requesting `nvidia.com/gpu` may come later as an optional extra; the job model already keeps all state in the series directory, so nothing changes but the launcher.
+- Where it runs (my call): v1 runs on the ml-01 host under uv, against the shared card, selected by `CUDA_VISIBLE_DEVICES` in config. Before a GPU stage loads, the runner checks free VRAM on that card against the backend's declared need and waits (or fails with `--no-wait`) rather than colliding with llama.cpp or CI. fukikae never depends on Kubernetes: the CLI on one machine with a GPU (or CPU, slowly) is the product. A k8s Job launcher requesting `nvidia.com/gpu` may come later as an optional extra; the job model already keeps all state in the series directory, so nothing changes but the launcher.
 - Python, managed with uv (`uv sync`, `uv run`), ruff, pyright, pre-commit, per the user's python-project conventions. License PolyForm Shield 1.0.0.
 - pyannote's gated models need a Hugging Face token with the model terms accepted.
-- ffmpeg and ffprobe are required external binaries, not assumed on the host (ml-01 has neither); the repo pins them through mise, and `doppio doctor` checks for them.
-- Test material: Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Copied once from the Plex library's TrueNAS share (`/mnt/mega/media/ums/media/TV`, no longer mounted on ml-01 since 2026-11-04) into `~/doppio-ws/media/<Show>/Season 1/` on ml-01, owner-only permissions. doppio treats that directory as read-only source, the same as it would a media share.
+- ffmpeg and ffprobe are required external binaries, not assumed on the host (ml-01 has neither); the repo pins them through mise, and `fukikae doctor` checks for them.
+- Test material: Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Copied once from the Plex library's TrueNAS share (`/mnt/mega/media/ums/media/TV`, no longer mounted on ml-01 since 2026-11-04) into `~/fukikae-ws/media/<Show>/Season 1/` on ml-01, owner-only permissions. fukikae treats that directory as read-only source, the same as it would a media share.
 - The GitHub repo, when it exists, comes from the infra Pulumi `repos` config, not `gh repo create`. Until then the project is a local git repo.
 
 ## Architecture
@@ -48,7 +50,7 @@ The cross-episode character identity is the reason this exists rather than just 
 ### Package layout (builder may adjust)
 
 ```
-src/doppio/
+src/fukikae/
   cli.py              # typer app: run, stage, registry, backends
   config.py           # load + validate TOML, resolve per-language overrides
   job.py              # episode work dir, manifest, stage runner, cache keys
@@ -76,13 +78,13 @@ Each backend kind is a `typing.Protocol` in `backends/base.py`. The kinds:
 | `translate` | cues + context + slot durations | English cues | `openai_compat` (chat completions) | `ctranslate2` NLLB/MADLAD for a no-LLM path |
 | `tts` | text, voice spec, optional rate | audio | Kokoro (stock voices) and one cloning backend (XTTS-v2 or Qwen3-TTS; builder picks after a listening test) | F5-TTS, CosyVoice |
 
-Backends register through Python entry points (group `doppio.backends.<kind>`), so a backend can live in a separate package without touching doppio. Built-ins register the same way. `doppio backends list` shows what is installed.
+Backends register through Python entry points (group `fukikae.backends.<kind>`), so a backend can live in a separate package without touching fukikae. Built-ins register the same way. `fukikae backends list` shows what is installed.
 
 Each backend declares the languages it supports (or `*`) and its VRAM need, and exposes `load()` / `unload()` so the stage runner can free the card between stages.
 
 ### Per-language configuration
 
-One TOML file per series (`doppio.toml` in the series directory), layered over a user-level default. Every backend kind has a default and optional per-language overrides:
+One TOML file per series (`fukikae.toml` in the series directory), layered over a user-level default. Every backend kind has a default and optional per-language overrides:
 
 ```toml
 target_language = "en"
@@ -104,11 +106,11 @@ backend = "qwen3_forced_aligner"  # falls back to wav2vec2 outside its 11 langua
 
 [translate]
 backend = "openai_compat"
-mode = "managed"          # doppio runs llama-server for the stage; "external" uses base_url
+mode = "managed"          # fukikae runs llama-server for the stage; "external" uses base_url
 model = "qwen3-8b-q6_k.gguf"
 # mode = "external"
 # base_url = "https://gateway.lab.lokkju.com/v1"
-# api_key_env = "DOPPIO_LLM_KEY"
+# api_key_env = "FUKIKAE_LLM_KEY"
 max_speed = 1.25          # used to compute the length budget per cue
 
 [translate.pair.ko-en]
@@ -134,7 +136,7 @@ Source language is detected per episode (Whisper language ID on the first minute
 Borrowed from yt-dbl. Each episode gets a work directory:
 
 ```
-<series>/.doppio/<episode-stem>/
+<series>/.fukikae/<episode-stem>/
   manifest.json          # per stage: status, input hashes, backend + config hash, timings
   00-extract/audio.wav
   01-separate/vocals.wav  background.wav
@@ -145,16 +147,16 @@ Borrowed from yt-dbl. Each episode gets a work directory:
   06-tts/<cue-id>.wav
   07-timefit/<cue-id>.wav  report.json
   08-mix/dub.en.wav
-  out/<episode>.doppio.mkv
+  out/<episode>.fukikae.mkv
 ```
 
-A stage's cache key is the hash of its input artifacts plus its resolved backend config. A stage re-runs when its key changes; downstream stages invalidate through the input hashes. A hand-edited artifact therefore re-runs everything after it and nothing before it. `doppio run <ep> --from translate` forces a re-run from a named stage.
+A stage's cache key is the hash of its input artifacts plus its resolved backend config. A stage re-runs when its key changes; downstream stages invalidate through the input hashes. A hand-edited artifact therefore re-runs everything after it and nothing before it. `fukikae run <ep> --from translate` forces a re-run from a named stage.
 
 Artifacts are JSON with a version field, documented in the repo, so hand correction is a supported workflow and not an accident.
 
 ### Character registry
 
-Lives at `<series>/.doppio/registry/`, one registry per series, not per season (my call): characters recur across seasons, and `registry cluster` takes the series directory and walks `Season N/` subdirectories (or any episode files under it) (SQLite for records, `.npy` for embeddings; builder may choose). Per character: stable ID, optional name, centroid embedding, per-episode exemplar embeddings, voice spec (`{backend, voice}` for a stock voice or `{backend, reference_wav, reference_text}` for a clone), and a lock flag.
+Lives at `<series>/.fukikae/registry/`, one registry per series, not per season (my call): characters recur across seasons, and `registry cluster` takes the series directory and walks `Season N/` subdirectories (or any episode files under it) (SQLite for records, `.npy` for embeddings; builder may choose). Per character: stable ID, optional name, centroid embedding, per-episode exemplar embeddings, voice spec (`{backend, voice}` for a stock voice or `{backend, reference_wav, reference_text}` for a clone), and a lock flag.
 
 Flow per episode:
 
@@ -163,11 +165,11 @@ Flow per episode:
 3. Update centroids with the new exemplars (locked characters keep their centroid).
 4. Write `assignments.json` with scores, so the operator can see marginal matches.
 
-Assignments are pinned once written (my call, from the anti-goal on voices changing): re-running an episode's later stages reuses its `assignments.json`, and re-running diarization maps the new clusters onto the old assignments by turn overlap. Centroid drift from later episodes never reassigns an earlier one. Only `doppio registry rematch <episode>` or a registry op re-matches, and it reports every change.
+Assignments are pinned once written (my call, from the anti-goal on voices changing): re-running an episode's later stages reuses its `assignments.json`, and re-running diarization maps the new clusters onto the old assignments by turn overlap. Centroid drift from later episodes never reassigns an earlier one. Only `fukikae registry rematch <episode>` or a registry op re-matches, and it reports every change.
 
 Extras (my call): a cluster becomes a registry character only if it has at least 20 s of clean speech in the episode, or matches an existing character. Clusters below that bar are episode-local extras: they get voices from a separate small pool of stock voices, reused across extras, and kept out of the registry. The threshold is config. Stock voices for registry characters may also be reused once the pool runs out, preferring characters who have never appeared in the same episode.
 
-`doppio registry cluster <season-dir>` does the batch version from the brief: agglomerative clustering over every episode's cluster embeddings at once, to seed the registry for a season that's already on disk.
+`fukikae registry cluster <season-dir>` does the batch version from the brief: agglomerative clustering over every episode's cluster embeddings at once, to seed the registry for a season that's already on disk.
 
 ### Actors
 

@@ -1,0 +1,117 @@
+[project]
+name = "fukikae"
+dynamic = ["version"]
+description = "Automatically dub foreign-language TV into English"
+readme = "README.md"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "huggingface-hub>=0.34.0,<1.0",
+    "jiwer>=4.0.0",
+    "numpy>=2.5.4",
+    "nvidia-ml-py>=13.615.71",
+    "pydantic>=2",
+    "pyyaml>=6.0.3",
+    "scipy>=1.18.1",
+    "typer>=0.15.0",
+]
+
+[project.optional-dependencies]
+demucs = [
+    "demucs>=4.0.1",
+]
+whisper = [
+    "faster-whisper>=1.2.1",
+    "nvidia-cublas-cu12>=12.9.3.13",
+    "torchaudio>=2.11.1",
+    "transformers>=4.57.6,<5",
+]
+qwen = [
+    "qwen-asr==0.0.6",
+]
+pyannote = [
+    "pyannote-audio>=4.0.7",
+    "speechbrain>=1.1.2",
+]
+
+[project.entry-points."fukikae.backends.asr"]
+faster_whisper = "fukikae.backends.asr.faster_whisper:FasterWhisperTranscriber"
+qwen3_asr = "fukikae.backends.asr.qwen3:Qwen3AsrTranscriber"
+
+[project.entry-points."fukikae.backends.lid"]
+faster_whisper = "fukikae.backends.asr.faster_whisper:FasterWhisperTranscriber"
+qwen3_asr = "fukikae.backends.asr.qwen3:Qwen3AsrTranscriber"
+
+[project.entry-points."fukikae.backends.align"]
+wav2vec2 = "fukikae.backends.align.wav2vec2:Wav2Vec2Aligner"
+qwen3_forced_aligner = "fukikae.backends.align.qwen3:Qwen3ForcedAligner"
+
+[project.entry-points."fukikae.backends.diarize"]
+pyannote = "fukikae.backends.diarize.pyannote:PyannoteDiarizer"
+
+[project.entry-points."fukikae.backends.embed"]
+ecapa = "fukikae.backends.embed.ecapa:EcapaEmbedder"
+
+[project.entry-points."fukikae.backends.separation"]
+demucs = "fukikae.backends.separation.demucs:DemucsSeparator"
+
+[project.urls]
+License = "https://polyformproject.org/licenses/shield/1.0.0"
+
+[project.scripts]
+fukikae = "fukikae.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.8.0",
+    "pyright>=1.1.0",
+    "pre-commit>=3.5.0",
+    "types-pyyaml>=6.0.12.20261103",
+]
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fukikae"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-m 'not gpu and not media'"
+markers = [
+    "gpu: needs a GPU and FUKIKAE_TEST_MEDIA",
+    "media: needs real media from FUKIKAE_TEST_MEDIA",
+    "ffmpeg: needs only the ffmpeg binary; skipped when it is not on PATH",
+    "slow: slow test",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "S", "ARG", "SIM"]
+ignore = ["S101"]
+flake8-bugbear.extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S603", "S607"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = [".venv", "**/__pycache__"]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
