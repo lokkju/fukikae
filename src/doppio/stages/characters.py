@@ -63,7 +63,8 @@ class CharactersStage:
                 )
 
         pinned: dict[str, ClusterAssignment] = {}
-        if assignments_path.exists() and prev_turns_path.exists():
+        can_pin = assignments_path.exists() and prev_turns_path.exists()
+        if can_pin:
             pinned = pin(
                 read_json(assignments_path, Assignments),
                 read_json(prev_turns_path, Diarization),
@@ -75,6 +76,9 @@ class CharactersStage:
         }
         todo = [ev for ev in evidence if ev.cluster not in pinned]
         with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+            if not can_pin:
+                # No earlier run to build on: drop any exemplars it left behind.
+                reg.delete_episode(ep.id)
             matched = match(
                 todo,
                 reg.actors(),

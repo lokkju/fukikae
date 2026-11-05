@@ -105,9 +105,11 @@ def pin(
     """Carry earlier assignments onto the current clusters by overlap in time.
 
     A current cluster inherits the assignment of the previous cluster it overlaps most
-    when that overlap exceeds half of the current cluster's total turn time.
+    when that overlap exceeds half of the current cluster's total turn time. Only
+    assignments with a character (matched, new, pinned) are inherited; `extra` and
+    `review` clusters are matched afresh on each run.
     """
-    prev_by_label = {c.cluster: c for c in previous.clusters}
+    prev_by_label = {c.cluster: c for c in previous.clusters if c.character_id is not None}
     prev_iv = _intervals(previous_turns.turns)
     pinned: dict[str, ClusterAssignment] = {}
     for label, cur in _intervals(current_turns.turns).items():
