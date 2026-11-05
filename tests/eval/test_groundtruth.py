@@ -367,6 +367,32 @@ def test_choose_text_track_prefers_marked_most_tagged(
         autolabel.choose_text_track(Path("x.mkv"), pr, tmp_path, "sdh", "en")
 
 
+def test_choose_text_track_real_grid_probe_all_forced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grid S01E02 as ffprobe reports it: every track flagged forced, titles `Korean [CC]`."""
+    pr = ProbeResult(
+        subtitles=[
+            SubTrack(2, "subrip", "kor", "Korean [CC]", True),
+            SubTrack(3, "subrip", "jpn", "Japanese", True),
+            SubTrack(4, "subrip", "eng", "English [CC]", True),
+            SubTrack(5, "subrip", "chi", "Chinese (Traditional)", True),
+            SubTrack(6, "subrip", "chi", "Chinese (Simplified)", True),
+        ]
+    )
+    one = _srt(("00:00:01,000", "00:00:02,000", "(새하) 뭐야"))
+    two = _srt(
+        ("00:00:01,000", "00:00:02,000", "(Saeha) what"),
+        ("00:00:03,000", "00:00:04,000", "(Saebyeok) yes"),
+    )
+    plain = _srt(("00:00:01,000", "00:00:02,000", "plain"))
+    _fake_extract({2: one, 3: plain, 4: two, 5: plain, 6: plain}, monkeypatch)
+    # [CC] in the title and the source language together beat a longer English [CC] track
+    assert autolabel.choose_text_track(Path("x.mkv"), pr, tmp_path, "sdh", "ko")[0] == 2
+    # without a source language the two [CC] tracks compete; the English one tags more
+    assert autolabel.choose_text_track(Path("x.mkv"), pr, tmp_path, "sdh", None)[0] == 4
+
+
 # ---- fix round 1 ----
 
 
