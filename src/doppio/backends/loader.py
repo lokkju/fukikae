@@ -14,6 +14,8 @@ EXTRAS: dict[str, str] = {
     "demucs": "demucs",
     "faster_whisper": "whisper",
     "wav2vec2": "whisper",
+    "qwen3_asr": "qwen",
+    "qwen3_forced_aligner": "qwen",
 }
 
 

@@ -7,7 +7,7 @@ license = "LicenseRef-PolyForm-Shield-1.0.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
-    "huggingface-hub>=2.4.0",
+    "huggingface-hub>=0.34.0,<1.0",
     "numpy>=2.5.4",
     "nvidia-ml-py>=13.615.71",
     "pydantic>=2",
@@ -22,19 +22,24 @@ whisper = [
     "faster-whisper>=1.2.1",
     "nvidia-cublas-cu12>=12.9.3.13",
     "torchaudio>=2.11.1",
-    "transformers>=5.22.1",
+    "transformers>=4.57.6,<5",
 ]
-qwen = []
+qwen = [
+    "qwen-asr==0.0.6",
+]
 pyannote = []
 
 [project.entry-points."doppio.backends.asr"]
 faster_whisper = "doppio.backends.asr.faster_whisper:FasterWhisperTranscriber"
+qwen3_asr = "doppio.backends.asr.qwen3:Qwen3AsrTranscriber"
 
 [project.entry-points."doppio.backends.lid"]
 faster_whisper = "doppio.backends.asr.faster_whisper:FasterWhisperTranscriber"
+qwen3_asr = "doppio.backends.asr.qwen3:Qwen3AsrTranscriber"
 
 [project.entry-points."doppio.backends.align"]
 wav2vec2 = "doppio.backends.align.wav2vec2:Wav2Vec2Aligner"
+qwen3_forced_aligner = "doppio.backends.align.qwen3:Qwen3ForcedAligner"
 
 [project.entry-points."doppio.backends.separation"]
 demucs = "doppio.backends.separation.demucs:DemucsSeparator"
