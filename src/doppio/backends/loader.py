@@ -16,6 +16,8 @@ EXTRAS: dict[str, str] = {
     "wav2vec2": "whisper",
     "qwen3_asr": "qwen",
     "qwen3_forced_aligner": "qwen",
+    "pyannote": "pyannote",
+    "ecapa": "pyannote",
 }
 
 
