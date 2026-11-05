@@ -176,3 +176,61 @@ def test_split_cluster_store(tmp_path):
         assert [c.actor_id for c in reg.characters() if c.id == new_cid] == [new_aid]
         old = next(a for a in reg.actors() if a.id == aid)
         assert old.centroid is not None and abs(float(old.centroid[0]) - 1.0) < 1e-6
+
+
+def test_cli_cluster_two_clusters_of_one_episode_then_run(tmp_path):
+    """A seeded group holding two clusters of one episode: the one with more clean speech
+    is matched, the other goes to review; the next characters run pins the seeded clusters
+    and keeps the second one in review against its claimed actor."""
+    from doppio.config import Config
+    from doppio.job import run_stages
+    from doppio.stages.characters import CharactersStage
+
+    ws = make_ws(tmp_path)
+    ep = _ep(ws, "S01E01")
+    rng = np.random.default_rng(3)
+    data = synthetic()["S01E01"]
+    data["S2"] = (noisy(rng, CENTERS[0]), 25.0)
+    write_diarize(ep, data, [(0, 20, "S0"), (20, 40, "S1"), (40, 60, "S2")])
+    r = runner.invoke(
+        app, ["registry", "cluster", str(ws.root), "--episodes", "S01E01,S01E02,S01E03"]
+    )
+    assert r.exit_code == 0, r.output
+    path = ep.work / "05-characters" / "assignments.json"
+    by = {c.cluster: c for c in read_json(path, Assignments).clusters}
+    assert by["S0"].status == "matched"
+    assert by["S2"].status == "review" and by["S2"].actor_id == by["S0"].actor_id
+    assert by["S2"].character_id is None
+    with Registry(ws.registry_path) as reg:
+        assert reg.cluster_actors("S01E01", "S2") == []
+        assert reg.exemplar_count(1) == 18
+
+    # what the next `doppio run` does for this episode
+    run_stages(ep, Config(), [CharactersStage()])
+    by = {c.cluster: c for c in read_json(path, Assignments).clusters}
+    assert by["S0"].status == "pinned" and by["S1"].status == "pinned"
+    assert by["S2"].status == "review" and by["S2"].actor_id == by["S0"].actor_id
+    with Registry(ws.registry_path) as reg:
+        assert len(reg.actors()) == 2
+        assert reg.exemplar_count(1) == 18 and reg.exemplar_count(2) == 18
+
+
+def test_cli_cluster_interrupted_leaves_registry_empty(tmp_path, monkeypatch):
+    ws = make_ws(tmp_path)
+    calls = []
+    real = Registry.add_exemplars
+
+    def flaky(self, *a, **k):
+        calls.append(1)
+        if len(calls) == 3:
+            raise KeyboardInterrupt
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Registry, "add_exemplars", flaky)
+    eps = "S01E01,S01E02,S01E03"
+    runner.invoke(app, ["registry", "cluster", str(ws.root), "--episodes", eps])
+    monkeypatch.undo()
+    with Registry(ws.registry_path) as reg:
+        assert reg.actors() == [] and reg.characters() == []
+    r = runner.invoke(app, ["registry", "cluster", str(ws.root), "--episodes", eps])
+    assert r.exit_code == 0, r.output
