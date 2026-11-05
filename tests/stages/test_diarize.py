@@ -148,8 +148,12 @@ def test_span_cap_keeps_longest(ep, monkeypatch):
     spans = z["S0/spans"]
     assert len(spans) == MAX_SPANS_PER_CLUSTER
     lengths = spans[:, 1] - spans[:, 0]
-    assert lengths.min() >= 2.0 + 0.1 * 0 - 0.2 - 1e-6
+    # 70 clean spans of 1.8 + 0.1 * (i % 7) s, ten per length; the 20 dropped are the two
+    # shortest lengths (1.8, 1.9), so every kept span is at least 2.0 s.
+    assert lengths.min() >= 2.0 - 1e-6
     assert list(lengths) == sorted(lengths, reverse=True)
+    # clean_seconds totals all 70 spans, not only the 50 embedded.
+    assert float(z["S0/clean_seconds"]) == pytest.approx(10 * sum(1.8 + 0.1 * k for k in range(7)))
 
 
 @pytest.mark.usefixtures("fakes")
