@@ -22,7 +22,7 @@ class FusionEmbedder:
     kind: ClassVar[str] = "embed"
     languages: ClassVar[frozenset[str] | Literal["*"]] = "*"
     devices: ClassVar[frozenset[str]] = frozenset({"cuda", "cpu"})
-    vram_mb: ClassVar[int] = 1900  # the largest member (ecapa)
+    vram_mb: ClassVar[int] = 5240  # the largest member (ecapa)
     dim: ClassVar[int] = 0  # the sum of the members' dims; see `.dim`
     extra: ClassVar[str] = "pyannote"
 
