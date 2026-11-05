@@ -32,4 +32,5 @@ def asr(
         raise typer.Exit(1) from e
     typer.echo(f"{'backend':<20}{'CER':>8}{'runtime':>10}")
     for s in scores:
-        typer.echo(f"{s.backend:<20}{s.cer:>8.4f}{s.runtime_s:>9.0f}s")
+        runtime = "cached" if s.runtime_s is None else f"{s.runtime_s:.0f}s"
+        typer.echo(f"{s.backend:<20}{s.cer:>8.4f}{runtime:>10}")

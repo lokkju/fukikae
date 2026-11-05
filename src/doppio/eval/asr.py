@@ -69,7 +69,7 @@ def extract_subtitle_text(ep: Episode, stream_index: int) -> list[str]:
 class AsrScore:
     backend: str
     cer: float
-    runtime_s: float
+    runtime_s: float | None  # None: the stage was cached, so nothing ran
 
 
 def transcript_text(transcript: Transcript) -> str:
@@ -93,8 +93,8 @@ def evaluate(
     for b in backends:
         stage = AsrStage(backend=b, out_dir=f"eval/asr-{b}")
         started = time.monotonic()
-        run_stages(ep, cfg, [stage])
-        runtime = time.monotonic() - started
+        ran = run_stages(ep, cfg, [stage])
+        runtime = time.monotonic() - started if ran else None
         (path,) = stage.outputs(ep)
         hyp = normalize(transcript_text(read_json(path, Transcript)), language)
         scores.append(AsrScore(b, cer(reference, hyp), runtime))
