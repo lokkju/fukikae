@@ -70,9 +70,8 @@ def run(
     no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
 ) -> None:
     """Run the pipeline stages for one episode."""
-    from doppio import runctx
-    from doppio.job import run_stages
-    from doppio.media import MediaError
+    from doppio import job, runctx
+    from doppio.errors import user_errors
     from doppio.stages.asr import AsrStage
     from doppio.stages.characters import CharactersStage
     from doppio.stages.diarize import DiarizeStage
@@ -93,8 +92,8 @@ def run(
             DiarizeStage(),
             CharactersStage(),
         ]
-        ran = run_stages(ep, ws.config, stages, from_stage, to_stage)
-    except (FileNotFoundError, MediaError, ValueError) as e:
+        ran = job.run_stages(ep, ws.config, stages, from_stage, to_stage)
+    except user_errors() as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
     typer.echo(f"{ep.id}: ran {', '.join(ran) if ran else 'nothing (up to date)'}")

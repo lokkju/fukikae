@@ -16,8 +16,8 @@ def asr(
 ) -> None:
     """Score ASR backends by character error rate against a subtitle track."""
     from doppio.backends.loader import names
-    from doppio.eval.asr import evaluate
-    from doppio.media import MediaError
+    from doppio.errors import user_errors
+    from doppio.eval import asr as eval_asr
     from doppio.workspace import Workspace
 
     ws = Workspace(workspace)
@@ -26,8 +26,8 @@ def asr(
         ep = ws.find_episode(episode)
         backends = list(backend) if backend else names("asr")
         language = cfg.source_language or "en"
-        scores = evaluate(ep, cfg, subtitle_track, backends, language)
-    except (FileNotFoundError, MediaError, ValueError) as e:
+        scores = eval_asr.evaluate(ep, cfg, subtitle_track, backends, language)
+    except user_errors() as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
     typer.echo(f"{'backend':<20}{'CER':>8}{'runtime':>10}")

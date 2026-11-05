@@ -26,3 +26,55 @@ def test_run_command_extracts(tmp_path, readonly_copy):
     assert len(list((ws / ".doppio" / "episodes").rglob("audio.wav"))) == 1
     again = CliRunner().invoke(app, ["run", str(ws), str(readonly_copy), "--to", "extract"])
     assert "up to date" in again.output
+
+
+def _user_errors():
+    from doppio.backends.loader import BackendUnavailable
+    from doppio.config import ConfigError
+    from doppio.gpu import VramTimeout
+
+    return [
+        VramTimeout("not enough free VRAM"),
+        ConfigError("unknown asr backend 'nope'"),
+        BackendUnavailable("asr backend 'qwen3_asr' cannot be imported"),
+    ]
+
+
+@pytest.mark.parametrize("exc", _user_errors(), ids=lambda e: type(e).__name__)
+def test_run_reports_user_errors_without_traceback(tmp_path, monkeypatch, exc):
+    import doppio.job
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    src = tmp_path / "S01E01.mkv"
+    src.write_bytes(b"x")
+
+    def boom(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr(doppio.job, "run_stages", boom)
+    r = CliRunner().invoke(app, ["run", str(ws), str(src), "--no-wait"])
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SystemExit)
+    assert f"error: {exc}" in r.output
+
+
+@pytest.mark.parametrize("exc", _user_errors(), ids=lambda e: type(e).__name__)
+def test_eval_asr_reports_user_errors_without_traceback(tmp_path, monkeypatch, exc):
+    import doppio.eval.asr
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    src = tmp_path / "S01E01.mkv"
+    src.write_bytes(b"x")
+
+    def boom(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr(doppio.eval.asr, "evaluate", boom)
+    r = CliRunner().invoke(
+        app, ["eval", "asr", str(ws), str(src), "--subtitle-track", "2", "--backend", "x"]
+    )
+    assert r.exit_code == 1
+    assert isinstance(r.exception, SystemExit)
+    assert f"error: {exc}" in r.output
