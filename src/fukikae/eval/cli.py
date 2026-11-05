@@ -42,18 +42,24 @@ def sample(
     episodes: str = typer.Option(..., "--episodes", help="Comma-separated, e.g. S01E01,S01E02."),
     per_cluster: int = typer.Option(4, "--per-cluster", min=1, help="Clips per cluster."),
     out: Path = typer.Option(..., "--out", help="Output directory."),
-    force: bool = typer.Option(False, "--force", help="Overwrite a labels.yaml that has labels."),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite a labels.yaml that has labels, and remove old clips."
+    ),
+    video: bool = typer.Option(False, "--video", help="Export mp4 clips with the picture."),
 ) -> None:
     """Export clips per diarized cluster and a labels.yaml to fill in, blind to the registry."""
     from fukikae.eval import speakers
+    from fukikae.media import MediaError
 
     refs = [e.strip() for e in episodes.split(",") if e.strip()]
     labels_path = out / "labels.yaml"
     try:
         if not force and speakers.labels_have_content(labels_path):
             raise ValueError(f"{labels_path} already has labels; pass --force to overwrite")
-        clips = speakers.sample(workspace, refs, per_cluster, out)
-    except (FileNotFoundError, ValueError) as e:
+        if force:
+            speakers.remove_clips(out)
+        clips = speakers.sample(workspace, refs, per_cluster, out, video=video)
+    except (FileNotFoundError, ValueError, MediaError) as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
     typer.echo(f"wrote {len(clips)} clips and {labels_path}")

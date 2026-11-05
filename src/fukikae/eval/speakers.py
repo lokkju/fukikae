@@ -10,6 +10,7 @@ import numpy as np
 import yaml
 
 from fukikae.artifacts import atomic_path, read_json
+from fukikae.media import run_ffmpeg
 from fukikae.models import Assignments
 from fukikae.workspace import Workspace, episode_id
 
@@ -18,9 +19,10 @@ IGNORED_LABELS = {"", "?", "extra"}
 PASS_FRACTION = 0.90
 TUNE_FRACTION = 0.75
 SAMPLE_RATE = 16000
+VIDEO_HEIGHT = 480
 
 _HEADER = """\
-# Fill in `label` for every clip with the speaker's name, listening to the wav at `clip`
+# Fill in `label` for every clip with the speaker's name, listening to the clip at `clip`
 # (relative to this file). Clips are named by episode cluster, not by the system's answer.
 # Keep the quotes around every label: label: "detective", label: "?", label: "extra".
 #   - Use the same name for the same person across episodes (case and spaces don't matter).
@@ -91,8 +93,40 @@ def labels_have_content(path: Path) -> bool:
     return path.is_file() and any(c.label.strip() for c in load_labels(path))
 
 
-def sample(root: Path, episodes: list[str], per_cluster: int, out: Path) -> list[LabeledClip]:
-    """Export the `per_cluster` longest clean spans of each cluster as clips; write labels.yaml."""
+def _write_video(source: Path, vocals: Path, start: float, end: float, path: Path) -> None:
+    """Cut `source`'s picture over [start, end) with the separated vocals as its sound."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dur = f"{end - start:.3f}"
+    with atomic_path(path) as tmp:
+        run_ffmpeg(
+            [
+                "-ss", f"{start:.3f}", "-t", dur, "-i", str(source),
+                "-ss", f"{start:.3f}", "-t", dur, "-i", str(vocals),
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-vf", f"scale=-2:{VIDEO_HEIGHT}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-t", dur, "-movflags", "+faststart",
+                str(tmp),
+            ]
+        )  # fmt: skip
+
+
+def remove_clips(out: Path) -> None:
+    """Delete the wav and mp4 clips under each episode subdirectory of `out`."""
+    if not out.is_dir():
+        return
+    for sub in out.iterdir():
+        if sub.is_dir():
+            for pattern in ("*.wav", "*.mp4"):
+                for f in sub.glob(pattern):
+                    f.unlink()
+
+
+def sample(
+    root: Path, episodes: list[str], per_cluster: int, out: Path, video: bool = False
+) -> list[LabeledClip]:
+    """Export the `per_cluster` longest clean spans of each cluster as clips; write labels.yaml.
+    With `video`, each clip is an mp4 of the episode's picture over the separated vocals."""
     ws = Workspace(root)
     clips: list[LabeledClip] = []
     for ref in episodes:
@@ -102,6 +136,12 @@ def sample(root: Path, episodes: list[str], per_cluster: int, out: Path) -> list
         if not npz.is_file():
             raise FileNotFoundError(f"{eid}: no diarization at {npz}")
         pcm = _read_wav(work / "01-separate" / "vocals_16k.wav")
+        source: Path | None = None
+        if video:
+            try:
+                source = ws.find_episode(ref).source
+            except FileNotFoundError as e:
+                raise FileNotFoundError(f"{eid}: source video not found ({e})") from e
         with np.load(npz) as z:
             for label in [str(x) for x in z["labels"]]:
                 spans = [
@@ -110,7 +150,12 @@ def sample(root: Path, episodes: list[str], per_cluster: int, out: Path) -> list
                 longest = sorted(spans, key=lambda s: s[1] - s[0], reverse=True)[:per_cluster]
                 for k, span in enumerate(sorted(longest)):
                     start, end = _crop(span)
-                    rel = f"{eid}/{label}-{k}.wav"
+                    rel = f"{eid}/{label}-{k}.{'mp4' if video else 'wav'}"
+                    if source is not None:
+                        vocals = work / "01-separate" / "vocals.wav"
+                        _write_video(source, vocals, start, end, out / rel)
+                        clips.append(LabeledClip(eid, label, rel, start, end, ""))
+                        continue
                     lo = max(0, round(start * SAMPLE_RATE))
                     hi = min(len(pcm), lo + round((end - start) * SAMPLE_RATE))
                     _write_wav(out / rel, pcm[lo:hi])

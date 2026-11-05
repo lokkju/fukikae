@@ -2,6 +2,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -211,3 +212,92 @@ def test_labels_compare_case_and_space_insensitively() -> None:
     shared = {"S01E01": _assign("S01E01", {"A": 1, "B": 1})}
     s = score([_clip("S01E01", "A", "Surgeon"), _clip("S01E01", "B", "profiler")], shared)
     assert s.merged_pairs == [("Surgeon", "profiler")]
+
+
+def _video_episode(tmp_path: Path, eid: str = "S01E01") -> tuple[Path, Path]:
+    import subprocess
+
+    root = _ws(tmp_path)
+    work = root / ".fukikae" / "episodes" / eid
+    (work / "01-separate").mkdir(parents=True)
+    (work / "04-diarize").mkdir(parents=True)
+    src = tmp_path / "media" / f"Show - {eid} (x).mkv"
+    src.parent.mkdir()
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=blue:s=640x360:r=24:d=12",
+            "-f", "lavfi", "-i", "sine=frequency=300:duration=12",
+            "-c:v", "libx264", "-c:a", "aac", "-shortest", str(src),
+        ],
+        check=True,
+    )  # fmt: skip
+    sr = 44100
+    t = np.arange(sr * 12) / sr
+    pcm = (np.sin(2 * np.pi * 440 * t) * 8000).astype(np.int16)
+    for name, rate, data in (
+        ("vocals.wav", sr, pcm),
+        ("vocals_16k.wav", 16000, pcm[:: sr // 16000][: 16000 * 12]),
+    ):
+        with wave.open(str(work / "01-separate" / name), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(data.tobytes())
+    arrays = {"labels": np.array(["SPEAKER_00"]), "SPEAKER_00/spans": np.array([[2.0, 5.0]])}
+    np.savez(work / "04-diarize" / "clusters.npz", **arrays)  # type: ignore[arg-type]
+    return root, src
+
+
+def _probe(path: Path) -> dict:
+    import json
+    import subprocess
+
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,height:format=duration",
+         "-of", "json", str(path)],
+        check=True, capture_output=True, text=True,
+    ).stdout  # fmt: skip
+    return json.loads(out)
+
+
+@pytest.mark.ffmpeg
+def test_sample_video_writes_mp4_with_vocals(tmp_path: Path) -> None:
+    root, src = _video_episode(tmp_path)
+    out = tmp_path / "out"
+    clips = sample(root, [str(src)], 2, out, video=True)
+    assert [c.clip for c in clips] == ["S01E01/SPEAKER_00-0.mp4"]
+    info = _probe(out / clips[0].clip)
+    assert abs(float(info["format"]["duration"]) - 3.0) <= 0.1
+    kinds = sorted(s["codec_type"] for s in info["streams"])
+    assert kinds == ["audio", "video"]
+    assert next(s for s in info["streams"] if s["codec_type"] == "video")["height"] == 480
+    assert "SPEAKER_00-0.mp4" in (out / "labels.yaml").read_text()
+    assert not list((out / "S01E01").glob(".*"))
+
+
+@pytest.mark.ffmpeg
+def test_sample_video_missing_source_exits_1(tmp_path: Path) -> None:
+    root, src = _video_episode(tmp_path)
+    ref = str(src.with_name("Show - S01E01 (gone).mkv"))
+    res = CliRunner().invoke(
+        eval_app,
+        ["sample", str(root), "--episodes", ref, "--out", str(tmp_path / "out"), "--video"],
+    )
+    assert res.exit_code == 1
+    assert "S01E01" in res.output
+
+
+@pytest.mark.ffmpeg
+def test_force_removes_stale_clips_of_other_kind(tmp_path: Path) -> None:
+    root, src = _video_episode(tmp_path)
+    out = tmp_path / "out"
+    r = CliRunner()
+    base = ["sample", str(root), "--episodes", str(src), "--out", str(out)]
+    assert r.invoke(eval_app, base).exit_code == 0
+    assert (out / "S01E01" / "SPEAKER_00-0.wav").is_file()
+    assert r.invoke(eval_app, [*base, "--video", "--force"]).exit_code == 0
+    assert not list((out / "S01E01").glob("*.wav"))
+    assert (out / "S01E01" / "SPEAKER_00-0.mp4").is_file()
+    assert r.invoke(eval_app, [*base, "--force"]).exit_code == 0
+    assert not list((out / "S01E01").glob("*.mp4"))
