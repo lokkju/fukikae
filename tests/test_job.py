@@ -148,12 +148,16 @@ def test_failure_records_and_reraises(ep, cfg):
 
 def test_interrupted_stage_reruns(ep, cfg):
     counts = {}
+    run_stages(ep, cfg, [FakeA(counts), FakeB(counts)])
+    assert (ep.work / "b.txt").read_text() == "x!"
+    cfg2 = make_cfg(ep.workspace_root, "y")
     with pytest.raises(KeyboardInterrupt):
-        run_stages(ep, cfg, [FakeA(counts), FakeB(counts, fail=KeyboardInterrupt())])
-    assert not (ep.work / "b.txt").exists()
-    assert list(ep.work.glob("*.tmp*")) == [] and list(ep.work.glob(".*.tmp*")) == []
-    assert run_stages(ep, cfg, [FakeA(counts), FakeB(counts)]) == ["b"]
-    assert (ep.work / "b.txt").exists()
+        run_stages(ep, cfg2, [FakeA(counts), FakeB(counts, fail=KeyboardInterrupt())])
+    # The interrupted write left the previous complete output untouched, no temp files.
+    assert (ep.work / "b.txt").read_text() == "x!"
+    assert list(ep.work.glob(".*.tmp*")) == []
+    assert run_stages(ep, cfg2, [FakeA(counts), FakeB(counts)]) == ["b"]
+    assert (ep.work / "b.txt").read_text() == "y!"
 
 
 def test_external_source_fingerprinted_by_stat(ep, cfg):
