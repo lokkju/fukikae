@@ -22,10 +22,24 @@ SAMPLE_RATE = 16000
 _HEADER = """\
 # Fill in `label` for every clip with the speaker's name, listening to the wav at `clip`
 # (relative to this file). Clips are named by episode cluster, not by the system's answer.
-#   - Use the same name for the same person across episodes.
-#   - Use `?` when you can't tell, and `extra` for a one-off speaker who won't recur.
-#   - Leave `label` empty (or `?`) to skip a clip; it is not scored.
+# Keep the quotes around every label: label: "detective", label: "?", label: "extra".
+#   - Use the same name for the same person across episodes (case and spaces don't matter).
+#   - Use "?" when you can't tell, and "extra" for a one-off speaker who won't recur.
+#   - Leave the label as "" (or "?") to skip a clip; it is not scored.
 """
+
+
+class _Quoted(str):
+    """A string always written double-quoted, so `?`, `no` and `007` stay strings."""
+
+
+yaml.SafeDumper.add_representer(
+    _Quoted, lambda d, v: d.represent_scalar("tag:yaml.org,2002:str", str(v), style='"')
+)
+
+
+def label_key(label: str) -> str:
+    return label.strip().casefold()
 
 
 @dataclass(frozen=True)
@@ -113,7 +127,7 @@ def write_labels(path: Path, clips: list[LabeledClip]) -> None:
             "clip": c.clip,
             "start": round(c.start, 3),
             "end": round(c.end, 3),
-            "label": c.label,
+            "label": _Quoted(c.label),
         }
         for c in clips
     ]
@@ -125,23 +139,38 @@ def write_labels(path: Path, clips: list[LabeledClip]) -> None:
 
 
 def load_labels(path: Path) -> list[LabeledClip]:
-    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or []
+    try:
+        data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or []
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        where = f" at line {mark.line + 1}" if mark is not None else ""
+        raise ValueError(
+            f'{path}: not valid YAML{where}; keep the quotes around labels (label: "?")'
+        ) from e
     if not isinstance(data, list):
         raise ValueError(f"{path}: expected a list of clips")
-    try:
-        return [
-            LabeledClip(
-                str(d["episode"]),
-                str(d["cluster"]),
-                str(d["clip"]),
-                float(d["start"]),
-                float(d["end"]),
-                "" if d.get("label") is None else str(d["label"]).strip(),
+    clips: list[LabeledClip] = []
+    for d in data:
+        try:
+            raw = d.get("label")
+            if raw is not None and not isinstance(raw, str):
+                raise ValueError(
+                    f"{path}: label {raw!r} of {d.get('episode')} {d.get('cluster')} "
+                    f"({d.get('clip')}) is not text; quote the label"
+                )
+            clips.append(
+                LabeledClip(
+                    str(d["episode"]),
+                    str(d["cluster"]),
+                    str(d["clip"]),
+                    float(d["start"]),
+                    float(d["end"]),
+                    (raw or "").strip(),
+                )
             )
-            for d in data
-        ]
-    except (KeyError, TypeError) as e:
-        raise ValueError(f"{path}: malformed clip entry ({e})") from e
+        except (KeyError, TypeError, AttributeError) as e:
+            raise ValueError(f"{path}: malformed clip entry ({e!r})") from e
+    return clips
 
 
 def load_assignments(root: Path, episodes: set[str]) -> dict[str, Assignments]:
@@ -163,11 +192,14 @@ def score(labels: list[LabeledClip], assignments: dict[str, Assignments]) -> Spe
     }
     episodes: dict[str, set[str]] = defaultdict(set)
     chars: dict[str, set[int | None]] = defaultdict(set)
+    display: dict[str, str] = {}
     for clip in labels:
-        if clip.label in IGNORED_LABELS:
+        key = label_key(clip.label)
+        if key in IGNORED_LABELS:
             continue
-        episodes[clip.label].add(clip.episode)
-        chars[clip.label].add(mapping.get((clip.episode, clip.cluster)))
+        display.setdefault(key, clip.label.strip())
+        episodes[key].add(clip.episode)
+        chars[key].add(mapping.get((clip.episode, clip.cluster)))
     recurring = [lab for lab, eps in episodes.items() if len(eps) >= 2]
     consistent = [lab for lab in recurring if len(chars[lab]) == 1 and None not in chars[lab]]
     by_char: dict[int, set[str]] = defaultdict(set)
@@ -178,10 +210,10 @@ def score(labels: list[LabeledClip], assignments: dict[str, Assignments]) -> Spe
     pairs: list[tuple[str, str]] = []
     ids: list[int] = []
     for cid in sorted(by_char):
-        names = sorted(by_char[cid])
+        names = sorted(by_char[cid], key=lambda k: display[k])
         for i, a in enumerate(names):
             for b in names[i + 1 :]:
-                pairs.append((a, b))
+                pairs.append((display[a], display[b]))
                 ids.append(cid)
     fraction = len(consistent) / len(recurring) if recurring else 0.0
     return SpeakerScore(len(recurring), len(consistent), pairs, fraction, ids)
