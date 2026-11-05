@@ -1,0 +1,159 @@
+import wave
+from pathlib import Path
+
+import numpy as np
+import yaml
+from typer.testing import CliRunner
+
+from doppio.artifacts import write_json
+from doppio.eval.cli import eval_app
+from doppio.eval.speakers import LabeledClip, load_labels, sample, score, verdict
+from doppio.models import Assignments, ClusterAssignment
+
+
+def _assign(episode: str, mapping: dict[str, int | None]) -> Assignments:
+    return Assignments(
+        episode=episode,
+        threshold=0.5,
+        clusters=[
+            ClusterAssignment(
+                cluster=c,
+                actor_id=None,
+                character_id=cid,
+                score=None,
+                clean_seconds=30.0,
+                status="matched" if cid is not None else "extra",
+            )
+            for c, cid in mapping.items()
+        ],
+    )
+
+
+def _clip(ep: str, cluster: str, label: str, k: int = 0) -> LabeledClip:
+    return LabeledClip(ep, cluster, f"{ep}/{cluster}-{k}.wav", 0.0, 1.0, label)
+
+
+def test_score_consistent_merged_and_fraction() -> None:
+    assignments = {
+        "S01E01": _assign("S01E01", {"SPEAKER_00": 1, "SPEAKER_01": 2, "SPEAKER_02": 2}),
+        "S01E02": _assign("S01E02", {"SPEAKER_00": 1, "SPEAKER_01": 3}),
+    }
+    labels = [
+        _clip("S01E01", "SPEAKER_00", "detective"),
+        _clip("S01E02", "SPEAKER_00", "detective"),
+        _clip("S01E01", "SPEAKER_01", "profiler"),
+        _clip("S01E02", "SPEAKER_01", "profiler"),
+        _clip("S01E01", "SPEAKER_02", "surgeon"),
+        _clip("S01E01", "SPEAKER_02", "?", 1),
+        _clip("S01E01", "SPEAKER_02", "", 2),
+        _clip("S01E01", "SPEAKER_02", "extra", 3),
+    ]
+    s = score(labels, assignments)
+    assert s.recurring == 2
+    assert s.consistent == 1
+    assert s.fraction == 0.5
+    assert s.merged_pairs == [("profiler", "surgeon")]
+    assert verdict(s) == "rework"
+
+
+def test_null_character_is_inconsistent_and_not_merged() -> None:
+    assignments = {
+        "S01E01": _assign("S01E01", {"A": None, "B": None}),
+        "S01E02": _assign("S01E02", {"A": None}),
+    }
+    labels = [_clip("S01E01", "A", "x"), _clip("S01E02", "A", "x"), _clip("S01E01", "B", "y")]
+    s = score(labels, assignments)
+    assert (s.recurring, s.consistent, s.merged_pairs) == (1, 0, [])
+
+
+def test_verdict_bar() -> None:
+    from doppio.eval.speakers import SpeakerScore
+
+    assert verdict(SpeakerScore(10, 9, [], 0.9)) == "pass"
+    assert verdict(SpeakerScore(10, 9, [("a", "b")], 0.9)) == "tune"
+    assert verdict(SpeakerScore(4, 3, [], 0.75)) == "tune"
+    assert verdict(SpeakerScore(4, 2, [], 0.5)) == "rework"
+
+
+def _make_episode(root: Path, eid: str) -> Path:
+    work = root / ".doppio" / "episodes" / eid
+    (work / "01-separate").mkdir(parents=True)
+    (work / "04-diarize").mkdir(parents=True)
+    (work / "05-characters").mkdir(parents=True)
+    sr = 16000
+    pcm = (np.arange(sr * 40) % 100).astype(np.int16)
+    with wave.open(str(work / "01-separate" / "vocals_16k.wav"), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm.tobytes())
+    spans = np.array([[1.0, 3.0], [5.0, 20.0], [22.0, 25.0], [30.0, 32.0], [33.0, 34.5]])
+    np.savez(
+        work / "04-diarize" / "clusters.npz",
+        labels=np.array(["SPEAKER_00", "SPEAKER_01"]),
+        **{
+            "SPEAKER_00/embeddings": np.ones((5, 4), dtype=np.float32),
+            "SPEAKER_00/spans": spans,
+            "SPEAKER_00/clean_seconds": np.array(float((spans[:, 1] - spans[:, 0]).sum())),
+            "SPEAKER_01/embeddings": np.zeros((0, 4), dtype=np.float32),
+            "SPEAKER_01/spans": np.zeros((0, 2)),
+            "SPEAKER_01/clean_seconds": np.array(0.0),
+        },
+    )
+    write_json(work / "05-characters" / "assignments.json", _assign(eid, {"SPEAKER_00": 7}))
+    return work
+
+
+def _ws(tmp_path: Path) -> Path:
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "doppio.toml").write_text("")
+    return root
+
+
+def test_sample_exports_longest_spans_capped_and_blind(tmp_path: Path) -> None:
+    root = _ws(tmp_path)
+    _make_episode(root, "S01E01")
+    out = tmp_path / "out"
+    clips = sample(root, ["S01E01"], 3, out)
+    assert [c.cluster for c in clips] == ["SPEAKER_00"] * 3
+    # longest three: 15 s (capped to 8), 3 s, 2 s (the earlier of the 2 s ties); by start
+    assert [round(c.end - c.start, 3) for c in clips] == [2.0, 8.0, 3.0]
+    starts = [c.start for c in clips]
+    assert starts == sorted(starts)
+    big = next(c for c in clips if c.end - c.start == 8.0)
+    assert (big.start, big.end) == (8.5, 16.5)
+    for c in clips:
+        with wave.open(str(out / c.clip), "rb") as w:
+            assert (w.getframerate(), w.getnchannels()) == (16000, 1)
+            assert w.getnframes() == round((c.end - c.start) * 16000)
+    text = (out / "labels.yaml").read_text()
+    assert text.lstrip().startswith("#")
+    data = yaml.safe_load(text)
+    assert set(data[0]) == {"episode", "cluster", "clip", "start", "end", "label"}
+    assert all(d["label"] == "" for d in data)
+    assert "character" not in text
+    assert [c.label for c in load_labels(out / "labels.yaml")] == [""] * 3
+
+
+def test_cli_sample_refuses_overwrite_then_speakers(tmp_path: Path) -> None:
+    root = _ws(tmp_path)
+    _make_episode(root, "S01E01")
+    out = tmp_path / "out"
+    r = CliRunner()
+    args = ["sample", str(root), "--episodes", "S01E01", "--per-cluster", "2", "--out", str(out)]
+    assert r.invoke(eval_app, args).exit_code == 0
+    path = out / "labels.yaml"
+    data = yaml.safe_load(path.read_text())
+    data[0]["label"] = "detective"
+    data[1]["label"] = "detective"
+    path.write_text(yaml.safe_dump(data))
+    res = r.invoke(eval_app, args)
+    assert res.exit_code == 1
+    assert "detective" in path.read_text()
+    assert r.invoke(eval_app, [*args, "--force"]).exit_code == 0
+    path.write_text(yaml.safe_dump(data))
+    res = r.invoke(eval_app, ["speakers", str(root), "--labels", str(path)])
+    assert res.exit_code == 0, res.output
+    assert "recurring" in res.output
+    assert "rework" in res.output  # no label appears in two episodes: nothing recurring

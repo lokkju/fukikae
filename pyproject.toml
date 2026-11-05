@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=2.5.4",
     "nvidia-ml-py>=13.615.71",
     "pydantic>=2",
+    "pyyaml>=6.0.3",
     "scipy>=1.18.1",
     "typer>=0.15.0",
 ]
@@ -68,6 +69,7 @@ dev = [
     "ruff>=0.8.0",
     "pyright>=1.1.0",
     "pre-commit>=3.5.0",
+    "types-pyyaml>=6.0.12.20261103",
 ]
 
 [build-system]
