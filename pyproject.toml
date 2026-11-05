@@ -8,6 +8,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "huggingface-hub>=0.34.0,<1.0",
+    "jiwer>=4.0.0",
     "numpy>=2.5.4",
     "nvidia-ml-py>=13.615.71",
     "pydantic>=2",
