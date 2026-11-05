@@ -61,6 +61,10 @@ class IdentityRun:
     holdout_episode: str | None
     cache_hits: int
     cache_misses: int
+    # Nearest-centroid accuracy (Ruling R8): the first tuning episode trains, the other
+    # tuning episodes test; for the holdout, all tuning episodes train.
+    tune_nc: dict[str, float] = field(default_factory=dict)
+    holdout_nc: dict[str, float] = field(default_factory=dict)
 
 
 class _Recording:
@@ -189,17 +193,20 @@ def run_identity(
     matcher: str = "centroid",
     threshold: float | None = None,
     min_new_seconds: float | None = None,
+    min_speech: float | None = None,
     gt_file: Path | None = None,
     subtitle_track: int | None = None,
     aliases: dict[str, str] | None = None,
     force: bool = False,
 ) -> IdentityRun:
+    import numpy as np
+
     from fukikae.eval.autolabel import speech_turns
     from fukikae.eval.groundtruth import KINDS as GT_KINDS
     from fukikae.eval.groundtruth import check_alignment
     from fukikae.eval.groundtruth.base import load_alias_file
     from fukikae.eval.identity.cache import EmbeddingCache, ResidentEmbedder, cache_root
-    from fukikae.eval.identity.metrics import score
+    from fukikae.eval.identity.metrics import MIN_SPEECH_S, nearest_centroid_accuracy, score
     from fukikae.eval.identity.segments import KINDS as SEG_KINDS
     from fukikae.eval.identity.segments import Kind as SegKind
     from fukikae.eval.identity.segments import segments as make_segments
@@ -275,15 +282,29 @@ def run_identity(
     for eid, counts in rec.statuses.items():
         infos[eid].statuses = counts
 
+    floor = MIN_SPEECH_S if min_speech is None else float(min_speech)
     tune_score = score(
         {k: v for k, v in assign.items() if k[0] in ids},
         {e: segs[e] for e in ids},
+        min_speech=floor,
         gt={e: gt[e] for e in ids},
     )
+
+    def stacked(eps: list[str]) -> tuple[list[Segment], np.ndarray]:
+        rows = [embs[e] for e in eps if len(segs[e])]
+        return [s for e in eps for s in segs[e]], (
+            np.vstack(rows) if rows else np.zeros((0, 0), dtype=np.float32)
+        )
+
+    tune_nc: dict[str, float] = {}
+    if len(ids) >= 2:
+        tune_nc = nearest_centroid_accuracy(*stacked(ids[:1]), *stacked(ids[1:]))
     hold_score = None
+    hold_nc: dict[str, float] = {}
     if hold_id is not None:
         p_segs, p_assign, p_gt = _pooled(ids, hold_id, segs, assign, gt)
-        hold_score = score(p_assign, p_segs, gt=p_gt)
+        hold_score = score(p_assign, p_segs, min_speech=floor, gt=p_gt)
+        hold_nc = nearest_centroid_accuracy(*stacked(ids), *stacked([hold_id]))
     settings = {
         "workspace": str(ws.root),
         "tune": ids,
@@ -294,6 +315,7 @@ def run_identity(
         "matcher": matcher,
         "threshold": thr,
         "min_new_seconds": min_new,
+        "min_speech": floor,
     }
     return IdentityRun(
         settings,
@@ -303,6 +325,8 @@ def run_identity(
         hold_id,
         cache.hits,
         cache.misses,
+        tune_nc,
+        hold_nc,
     )
 
 
@@ -313,7 +337,18 @@ def _id(cid: int | None) -> str:
     return "-" if cid is None else str(cid)
 
 
-def format_score(s: IdentityScore, title: str) -> str:
+def format_nc(nc: dict[str, float]) -> list[str]:
+    from fukikae.eval.identity.metrics import OVERALL
+
+    if not nc:
+        return ["  nearest-centroid accuracy: nothing to score"]
+    per = ", ".join(f"{n} {v:.0%}" for n, v in nc.items() if n != OVERALL)
+    return [f"  nearest-centroid accuracy: {nc[OVERALL]:.0%} overall (speech-weighted); {per}"]
+
+
+def format_score(
+    s: IdentityScore, title: str, min_speech: float, nc: dict[str, float] | None = None
+) -> str:
     rows = [title]
     for ep in s.episodes:
         rows.append(f"  {ep}")
@@ -333,7 +368,7 @@ def format_score(s: IdentityScore, title: str) -> str:
             f"    {cid:>4} {p.speech:>7.1f}s  {p.dominant[:19]:<20}{p.purity:>5.0%}  {others}"
         )
     rows.append(
-        f"  recurring (>= 20 s in each): {s.recurring}  passing: {s.passing}  "
+        f"  recurring (>= {min_speech:g} s in each): {s.recurring}  passing: {s.passing}  "
         f"fraction: {s.fraction:.2f}"
     )
     if s.merges:
@@ -345,6 +380,8 @@ def format_score(s: IdentityScore, title: str) -> str:
         f"speech-weighted on modal id: {s.weighted_share:.0%}  strict: {s.strict_fraction:.2f}"
     )
     rows.append(f"  coverage: {s.coverage:.0%}")
+    if nc is not None:
+        rows += format_nc(nc)
     rows.append(f"  verdict: {s.verdict}")
     return "\n".join(rows)
 
@@ -371,11 +408,21 @@ def format_run(r: IdentityRun) -> str:
             f"{e.episode}: {e.lines} lines, {e.segments} segments ({e.labeled} labeled), "
             f"{align}{f'; clusters: {status}' if status else ''}"
         )
-    rows.append(format_score(r.tune, f"tune: {', '.join(st['tune'])}"))
-    if r.holdout is not None:
-        rows.append(
-            format_score(r.holdout, f"held out: {r.holdout_episode} (against the tuning registry)")
+    floor = st["min_speech"]
+    rows.append(
+        format_score(
+            r.tune,
+            f"tune: {', '.join(st['tune'])}",
+            floor,
+            r.tune_nc if len(st["tune"]) >= 2 else None,
         )
+    )
+    if r.holdout is not None:
+        title = (
+            f"held out: {r.holdout_episode} (against the registry the tuning episodes built; "
+            "tuning episodes scored as one pooled episode)"
+        )
+        rows.append(format_score(r.holdout, title, floor, r.holdout_nc))
     return "\n".join(rows)
 
 
@@ -393,10 +440,18 @@ def to_json(r: IdentityRun) -> dict[str, Any]:
         "settings": r.settings,
         "episodes": plain(r.episodes),
         "cache": {"hits": r.cache_hits, "misses": r.cache_misses},
-        "tune": {"episodes": r.settings["tune"], "score": plain(r.tune)},
+        "tune": {
+            "episodes": r.settings["tune"],
+            "score": plain(r.tune),
+            "nearest_centroid": r.tune_nc,
+        },
         "holdout": None
         if r.holdout is None
-        else {"episode": r.holdout_episode, "score": plain(r.holdout)},
+        else {
+            "episode": r.holdout_episode,
+            "score": plain(r.holdout),
+            "nearest_centroid": r.holdout_nc,
+        },
     }
 
 
@@ -406,7 +461,12 @@ def identity_cmd(
         ..., "--tune", help="Tuning episodes in registry order, e.g. S01E12,S01E13."
     ),
     holdout: str = typer.Option(
-        None, "--holdout", help="Held-out episode, resolved against the tuning registry."
+        None,
+        "--holdout",
+        help="Held-out episode, resolved against the registry all tuning episodes built and "
+        "scored separately; the tuning episodes count as one pooled episode beside it, so a "
+        "recurring character needs --min-speech in the tuning episodes together and in the "
+        "held-out one (Ruling R7).",
     ),
     gt: str = typer.Option(
         "ass", "--gt", help="Ground truth: ass (Name field), sdh (speaker tags) or colour."
@@ -430,6 +490,12 @@ def identity_cmd(
         None, "--embedder-option", help="k=v embedder option; repeat."
     ),
     matcher: str = typer.Option("centroid", "--matcher", help="Matcher: centroid."),
+    min_speech: float = typer.Option(
+        5.0,
+        "--min-speech",
+        min=0.0,
+        help="Seconds of labeled speech a character needs in each episode compared to recur.",
+    ),
     threshold: float = typer.Option(
         None, "--threshold", help="Match threshold (default: the workspace's registry setting)."
     ),
@@ -456,6 +522,7 @@ def identity_cmd(
             embedder_options=parse_options(embedder_option),
             matcher=matcher,
             threshold=threshold,
+            min_speech=min_speech,
             gt_file=gt_file,
             subtitle_track=subtitle_track,
             aliases=parse_aliases(alias),

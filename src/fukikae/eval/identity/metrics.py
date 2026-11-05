@@ -1,6 +1,7 @@
 """Cross-episode identity metrics.
 
-The bar (global constraints): a *recurring* character has at least `min_speech` seconds of
+The bar (global constraints, floor per Ruling R6): a *recurring* character has at least
+`min_speech` (default 5) seconds of
 labeled speech in every episode compared. A recurring character *passes* when at least `keep`
 of its labeled speech sits on its modal character id. The run passes when at least `share` of
 recurring characters pass and no two recurring characters share a modal id; with no recurring
@@ -25,11 +26,16 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from fukikae.eval.groundtruth import GroundTruthLine
 from fukikae.eval.identity.segments import Segment
 from fukikae.eval.speakers import IGNORED_LABELS, label_key
 
-MIN_SPEECH_S = 20.0
+# Ruling R6: 20 s per episode let a rework-grade system pass on Fairy Tail (two characters
+# reached it); labeled speech per character per episode is small, so the floor is 5 s.
+MIN_SPEECH_S = 5.0
+OVERALL = "(overall)"
 KEEP = 0.8
 SHARE = 0.9
 
@@ -243,3 +249,52 @@ def score(
         episodes=episodes,
         characters=chars,
     )
+
+
+def nearest_centroid_accuracy(
+    train_segs: Sequence[Segment],
+    train_embs: np.ndarray,
+    test_segs: Sequence[Segment],
+    test_embs: np.ndarray,
+) -> dict[str, float]:
+    """Embedding separability without clustering or matching (Ruling R8): one centroid per
+    character from the labeled training segments (normalized mean), each labeled test segment
+    classified to the most cosine-similar centroid. Returns the speech-weighted share classified
+    correctly per character, plus `OVERALL` over all scored speech. Test characters with no
+    training speech are not scored; empty when nothing can be scored."""
+
+    def labeled(segs: Sequence[Segment]) -> list[tuple[int, str]]:
+        return [
+            (i, label_key(s.label))
+            for i, s in enumerate(segs)
+            if s.label is not None and label_key(s.label) not in IGNORED_LABELS
+        ]
+
+    display: dict[str, str] = {}
+    rows: dict[str, list[int]] = defaultdict(list)
+    for i, key in labeled(train_segs):
+        rows[key].append(i)
+        display.setdefault(key, str(train_segs[i].label).strip())
+    names = sorted(rows)
+    if not names:
+        return {}
+    tr = np.asarray(train_embs, dtype=np.float64)
+    cents = np.stack([tr[rows[k]].mean(axis=0) for k in names])
+    cents /= np.maximum(np.linalg.norm(cents, axis=1, keepdims=True), 1e-12)
+    te = np.asarray(test_embs, dtype=np.float64)
+    right: dict[str, float] = defaultdict(float)
+    total: dict[str, float] = defaultdict(float)
+    for i, key in labeled(test_segs):
+        if key not in rows:
+            continue
+        v = te[i] / max(float(np.linalg.norm(te[i])), 1e-12)
+        guess = names[int(np.argmax(cents @ v))]
+        d = test_segs[i].duration
+        total[key] += d
+        if guess == key:
+            right[key] += d
+    if not total:
+        return {}
+    out = {display[k]: right[k] / total[k] for k in sorted(total, key=lambda k: -total[k])}
+    out[OVERALL] = sum(right.values()) / sum(total.values())
+    return out
