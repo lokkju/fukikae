@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-import torch
 
 from doppio.backends import loader
 from doppio.backends.align.wav2vec2 import MODELS, Wav2Vec2Aligner, ctc_align, split_words
@@ -25,6 +24,8 @@ def test_split_words():
 
 
 def test_ctc_align_is_monotonic_on_synthetic_emission():
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torchaudio")
     # vocabulary: 0 blank, 1..3; target 1 2 3 emitted at frames 2, 5, 8 of 10.
     em = torch.full((1, 10, 4), -10.0)
     em[:, :, 0] = 0.0
@@ -38,6 +39,8 @@ def test_ctc_align_is_monotonic_on_synthetic_emission():
 
 
 def test_ctc_align_returns_none_when_target_too_long():
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torchaudio")
     em = torch.zeros(1, 2, 4).log_softmax(-1)
     assert ctc_align(em, [1, 2, 3, 1], blank=0) is None
 
