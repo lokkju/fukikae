@@ -38,7 +38,23 @@ def test_choose_track_by_title():
     )
     assert choose_audio_track(p, "es", None, title="castilian").index == 3
     assert choose_audio_track(p, "es", None).index == 2
-    assert choose_audio_track(p, "es", None, title="absent").index == 2
+    assert choose_audio_track(p, "es", 2, title="castilian").index == 2
+
+
+def test_choose_track_title_without_match_raises():
+    p = ProbeResult(
+        audio=[
+            AudioTrack(1, "aac", 2, "spa", "Spanish (Latin America)", False),
+            AudioTrack(2, "aac", 2, "spa", "Spanish (Castilian)", False),
+        ],
+        subtitles=[],
+    )
+    with pytest.raises(MediaError, match="absent"):
+        choose_audio_track(p, "es", None, title="absent")
+    # a title naming a track of another language does not count
+    jp = ProbeResult(audio=[AudioTrack(1, "aac", 2, "jpn", "Castilian", False)], subtitles=[])
+    with pytest.raises(MediaError):
+        choose_audio_track(jp, "es", None, title="castilian")
     assert choose_audio_track(p, "es", 2, title="castilian").index == 2
 
 

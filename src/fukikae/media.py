@@ -113,7 +113,8 @@ def choose_audio_track(
     override: int | None,
     title: str | None = None,
 ) -> AudioTrack:
-    """Override wins; else source language plus title; else language; else first non-English."""
+    """Override wins; else source language plus title (a title nothing matches is an error);
+    else language; else first non-English."""
     tracks = probe_result.audio
     if not tracks:
         raise MediaError("no audio tracks")
@@ -128,6 +129,10 @@ def choose_audio_track(
         for t in tracks:
             if _norm_lang(t.language) == want and needle in (t.title or "").lower():
                 return t
+        raise MediaError(
+            f"no {want} audio track has {title!r} in its title; "
+            f"have {[(t.index, t.language, t.title) for t in tracks]}"
+        )
     if want:
         for t in tracks:
             if _norm_lang(t.language) == want:
