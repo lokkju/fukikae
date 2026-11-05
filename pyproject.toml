@@ -1,0 +1,74 @@
+[project]
+name = "doppio"
+dynamic = ["version"]
+description = "Automatically dub foreign-language TV into English"
+readme = "README.md"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "typer>=0.15.0",
+]
+
+[project.optional-dependencies]
+demucs = []
+whisper = []
+qwen = []
+pyannote = []
+
+[project.urls]
+License = "https://polyformproject.org/licenses/shield/1.0.0"
+
+[project.scripts]
+doppio = "doppio.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.8.0",
+    "pyright>=1.1.0",
+    "pre-commit>=3.5.0",
+]
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/doppio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not gpu and not media'"
+markers = [
+    "gpu: needs a GPU and DOPPIO_TEST_MEDIA",
+    "media: needs real media from DOPPIO_TEST_MEDIA",
+    "ffmpeg: needs only the ffmpeg binary; skipped when it is not on PATH",
+    "slow: slow test",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "S", "ARG", "SIM"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = [".venv", "**/__pycache__"]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
