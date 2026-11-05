@@ -277,7 +277,7 @@ def test_interrupted_stage_reruns(ep, cfg): ...  # b raises KeyboardInterrupt af
   - `ExtractStage` (`name="extract"`): writes `00-extract/audio.wav` (44.1 kHz, stereo downmix, pcm_s16le) from the chosen track; `config_key` includes the chosen track index.
   - `doctor()` checks ffmpeg/ffprobe on PATH, NVML visibility, HF token presence (`huggingface_hub.get_token()` is not None; never print it), installed backends per kind.
   - `doppio run <workspace> <episode-ref> [--from STAGE] [--to STAGE] [--no-wait]`.
-  - `scripts/make-fixtures`: given `DOPPIO_TEST_MEDIA`, cuts 90 s clips (`S01E01-clip.mkv`, `S01E02-clip.mkv`, from 00:05:00) of the two Chimera episodes with stream copy, plus a full-episode symlink for each. Episode paths are in the script (from the spec's test material).
+  - `scripts/make-fixtures`: given `DOPPIO_TEST_MEDIA`, cuts 90 s clips (`S01E01-clip.mkv`, `S01E02-clip.mkv`, from 00:05:00) of the two Chimera episodes with stream copy, plus a full-episode symlink for each. It reads the episodes from `~/doppio-ws/media/Chimera (2021)/Season 1/` (the spec's test material; override with `DOPPIO_SOURCE_MEDIA`).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -489,7 +489,7 @@ def test_rerun_after_registry_drift_keeps_assignment(): ...
 **Files:**
 - Create: `docs/results/<date>-registry-chimera.md`, the workspace's `doppio.toml` (outside the repo, e.g. `~/doppio-ws/chimera/`; record its contents in the results doc)
 
-- [ ] **Step 1:** Create the workspace with `source = "/mnt/truenas/media/ums/media/TV/Chimera (2021)"`, `source_language = "ko"`, the ASR default from Task 11, `gpu_device` set to the 3090 not running vLLM (check `nvidia-smi` for the card with the vLLM process).
+- [ ] **Step 1:** Create the workspace with `source = "~/doppio-ws/media/Chimera (2021)"` (expanded to an absolute path), `source_language = "ko"`, the ASR default from Task 11, `gpu_device` set to the 3090 not running vLLM (check `nvidia-smi` for the card with the vLLM process).
 - [ ] **Step 2:** `uv run doppio run ~/doppio-ws/chimera S01E01 --to characters`, then `S01E02`. Expected: both complete; `S01E02/05-characters/assignments.json` has `matched` entries.
 - [ ] **Step 3:** `uv run doppio eval sample ~/doppio-ws/chimera --episodes S01E01,S01E02 --per-cluster 4 --out ~/doppio-ws/chimera/labels`. Labeling needs a person listening to the clips: hand `labels.yaml` to the operator as a queued action and wait.
 - [ ] **Step 4:** `uv run doppio eval speakers ~/doppio-ws/chimera --labels ~/doppio-ws/chimera/labels/labels.yaml`. If the verdict is `tune`, sweep `registry.match_threshold` (0.5-0.8 in 0.05 steps, `registry rematch` on S01E02 for each) and report the curve; set the best value as the default in `config.py`.

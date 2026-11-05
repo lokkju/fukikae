@@ -40,7 +40,7 @@ The cross-episode character identity is the reason this exists rather than just 
 - Python, managed with uv (`uv sync`, `uv run`), ruff, pyright, pre-commit, per the user's python-project conventions. License PolyForm Shield 1.0.0.
 - pyannote's gated models need a Hugging Face token with the model terms accepted.
 - ffmpeg and ffprobe are required external binaries, not assumed on the host (ml-01 has neither); the repo pins them through mise, and `doppio doctor` checks for them.
-- Test material (read-only, from the Plex library at `/mnt/truenas/media/ums/media/TV/`): Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Episodes are never written; doppio's work directory for them lives outside the share.
+- Test material: Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Copied once from the Plex library's TrueNAS share (`/mnt/mega/media/ums/media/TV`, no longer mounted on ml-01 since 2026-11-04) into `~/doppio-ws/media/<Show>/Season 1/` on ml-01, owner-only permissions. doppio treats that directory as read-only source, the same as it would a media share.
 - The GitHub repo, when it exists, comes from the infra Pulumi `repos` config, not `gh repo create`. Until then the project is a local git repo.
 
 ## Architecture
