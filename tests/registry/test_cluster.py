@@ -160,10 +160,22 @@ def test_cli_merge_and_split(tmp_path):
     with Registry(ws.registry_path) as reg:
         assert len(reg.actors()) == 3
         assert reg.exemplar_count(1) == 12 and reg.exemplar_count(3) == 6
+    path = ws.work_dir("S01E02") / "05-characters" / "assignments.json"
+    by = {c.cluster: c for c in read_json(path, Assignments).clusters}
+    assert (by["S0"].actor_id, by["S0"].character_id) == (3, 3)
+    ep2 = _ep(ws, "S01E02")
+    m = load_manifest(ep2)
+    m.stages["characters"] = StageRecord(key="k", status="done", started=datetime.now(UTC))
+    save_manifest(ep2, m)
     r = runner.invoke(app, ["registry", "merge", w, "1", "3"])
     assert r.exit_code == 0 and "S01E02" in r.output
     with Registry(ws.registry_path) as reg:
         assert len(reg.actors()) == 2 and reg.exemplar_count(1) == 18
+        assert sorted(c.id for c in reg.characters()) == [1, 2]
+    by = {c.cluster: c for c in read_json(path, Assignments).clusters}
+    assert (by["S0"].actor_id, by["S0"].character_id) == (1, 1)
+    assert (by["S1"].actor_id, by["S1"].character_id) == (2, 2)
+    assert "characters" not in load_manifest(ep2).stages
 
 
 def test_split_cluster_store(tmp_path):

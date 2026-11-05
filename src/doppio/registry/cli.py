@@ -103,6 +103,7 @@ def _remap_assignments(
     actor_map: dict[int, int],
     only_cluster: str | None = None,
     character: tuple[int, int] | None = None,
+    character_map: dict[int, int] | None = None,
 ) -> None:
     """Keep an episode's assignments.json in step with a merge or split.
 
@@ -125,6 +126,8 @@ def _remap_assignments(
             upd["actor_id"] = actor_map[c.actor_id]
         if character is not None and c.cluster == only_cluster:
             upd["character_id"] = character[1]
+        if character_map and c.character_id in character_map:
+            upd["character_id"] = character_map[c.character_id]
         out.append(c.model_copy(update=upd))
     write_json(path, a.model_copy(update={"clusters": out}))
 
@@ -297,16 +300,16 @@ def merge(
     keep: int = typer.Argument(..., metavar="KEEP", help="Actor id to keep."),
     drop: int = typer.Argument(..., metavar="DROP", help="Actor id folded into KEEP."),
 ) -> None:
-    """Merge actor DROP into actor KEEP."""
+    """Merge actor DROP into actor KEEP; DROP's characters fold into KEEP's first one."""
     ws = Workspace(workspace)
     with _open(workspace) as reg:
         try:
             affected = list(reg.episode_counts(drop))
-            reg.merge_actors(keep, drop)
+            chars = reg.merge_actors(keep, drop)
         except (KeyError, ValueError) as e:
             raise _fail(f"cannot merge {drop} into {keep}: {e!r}") from e
     for eid in affected:
-        _remap_assignments(ws, eid, {drop: keep})
+        _remap_assignments(ws, eid, {drop: keep}, character_map=chars)
     _stale(ws, affected)
 
 
