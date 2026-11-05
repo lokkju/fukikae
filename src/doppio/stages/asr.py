@@ -39,12 +39,16 @@ def _resolve(cfg: Config, kind: str, language: str | None, default: str) -> Back
         return BackendConfig(default, opts)
 
 
-class AsrStage:
-    name = "asr"
+DEFAULT_OUT_DIR = "03-asr"
 
-    def __init__(self, backend: str | None = None, out_dir: str = "03-asr") -> None:
+
+class AsrStage:
+    def __init__(self, backend: str | None = None, out_dir: str = DEFAULT_OUT_DIR) -> None:
         self.backend = backend
         self.out_dir = out_dir
+        # Another out_dir (an eval run) keeps its own manifest record, so it never
+        # overwrites the pipeline's "asr" record or another backend's.
+        self.name = "asr" if out_dir == DEFAULT_OUT_DIR else f"asr:{out_dir}"
 
     def inputs(self, ep: Episode) -> list[Path]:
         return [

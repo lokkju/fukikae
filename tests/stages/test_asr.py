@@ -172,7 +172,7 @@ def test_backend_override_keeps_options_only_when_names_match(ep):
 @pytest.mark.usefixtures("fakes")
 def test_out_dir_and_outputs(ep):
     s = AsrStage(out_dir="eval/asr-fake")
-    assert s.name == "asr"
+    assert s.name == "asr:eval/asr-fake"
     s.run(ep, _cfg(asr={"backend": "fake"}))
     assert (ep.work / "eval" / "asr-fake" / "transcript.json").exists()
     assert s.outputs(ep) == [ep.work / "eval" / "asr-fake" / "transcript.json"]
@@ -212,3 +212,19 @@ def test_gpu_asr_and_align_on_clip(clip_ep):
     AsrStage().run(clip_ep, Config(source_language="ko"))
     t = read_json(clip_ep.work / "03-asr" / "transcript.json", Transcript)
     assert t.language == "ko" and t.word_timing and t.segments
+
+
+@pytest.mark.usefixtures("fakes")
+def test_eval_out_dir_gets_its_own_manifest_record(ep):
+    from doppio.job import load_manifest, run_stages
+
+    assert AsrStage().name == "asr"
+    evals = AsrStage(backend="fa", out_dir="eval/asr-fa")
+    assert evals.name == "asr:eval/asr-fa"
+    cfg = _cfg(asr={"backend": "fake"}, align={"backend": "fa"})
+    assert run_stages(ep, cfg, [AsrStage()]) == ["asr"]
+    pipeline = load_manifest(ep).stages["asr"]
+    assert run_stages(ep, cfg, [evals]) == ["asr:eval/asr-fa"]
+    assert load_manifest(ep).stages["asr"] == pipeline  # eval left it alone
+    assert run_stages(ep, cfg, [AsrStage(backend="fa", out_dir="eval/asr-fa")]) == []
+    assert run_stages(ep, cfg, [AsrStage()]) == []
