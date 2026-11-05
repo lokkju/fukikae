@@ -45,6 +45,17 @@ def test_declarations_and_registration():
     assert loader.EXTRAS["qwen3_asr"] == loader.EXTRAS["qwen3_forced_aligner"] == "qwen"
 
 
+def test_default_chunk_plus_padding_fits_the_models_30_s_window():
+    import inspect
+
+    from doppio.backends.asr import qwen3
+
+    t = Qwen3AsrTranscriber({}, "cpu")
+    assert t.max_chunk_s == 28.0
+    assert t.max_chunk_s + 2 * qwen3._PAD_S <= 30.0
+    assert inspect.signature(plan_chunks).parameters["max_s"].default == t.max_chunk_s
+
+
 def test_language_names_map_to_iso_codes():
     assert name_to_code("Korean") == "ko" and name_to_code("cantonese") == "yue"
     assert name_to_code("Chinese") == "zh" and name_to_code("Japanese") == "ja"

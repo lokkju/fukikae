@@ -56,6 +56,8 @@ _BY_LOWER = {name.lower(): code for name, code in LANGUAGES.items()}
 _RATE = 16000
 _FRAME_S = 0.02
 _PAD_S = 0.1  # audio kept around a chunk so its first and last sounds are not clipped
+# The model decodes at most 30 s; a chunk plus its padding on both sides stays under that.
+MAX_CHUNK_S = 28.0
 
 
 def name_to_code(name: str) -> str | None:
@@ -79,7 +81,7 @@ def read_wav16k(path: Path) -> np.ndarray:
 
 
 def plan_chunks(
-    samples: np.ndarray, sr: int = _RATE, max_s: float = 30.0, min_s: float = 0.2
+    samples: np.ndarray, sr: int = _RATE, max_s: float = MAX_CHUNK_S, min_s: float = 0.2
 ) -> list[tuple[float, float]]:
     """Speech chunks ``(start, end)`` in seconds, each at most ``max_s`` long.
 
@@ -143,7 +145,7 @@ class Qwen3AsrTranscriber:
         self.model_name: str = str(options.get("model", "Qwen/Qwen3-ASR-1.7B"))
         self.device = device
         self.batch_size: int = int(options.get("batch_size", 8))
-        self.max_chunk_s: float = float(options.get("max_chunk_s", 30.0))
+        self.max_chunk_s: float = float(options.get("max_chunk_s", MAX_CHUNK_S))
         self._model: Any = None
 
     @property
