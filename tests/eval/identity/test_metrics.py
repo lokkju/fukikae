@@ -228,3 +228,54 @@ def test_nearest_centroid_accuracy():
     assert "C" not in got
     assert got["(overall)"] == pytest.approx(16 / 20)
     assert nearest_centroid_accuracy([], np.zeros((0, 3)), test, test_e) == {}
+
+
+def test_holdout_share_comes_from_held_out_speech_only():
+    """Lucy: 70 s on id 4 across the tuning episodes, 10 s all on id 9 in the held-out one.
+    Pooled into one share that is 87.5%; scored on the held-out speech it is 0%."""
+    rows = [
+        ("LUCY", "tune", 4, 70.0),
+        ("LUCY", "E14", 9, 10.0),
+        ("LAXUS", "tune", 7, 50.0),
+        ("LAXUS", "E14", 7, 12.0),
+    ]
+    s = score(*build(rows), reference=["tune"])
+    by = {c.name: c for c in s.characters}
+    assert by["LUCY"].recurring and by["LUCY"].modal_id == 4
+    assert by["LUCY"].share == 0.0 and not by["LUCY"].passing
+    assert by["LUCY"].speech == pytest.approx(10.0)
+    assert by["LAXUS"].passing and by["LAXUS"].share == 1.0
+    assert (s.recurring, s.passing) == (2, 1)
+    assert s.verdict == "fail"
+    # Purity and coverage count the held-out episode alone.
+    assert set(s.purity_by_id) == {7, 9}
+
+
+def test_holdout_passes_when_it_agrees_with_the_tuning_ids():
+    rows = [
+        ("LUCY", "tune", 4, 70.0),
+        ("LUCY", "E14", 4, 9.0),
+        ("LUCY", "E14", None, 1.0),
+        ("LAXUS", "tune", 7, 50.0),
+        ("LAXUS", "E14", 7, 12.0),
+    ]
+    s = score(*build(rows), reference=["tune"])
+    assert (s.recurring, s.passing, s.merges) == (2, 2, [])
+    assert {c.name: c.share for c in s.characters}["LUCY"] == pytest.approx(0.9)
+    assert s.verdict == "pass"
+
+
+def test_holdout_merge_is_on_held_out_speech():
+    """Distinct ids in the tuning episodes, but both land mostly on id 7 in the held-out one."""
+    rows = [
+        ("LUCY", "tune", 4, 70.0),
+        ("LUCY", "E14", 7, 10.0),
+        ("LAXUS", "tune", 7, 50.0),
+        ("LAXUS", "E14", 7, 12.0),
+    ]
+    s = score(*build(rows), reference=["tune"])
+    assert s.merges == [("LAXUS", "LUCY", 7)]
+    assert s.verdict == "fail"
+    # Recurring needs the floor in the pooled tuning speech and in the held-out speech.
+    s2 = score(*build([("A", "tune", 1, 60.0), ("A", "E14", 1, 4.0)]), reference=["tune"])
+    assert s2.verdict == "insufficient"
