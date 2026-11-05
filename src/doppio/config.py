@@ -50,7 +50,12 @@ class Config:
             if key is None:
                 continue
             override = table.get(group, {}).get(key)
-            if isinstance(override, dict):
+            if not isinstance(override, dict):
+                continue
+            if "backend" in override and override["backend"] != merged.get("backend"):
+                # A different backend gets only its own options, not the previous one's.
+                merged = dict(override)
+            else:
                 merged.update(override)
         backend = merged.pop("backend", None)
         if not backend:

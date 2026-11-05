@@ -74,3 +74,16 @@ def test_defaults_and_source(tmp_path):
 def test_default_user_config_missing_is_fine(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "nohome"))
     assert load_config(tmp_path).target_language == "en"
+
+
+def test_override_with_other_backend_drops_base_options(tmp_path):
+    (tmp_path / "doppio.toml").write_text(
+        '[asr]\nbackend="faster_whisper"\nmodel="large-v3"\ncompute_type="int8"\n'
+        '[asr.lang.ko]\nbackend="qwen3_asr"\nmodel="Qwen/Qwen3-ASR-1.7B"\n'
+        '[asr.lang.fr]\nmodel="large-v2"\n'
+    )
+    c = load_config(tmp_path, user_config=None)
+    assert c.resolve("asr", "ko") == BackendConfig("qwen3_asr", {"model": "Qwen/Qwen3-ASR-1.7B"})
+    assert c.resolve("asr", "fr") == BackendConfig(
+        "faster_whisper", {"model": "large-v2", "compute_type": "int8"}
+    )
