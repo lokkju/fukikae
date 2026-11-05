@@ -14,6 +14,13 @@ class Word(BaseModel):
 
 
 class Segment(BaseModel):
+    """A stretch of transcript as the ASR backend decoded it.
+
+    A decoding chunk, not a dubbing cue: its length is whatever the backend chose (Qwen3-ASR
+    gives chunks of up to ~28 s, faster-whisper much shorter ones) and it may span several
+    speakers. Cue segmentation comes later, from the word timings and the diarization turns.
+    """
+
     start: float
     end: float
     text: str
