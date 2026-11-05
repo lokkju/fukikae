@@ -157,3 +157,57 @@ def test_cli_sample_refuses_overwrite_then_speakers(tmp_path: Path) -> None:
     assert res.exit_code == 0, res.output
     assert "recurring" in res.output
     assert "rework" in res.output  # no label appears in two episodes: nothing recurring
+
+
+def _labels_file(tmp_path: Path, label_text: str) -> Path:
+    path = tmp_path / "labels.yaml"
+    path.write_text(
+        "- episode: S01E01\n  cluster: SPEAKER_00\n  clip: S01E01/SPEAKER_00-0.wav\n"
+        f"  start: 1.0\n  end: 2.0\n  label: {label_text}\n"
+    )
+    return path
+
+
+def test_written_labels_are_quoted_and_quoted_question_mark_loads(tmp_path: Path) -> None:
+    path = tmp_path / "labels.yaml"
+    from doppio.eval.speakers import write_labels
+
+    write_labels(path, [_clip("S01E01", "SPEAKER_00", "")])
+    assert 'label: ""' in path.read_text()
+    assert load_labels(_labels_file(tmp_path, '"?"'))[0].label == "?"
+
+
+def test_bare_question_mark_and_bare_bool_are_clean_errors(tmp_path: Path) -> None:
+    runner = CliRunner()
+    for text in ("?", "no"):
+        path = _labels_file(tmp_path, text)
+        res = runner.invoke(eval_app, ["speakers", str(tmp_path), "--labels", str(path)])
+        assert res.exit_code == 1, text
+        assert res.output.startswith("error:") or "error:" in res.output
+        assert "Traceback" not in res.output
+    path = _labels_file(tmp_path, "no")
+    res = runner.invoke(eval_app, ["speakers", str(tmp_path), "--labels", str(path)])
+    assert "SPEAKER_00" in res.output and "quote" in res.output
+    res = runner.invoke(
+        eval_app,
+        ["sample", str(tmp_path), "--episodes", "S01E01", "--out", str(tmp_path)],
+    )
+    assert res.exit_code == 1
+
+
+def test_labels_compare_case_and_space_insensitively() -> None:
+    assignments = {
+        "S01E01": _assign("S01E01", {"A": 1, "B": 2}),
+        "S01E02": _assign("S01E02", {"A": 1}),
+    }
+    labels = [
+        _clip("S01E01", "A", "Detective"),
+        _clip("S01E02", "A", "detective "),
+        _clip("S01E01", "B", "Extra"),
+        _clip("S01E02", "B", "EXTRA"),
+    ]
+    s = score(labels, assignments)
+    assert (s.recurring, s.consistent, s.merged_pairs) == (1, 1, [])
+    shared = {"S01E01": _assign("S01E01", {"A": 1, "B": 1})}
+    s = score([_clip("S01E01", "A", "Surgeon"), _clip("S01E01", "B", "profiler")], shared)
+    assert s.merged_pairs == [("Surgeon", "profiler")]
