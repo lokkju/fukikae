@@ -5,11 +5,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from doppio.backends.loader import EXTRAS, names
-from doppio.backends.separation.demucs import DemucsSeparator
-from doppio.config import Config
-from doppio.stages.separate import SeparateStage
-from doppio.workspace import Episode
+from fukikae.backends.loader import EXTRAS, names
+from fukikae.backends.separation.demucs import DemucsSeparator
+from fukikae.config import Config
+from fukikae.stages.separate import SeparateStage
+from fukikae.workspace import Episode
 
 
 def test_declaration():
@@ -41,14 +41,14 @@ def _rms(x: np.ndarray) -> float:
 
 @pytest.mark.gpu
 def test_separates_dialogue_clip(tmp_path):
-    media = os.environ.get("DOPPIO_TEST_MEDIA")
+    media = os.environ.get("FUKIKAE_TEST_MEDIA")
     if not media:
-        pytest.skip("DOPPIO_TEST_MEDIA not set")
+        pytest.skip("FUKIKAE_TEST_MEDIA not set")
     clip = Path(media).expanduser() / "S01E01-clip.mkv"
     root = tmp_path / "ws"
     work = root / "episodes" / "e1"
     ep = Episode(source=clip, id="e1", work=work, workspace_root=root)
-    from doppio.stages.extract import ExtractStage
+    from fukikae.stages.extract import ExtractStage
 
     cfg = Config(source_language="ko")
     ExtractStage().run(ep, cfg)

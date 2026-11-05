@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from doppio.backends import loader
-from doppio.backends.diarize.pyannote import PyannoteDiarizer
-from doppio.backends.embed.ecapa import EcapaEmbedder
+from fukikae.backends import loader
+from fukikae.backends.diarize.pyannote import PyannoteDiarizer
+from fukikae.backends.embed.ecapa import EcapaEmbedder
 
 
 def test_declarations_and_registration():

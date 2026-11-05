@@ -1,6 +1,6 @@
 import pytest
 
-from doppio.media import AudioTrack, MediaError, ProbeResult, choose_audio_track, probe, run_ffmpeg
+from fukikae.media import AudioTrack, MediaError, ProbeResult, choose_audio_track, probe, run_ffmpeg
 
 
 def _probe():

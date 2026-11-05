@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from doppio.artifacts import read_json, write_json
-from doppio.models import (
+from fukikae.artifacts import read_json, write_json
+from fukikae.models import (
     Assignments,
     ClusterAssignment,
     Diarization,

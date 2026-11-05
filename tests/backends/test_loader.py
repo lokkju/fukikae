@@ -3,16 +3,16 @@ import importlib.metadata
 import pytest
 from typer.testing import CliRunner
 
-from doppio.backends.loader import BackendUnavailable, available, create, supports
-from doppio.cli import app
-from doppio.config import BackendConfig, ConfigError
+from fukikae.backends.loader import BackendUnavailable, available, create, supports
+from fukikae.cli import app
+from fukikae.config import BackendConfig, ConfigError
 from tests.backends.fakes import AnyLanguage, FakeTranscriber
 
 GOOD = importlib.metadata.EntryPoint(
-    "fake", "tests.backends.fakes:FakeTranscriber", "doppio.backends.asr"
+    "fake", "tests.backends.fakes:FakeTranscriber", "fukikae.backends.asr"
 )
 BROKEN = importlib.metadata.EntryPoint(
-    "faster_whisper", "tests.backends.not_there:Nope", "doppio.backends.asr"
+    "faster_whisper", "tests.backends.not_there:Nope", "fukikae.backends.asr"
 )
 
 
@@ -55,7 +55,7 @@ def test_create_passes_options():
 
 @pytest.mark.usefixtures("broken_ep")
 def test_import_failure_names_extra():
-    with pytest.raises(BackendUnavailable, match=r"doppio\[whisper\]") as e:
+    with pytest.raises(BackendUnavailable, match=r"fukikae\[whisper\]") as e:
         create("asr", BackendConfig("faster_whisper", {}), "cpu")
     assert "uv " in str(e.value) and "pip" not in str(e.value)
     assert available("asr") == {"fake": FakeTranscriber}

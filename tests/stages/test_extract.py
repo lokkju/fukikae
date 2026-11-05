@@ -4,10 +4,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from doppio.config import load_config
-from doppio.job import run_stages
-from doppio.stages.extract import ExtractStage
-from doppio.workspace import Workspace
+from fukikae.config import load_config
+from fukikae.job import run_stages
+from fukikae.stages.extract import ExtractStage
+from fukikae.workspace import Workspace
 
 
 def _dominant_hz(path: Path) -> float:

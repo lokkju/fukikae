@@ -27,13 +27,13 @@ The subtitle keeps some English as Latin text (for example `ANFO`, `IED`, `socia
 ## Command
 
 ```
-uv run doppio eval asr ~/doppio-ws/chimera S01E01 --subtitle-track 2 --backend qwen3_asr --backend faster_whisper
+uv run fukikae eval asr ~/fukikae-ws/chimera S01E01 --subtitle-track 2 --backend qwen3_asr --backend faster_whisper
 ```
 
-Workspace `~/doppio-ws/chimera/doppio.toml` (outside the repo), with the winner set after the run:
+Workspace `~/fukikae-ws/chimera/fukikae.toml` (outside the repo), with the winner set after the run:
 
 ```toml
-source = "~/doppio-ws/media/Chimera (2021)"
+source = "~/fukikae-ws/media/Chimera (2021)"
 source_language = "ko"
 gpu_device = 0
 

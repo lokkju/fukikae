@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from doppio.registry.store import Registry
+from fukikae.registry.store import Registry
 
 
 def unit(*xs: float) -> np.ndarray:

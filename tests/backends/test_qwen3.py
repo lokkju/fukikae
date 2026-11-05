@@ -6,16 +6,16 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from doppio.backends import loader
-from doppio.backends.align.qwen3 import Qwen3ForcedAligner, group_segments
-from doppio.backends.asr.qwen3 import (
+from fukikae.backends import loader
+from fukikae.backends.align.qwen3 import Qwen3ForcedAligner, group_segments
+from fukikae.backends.asr.qwen3 import (
     LANGUAGES,
     Qwen3AsrTranscriber,
     code_to_name,
     name_to_code,
     plan_chunks,
 )
-from doppio.models import Segment, Transcript
+from fukikae.models import Segment, Transcript
 
 
 def seg(a: float, b: float, text: str = "x") -> Segment:
@@ -48,7 +48,7 @@ def test_declarations_and_registration():
 def test_default_chunk_plus_padding_fits_the_models_30_s_window():
     import inspect
 
-    from doppio.backends.asr import qwen3
+    from fukikae.backends.asr import qwen3
 
     t = Qwen3AsrTranscriber({}, "cpu")
     assert t.max_chunk_s == 28.0

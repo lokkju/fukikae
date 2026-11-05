@@ -6,13 +6,13 @@ from typing import Any, ClassVar
 import numpy as np
 import pytest
 
-from doppio import runctx
-from doppio.config import Config, load_config
-from doppio.gpu import VramTimeout
-from doppio.models import Separation
-from doppio.stages import separate
-from doppio.stages.separate import SeparateStage
-from doppio.workspace import Episode, Workspace
+from fukikae import runctx
+from fukikae.config import Config, load_config
+from fukikae.gpu import VramTimeout
+from fukikae.models import Separation
+from fukikae.stages import separate
+from fukikae.stages.separate import SeparateStage
+from fukikae.workspace import Episode, Workspace
 
 
 def _write_wav(path: Path, hz: float, rate: int = 44100, secs: float = 1.0, ch: int = 2) -> None:

@@ -1,8 +1,8 @@
 import numpy as np
 
-from doppio.models import Assignments, ClusterAssignment, Diarization, Turn
-from doppio.registry.matching import ClusterEvidence, match, pin
-from doppio.registry.store import Actor, Character
+from fukikae.models import Assignments, ClusterAssignment, Diarization, Turn
+from fukikae.registry.matching import ClusterEvidence, match, pin
+from fukikae.registry.store import Actor, Character
 
 
 def unit(v):

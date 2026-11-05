@@ -83,6 +83,6 @@ Thumbs.db
 # VCR cassettes (if not committing test fixtures)
 # tests/cassettes/
 
-# doppio
-.doppio/
+# fukikae
+.fukikae/
 .superpowers/

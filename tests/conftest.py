@@ -49,13 +49,13 @@ def clip_ep(tmp_path_factory: pytest.TempPathFactory):
     """The 90 s Korean clip, extracted and separated once per session (gpu tests only)."""
     import os
 
-    media = os.environ.get("DOPPIO_TEST_MEDIA")
+    media = os.environ.get("FUKIKAE_TEST_MEDIA")
     if not media:
-        pytest.skip("DOPPIO_TEST_MEDIA not set")
-    from doppio.config import Config
-    from doppio.stages.extract import ExtractStage
-    from doppio.stages.separate import SeparateStage
-    from doppio.workspace import Episode
+        pytest.skip("FUKIKAE_TEST_MEDIA not set")
+    from fukikae.config import Config
+    from fukikae.stages.extract import ExtractStage
+    from fukikae.stages.separate import SeparateStage
+    from fukikae.workspace import Episode
 
     root = tmp_path_factory.mktemp("clipws")
     work = root / "episodes" / "e1"

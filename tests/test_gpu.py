@@ -3,9 +3,9 @@ import types
 
 import pytest
 
-from doppio import gpu
-from doppio.config import Config
-from doppio.gpu import VramTimeout, device_string, free_mb, wait_for_vram
+from fukikae import gpu
+from fukikae.config import Config
+from fukikae.gpu import VramTimeout, device_string, free_mb, wait_for_vram
 
 
 def _seq(values):

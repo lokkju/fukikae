@@ -1118,80 +1118,6 @@ wheels = [
 ]
 
 [[package]]
-name = "doppio"
-source = { editable = "." }
-dependencies = [
-    { name = "huggingface-hub" },
-    { name = "jiwer" },
-    { name = "numpy" },
-    { name = "nvidia-ml-py" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "scipy" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-demucs = [
-    { name = "demucs", version = "4.0.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "demucs", version = "4.1.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
-]
-pyannote = [
-    { name = "pyannote-audio" },
-    { name = "speechbrain" },
-]
-qwen = [
-    { name = "qwen-asr" },
-]
-whisper = [
-    { name = "faster-whisper" },
-    { name = "nvidia-cublas-cu12" },
-    { name = "torchaudio" },
-    { name = "transformers" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pre-commit" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-    { name = "types-pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "demucs", marker = "extra == 'demucs'", specifier = ">=4.0.1" },
-    { name = "faster-whisper", marker = "extra == 'whisper'", specifier = ">=1.2.1" },
-    { name = "huggingface-hub", specifier = ">=0.34.0,<1.0" },
-    { name = "jiwer", specifier = ">=4.0.0" },
-    { name = "numpy", specifier = ">=2.5.4" },
-    { name = "nvidia-cublas-cu12", marker = "extra == 'whisper'", specifier = ">=12.9.3.13" },
-    { name = "nvidia-ml-py", specifier = ">=13.615.71" },
-    { name = "pyannote-audio", marker = "extra == 'pyannote'", specifier = ">=4.0.7" },
-    { name = "pydantic", specifier = ">=2" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "qwen-asr", marker = "extra == 'qwen'", specifier = "==0.0.6" },
-    { name = "scipy", specifier = ">=1.18.1" },
-    { name = "speechbrain", marker = "extra == 'pyannote'", specifier = ">=1.1.2" },
-    { name = "torchaudio", marker = "extra == 'whisper'", specifier = ">=2.11.1" },
-    { name = "transformers", marker = "extra == 'whisper'", specifier = ">=4.57.6,<5" },
-    { name = "typer", specifier = ">=0.15.0" },
-]
-provides-extras = ["demucs", "pyannote", "qwen", "whisper"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pre-commit", specifier = ">=3.5.0" },
-    { name = "pyright", specifier = ">=1.1.0" },
-    { name = "pytest", specifier = ">=7.4.0" },
-    { name = "pytest-cov", specifier = ">=4.1.0" },
-    { name = "ruff", specifier = ">=0.8.0" },
-    { name = "types-pyyaml", specifier = ">=6.0.12.20261103" },
-]
-
-[[package]]
 name = "dora-search"
 version = "0.1.13"
 source = { registry = "https://pypi.org/simple" }
@@ -1485,6 +1411,80 @@ wheels = [
 [package.optional-dependencies]
 http = [
     { name = "aiohttp" },
+]
+
+[[package]]
+name = "fukikae"
+source = { editable = "." }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "jiwer" },
+    { name = "numpy" },
+    { name = "nvidia-ml-py" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "scipy" },
+    { name = "typer" },
+]
+
+[package.optional-dependencies]
+demucs = [
+    { name = "demucs", version = "4.0.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
+    { name = "demucs", version = "4.1.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
+]
+pyannote = [
+    { name = "pyannote-audio" },
+    { name = "speechbrain" },
+]
+qwen = [
+    { name = "qwen-asr" },
+]
+whisper = [
+    { name = "faster-whisper" },
+    { name = "nvidia-cublas-cu12" },
+    { name = "torchaudio" },
+    { name = "transformers" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pre-commit" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+    { name = "types-pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "demucs", marker = "extra == 'demucs'", specifier = ">=4.0.1" },
+    { name = "faster-whisper", marker = "extra == 'whisper'", specifier = ">=1.2.1" },
+    { name = "huggingface-hub", specifier = ">=0.34.0,<1.0" },
+    { name = "jiwer", specifier = ">=4.0.0" },
+    { name = "numpy", specifier = ">=2.5.4" },
+    { name = "nvidia-cublas-cu12", marker = "extra == 'whisper'", specifier = ">=12.9.3.13" },
+    { name = "nvidia-ml-py", specifier = ">=13.615.71" },
+    { name = "pyannote-audio", marker = "extra == 'pyannote'", specifier = ">=4.0.7" },
+    { name = "pydantic", specifier = ">=2" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "qwen-asr", marker = "extra == 'qwen'", specifier = "==0.0.6" },
+    { name = "scipy", specifier = ">=1.18.1" },
+    { name = "speechbrain", marker = "extra == 'pyannote'", specifier = ">=1.1.2" },
+    { name = "torchaudio", marker = "extra == 'whisper'", specifier = ">=2.11.1" },
+    { name = "transformers", marker = "extra == 'whisper'", specifier = ">=4.57.6,<5" },
+    { name = "typer", specifier = ">=0.15.0" },
+]
+provides-extras = ["demucs", "pyannote", "qwen", "whisper"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pre-commit", specifier = ">=3.5.0" },
+    { name = "pyright", specifier = ">=1.1.0" },
+    { name = "pytest", specifier = ">=7.4.0" },
+    { name = "pytest-cov", specifier = ">=4.1.0" },
+    { name = "ruff", specifier = ">=0.8.0" },
+    { name = "types-pyyaml", specifier = ">=6.0.12.20261103" },
 ]
 
 [[package]]

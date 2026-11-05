@@ -1,7 +1,7 @@
 import pytest
 
-from doppio.artifacts import ArtifactVersionError, atomic_path, read_json, write_json
-from doppio.models import Transcript
+from fukikae.artifacts import ArtifactVersionError, atomic_path, read_json, write_json
+from fukikae.models import Transcript
 
 
 def test_read_rejects_newer_schema(tmp_path):

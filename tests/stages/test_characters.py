@@ -3,12 +3,12 @@ from typing import Any
 import numpy as np
 import pytest
 
-from doppio.artifacts import read_json, write_json
-from doppio.config import Config, RegistrySettings
-from doppio.models import Assignments, Diarization, Turn
-from doppio.registry.store import Registry
-from doppio.stages.characters import CharactersStage
-from doppio.workspace import Episode, Workspace
+from fukikae.artifacts import read_json, write_json
+from fukikae.config import Config, RegistrySettings
+from fukikae.models import Assignments, Diarization, Turn
+from fukikae.registry.store import Registry
+from fukikae.stages.characters import CharactersStage
+from fukikae.workspace import Episode, Workspace
 
 
 def unit(v):

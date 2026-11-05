@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from doppio.eval.asr import cer, normalize, parse_srt
+from fukikae.eval.asr import cer, normalize, parse_srt
 
 
 def test_normalize_korean() -> None:
@@ -32,12 +32,12 @@ def test_parse_srt_concatenates_cues_in_order() -> None:
 def test_evaluate_reports_cached_backend_runtime_as_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import doppio.eval.asr as mod
-    import doppio.job
-    from doppio.artifacts import write_json
-    from doppio.config import Config
-    from doppio.models import Segment, Transcript
-    from doppio.workspace import Episode
+    import fukikae.eval.asr as mod
+    import fukikae.job
+    from fukikae.artifacts import write_json
+    from fukikae.config import Config
+    from fukikae.models import Segment, Transcript
+    from fukikae.workspace import Episode
 
     ep = Episode(tmp_path / "a.mkv", "S01E01", tmp_path / "work", tmp_path)
     path = ep.work / "eval/asr-fake/transcript.json"
@@ -52,12 +52,12 @@ def test_evaluate_reports_cached_backend_runtime_as_none(
         ),
     )
     monkeypatch.setattr(mod, "extract_subtitle_text", lambda *_: ["안녕하세요"])
-    monkeypatch.setattr(doppio.job, "run_stages", lambda *_a, **_k: [])  # everything cached
+    monkeypatch.setattr(fukikae.job, "run_stages", lambda *_a, **_k: [])  # everything cached
 
     (score,) = mod.evaluate(ep, Config(), 2, ["fake"], "ko")
     assert score.runtime_s is None
     assert score.cer == 0.0
 
-    monkeypatch.setattr(doppio.job, "run_stages", lambda *_a, **_k: ["asr"])
+    monkeypatch.setattr(fukikae.job, "run_stages", lambda *_a, **_k: ["asr"])
     (score,) = mod.evaluate(ep, Config(), 2, ["fake"], "ko")
     assert score.runtime_s is not None
