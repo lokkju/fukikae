@@ -18,9 +18,23 @@ dependencies = [
 demucs = [
     "demucs>=4.0.1",
 ]
-whisper = []
+whisper = [
+    "faster-whisper>=1.2.1",
+    "nvidia-cublas-cu12>=12.9.3.13",
+    "torchaudio>=2.11.1",
+    "transformers>=5.22.1",
+]
 qwen = []
 pyannote = []
+
+[project.entry-points."doppio.backends.asr"]
+faster_whisper = "doppio.backends.asr.faster_whisper:FasterWhisperTranscriber"
+
+[project.entry-points."doppio.backends.lid"]
+faster_whisper = "doppio.backends.asr.faster_whisper:FasterWhisperTranscriber"
+
+[project.entry-points."doppio.backends.align"]
+wav2vec2 = "doppio.backends.align.wav2vec2:Wav2Vec2Aligner"
 
 [project.entry-points."doppio.backends.separation"]
 demucs = "doppio.backends.separation.demucs:DemucsSeparator"

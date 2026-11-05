@@ -42,3 +42,30 @@ def readonly_copy(tmp_path: Path):
     folder.chmod(stat.S_IRUSR | stat.S_IXUSR)
     yield target
     folder.chmod(mode)
+
+
+@pytest.fixture(scope="session")
+def clip_ep(tmp_path_factory: pytest.TempPathFactory):
+    """The 90 s Korean clip, extracted and separated once per session (gpu tests only)."""
+    import os
+
+    media = os.environ.get("DOPPIO_TEST_MEDIA")
+    if not media:
+        pytest.skip("DOPPIO_TEST_MEDIA not set")
+    from doppio.config import Config
+    from doppio.stages.extract import ExtractStage
+    from doppio.stages.separate import SeparateStage
+    from doppio.workspace import Episode
+
+    root = tmp_path_factory.mktemp("clipws")
+    work = root / "episodes" / "e1"
+    ep = Episode(
+        source=Path(media).expanduser() / "S01E01-clip.mkv",
+        id="e1",
+        work=work,
+        workspace_root=root,
+    )
+    cfg = Config(source_language="ko")
+    ExtractStage().run(ep, cfg)
+    SeparateStage().run(ep, cfg)
+    return ep

@@ -13,6 +13,7 @@ from doppio.config import BackendConfig, ConfigError
 EXTRAS: dict[str, str] = {
     "demucs": "demucs",
     "faster_whisper": "whisper",
+    "wav2vec2": "whisper",
 }
 
 
