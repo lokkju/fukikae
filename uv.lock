@@ -1423,6 +1423,7 @@ dependencies = [
     { name = "nvidia-ml-py" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "scikit-learn" },
     { name = "scipy" },
     { name = "typer" },
 ]
@@ -1476,6 +1477,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "qwen-asr", marker = "extra == 'qwen'", specifier = "==0.0.6" },
+    { name = "scikit-learn", specifier = ">=1.9.1" },
     { name = "scipy", specifier = ">=1.18.1" },
     { name = "sherpa-onnx", marker = "extra == 'sherpa'", specifier = ">=2.0.1" },
     { name = "speechbrain", marker = "extra == 'pyannote'", specifier = ">=1.1.2" },

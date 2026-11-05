@@ -61,13 +61,8 @@ def match(
     actor or character yet: the caller creates them. `matched` takes the actor's
     lowest-id character from `characters`.
     """
-    first_char: dict[int, int] = {}
-    for c in sorted(characters or [], key=lambda c: c.id):
-        first_char.setdefault(c.actor_id, c.id)
     scored = [a for a in actors if a.centroid is not None]
-
-    out: dict[str, ClusterAssignment] = {}
-    best: dict[str, tuple[int, float]] = {}
+    tops: dict[str, tuple[int, float] | None] = {}
     for ev in evidence:
         top: tuple[int, float] | None = None
         if ev.embedding is not None:
@@ -77,6 +72,29 @@ def match(
                 s = float(np.dot(a.centroid, ev.embedding)) / denom if denom else 0.0
                 if top is None or s > top[1]:
                     top = (a.id, s)
+        tops[ev.cluster] = top
+    return decide(evidence, tops, threshold, min_new_seconds, characters, claimed)
+
+
+def decide(
+    evidence: list[ClusterEvidence],
+    tops: dict[str, tuple[int, float] | None],
+    threshold: float,
+    min_new_seconds: float,
+    characters: list[Character] | None = None,
+    claimed: set[int] | None = None,
+) -> list[ClusterAssignment]:
+    """`match`'s decisions from each cluster's best (actor id, score), however scored: at
+    least `threshold` is a match (the best-scoring cluster per actor `matched`, the others
+    `review`), else `new` with `min_new_seconds` and an embedding, else `extra`."""
+    first_char: dict[int, int] = {}
+    for c in sorted(characters or [], key=lambda c: c.id):
+        first_char.setdefault(c.actor_id, c.id)
+
+    out: dict[str, ClusterAssignment] = {}
+    best: dict[str, tuple[int, float]] = {}
+    for ev in evidence:
+        top = tops.get(ev.cluster)
         score = None if top is None else top[1]
         if top is not None and top[1] >= threshold:
             best[ev.cluster] = top

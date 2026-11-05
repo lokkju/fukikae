@@ -89,13 +89,13 @@ class _Recording:
         return ids
 
 
-def parse_options(items: list[str] | None) -> dict[str, Any]:
+def parse_options(items: list[str] | None, flag: str = "--embedder-option") -> dict[str, Any]:
     """`k=v` pairs; a value that reads as a TOML scalar (8, 0.5, true) becomes one."""
     out: dict[str, Any] = {}
     for item in items or []:
         k, sep, v = item.partition("=")
         if not sep or not k.strip():
-            raise ValueError(f"--embedder-option {item!r}: expected k=v")
+            raise ValueError(f"{flag} {item!r}: expected k=v")
         try:
             out[k.strip()] = tomllib.loads(f"v = {v.strip()}")["v"]
         except tomllib.TOMLDecodeError:
@@ -193,6 +193,10 @@ def run_identity(
     embedder: str | None = None,
     embedder_options: dict[str, Any] | None = None,
     matcher: str = "centroid",
+    matcher_options: dict[str, Any] | None = None,
+    segment_embedder: str | None = None,
+    segment_embedder_options: dict[str, Any] | None = None,
+    segmentation_options: dict[str, Any] | None = None,
     threshold: float | None = None,
     min_new_seconds: float | None = None,
     min_speech: float | None = None,
@@ -211,6 +215,7 @@ def run_identity(
     from fukikae.eval.identity.metrics import MIN_SPEECH_S, nearest_centroid_accuracy, score
     from fukikae.eval.identity.segments import KINDS as SEG_KINDS
     from fukikae.eval.identity.segments import Kind as SegKind
+    from fukikae.eval.identity.segments import Segment as Seg
     from fukikae.eval.identity.segments import segments as make_segments
     from fukikae.eval.identity.simulate import simulate
     from fukikae.registry.matchers import MATCHERS, make_matcher
@@ -232,12 +237,32 @@ def run_identity(
     hold_id = episode_id(Path(holdout)) if holdout else None
     if hold_id is not None and hold_id in ids:
         raise ValueError(f"held-out episode {hold_id} is also a tuning episode")
+    if hold_id is not None and hasattr(MATCHERS[matcher], "fit_all"):
+        raise ValueError(
+            f"matcher {matcher} clusters every episode at once and keeps no registry to "
+            "resolve a held-out episode against; score it without --holdout"
+        )
+    if segmentation != "asr" and (segment_embedder or segmentation_options):
+        raise ValueError("--segment-embedder and --segmentation-option apply to asr only")
+    m_opts = dict(matcher_options or {})
+    for reserved in ("threshold", "min_new_seconds"):
+        if reserved in m_opts:
+            raise ValueError(f"--matcher-option {reserved}: use --{reserved.replace('_', '-')}")
 
     ws = Workspace(root)
     cfg = ws.config
     emb_cfg = embedder_config(cfg, embedder, embedder_options or {})
+    seg_emb_cfg = (
+        embedder_config(cfg, segment_embedder, segment_embedder_options or {})
+        if segment_embedder
+        else emb_cfg
+    )
     thr = cfg.registry.match_threshold if threshold is None else float(threshold)
     min_new = cfg.registry.min_new_seconds if min_new_seconds is None else float(min_new_seconds)
+    try:
+        the_matcher = make_matcher(matcher, threshold=thr, min_new_seconds=min_new, **m_opts)
+    except TypeError as e:
+        raise ValueError(f"matcher {matcher}: {e}") from e
     merged_aliases = {**load_alias_file(ws.root / "labels-aliases.yaml"), **(aliases or {})}
 
     refs = list(tune) + ([holdout] if holdout else [])
@@ -245,44 +270,62 @@ def run_identity(
     gt: dict[str, list[GroundTruthLine]] = {}
     segs: dict[str, list[Segment]] = {}
     infos: dict[str, EpisodeInfo] = {}
-    for ref, eid in zip(refs, order, strict=True):
-        work = ws.work_dir(eid)
-        if not (work / "04-diarize").is_dir():
-            raise FileNotFoundError(f"{eid}: no diarization under {work / '04-diarize'}")
-        path, lines = _ground_truth(
-            ws, ref, eid, gt_kind, gt_file, len(refs), subtitle_track, merged_aliases
-        )
-        lines, rep, applied = check_alignment(
-            lines,
-            speech_turns(work),
-            force=force,
-            label=f"{gt_kind} speaker lines in {eid} ({path.name})",
-        )
-        gt[eid] = lines
-        segs[eid] = make_segments(ws, eid, cast(SegKind, segmentation), lines)
-        infos[eid] = EpisodeInfo(
-            eid,
-            str(path),
-            len(lines),
-            len(segs[eid]),
-            sum(s.label is not None for s in segs[eid]),
-            rep,
-            applied,
-        )
-
     cache = EmbeddingCache(cache_root(ws.root))
     embs: dict[str, np.ndarray] = {}
-    with ResidentEmbedder(cfg) as embed:
-        for eid in order:
-            audio = ws.work_dir(eid) / "01-separate" / "vocals_16k.wav"
-            if not audio.is_file():
-                raise FileNotFoundError(f"{eid}: no separated vocals at {audio}")
-            embs[eid] = cache.get_or_compute(eid, segs[eid], emb_cfg, audio, embed=embed)
 
-    rec = _Recording(make_matcher(matcher, threshold=thr, min_new_seconds=min_new))
-    assign = simulate(order, rec, segs, embs)
-    for eid, counts in rec.statuses.items():
-        infos[eid].statuses = counts
+    def audio_of(eid: str) -> Path:
+        audio = ws.work_dir(eid) / "01-separate" / "vocals_16k.wav"
+        if not audio.is_file():
+            raise FileNotFoundError(f"{eid}: no separated vocals at {audio}")
+        return audio
+
+    with ResidentEmbedder(cfg) as embed:
+        for ref, eid in zip(refs, order, strict=True):
+            work = ws.work_dir(eid)
+            if not (work / "04-diarize").is_dir():
+                raise FileNotFoundError(f"{eid}: no diarization under {work / '04-diarize'}")
+            path, lines = _ground_truth(
+                ws, ref, eid, gt_kind, gt_file, len(refs), subtitle_track, merged_aliases
+            )
+            lines, rep, applied = check_alignment(
+                lines,
+                speech_turns(work),
+                force=force,
+                label=f"{gt_kind} speaker lines in {eid} ({path.name})",
+            )
+            gt[eid] = lines
+
+            def window_embed(spans: list[tuple[float, float]], eid: str = eid) -> np.ndarray:
+                windows = [Seg(eid, a, b, None) for a, b in spans]
+                return cache.get_or_compute(eid, windows, seg_emb_cfg, audio_of(eid), embed=embed)
+
+            segs[eid] = make_segments(
+                ws,
+                eid,
+                cast(SegKind, segmentation),
+                lines,
+                window_embed=window_embed if segmentation == "asr" else None,
+                options=segmentation_options,
+            )
+            infos[eid] = EpisodeInfo(
+                eid,
+                str(path),
+                len(lines),
+                len(segs[eid]),
+                sum(s.label is not None for s in segs[eid]),
+                rep,
+                applied,
+            )
+        for eid in order:
+            embs[eid] = cache.get_or_compute(eid, segs[eid], emb_cfg, audio_of(eid), embed=embed)
+
+    if hasattr(the_matcher, "fit_all"):
+        assign = simulate(order, the_matcher, segs, embs)
+    else:
+        rec = _Recording(the_matcher)
+        assign = simulate(order, rec, segs, embs)
+        for eid, counts in rec.statuses.items():
+            infos[eid].statuses = counts
 
     floor = MIN_SPEECH_S if min_speech is None else float(min_speech)
     tune_score = score(
@@ -315,10 +358,17 @@ def run_identity(
         "segmentation": segmentation,
         "embedder": {"backend": emb_cfg.backend, "options": emb_cfg.options},
         "matcher": matcher,
+        "matcher_options": m_opts,
         "threshold": thr,
         "min_new_seconds": min_new,
         "min_speech": floor,
     }
+    if segmentation == "asr":
+        settings["segment_embedder"] = {
+            "backend": seg_emb_cfg.backend,
+            "options": seg_emb_cfg.options,
+        }
+        settings["segmentation_options"] = dict(segmentation_options or {})
     return IdentityRun(
         settings,
         [infos[e] for e in order],
@@ -484,7 +534,21 @@ def identity_cmd(
         None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
     ),
     segmentation: str = typer.Option(
-        "diarization", "--segmentation", help="diarization (clean spans) or subtitles."
+        "diarization",
+        "--segmentation",
+        help="diarization (clean spans), subtitles, or asr (transcript sentences split where "
+        "word-window voices differ).",
+    ),
+    segment_embedder: str = typer.Option(
+        None,
+        "--segment-embedder",
+        help="asr only: embed backend for the word windows (default: --embedder's).",
+    ),
+    segmentation_option: list[str] = typer.Option(
+        None,
+        "--segmentation-option",
+        help="asr only: k=v, one of window (s, 1.5), split (cosine distance, 0.5), "
+        "max_gap (s, 1.0); repeat.",
     ),
     embedder: str = typer.Option(
         None, "--embedder", help="Embed backend (default: the workspace's, else ecapa)."
@@ -492,7 +556,15 @@ def identity_cmd(
     embedder_option: list[str] = typer.Option(
         None, "--embedder-option", help="k=v embedder option; repeat."
     ),
-    matcher: str = typer.Option("centroid", "--matcher", help="Matcher: centroid."),
+    matcher: str = typer.Option(
+        "centroid",
+        "--matcher",
+        help="Matcher: centroid, knn (k), multi-centroid (max_centroids, min_rows), lda (dims; "
+        "fit on earlier episodes' labels), joint (seed; all episodes at once, no --holdout).",
+    ),
+    matcher_option: list[str] = typer.Option(
+        None, "--matcher-option", help="k=v matcher option, e.g. k=5; repeat."
+    ),
     min_speech: float = typer.Option(
         5.0,
         "--min-speech",
@@ -524,6 +596,9 @@ def identity_cmd(
             embedder=embedder,
             embedder_options=parse_options(embedder_option),
             matcher=matcher,
+            matcher_options=parse_options(matcher_option, "--matcher-option"),
+            segment_embedder=segment_embedder,
+            segmentation_options=parse_options(segmentation_option, "--segmentation-option"),
             threshold=threshold,
             min_speech=min_speech,
             gt_file=gt_file,
