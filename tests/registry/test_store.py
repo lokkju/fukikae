@@ -47,11 +47,11 @@ def test_merge_moves_and_recomputes(reg: Registry):
     e2 = np.stack([unit(0.1, 1, 0)])
     reg.add_exemplars(a1, "e1", "c0", e1, 10.0)
     reg.add_exemplars(a2, "e2", "c0", e2, 5.0)
-    reg.merge_actors(a1, a2)
+    assert reg.merge_actors(a1, a2) == {c2: c1}
     actors = reg.actors()
     assert [a.id for a in actors] == [a1]
-    assert {c.actor_id for c in reg.characters()} == {a1}
-    assert {c.id for c in reg.characters()} == {c1, c2}
+    # v1: one character per actor; DROP's characters fold into KEEP's lowest-id one
+    assert [(c.id, c.actor_id) for c in reg.characters()] == [(c1, a1)]
     assert reg.exemplar_count(a1) == 3
     expected = norm_mean(np.concatenate([e1, e2]))
     assert actors[0].centroid is not None

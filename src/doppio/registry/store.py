@@ -272,18 +272,37 @@ class Registry:
             if cur.rowcount == 0:
                 raise KeyError(actor_id)
 
-    def merge_actors(self, keep: int, drop: int) -> None:
-        """Move drop's exemplars and characters to keep, delete drop, recompute keep."""
+    def merge_actors(self, keep: int, drop: int) -> dict[int, int]:
+        """Fold actor drop into keep, delete drop, recompute keep.
+
+        drop's exemplars move to keep. v1 has one character per actor, so drop's
+        characters are deleted and folded into keep's lowest-id character; returns
+        {drop character id: keep character id} for the caller to remap references.
+        """
         if keep == drop:
             raise ValueError("cannot merge an actor into itself")
         with self._tx() as con:
             for aid in (keep, drop):
                 if con.execute("SELECT 1 FROM actors WHERE id = ?", (aid,)).fetchone() is None:
                     raise KeyError(aid)
+            dropped = [
+                r[0]
+                for r in con.execute(
+                    "SELECT id FROM characters WHERE actor_id = ? ORDER BY id", (drop,)
+                )
+            ]
+            row = con.execute(
+                "SELECT MIN(id) FROM characters WHERE actor_id = ?", (keep,)
+            ).fetchone()
+            target = row[0]
+            if target is None and dropped:  # keep has no character: adopt drop's first
+                target = dropped.pop(0)
+                con.execute("UPDATE characters SET actor_id = ? WHERE id = ?", (keep, target))
             con.execute("UPDATE exemplars SET actor_id = ? WHERE actor_id = ?", (keep, drop))
-            con.execute("UPDATE characters SET actor_id = ? WHERE actor_id = ?", (keep, drop))
+            con.execute("DELETE FROM characters WHERE actor_id = ?", (drop,))
             con.execute("DELETE FROM actors WHERE id = ?", (drop,))
             self._recompute(con, keep)
+        return dict.fromkeys(dropped, target)
 
     def delete_episode(self, episode: str) -> list[int]:
         """Remove an episode's exemplars and recompute each affected unlocked actor.
