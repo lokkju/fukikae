@@ -27,6 +27,21 @@ def test_choose_track_override_and_fallback():
         choose_audio_track(only_eng, None, 9)
 
 
+def test_choose_track_by_title():
+    p = ProbeResult(
+        audio=[
+            AudioTrack(1, "aac", 2, "jpn", None, False),
+            AudioTrack(2, "aac", 2, "spa", "Spanish (Latin America)", False),
+            AudioTrack(3, "aac", 2, "spa", "Spanish (Castilian)", False),
+        ],
+        subtitles=[],
+    )
+    assert choose_audio_track(p, "es", None, title="castilian").index == 3
+    assert choose_audio_track(p, "es", None).index == 2
+    assert choose_audio_track(p, "es", None, title="absent").index == 2
+    assert choose_audio_track(p, "es", 2, title="castilian").index == 2
+
+
 @pytest.mark.ffmpeg
 def test_probe_real(readonly_copy):
     result = probe(readonly_copy)

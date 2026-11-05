@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -36,32 +37,58 @@ class Config:
     gpu_device: int = 0
     registry: RegistrySettings = field(default_factory=RegistrySettings)
     raw: dict[str, Any] = field(default_factory=dict)
+    profile: str = "default"
+    profile_raw: dict[str, Any] = field(default_factory=dict)
 
     def resolve(
         self, kind: str, language: str | None = None, pair: str | None = None
     ) -> BackendConfig:
         """Pick the backend for a stage: pair table over language table over base."""
-        table = self.raw.get(kind)
-        if not isinstance(table, dict):
-            table = {}
-        merged: dict[str, Any] = {k: v for k, v in table.items() if k not in ("lang", "pair")}
-        layers = (("lang", language), ("pair", pair))
-        for group, key in layers:
-            if key is None:
+        merged: dict[str, Any] = {}
+        # Later layers win: profile, then the workspace's own tables over it.
+        for source in (self.profile_raw, self.raw):
+            table = source.get(kind)
+            if not isinstance(table, dict):
                 continue
-            override = table.get(group, {}).get(key)
-            if not isinstance(override, dict):
-                continue
-            if "backend" in override and override["backend"] != merged.get("backend"):
-                # A different backend gets only its own options, not the previous one's.
-                merged = dict(override)
-            else:
-                merged.update(override)
+            base = {k: v for k, v in table.items() if k not in ("lang", "pair")}
+            merged = _layer(merged, base)
+            for group, key in (("lang", language), ("pair", pair)):
+                if key is None:
+                    continue
+                override = table.get(group, {}).get(key)
+                if isinstance(override, dict):
+                    merged = _layer(merged, override)
         backend = merged.pop("backend", None)
         if not backend:
             raise ConfigError(f"no backend configured for {kind!r}")
         options = {k: v for k, v in merged.items() if k not in _RESERVED}
         return BackendConfig(str(backend), options)
+
+
+def _layer(merged: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+    """Apply one layer; a different backend gets only its own options (Ruling R4)."""
+    if "backend" in over and merged.get("backend") not in (None, over["backend"]):
+        return dict(over)
+    return {**merged, **over}
+
+
+def profile_names() -> list[str]:
+    return sorted(
+        p.name.removesuffix(".toml")
+        for p in resources.files("fukikae.profiles").iterdir()
+        if p.name.endswith(".toml")
+    )
+
+
+def load_profile(name: str) -> dict[str, Any]:
+    """Read a profile shipped as package data; unknown names list the available ones."""
+    if name not in profile_names():
+        raise ConfigError(f"unknown profile {name!r}; available: {', '.join(profile_names())}")
+    text = resources.files("fukikae.profiles").joinpath(f"{name}.toml").read_text("utf-8")
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"profile {name}: {e}") from e
 
 
 def _deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
@@ -98,7 +125,9 @@ def load_config(
         raw = _read(user_config)
     raw = _deep_merge(raw, _read(workspace / "fukikae.toml"))
 
-    reg = raw.get("registry", {})
+    profile = str(raw.get("profile", "default"))
+    profile_raw = load_profile(profile)
+    reg = {**profile_raw.get("registry", {}), **raw.get("registry", {})}
     defaults = RegistrySettings()
     source = raw.get("source")
     return Config(
@@ -111,4 +140,6 @@ def load_config(
             match_threshold=float(reg.get("match_threshold", defaults.match_threshold)),
         ),
         raw=raw,
+        profile=profile,
+        profile_raw=profile_raw,
     )
