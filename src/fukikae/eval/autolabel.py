@@ -1,137 +1,55 @@
-"""Ground-truth speaker labels from the speaker names in a subtitle track's ASS dialogue."""
+"""Ground-truth speaker labels for diarized spans, from the speaker names in a subtitle track:
+ASS Name fields, SDH/CC speaker tags or colour-coded subtitles (see `eval.groundtruth`)."""
 
 import re
 import shutil
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import numpy as np
-import yaml
 
-from fukikae.artifacts import atomic_path
+from fukikae.artifacts import atomic_path, read_json
+from fukikae.eval.groundtruth import (
+    KINDS,
+    AlignmentReport,
+    GroundTruthLine,
+    Kind,
+    check_alignment,
+    read_ground_truth,
+)
+from fukikae.eval.groundtruth.ass_names import (
+    IGNORED_NAMES,
+    UNKNOWN,
+    Line,
+    canonical_name,
+    label_spans,
+    load_alias_file,
+    normalize_aliases,
+    parse_ass,
+)
+from fukikae.eval.groundtruth.base import read_cues
+from fukikae.eval.groundtruth.colour import has_colour
 from fukikae.eval.speakers import LabeledClip, label_key, write_labels
 from fukikae.media import MediaError, ProbeResult, SubTrack, _norm_lang, probe, run_ffmpeg
+from fukikae.models import Diarization, Turn
 from fukikae.workspace import Episode, Workspace
 
-IGNORED_NAMES = {"sign", "signs", "title", "caption", "note", "song", "op", "ed", "lyrics"}
-_MULTI = re.compile(r"[&/,]|\band\b", re.IGNORECASE)
-_DEFAULT_FORMAT = "Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
+__all__ = [
+    "IGNORED_NAMES",
+    "UNKNOWN",
+    "Line",
+    "canonical_name",
+    "label_spans",
+    "load_alias_file",
+    "normalize_aliases",
+    "parse_ass",
+]
+
 _ASS_CODECS = {"ass", "ssa"}
-UNKNOWN = "?"
-
-
-@dataclass(frozen=True)
-class Line:
-    start: float
-    end: float
-    name: str
-    text: str
-
-
-def _seconds(stamp: str) -> float:
-    h, m, s = stamp.strip().split(":")
-    return int(h) * 3600 + int(m) * 60 + float(s)
-
-
-_THOUGHT = re.compile(r"\s*(?:/\s*(?:I|OS|OC|VO)|\((?:V\.O\.|O\.S\.)\))\s*$", re.IGNORECASE)
-
-
-def canonical_name(name: str) -> str:
-    """The name without a trailing thought/off-screen marker (`/I`, `/OS`, `(V.O.)`), with
-    whitespace collapsed and spacing around parentheses normalized."""
-    name = _THOUGHT.sub("", name.strip())
-    name = re.sub(r"\s*\(\s*", " (", name)
-    name = re.sub(r"\s*\)", ")", name)
-    return re.sub(r"\s+", " ", name).strip()
-
-
-def _usable(name: str) -> bool:
-    if not name or label_key(name) in IGNORED_NAMES:
-        return False
-    return not _MULTI.search(name)
-
-
-def normalize_aliases(aliases: dict[str, str] | None) -> dict[str, str]:
-    """FROM (canonical, case-insensitive) -> TO (canonical spelling)."""
-    return {label_key(canonical_name(a)): canonical_name(b) for a, b in (aliases or {}).items()}
-
-
-def load_alias_file(path: Path) -> dict[str, str]:
-    if not path.is_file():
-        return {}
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"{path}: expected a mapping of FROM: TO")
-    return {str(a): str(b) for a, b in data.items()}
-
-
-def parse_ass(
-    text: str,
-    aliases: dict[str, str] | None = None,
-    seen: dict[str, Counter[str]] | None = None,
-    hits: Counter[tuple[str, str]] | None = None,
-) -> list[Line]:
-    """Dialogue lines that name exactly one speaker, in file order. Names are canonicalized,
-    then mapped through `aliases`. `seen` collects raw spellings per canonical key and `hits`
-    counts alias uses as (canonical FROM, TO), for the report."""
-    amap = normalize_aliases(aliases)
-    fields = [f.strip().casefold() for f in _DEFAULT_FORMAT.split(",")]
-    lines: list[Line] = []
-    in_events = False
-    for raw in text.splitlines():
-        row = raw.strip()
-        if row.startswith("["):
-            in_events = row.casefold() == "[events]"
-            continue
-        if not in_events:
-            continue
-        if row.casefold().startswith("format:"):
-            fields = [f.strip().casefold() for f in row.split(":", 1)[1].split(",")]
-        elif row.casefold().startswith("dialogue:"):
-            parts = row.split(":", 1)[1].lstrip().split(",", len(fields) - 1)
-            if len(parts) < len(fields):
-                continue
-            d = dict(zip(fields, parts, strict=True))
-            try:
-                start, end = _seconds(d["start"]), _seconds(d["end"])
-            except (KeyError, ValueError):
-                continue
-            raw = d.get("name", "").strip()
-            name = canonical_name(raw)
-            if _usable(name):
-                if seen is not None:
-                    seen.setdefault(label_key(name), Counter())[raw] += 1
-                target = amap.get(label_key(name))
-                if target is not None and label_key(target) != label_key(name):
-                    if hits is not None:
-                        hits[(name, target)] += 1
-                    name = target
-                lines.append(Line(start, end, name, d.get("text", "")))
-    return lines
-
-
-def label_spans(
-    spans: list[tuple[float, float]], lines: list[Line], min_overlap: float
-) -> list[str]:
-    """One label per span: the name covering at least `min_overlap` of it, else `?`."""
-    spelling: dict[str, str] = {}
-    for ln in sorted(lines, key=lambda x: x.start):
-        spelling.setdefault(label_key(ln.name), ln.name)
-    out: list[str] = []
-    for a, b in spans:
-        dur = b - a
-        cover: dict[str, float] = defaultdict(float)
-        for ln in lines:
-            ov = min(b, ln.end) - max(a, ln.start)
-            if ov > 0:
-                cover[label_key(ln.name)] += ov
-        best = max(cover, key=lambda k: cover[k], default=None)
-        if best is not None and dur > 0 and min(cover[best], dur) / dur >= min_overlap:
-            out.append(spelling[best])
-        else:
-            out.append(UNKNOWN)
-    return out
+_TEXT_CODECS = _ASS_CODECS | {"subrip", "srt", "webvtt", "mov_text", "text", "ttml"}
+_SDH_TITLE = re.compile(r"sdh|\bcc\b|closed|hearing|слабослыш|자막", re.IGNORECASE)
 
 
 def _extract(source: Path, index: int, dest: Path) -> None:
@@ -176,6 +94,101 @@ def choose_subtitle_track(
     return best[1].index, out
 
 
+def _extract_text(source: Path, index: int, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_path(dest) as tmp:
+        run_ffmpeg(["-i", str(source), "-map", f"0:{index}", "-c:s", "srt", "-f", "srt", str(tmp)])
+
+
+def choose_text_track(
+    source: Path,
+    pr: ProbeResult,
+    work: Path,
+    kind: str,
+    source_language: str | None = None,
+    override: int | None = None,
+) -> tuple[int, Path]:
+    """Extract the SDH or colour-coded text track to `work/eval/subtitles.srt`: `override`, else
+    among the non-forced text tracks that are marked SDH/CC in their title or in the episode's
+    source language (all of them when none is), the one with the most tagged (`sdh`) or
+    coloured (`colour`) lines."""
+    out = work / "eval" / "subtitles.srt"
+    texts = [s for s in pr.subtitles if s.codec in _TEXT_CODECS]
+    if override is not None:
+        if override not in {s.index for s in pr.subtitles}:
+            raise MediaError(
+                f"subtitle track {override} not found; have {[s.index for s in pr.subtitles]}"
+            )
+        _extract_text(source, override, out)
+        return override, out
+    want = _norm_lang(source_language)
+    cands: list[SubTrack] = [s for s in texts if not s.forced]
+    preferred = [
+        s
+        for s in cands
+        if _SDH_TITLE.search(s.title or "") or (want and _norm_lang(s.language) == want)
+    ]
+    cands = preferred or cands
+    if not cands:
+        raise MediaError(f"no text subtitle stream for {kind} ground truth; pass --subtitle-track")
+    best: tuple[int, SubTrack, Path] | None = None
+    for s in cands:
+        tmp = work / "eval" / f"subtitles-{s.index}.srt"
+        _extract_text(source, s.index, tmp)
+        if kind == "colour":
+            n = has_colour(read_cues(tmp))
+        else:
+            n = len(read_ground_truth(tmp, "sdh", {}))
+        if best is None or n > best[0]:
+            best = (n, s, tmp)
+    assert best is not None
+    if best[0] == 0:
+        raise MediaError(
+            f"no subtitle stream carries {kind} speaker information; pass --subtitle-track "
+            "or --gt-file"
+        )
+    shutil.copyfile(best[2], out)
+    for s in cands:
+        (work / "eval" / f"subtitles-{s.index}.srt").unlink(missing_ok=True)
+    return best[1].index, out
+
+
+def prepare_text_subtitles(ep: Episode, track: int | None, kind: str, language: str | None) -> Path:
+    _, path = choose_text_track(ep.source, probe(ep.source), ep.work, kind, language, track)
+    return path
+
+
+def gt_path_for(gt_file: Path, ep_id: str, n_episodes: int) -> Path:
+    """A sidecar subtitle file: the file itself for one episode, or the file in a directory
+    whose name contains the episode code."""
+    gt_file = Path(gt_file)
+    if gt_file.is_dir():
+        found = sorted(
+            p for p in gt_file.iterdir() if p.is_file() and ep_id.casefold() in p.name.casefold()
+        )
+        if not found:
+            raise FileNotFoundError(f"{ep_id}: no file with that code in {gt_file}")
+        return found[0]
+    if n_episodes > 1:
+        raise ValueError("--gt-file names one file; give a directory for several episodes")
+    if not gt_file.is_file():
+        raise FileNotFoundError(f"{gt_file}: no such file")
+    return gt_file
+
+
+def speech_turns(work: Path) -> list[Turn]:
+    """The diarizer's turns, else the cluster spans."""
+    d = work / "04-diarize"
+    if (d / "turns.json").is_file():
+        return read_json(d / "turns.json", Diarization).turns
+    out: list[Turn] = []
+    with np.load(d / "clusters.npz") as z:
+        for cluster in [str(x) for x in z["labels"]]:
+            for a, b in np.asarray(z[f"{cluster}/spans"]).reshape(-1, 2):
+                out.append(Turn(start=float(a), end=float(b), speaker=cluster))
+    return out
+
+
 def prepare_subtitles(ep: Episode, track: int | None) -> Path:
     _, path = choose_subtitle_track(ep.source, probe(ep.source), ep.work, track)
     return path
@@ -200,6 +213,8 @@ class AutoLabelResult:
     collapsed: list[tuple[str, list[str]]] = field(default_factory=list)
     aliased: list[tuple[str, str, int]] = field(default_factory=list)
     suggestions: list[tuple[str, str]] = field(default_factory=list)
+    # per episode: (episode, alignment of the subtitles with the speech, offset applied)
+    alignment: list[tuple[str, AlignmentReport, bool]] = field(default_factory=list)
 
 
 def _within_one(a: str, b: str) -> bool:
@@ -241,7 +256,16 @@ def auto_label(
     subtitle_track: int | None = None,
     min_overlap: float = 0.6,
     aliases: dict[str, str] | None = None,
+    *,
+    source: str = "ass",
+    gt_file: Path | None = None,
+    force: bool = False,
 ) -> AutoLabelResult:
+    """Label every diarized span from the ground truth read with `source` (ass, sdh, colour).
+    The subtitles must line up with the detected speech (`check_alignment`); `force` scores a
+    misaligned episode anyway."""
+    if source not in KINDS:
+        raise ValueError(f"unknown --source {source!r}; use one of {', '.join(KINDS)}")
     ws = Workspace(root)
     merged = {**load_alias_file(Path(root) / "labels-aliases.yaml"), **(aliases or {})}
     seen: dict[str, Counter[str]] = {}
@@ -250,13 +274,29 @@ def auto_label(
     reports: list[ClusterReport] = []
     names: dict[str, tuple[float, set[tuple[str, str]]]] = {}
     display: dict[str, str] = {}
+    aligned: list[tuple[str, AlignmentReport, bool]] = []
     for ref in episodes:
         ep = ws.find_episode(ref)
         npz = ep.work / "04-diarize" / "clusters.npz"
         if not npz.is_file():
             raise FileNotFoundError(f"{ep.id}: no diarization at {npz}")
-        ass = prepare_subtitles(ep, subtitle_track)
-        lines = parse_ass(ass.read_text(encoding="utf-8", errors="replace"), merged, seen, hits)
+        if gt_file is not None:
+            path = gt_path_for(gt_file, ep.id, len(episodes))
+        elif source == "ass":
+            path = prepare_subtitles(ep, subtitle_track)
+        else:
+            path = prepare_text_subtitles(ep, subtitle_track, source, ws.config.source_language)
+        truth: list[GroundTruthLine] = read_ground_truth(
+            path,
+            cast(Kind, source),
+            merged,
+            episode=ep.id,
+            seen=seen,
+            hits=hits,
+        )
+        truth, report, applied = check_alignment(truth, speech_turns(ep.work), force=force)
+        aligned.append((ep.id, report, applied))
+        lines = [Line(t.start, t.end, t.speaker, "") for t in truth]
         with np.load(npz) as z:
             for cluster in [str(x) for x in z["labels"]]:
                 spans = [
@@ -298,6 +338,7 @@ def auto_label(
         collapsed,
         aliased,
         suggest_aliases(shown, normalize_aliases(merged)),
+        aligned,
     )
 
 
@@ -315,6 +356,17 @@ def format_report(result: AutoLabelResult) -> str:
             f"  {r.cluster:<14} spans {r.spans:>4}  labeled {frac:>5.0%}  "
             f"majority {who:<16} purity {pur}"
         )
+    if result.alignment:
+        rows.append("subtitle alignment (share of subtitle time over detected speech)")
+        for ep_id, rep, applied in result.alignment:
+            note = (
+                f"offset {rep.best_offset_s:+.1f} s applied, "
+                f"{rep.overlap_share:.0%} -> {rep.share_at_offset:.0%}"
+                if applied
+                else f"{rep.overlap_share:.0%}, best offset {rep.best_offset_s:+.1f} s "
+                f"({rep.share_at_offset:.0%}), not applied"
+            )
+            rows.append(f"  {ep_id}: {note}")
     rows.append("names")
     for name, (secs, where) in sorted(result.names.items(), key=lambda kv: -kv[1][0]):
         rows.append(f"  {name:<16} {secs:>8.1f}s  {len(where)} clusters")

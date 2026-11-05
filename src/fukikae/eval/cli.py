@@ -107,8 +107,22 @@ def auto_label_cmd(
     report: bool = typer.Option(
         False, "--report", help="Print per-cluster purity and name spread."
     ),
+    source: str = typer.Option(
+        "ass",
+        "--source",
+        help="Ground truth: ass (Name field), sdh (NAME:/(NAME) tags) or colour (text colours).",
+    ),
+    gt_file: Path = typer.Option(
+        None,
+        "--gt-file",
+        help="Sidecar subtitle file (or a directory of them, matched by SxxEyy) instead of "
+        "an embedded track.",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Score even when the subtitles do not line up with the speech."
+    ),
 ) -> None:
-    """Label every clean span from the speaker names in the episodes' ASS subtitles."""
+    """Label every clean span from the speaker names, tags or colours in the episodes' subtitles."""
     from fukikae.eval import autolabel
     from fukikae.media import MediaError
 
@@ -120,11 +134,20 @@ def auto_label_cmd(
             if not sep or not src.strip() or not dst.strip():
                 raise ValueError(f"--alias {item!r}: expected FROM=TO")
             aliases[src.strip()] = dst.strip()
-        result = autolabel.auto_label(workspace, refs, out, subtitle_track, min_overlap, aliases)
+        result = autolabel.auto_label(
+            workspace, refs, out, subtitle_track, min_overlap, aliases,
+            source=source, gt_file=gt_file, force=force,
+        )  # fmt: skip
     except (FileNotFoundError, ValueError, MediaError) as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
     kept = sum(1 for c in result.clips if c.label != autolabel.UNKNOWN)
     typer.echo(f"wrote {len(result.clips)} spans ({kept} labeled) to {out / 'labels.yaml'}")
+    for ep_id, rep, applied in result.alignment:
+        if applied:
+            typer.echo(
+                f"{ep_id}: subtitles ran {rep.best_offset_s:+.1f} s against the speech; "
+                f"moved back ({rep.overlap_share:.0%} -> {rep.share_at_offset:.0%} overlap)"
+            )
     if report:
         typer.echo(autolabel.format_report(result))
