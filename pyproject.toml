@@ -34,6 +34,13 @@ pyannote = [
     "pyannote-audio>=4.0.7",
     "speechbrain>=1.1.2",
 ]
+sherpa = [
+    "sherpa-onnx>=2.0.1",
+]
+wavlm = [
+    "torch>=2.8",
+    "transformers>=4.57.6,<5",
+]
 
 [project.entry-points."fukikae.backends.asr"]
 faster_whisper = "fukikae.backends.asr.faster_whisper:FasterWhisperTranscriber"
@@ -52,6 +59,12 @@ pyannote = "fukikae.backends.diarize.pyannote:PyannoteDiarizer"
 
 [project.entry-points."fukikae.backends.embed"]
 ecapa = "fukikae.backends.embed.ecapa:EcapaEmbedder"
+wespeaker = "fukikae.backends.embed.wespeaker:WespeakerEmbedder"
+wavlm_sv = "fukikae.backends.embed.wavlm_sv:WavlmSvEmbedder"
+campplus = "fukikae.backends.embed.sherpa:CampplusEmbedder"
+eres2netv2 = "fukikae.backends.embed.sherpa:Eres2netv2Embedder"
+titanet = "fukikae.backends.embed.sherpa:TitanetEmbedder"
+fusion = "fukikae.backends.embed.fusion:FusionEmbedder"
 
 [project.entry-points."fukikae.backends.separation"]
 demucs = "fukikae.backends.separation.demucs:DemucsSeparator"

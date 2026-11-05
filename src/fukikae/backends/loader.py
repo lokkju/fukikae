@@ -18,6 +18,12 @@ EXTRAS: dict[str, str] = {
     "qwen3_forced_aligner": "qwen",
     "pyannote": "pyannote",
     "ecapa": "pyannote",
+    "wespeaker": "pyannote",
+    "wavlm_sv": "wavlm",
+    "campplus": "sherpa",
+    "eres2netv2": "sherpa",
+    "titanet": "sherpa",
+    "fusion": "pyannote",
 }
 
 
