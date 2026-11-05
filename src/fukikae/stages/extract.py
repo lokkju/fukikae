@@ -19,13 +19,22 @@ class ExtractStage:
         return [ep.work / "00-extract" / "audio.wav"]
 
     def _track(self, cfg: Config, ep: Episode) -> media.AudioTrack:
-        override = cfg.raw.get("extract", {}).get("audio_track")
+        table = cfg.raw.get("extract", {})
+        override = table.get("audio_track")
         return media.choose_audio_track(
-            media.probe(ep.source), cfg.source_language, None if override is None else int(override)
+            media.probe(ep.source),
+            cfg.source_language,
+            None if override is None else int(override),
+            table.get("audio_title"),
         )
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:
-        return {"track": self._track(cfg, ep).index, "rate": 44100, "channels": 2}
+        return {
+            "track": self._track(cfg, ep).index,
+            "audio_title": cfg.raw.get("extract", {}).get("audio_title"),
+            "rate": 44100,
+            "channels": 2,
+        }
 
     def run(self, ep: Episode, cfg: Config) -> None:
         track = self._track(cfg, ep)
