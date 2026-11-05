@@ -34,3 +34,11 @@ def test_atomic_path_renames_on_success(tmp_path):
         p.write_bytes(b"ok")
     assert target.read_bytes() == b"ok"
     assert list(tmp_path.iterdir()) == [target]
+
+
+def test_atomic_path_keeps_suffix_and_directory(tmp_path):
+    target = tmp_path / "a.wav"
+    with atomic_path(target) as p:
+        assert p.suffix == ".wav"
+        assert p.parent == tmp_path
+        p.write_bytes(b"x")
