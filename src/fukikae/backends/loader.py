@@ -66,6 +66,16 @@ def available(kind: str) -> dict[str, type[Backend]]:
     return out
 
 
+def backend_class(kind: str, name: str) -> type[Backend]:
+    """The backend class registered under `name`, without instantiating it."""
+    eps = _entry_points(kind)
+    ep = eps.get(name)
+    if ep is None:
+        installed = ", ".join(sorted(eps)) or "none"
+        raise ConfigError(f"unknown {kind} backend {name!r}; installed: {installed}")
+    return _load(kind, name, ep)
+
+
 def create(kind: str, cfg: BackendConfig, device: str) -> Backend:
     eps = _entry_points(kind)
     ep = eps.get(cfg.backend)
