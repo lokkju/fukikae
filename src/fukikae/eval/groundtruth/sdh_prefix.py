@@ -21,7 +21,7 @@ DEFAULT_SOUNDS = frozenset(
         "llora", "grita", "todos", "ambos", "música", "risas", "aplausos",
         "sigh", "gasp", "scoffs", "mutters", "whimpers", "snores", "coughs", "yelling",
         "radio", "tv", "vídeo", "video", "смех", "вздох", "вздыхает", "кричит",
-        "웃", "한숨", "음성", "소리", "신음", "경적", "자막", "함께", "音声", "声",
+        "웃", "한숨", "음성", "소리", "울음", "신음", "경적", "자막", "함께", "音声", "声",
     }
 )  # fmt: skip
 
@@ -36,9 +36,10 @@ _PAIR = re.compile(
     r"[\uac00-\ud7af]+[과와랑]\s+[\uac00-\ud7af]+"
     r"|[\u3040-\u30ff\u3400-\u9fff]+[と和与跟][\u3040-\u30ff\u3400-\u9fff]+"
 )
-_HANGUL_DESCRIPTION_END = re.compile(
-    r"[며면서다음]$"
-)  # `웃으며`, `울린다`, `조작음`: an action or sound
+_HANGUL_ENDING = re.compile(r"(?:하며|으며|면서|하다|이다)$")  # whole description endings
+_HANGUL_SHORT_ENDING = re.compile(
+    r"[며다음]$"
+)  # only on 3+ syllables or after another word: 울린다, 조작음, 놀라며
 
 MAX_NAME_CHARS = 24
 MAX_NAME_WORDS = 4
@@ -58,7 +59,13 @@ def _is_description(name: str, sounds: frozenset[str]) -> bool:
         return True  # no spaces in Hangul/CJK: a listed word anywhere in the tag
     if words[0] in LEADING_WORDS or _PAIR.search(name):
         return True
-    return bool(_HANGUL_DESCRIPTION_END.search(words[-1]) and _CJK.search(words[-1]))
+    last = words[-1]
+    if not _CJK.search(last):
+        return False
+    return bool(
+        _HANGUL_ENDING.search(last)
+        or ((len(last) >= 3 or len(words) >= 2) and _HANGUL_SHORT_ENDING.search(last))
+    )
 
 
 def valid_name(name: str, sounds: frozenset[str], upper_only: bool = False) -> bool:

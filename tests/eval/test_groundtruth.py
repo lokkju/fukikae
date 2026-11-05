@@ -406,3 +406,17 @@ def test_zero_lines_refuse_unless_forced(tmp_path: Path) -> None:
     sub.write_text("", encoding="utf-8")
     with pytest.raises(AlignmentError, match="S01E01"):
         autolabel.auto_label(root, [ref], tmp_path / "o", source="ass", gt_file=sub)
+
+
+@pytest.mark.parametrize("name", ["민서", "예서", "지서", "유다", "마음", "태음", "하서"])
+def test_korean_given_names_ending_in_description_characters(name: str) -> None:
+    got = extract_tag(f"({name}) 응")
+    assert got is not None and got[0] == name
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["(놀라며) 어", "(살짝 웃으며) 응", "(피식 웃으며) 응", "(손뼉을 짝 치며) 응", "(풀벌레 울음)"],
+)
+def test_korean_action_endings_rejected(line: str) -> None:
+    assert extract_tag(line) is None
