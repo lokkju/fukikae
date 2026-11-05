@@ -97,6 +97,11 @@ def test_identity_cli_tune_and_holdout(tmp_path: Path, monkeypatch: pytest.Monke
     assert data["holdout"]["score"]["verdict"] == "pass"
     assert data["settings"]["embedder"] == {"backend": "ecapa", "options": {}}
     assert data["settings"]["threshold"] == 0.6
+    assert data["settings"]["min_speech"] == 5.0
+    # Nearest-centroid accuracy: E1 trains, E2 tests; the tuning episodes train the holdout.
+    assert data["tune"]["nearest_centroid"] == {"LUCY": 1.0, "LAXUS": 1.0, "(overall)": 1.0}
+    assert data["holdout"]["nearest_centroid"]["(overall)"] == 1.0
+    assert "nearest-centroid accuracy" in r.output
     # Nothing written beside the pipeline's artifacts; the embeddings sit in the cache.
     assert files_under(episodes_dir) == before
     assert len(list((root / ".fukikae" / "cache" / "embeddings").rglob("*.npy"))) == 3
@@ -118,7 +123,7 @@ def test_identity_cli_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         ["eval", "identity", str(root), "--tune", "S01E01,S01E02", "--gt-file",
          str(tmp_path / "gt"), "--segmentation", "subtitles", "--embedder", "ecapa",
          "--embedder-option", "model=x/y", "--embedder-option", "batch=8",
-         "--threshold", "0.7", "--json", str(out)],
+         "--threshold", "0.7", "--min-speech", "20", "--json", str(out)],
     )  # fmt: skip
     assert r.exit_code == 0, r.output
     s = json.loads(out.read_text())["settings"]
@@ -126,6 +131,8 @@ def test_identity_cli_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert s["embedder"] == {"backend": "ecapa", "options": {"model": "x/y", "batch": 8}}
     assert s["threshold"] == 0.7
     assert s["matcher"] == "centroid"
+    assert s["min_speech"] == 20.0
+    assert json.loads(out.read_text())["tune"]["score"]["recurring"] == 2
 
 
 def test_identity_cli_refuses_misaligned_ground_truth(
@@ -159,3 +166,9 @@ def test_identity_cli_bad_arguments(tmp_path: Path):
     assert r.exit_code == 1 and "held-out" in r.output
     r = CliRunner().invoke(app, [*base, "--tune", "S01E01", "--embedder-option", "novalue"])
     assert r.exit_code == 1 and "k=v" in r.output
+
+
+def test_identity_help_documents_the_pooled_holdout():
+    r = CliRunner().invoke(app, ["eval", "identity", "--help"], env={"COLUMNS": "200"})
+    assert r.exit_code == 0
+    assert "pooled" in r.output and "--min-speech" in r.output

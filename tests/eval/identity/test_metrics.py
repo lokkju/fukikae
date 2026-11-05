@@ -1,7 +1,8 @@
+import numpy as np
 import pytest
 
 from fukikae.eval.groundtruth import GroundTruthLine
-from fukikae.eval.identity.metrics import score
+from fukikae.eval.identity.metrics import MIN_SPEECH_S, nearest_centroid_accuracy, score
 from fukikae.eval.identity.segments import Segment
 
 # Fairy Tail 100YQ S01E12-E13 as auto-labeled and assigned by the pipeline (results doc
@@ -107,7 +108,7 @@ def test_fairytail_numbers_reproduce():
 
 def test_fairytail_bar_at_20s_has_two_recurring_characters():
     assign, segs = build(FAIRYTAIL)
-    s = score(assign, segs)
+    s = score(assign, segs, min_speech=20.0)
     # Only Lucy and Laxus reach 20 s in both episodes; both keep >= 80% on one id.
     assert {c.name for c in s.characters if c.recurring} == {"LAXUS", "LUCY"}
     assert (s.recurring, s.passing, s.merges) == (2, 2, [])
@@ -142,7 +143,7 @@ def test_merges_counted_when_recurring_characters_share_a_modal_id():
 
 
 def test_insufficient_when_nothing_recurs():
-    rows = [("A", "E1", 1, 60.0), ("B", "E2", 2, 60.0), ("C", "E1", 3, 25.0), ("C", "E2", 3, 5.0)]
+    rows = [("A", "E1", 1, 60.0), ("B", "E2", 2, 60.0), ("C", "E1", 3, 25.0), ("C", "E2", 3, 4.9)]
     s = score(*build(rows))
     assert s.recurring == 0
     assert s.fraction == 0.0
@@ -184,3 +185,46 @@ def test_coverage_against_ground_truth():
     assert s.coverage == pytest.approx(20.0 / 60.0)
     # Without ground truth: the share of labeled segment time that got an id.
     assert score(assign, segs).coverage == pytest.approx(20.0 / 30.0)
+
+
+def test_default_bar_is_5s_and_flips_the_fairytail_verdict():
+    """Ruling R6: at 20 s per episode the Fairy Tail baseline passes on two characters; at the
+    5 s default eleven recur and it fails."""
+    assert MIN_SPEECH_S == 5.0
+    assign, segs = build(FAIRYTAIL)
+    assert score(assign, segs, min_speech=20.0).verdict == "pass"
+    s = score(assign, segs)
+    assert s.recurring > 2
+    assert s.verdict == "fail"
+    assert s.merges  # Lucy and Juvia on id 4, Happy and Charle on id 2
+
+
+def unit(*v):
+    a = np.array(v, dtype=np.float32)
+    return a / np.linalg.norm(a)
+
+
+def test_nearest_centroid_accuracy():
+    train = [
+        Segment("E1", 0, 10, "A"),
+        Segment("E1", 10, 20, "B"),
+        Segment("E1", 20, 25, None),  # unlabeled: no centroid
+        Segment("E1", 25, 30, "?"),
+    ]
+    train_e = np.stack([unit(1, 0, 0), unit(0, 1, 0), unit(0, 0, 1), unit(0, 0, 1)])
+    test = [
+        Segment("E2", 0, 6, "A"),  # near A: right
+        Segment("E2", 6, 10, "A"),  # near B: wrong
+        Segment("E2", 10, 20, "b"),  # case-insensitive label, near B: right
+        Segment("E2", 20, 30, "C"),  # no training speech: not scored
+        Segment("E2", 30, 40, None),
+    ]
+    test_e = np.stack(
+        [unit(1, 0.1, 0), unit(0.1, 1, 0), unit(0, 1, 0.2), unit(0, 0, 1), unit(1, 0, 0)]
+    )
+    got = nearest_centroid_accuracy(train, train_e, test, test_e)
+    assert got["A"] == pytest.approx(0.6)
+    assert got["B"] == pytest.approx(1.0)
+    assert "C" not in got
+    assert got["(overall)"] == pytest.approx(16 / 20)
+    assert nearest_centroid_accuracy([], np.zeros((0, 3)), test, test_e) == {}
