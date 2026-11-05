@@ -72,7 +72,7 @@ Steps 2-5 each end with a results note and a keep/drop decision recorded as a ru
 - The same episodes' English dub track (E12-E14 have `eng` audio): same ground truth, a second language for free. Each audio language is its own workspace and registry (a dub has different voice actors); the subtitle names label both. Linking one character across languages is the actor model's job and out of scope here.
 - Spanish: DAN DA DAN S01E01-E03, ToonsHub CR WEB-DL MULTi (13 audio tracks verified from MediaInfo, including es-ES and es-419 Spanish dubs, plus Japanese and English; CR English ASS). Each Spanish dub is its own registry, labeled by the English ASS names (dubs keep the original timing).
 - Chinese: Link Click S03 (Bridon Arc) E04-E06, ToonsHub CR WEB-DL Dual-Audio (Chinese original plus English dub, verified; CR English ASS).
-- Russian: none exists (2026-11-05 survey: no Russian-audio release with CR ASS; Russian appears only as subtitle tracks).
+- Russian: not yet found. The 2026-11-05 survey searched only Crunchyroll releases indexed on AnimeTosho, which carry no Russian audio (Crunchyroll left Russia in 2022). Russian sources (dub and fansub groups such as AniLibria, Anidub, SHIZA Project, whose ASS scripts often name speakers; Russian streaming originals; Russian subtitle archives) are being searched separately.
 - Name-field coverage on the Spanish and Chinese sets is unverified until the files are in the library; checked first when they arrive.
 - Chimera (Korean) has no speaker ground truth; used only to check the chosen config doesn't break on live action (cluster counts, review rate), not scored.
 
