@@ -87,3 +87,24 @@ def test_pin_requires_more_than_half():
     cur_turns = Diarization(backend="x", turns=[Turn(start=0, end=10, speaker="Z")])
     prev = Assignments(episode="e", threshold=0.6, clusters=[_ca("A", 1, 11)])
     assert pin(prev, prev_turns, cur_turns) == {}
+
+
+def test_pin_skips_previous_extra_and_review():
+    turns = Diarization(
+        backend="x",
+        turns=[Turn(start=0, end=10, speaker="A"), Turn(start=10, end=20, speaker="B")],
+    )
+    cur = Diarization(
+        backend="x",
+        turns=[Turn(start=0, end=10, speaker="Z"), Turn(start=10, end=20, speaker="Y")],
+    )
+    extra = ClusterAssignment(
+        cluster="A", actor_id=None, character_id=None, score=0.1, clean_seconds=3.0,
+        status="extra",
+    )  # fmt: skip
+    review = ClusterAssignment(
+        cluster="B", actor_id=1, character_id=None, score=0.9, clean_seconds=30.0,
+        status="review",
+    )  # fmt: skip
+    prev = Assignments(episode="e", threshold=0.6, clusters=[extra, review])
+    assert pin(prev, turns, cur) == {}

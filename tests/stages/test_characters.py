@@ -143,3 +143,28 @@ def test_stage_declares_files(tmp_path):
     assert s.name == "characters"
     assert [p.name for p in s.inputs(ep)] == ["turns.json", "clusters.npz"]
     assert s.config_key(CFG, ep) == {"threshold": 0.8, "min_new_seconds": 20.0}
+
+
+def test_rerun_without_assignments_does_not_duplicate_exemplars(tmp_path):
+    ep = make_ep(tmp_path)
+    write_diarize(ep, {"S0": ([unit([1, 0, 0]), unit([1, 0.1, 0])], 40.0)}, [(0, 20, "S0")])
+    CharactersStage().run(ep, CFG)
+    first = assignments(ep).clusters[0]
+    for p in CharactersStage().outputs(ep):
+        p.unlink()
+    CharactersStage().run(ep, CFG)
+    again = assignments(ep).clusters[0]
+    with registry(ep) as reg:
+        assert reg.exemplar_count(1) == 2
+        assert len(reg.actors()) == 1
+    assert again.character_id == first.character_id
+
+
+def test_previous_extra_is_rematched_not_pinned(tmp_path):
+    ep = make_ep(tmp_path)
+    write_diarize(ep, {"S0": ([unit([1, 0, 0])], 5.0)}, [(0, 20, "S0")])
+    CharactersStage().run(ep, CFG)
+    assert assignments(ep).clusters[0].status == "extra"
+    write_diarize(ep, {"S0": ([unit([1, 0, 0])], 40.0)}, [(0, 20, "S0")])
+    CharactersStage().run(ep, CFG)
+    assert assignments(ep).clusters[0].status == "new"
