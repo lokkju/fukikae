@@ -11,11 +11,11 @@ Result: a tie within reference noise. The 0.0036 CER gap (about 3% relative) com
 
 Run order was qwen3_asr first, then faster_whisper, in one process, one run each. The model weights were already on disk in the Hugging Face cache (downloaded earlier that day by the backend tests); neither model had been loaded in that process before, so each runtime includes its own load and CUDA warm-up, and qwen3_asr also paid the process's first CUDA initialization. The 19 s runtime gap is a single measurement under those conditions and is not evidence of a speed difference.
 
-`qwen3_asr` is the provisional Korean default, mainly because it produced 152 segments against 610 for faster-whisper (VAD removed 32:08 of the audio before decoding), which suits downstream segmentation, and on the small runtime and CER edge. Confirm on a second episode before treating it as settled.
+`qwen3_asr` is the provisional Korean default. Neither CER nor runtime separates the two (see above), and segment count is no basis either: qwen3_asr produced 152 segments against 610 for faster-whisper (whose VAD removed 32:08 of the audio before decoding), but a segment is a decoding chunk, not a dubbing cue, and cues will come from word timing and diarization turns. The choice stands until a second episode, or a later stage that depends on the backend, gives a reason to change it.
 
 ## Effect of Latin text in the reference
 
-The subtitle keeps some English as Latin text (for example `ANFO`, `IED`, `social psychology`, `spontaneous human combustion`). After normalization the reference has 7100 characters, 262 of them (41 tokens) Latin letters or digits. A Hangul transcription of those words can never match them, so every such token is a guaranteed error on both sides, about 3.7% of the reference.
+The subtitle keeps some English as Latin text (for example `ANFO`, `IED`, `social psychology`, `spontaneous human combustion`). After normalization the reference has 7100 characters, 262 of them (41 tokens) Latin letters or digits. A Hangul transcription of those words can never match them, so every one a backend writes in Hangul is an error; together they are about 3.7% of the reference. Both backends wrote some of them in Latin letters, which match only when spelled as the subtitle spells them.
 
 | scoring | qwen3_asr | faster_whisper |
 |---|---|---|
