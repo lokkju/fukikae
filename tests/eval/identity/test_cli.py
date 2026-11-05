@@ -177,3 +177,63 @@ def test_identity_help_documents_the_pooled_holdout():
     assert r.exit_code == 0
     assert "pooled" in r.output and "--min-speech" in r.output
     assert "modal id in the tuning episodes" in r.output
+
+
+def test_identity_cli_matcher_options_and_joint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from fukikae.eval.identity import cache as mod
+
+    root = setup_ws(tmp_path, ["S01E01", "S01E02", "S01E03"])
+    monkeypatch.setattr(mod, "ResidentEmbedder", FakeResident)
+    out = tmp_path / "r.json"
+    base = ["eval", "identity", str(root), "--tune", "S01E01,S01E02", "--gt-file",
+            str(tmp_path / "gt")]  # fmt: skip
+    r = CliRunner().invoke(app, [*base, "--matcher", "knn", "--matcher-option", "k=3",
+                                 "--json", str(out)])  # fmt: skip
+    assert r.exit_code == 0, r.output
+    s = json.loads(out.read_text())["settings"]
+    assert s["matcher"] == "knn" and s["matcher_options"] == {"k": 3}
+    r = CliRunner().invoke(app, [*base, "--matcher", "joint", "--threshold", "0.5",
+                                 "--json", str(out)])  # fmt: skip
+    assert r.exit_code == 0, r.output
+    assert json.loads(out.read_text())["tune"]["score"]["verdict"] == "pass"
+    r = CliRunner().invoke(app, [*base, "--matcher", "joint", "--holdout", "S01E03"])
+    assert r.exit_code == 1 and "joint" in r.output
+    r = CliRunner().invoke(app, [*base, "--matcher", "knn", "--matcher-option", "bogus=1"])
+    assert r.exit_code == 1 and "bogus" in r.output
+
+
+def test_identity_cli_asr_segmentation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from fukikae.eval.identity import cache as mod
+    from fukikae.models import Segment as AsrSegment
+    from fukikae.models import Transcript, Word
+
+    root = setup_ws(tmp_path, ["S01E01", "S01E02"])
+    for ep in ["S01E01", "S01E02"]:
+        work = root / ".fukikae" / "episodes" / ep
+        segs = []
+        for k in range(12):
+            start = 5.0 * k
+            words = [Word(start=start + 0.5 * j, end=start + 0.5 * j + 0.4, text=f"w{j}.")
+                     if j == 7 else Word(start=start + 0.5 * j, end=start + 0.5 * j + 0.4,
+                                         text=f"w{j}") for j in range(8)]  # fmt: skip
+            segs.append(AsrSegment(start=start, end=start + 4.0, text="", words=words))
+        (work / "03-asr").mkdir()
+        write_json(
+            work / "03-asr" / "transcript.json",
+            Transcript(language="ja", backend="x", word_timing=True, segments=segs),
+        )
+    monkeypatch.setattr(mod, "ResidentEmbedder", FakeResident)
+    out = tmp_path / "r.json"
+    r = CliRunner().invoke(
+        app,
+        ["eval", "identity", str(root), "--tune", "S01E01,S01E02", "--gt-file",
+         str(tmp_path / "gt"), "--segmentation", "asr", "--segment-embedder", "wespeaker",
+         "--segmentation-option", "window=1.5", "--json", str(out)],
+    )  # fmt: skip
+    assert r.exit_code == 0, r.output
+    data = json.loads(out.read_text())
+    assert data["settings"]["segmentation"] == "asr"
+    assert data["settings"]["segment_embedder"] == {"backend": "wespeaker", "options": {}}
+    assert data["settings"]["segmentation_options"] == {"window": 1.5}
+    assert data["tune"]["score"]["verdict"] == "pass"
+    assert data["episodes"][0]["segments"] == 12

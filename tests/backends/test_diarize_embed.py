@@ -63,3 +63,59 @@ def test_real_models_on_clip(clip_ep):
         e.unload()
     assert emb.shape == (len(spans), 192)
     np.testing.assert_allclose(np.linalg.norm(emb, axis=1), 1.0, atol=1e-3)
+
+
+class FakePipeline:
+    def __init__(self, clustering: dict) -> None:
+        self.params = {"segmentation": {"min_duration_off": 0.0}, "clustering": dict(clustering)}
+        self.embedding_exclude_overlap = True
+        self.instantiated: list[dict] = []
+
+    def parameters(self, instantiated: bool = False) -> dict:  # noqa: ARG002
+        return {k: dict(v) for k, v in self.params.items()}
+
+    def instantiate(self, params: dict) -> "FakePipeline":
+        self.instantiated.append(params)
+        self.params = params
+        return self
+
+
+VBX = {"threshold": 0.6, "Fa": 0.07, "Fb": 0.8}
+AHC = {"method": "centroid", "min_cluster_size": 12, "threshold": 0.7}
+
+
+def test_tuning_options_reach_the_pipeline():
+    d = PyannoteDiarizer({"clustering_threshold": 0.7, "exclude_overlap": False}, "cpu")
+    p = FakePipeline(VBX)
+    d.tune(p)
+    assert p.params["clustering"] == {"threshold": 0.7, "Fa": 0.07, "Fb": 0.8}
+    assert p.embedding_exclude_overlap is False
+    a = FakePipeline(AHC)
+    PyannoteDiarizer({"min_cluster_size": 5}, "cpu").tune(a)
+    assert a.params["clustering"]["min_cluster_size"] == 5
+
+
+def test_no_tuning_options_leave_the_pipeline_alone():
+    p = FakePipeline(VBX)
+    PyannoteDiarizer({}, "cpu").tune(p)
+    assert p.instantiated == [] and p.embedding_exclude_overlap is True
+
+
+def test_min_cluster_size_on_a_vbx_pipeline_is_an_error():
+    with pytest.raises(ValueError, match="min_cluster_size"):
+        PyannoteDiarizer({"min_cluster_size": 5}, "cpu").tune(FakePipeline(VBX))
+
+
+@pytest.mark.parametrize(
+    "opts",
+    [
+        {"clustering_threshold": "high"},
+        {"clustering_threshold": True},
+        {"min_cluster_size": 0},
+        {"min_cluster_size": 2.5},
+        {"exclude_overlap": "yes"},
+    ],
+)
+def test_bad_tuning_options(opts):
+    with pytest.raises(ValueError):
+        PyannoteDiarizer(opts, "cpu")

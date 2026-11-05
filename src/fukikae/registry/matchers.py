@@ -7,6 +7,19 @@ registry state built from the episodes resolved before it.
 whole series through it offline; the characters stage can select a matcher by name later
 (Task 7). Segments are any objects with ``start``, ``end``, ``duration`` and ``cluster``
 attributes (`fukikae.eval.identity.segments.Segment`); this module imports nothing from eval.
+
+Matchers by name (`make_matcher`), each taking `threshold` and `min_new_seconds`:
+
+- `centroid`: today's pipeline (one normalized mean per actor).
+- `knn` (`k`, default 5): each cluster row votes for the actors of its `k` nearest exemplar
+  rows, weighted by similarity; the winner's score is the mean similarity of its votes.
+- `multi-centroid` (`max_centroids`, default 3; `min_rows`, default 5): up to that many
+  spherical k-means centroids per actor, one per `min_rows` exemplar rows; a cluster scores
+  its best centroid.
+- `lda` (`dims`, default all): centroid matching in a linear discriminant space fit on the
+  labeled segments of the episodes resolved before this one (never this one's).
+- `joint` (`seed`, default clusters): one constrained agglomerative clustering of every
+  episode at once (`AllEpisodesMatcher.fit_all`); no registry state.
 """
 
 from __future__ import annotations
@@ -19,7 +32,7 @@ import numpy as np
 from scipy.cluster.hierarchy import fcluster, linkage
 
 from fukikae.models import ClusterAssignment
-from fukikae.registry.matching import ClusterEvidence, match, mean_embedding
+from fukikae.registry.matching import ClusterEvidence, decide, match, mean_embedding
 from fukikae.registry.store import Actor, Character
 
 # The diarize stage embeds at most this many spans per cluster (the longest), so a cluster's
@@ -86,6 +99,25 @@ class Matcher(Protocol):
         embs: np.ndarray,
         segs: Sequence[SegmentLike],
     ) -> list[int | None]: ...
+
+
+class AllEpisodesMatcher(Protocol):
+    """A matcher that resolves every episode in one pass, with no registry state."""
+
+    name: ClassVar[str]
+
+    def fit_all(
+        self,
+        order: list[str],
+        embs: dict[str, np.ndarray],
+        segs: dict[str, Sequence[SegmentLike]],
+    ) -> dict[str, list[int | None]]: ...
+
+
+def _unit_rows(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float64)
+    n = np.linalg.norm(x, axis=1, keepdims=True)
+    return x / np.where(n == 0, 1.0, n)
 
 
 def group_segments(
@@ -188,10 +220,427 @@ class CentroidMatcher:
         return out
 
 
-MATCHERS: dict[str, type[Any]] = {"centroid": CentroidMatcher}
+class _ScoringMatcher:
+    """The centroid matcher's flow (grouping, the longest `max_rows` rows per cluster,
+    `registry.matching.decide`, rows added to the actor) with the cluster-to-actor score
+    left to `_best`, in the space `_project` maps embeddings into (the identity here).
+    The state keeps raw rows; projection happens at matching time."""
+
+    name: ClassVar[str] = "scoring"
+
+    def __init__(
+        self,
+        threshold: float = 0.6,
+        min_new_seconds: float = 20.0,
+        max_rows: int = MAX_ROWS_PER_CLUSTER,
+    ) -> None:
+        self.threshold = float(threshold)
+        self.min_new_seconds = float(min_new_seconds)
+        self.max_rows = int(max_rows)
+        self.last: list[ClusterAssignment] = []
+        self.last_groups: list[tuple[str, list[int]]] = []
+
+    def _project(self, x: np.ndarray) -> np.ndarray:
+        return np.asarray(x, dtype=np.float32)
+
+    def _prepare(self, state: RegistryState) -> None:
+        """Called once per episode before scoring, with the state as it stands."""
+
+    def _best(self, rows: np.ndarray, mean: np.ndarray) -> tuple[int, float] | None:
+        """The best (actor id, score) for a cluster's rows and normalized mean, against the
+        state `_prepare` saw."""
+        raise NotImplementedError
+
+    def _before(self, episode: str) -> None:
+        """Called first in each fit_episode."""
+
+    def _after(self, episode: str, embs: np.ndarray, segs: Sequence[SegmentLike]) -> None:
+        """Called last in each fit_episode, once its ids are decided."""
+
+    def fit_episode(
+        self,
+        state: RegistryState,
+        episode: str,
+        embs: np.ndarray,
+        segs: Sequence[SegmentLike],
+    ) -> list[int | None]:
+        self._before(episode)
+        raw = np.asarray(embs, dtype=np.float32)
+        if len(raw) != len(segs):
+            raise ValueError(f"{len(segs)} segments but {len(raw)} embeddings")
+        space = self._project(raw) if len(raw) else raw
+        groups = group_segments(space, segs, 1.0 - self.threshold)
+        self._prepare(state)
+        raw_rows: dict[str, np.ndarray] = {}
+        evidence: list[ClusterEvidence] = []
+        tops: dict[str, tuple[int, float] | None] = {}
+        for label, idx in groups:
+            longest = sorted(idx, key=lambda i: segs[i].duration, reverse=True)[: self.max_rows]
+            raw_rows[label] = raw[longest]
+            mean = mean_embedding(space[longest])
+            evidence.append(ClusterEvidence(label, mean, float(sum(segs[i].duration for i in idx))))
+            tops[label] = (
+                None if mean is None or not state.actors else self._best(space[longest], mean)
+            )
+        result = decide(
+            evidence, tops, self.threshold, self.min_new_seconds, state.character_list()
+        )
+        touched: list[ClusterAssignment] = []
+        char: dict[str, int | None] = {}
+        for a in result:
+            if a.status == "new":
+                aid, cid = state.create(raw_rows[a.cluster])
+                a = a.model_copy(update={"actor_id": aid, "character_id": cid})
+            elif a.status == "matched" and a.actor_id is not None:
+                state.add(a.actor_id, raw_rows[a.cluster])
+            touched.append(a)
+            char[a.cluster] = a.character_id
+        self.last = touched
+        self.last_groups = groups
+        out: list[int | None] = [None] * len(segs)
+        for label, idx in groups:
+            for i in idx:
+                out[i] = char[label]
+        self._after(episode, raw, segs)
+        return out
 
 
-def make_matcher(name: str, **options: Any) -> Matcher:
+class KnnMatcher(_ScoringMatcher):
+    """Each of a cluster's rows (its longest `max_rows`) takes its `k` nearest exemplar rows
+    among all actors' and votes for their actors with their cosine similarity; the actor
+    with the largest vote total is the cluster's best, scored by the mean similarity of the
+    votes it got. A speaker heard in several registers keeps the exemplars of each, so a
+    cluster in one register finds its own exemplars where the actor's mean lies between
+    registers. Options: `k` (default 5)."""
+
+    name: ClassVar[str] = "knn"
+
+    def __init__(
+        self,
+        threshold: float = 0.6,
+        min_new_seconds: float = 20.0,
+        max_rows: int = MAX_ROWS_PER_CLUSTER,
+        k: int = 5,
+    ) -> None:
+        super().__init__(threshold, min_new_seconds, max_rows)
+        if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+            raise ValueError(f"knn: k must be a whole number of at least 1, not {k!r}")
+        self.k = k
+        self._x = np.zeros((0, 0))
+        self._owner = np.zeros(0, dtype=int)
+
+    def _prepare(self, state: RegistryState) -> None:
+        mats, owners = [], []
+        for aid in state.actors:
+            rows = np.vstack(state.exemplars[aid])
+            mats.append(rows)
+            owners.append(np.full(len(rows), aid))
+        self._x = _unit_rows(np.vstack(mats)) if mats else np.zeros((0, 0))
+        self._owner = np.concatenate(owners) if owners else np.zeros(0, dtype=int)
+
+    def _best(self, rows: np.ndarray, mean: np.ndarray) -> tuple[int, float] | None:  # noqa: ARG002
+        if not len(self._x):
+            return None
+        sims = _unit_rows(rows) @ self._x.T  # (rows, exemplars)
+        k = min(self.k, sims.shape[1])
+        nn = np.argpartition(-sims, k - 1, axis=1)[:, :k]
+        votes: dict[int, list[float]] = {}
+        for r in range(len(sims)):
+            for j in nn[r]:
+                votes.setdefault(int(self._owner[j]), []).append(float(sims[r, j]))
+        aid = max(votes, key=lambda a: (sum(votes[a]), -a))
+        return aid, float(np.mean(votes[aid]))
+
+
+def _spherical_kmeans(x: np.ndarray, k: int, iters: int = 25) -> np.ndarray:
+    """`k` unit centroids of unit rows `x`: farthest-point initialisation from the row
+    nearest the mean (deterministic), then cosine k-means."""
+    mean = mean_embedding(x)
+    first = int(np.argmax(x @ mean)) if mean is not None else 0
+    cents = [x[first]]
+    for _ in range(1, k):
+        sim = np.max(x @ np.vstack(cents).T, axis=1)
+        cents.append(x[int(np.argmin(sim))])
+    c = np.vstack(cents)
+    for _ in range(iters):
+        assign = np.argmax(x @ c.T, axis=1)
+        new = np.vstack(
+            [
+                (m if (m := mean_embedding(x[assign == j])) is not None else c[j])
+                for j in range(len(c))
+            ]
+        )
+        if np.allclose(new, c):
+            break
+        c = new
+    return c
+
+
+class MultiCentroidMatcher(_ScoringMatcher):
+    """Up to `max_centroids` spherical k-means centroids per actor, one per `min_rows` of its
+    exemplar rows (an actor with fewer than 2 × `min_rows` rows keeps one centroid, its
+    normalized mean); a cluster's score for an actor is the cosine of its mean with the
+    nearest of them. One centroid is the centroid matcher. Options: `max_centroids`
+    (default 3), `min_rows` (default 5)."""
+
+    name: ClassVar[str] = "multi-centroid"
+
+    def __init__(
+        self,
+        threshold: float = 0.6,
+        min_new_seconds: float = 20.0,
+        max_rows: int = MAX_ROWS_PER_CLUSTER,
+        max_centroids: int = 3,
+        min_rows: int = 5,
+    ) -> None:
+        super().__init__(threshold, min_new_seconds, max_rows)
+        for key, v in (("max_centroids", max_centroids), ("min_rows", min_rows)):
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ValueError(f"multi-centroid: {key} must be a whole number >= 1, not {v!r}")
+        self.max_centroids = max_centroids
+        self.min_rows = min_rows
+        self._cents: dict[int, np.ndarray] = {}
+
+    def _prepare(self, state: RegistryState) -> None:
+        self._cents = {}
+        for aid in state.actors:
+            rows = np.vstack(state.exemplars[aid])
+            k = max(1, min(self.max_centroids, len(rows) // self.min_rows))
+            if k == 1:
+                c = state.centroid(aid)
+                if c is not None:
+                    self._cents[aid] = np.asarray(c, dtype=np.float64)[None]
+            else:
+                self._cents[aid] = _spherical_kmeans(_unit_rows(rows), k)
+
+    def _best(self, rows: np.ndarray, mean: np.ndarray) -> tuple[int, float] | None:  # noqa: ARG002
+        top: tuple[int, float] | None = None
+        m = np.asarray(mean, dtype=np.float64)
+        m = m / (np.linalg.norm(m) or 1.0)
+        for aid, c in self._cents.items():
+            s = float(np.max(_unit_rows(c) @ m))
+            if top is None or s > top[1]:
+                top = (aid, s)
+        return top
+
+
+class LdaMatcher(_ScoringMatcher):
+    """Centroid matching in a linear discriminant space (scikit-learn's
+    LinearDiscriminantAnalysis, eigen solver with automatic shrinkage), fit on the labeled
+    segments (``label`` not None) of the episodes this matcher resolved before the current
+    one, and never on the current episode's: an episode's labels join the training set only
+    after its ids are decided, and resolving an episode twice is an error. For E12 then E13
+    the space is fit on E12's labels and E13 is resolved in it. With fewer than two labels
+    of two or more segments each to fit on (the first episode), there is no space and the
+    episode resolves exactly as `centroid`. Embeddings, exemplars and cluster means are
+    projected, then L2-normalized; grouping of unclustered segments happens in the space.
+    Options: `dims` (components, at most labels - 1; default or "all": that maximum)."""
+
+    name: ClassVar[str] = "lda"
+
+    def __init__(
+        self,
+        threshold: float = 0.6,
+        min_new_seconds: float = 20.0,
+        max_rows: int = MAX_ROWS_PER_CLUSTER,
+        dims: int | str | None = None,
+    ) -> None:
+        super().__init__(threshold, min_new_seconds, max_rows)
+        if dims == "all":
+            dims = None
+        if dims is not None and (isinstance(dims, bool) or not isinstance(dims, int) or dims < 1):
+            raise ValueError(f'lda: dims must be a whole number >= 1 or "all", not {dims!r}')
+        self.dims: int | None = dims
+        self._seen: list[str] = []
+        self._train_x: list[np.ndarray] = []
+        self._train_y: list[str] = []
+        self._lda: Any = None
+        self._cents: dict[int, np.ndarray] = {}
+
+    def _before(self, episode: str) -> None:
+        if episode in self._seen:
+            raise ValueError(f"lda: episode {episode} was already resolved")
+        self._lda = self._fit()
+
+    def _fit(self) -> Any:
+        from collections import Counter
+
+        counts = Counter(self._train_y)
+        keep = [i for i, y in enumerate(self._train_y) if counts[y] >= 2]
+        classes = {self._train_y[i] for i in keep}
+        if len(classes) < 2:
+            return None
+        from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+        x = np.vstack([self._train_x[i] for i in keep]).astype(np.float64)
+        y = [self._train_y[i] for i in keep]
+        top = min(len(classes) - 1, x.shape[1])
+        n = top if self.dims is None else min(self.dims, top)
+        return LinearDiscriminantAnalysis(solver="eigen", shrinkage="auto", n_components=n).fit(
+            x, y
+        )
+
+    def _project(self, x: np.ndarray) -> np.ndarray:
+        if self._lda is None:
+            return np.asarray(x, dtype=np.float32)
+        return _unit_rows(self._lda.transform(np.asarray(x, dtype=np.float64))).astype(np.float32)
+
+    def _prepare(self, state: RegistryState) -> None:
+        self._cents = {}
+        for aid in state.actors:
+            if self._lda is None:
+                c = state.centroid(aid)
+            else:
+                c = mean_embedding(self._project(np.vstack(state.exemplars[aid])))
+            if c is not None:
+                self._cents[aid] = np.asarray(c, dtype=np.float64)
+
+    def _best(self, rows: np.ndarray, mean: np.ndarray) -> tuple[int, float] | None:  # noqa: ARG002
+        top: tuple[int, float] | None = None
+        m = np.asarray(mean, dtype=np.float64)
+        for aid, c in self._cents.items():
+            denom = float(np.linalg.norm(c) * np.linalg.norm(m))
+            s = float(c @ m) / denom if denom else 0.0
+            if top is None or s > top[1]:
+                top = (aid, s)
+        return top
+
+    def _after(self, episode: str, embs: np.ndarray, segs: Sequence[SegmentLike]) -> None:
+        self._seen.append(episode)
+        for row, seg in zip(embs, segs, strict=True):
+            label = getattr(seg, "label", None)
+            if label is not None:
+                self._train_x.append(np.asarray(row, dtype=np.float64))
+                self._train_y.append(str(label))
+
+
+class JointMatcher:
+    """One agglomerative clustering of every episode's segments at once: average linkage on
+    cosine similarity (the mean pairwise similarity of two groups' rows), merging the most
+    similar pair while it reaches `threshold`, never merging two groups that hold segments
+    of one episode overlapping in time (cannot-link; the constraint carries through every
+    merge). `seed="clusters"` starts each episode's diarization cluster as one group
+    (segments without a cluster start alone); `seed="segments"` starts every segment alone.
+    Groups with at least `min_new_seconds` of segment time become characters, numbered from
+    1 in order of first appearance (episode order, then segment order); the rest get no id.
+    There is no registry state: the harness hands it every episode (`fit_all`)."""
+
+    name: ClassVar[str] = "joint"
+
+    def __init__(
+        self,
+        threshold: float = 0.6,
+        min_new_seconds: float = 20.0,
+        seed: str = "clusters",
+    ) -> None:
+        if seed not in ("clusters", "segments"):
+            raise ValueError(f'joint: seed must be "clusters" or "segments", not {seed!r}')
+        self.threshold = float(threshold)
+        self.min_new_seconds = float(min_new_seconds)
+        self.seed = seed
+
+    def fit_all(
+        self,
+        order: list[str],
+        embs: dict[str, np.ndarray],
+        segs: dict[str, Sequence[SegmentLike]],
+    ) -> dict[str, list[int | None]]:
+        items: list[tuple[str, int]] = []
+        rows: list[np.ndarray] = []
+        for ep in order:
+            e = np.asarray(embs[ep])
+            if len(e) != len(segs[ep]):
+                raise ValueError(f"{ep}: {len(segs[ep])} segments but {len(e)} embeddings")
+            for i in range(len(segs[ep])):
+                items.append((ep, i))
+                rows.append(e[i])
+        out: dict[str, list[int | None]] = {ep: [None] * len(segs[ep]) for ep in order}
+        if not items:
+            return out
+        x = _unit_rows(np.vstack(rows))
+        # Seed groups.
+        group_of: list[int] = []
+        seeds: dict[tuple[str, str], int] = {}
+        n_groups = 0
+        for ep, i in items:
+            c = segs[ep][i].cluster
+            if self.seed == "clusters" and c is not None:
+                key = (ep, str(c))
+                if key not in seeds:
+                    seeds[key] = n_groups
+                    n_groups += 1
+                group_of.append(seeds[key])
+            else:
+                group_of.append(n_groups)
+                n_groups += 1
+        g = np.asarray(group_of)
+        sums = np.zeros((n_groups, x.shape[1]))
+        np.add.at(sums, g, x)
+        counts = np.bincount(g, minlength=n_groups).astype(np.float64)
+        cannot = np.zeros((n_groups, n_groups), dtype=bool)
+        for ep in order:
+            idx = [k for k, (e, _) in enumerate(items) if e == ep]
+            spans = sorted((segs[ep][items[k][1]].start, segs[ep][items[k][1]].end, k) for k in idx)
+            for a in range(len(spans)):
+                s0, e0, ka = spans[a]
+                for b in range(a + 1, len(spans)):
+                    s1, _e1, kb = spans[b]
+                    if s1 >= e0:
+                        break
+                    ga, gb = g[ka], g[kb]
+                    if ga != gb:
+                        cannot[ga, gb] = cannot[gb, ga] = True
+        alive = np.ones(n_groups, dtype=bool)
+        sim = (sums @ sums.T) / np.outer(counts, counts)
+        sim[cannot] = -np.inf
+        np.fill_diagonal(sim, -np.inf)
+        parent = np.arange(n_groups)
+        while True:
+            flat = int(np.argmax(sim))
+            a, b = divmod(flat, n_groups)
+            if not np.isfinite(sim[a, b]) or sim[a, b] < self.threshold:
+                break
+            # Merge b into a.
+            sums[a] += sums[b]
+            counts[a] += counts[b]
+            alive[b] = False
+            parent[parent == b] = a
+            cannot[a] |= cannot[b]
+            cannot[:, a] = cannot[a]
+            row = (sums @ sums[a]) / (counts * counts[a])
+            row[~alive] = -np.inf
+            row[cannot[a]] = -np.inf
+            row[a] = -np.inf
+            sim[a, :] = row
+            sim[:, a] = row
+            sim[b, :] = -np.inf
+            sim[:, b] = -np.inf
+        final = parent[g]
+        seconds: dict[int, float] = {}
+        for k, (ep, i) in enumerate(items):
+            seconds[int(final[k])] = seconds.get(int(final[k]), 0.0) + segs[ep][i].duration
+        ids: dict[int, int] = {}
+        for k, (ep, i) in enumerate(items):
+            f = int(final[k])
+            if seconds[f] < self.min_new_seconds:
+                continue
+            if f not in ids:
+                ids[f] = len(ids) + 1
+            out[ep][i] = ids[f]
+        return out
+
+
+MATCHERS: dict[str, type[Any]] = {
+    "centroid": CentroidMatcher,
+    "knn": KnnMatcher,
+    "multi-centroid": MultiCentroidMatcher,
+    "lda": LdaMatcher,
+    "joint": JointMatcher,
+}
+
+
+def make_matcher(name: str, **options: Any) -> Any:
+    """A matcher by name: a `Matcher`, or for `joint` an `AllEpisodesMatcher`."""
     cls = MATCHERS.get(name)
     if cls is None:
         raise ValueError(f"unknown matcher {name!r}; use one of {', '.join(sorted(MATCHERS))}")
