@@ -17,7 +17,7 @@ class ArtifactVersionError(Exception):
 def atomic_path(path: Path) -> Iterator[Path]:
     """Yield a temp path beside `path`; rename onto it on clean exit, delete on error."""
     path = Path(path)
-    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp{path.suffix}")
     try:
         yield tmp
         os.replace(tmp, path)
