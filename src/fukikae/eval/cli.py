@@ -151,3 +151,12 @@ def auto_label_cmd(
             )
     if report:
         typer.echo(autolabel.format_report(result))
+
+
+def _register_identity() -> None:
+    from fukikae.eval.identity.cli import identity_cmd
+
+    eval_app.command("identity")(identity_cmd)
+
+
+_register_identity()
