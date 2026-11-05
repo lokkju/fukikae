@@ -49,11 +49,15 @@ def match(
     threshold: float,
     min_new_seconds: float,
     characters: list[Character] | None = None,
+    claimed: set[int] | None = None,
 ) -> list[ClusterAssignment]:
     """Assign each cluster to an actor (`matched`), a new actor (`new`) or nobody (`extra`).
 
     When several clusters best-match the same actor, only the highest-scoring is `matched`;
-    the others are `review` (kept apart, with their score and actor). `new` carries no
+    the others are `review` (kept apart, with their score and actor). A cluster whose best
+    match is in `claimed` (actors another cluster of this episode already holds, such as a
+    pinned one) is `review` too: one character never takes two clusters of an episode
+    silently. `new` carries no
     actor or character yet: the caller creates them. `matched` takes the actor's
     lowest-id character from `characters`.
     """
@@ -90,12 +94,15 @@ def match(
         )
 
     secs = {e.cluster: e.clean_seconds for e in evidence}
+    taken = claimed or set()
     winners: dict[int, str] = {}
     for cluster, (aid, s) in best.items():
+        if aid in taken:
+            continue
         if aid not in winners or s > best[winners[aid]][1]:
             winners[aid] = cluster
     for cluster, (aid, s) in best.items():
-        won = winners[aid] == cluster
+        won = winners.get(aid) == cluster
         out[cluster] = ClusterAssignment(
             cluster=cluster,
             actor_id=aid,

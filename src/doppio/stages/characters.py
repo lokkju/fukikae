@@ -98,6 +98,7 @@ class CharactersStage:
                 threshold,
                 cfg.registry.min_new_seconds,
                 characters=reg.characters(),
+                claimed=claimed,
             )
             for a in matched:
                 emb = rows[a.cluster]
