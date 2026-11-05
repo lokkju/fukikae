@@ -7,6 +7,7 @@ import typer
 
 from doppio import __version__
 from doppio.eval.cli import eval_app
+from doppio.registry.cli import registry_app
 
 # torch must number cards the way nvidia-smi and NVML do (gpu_device is an NVML index).
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -34,6 +35,7 @@ def main(
 
 
 app.add_typer(eval_app, name="eval")
+app.add_typer(registry_app, name="registry")
 
 backends_app = typer.Typer(help="Inspect installed model backends.", no_args_is_help=True)
 app.add_typer(backends_app, name="backends")
@@ -72,6 +74,7 @@ def run(
     from doppio.job import run_stages
     from doppio.media import MediaError
     from doppio.stages.asr import AsrStage
+    from doppio.stages.characters import CharactersStage
     from doppio.stages.diarize import DiarizeStage
     from doppio.stages.extract import ExtractStage
     from doppio.stages.language import LanguageStage
@@ -82,7 +85,14 @@ def run(
     ws = Workspace(workspace)
     try:
         ep = ws.find_episode(episode)
-        stages = [ExtractStage(), SeparateStage(), LanguageStage(), AsrStage(), DiarizeStage()]
+        stages = [
+            ExtractStage(),
+            SeparateStage(),
+            LanguageStage(),
+            AsrStage(),
+            DiarizeStage(),
+            CharactersStage(),
+        ]
         ran = run_stages(ep, ws.config, stages, from_stage, to_stage)
     except (FileNotFoundError, MediaError, ValueError) as e:
         typer.echo(f"error: {e}", err=True)
