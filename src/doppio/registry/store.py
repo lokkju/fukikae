@@ -302,7 +302,7 @@ class Registry:
             con.execute("DELETE FROM characters WHERE actor_id = ?", (drop,))
             con.execute("DELETE FROM actors WHERE id = ?", (drop,))
             self._recompute(con, keep)
-        return dict.fromkeys(dropped, target)
+        return {} if target is None else dict.fromkeys(dropped, target)
 
     def delete_episode(self, episode: str) -> list[int]:
         """Remove an episode's exemplars and recompute each affected unlocked actor.
