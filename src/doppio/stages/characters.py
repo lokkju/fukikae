@@ -4,9 +4,9 @@ Reads ``04-diarize/turns.json`` and ``clusters.npz``; writes under ``05-characte
 
 ``assignments.json``
     An ``Assignments``: one ``ClusterAssignment`` per cluster.
-``turns.prev.json``
-    A copy of the turns this run used. The next run pins its clusters to this run's
-    assignments by overlap in time, so a re-run never silently reassigns a character.
+    Also holds ``turns``, the diarization turns this run used, so the labels and the turns
+    they refer to are one artifact. The next run pins its clusters to these assignments by
+    overlap in time, so a re-run never silently reassigns a character.
 
 Only ``matched`` and ``new`` clusters add exemplars; ``pinned`` ones did so on their
 earlier run, ``review`` and ``extra`` ones never do. The registry database lives in the
@@ -23,7 +23,7 @@ import numpy as np
 from doppio.artifacts import read_json, write_json
 from doppio.config import Config
 from doppio.models import Assignments, ClusterAssignment, Diarization
-from doppio.registry.matching import ClusterEvidence, match, mean_embedding, pin
+from doppio.registry.matching import ClusterEvidence, match, mean_embedding, pin, pin_sources
 from doppio.registry.store import Registry
 from doppio.workspace import Episode, Workspace
 
@@ -36,8 +36,7 @@ class CharactersStage:
         return [d / "turns.json", d / "clusters.npz"]
 
     def outputs(self, ep: Episode) -> list[Path]:
-        d = ep.work / "05-characters"
-        return [d / "assignments.json", d / "turns.prev.json"]
+        return [ep.work / "05-characters" / "assignments.json"]
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
         return {
@@ -47,7 +46,7 @@ class CharactersStage:
 
     def run(self, ep: Episode, cfg: Config) -> None:
         turns_path, clusters_path = self.inputs(ep)
-        assignments_path, prev_turns_path = self.outputs(ep)
+        (assignments_path,) = self.outputs(ep)
         assignments_path.parent.mkdir(parents=True, exist_ok=True)
         turns = read_json(turns_path, Diarization)
         threshold = cfg.registry.match_threshold
@@ -63,22 +62,31 @@ class CharactersStage:
                 )
 
         pinned: dict[str, ClusterAssignment] = {}
-        can_pin = assignments_path.exists() and prev_turns_path.exists()
-        if can_pin:
-            pinned = pin(
-                read_json(assignments_path, Assignments),
-                read_json(prev_turns_path, Diarization),
-                turns,
-            )
+        sources: dict[str, str] = {}
+        previous: Assignments | None = None
+        if assignments_path.exists():
+            previous = read_json(assignments_path, Assignments)
+        if previous is not None and previous.turns is not None:
+            prev_turns = Diarization(backend=turns.backend, turns=previous.turns)
+            pinned = pin(previous, prev_turns, turns)
+            sources = pin_sources(previous, prev_turns, turns)
 
         result: dict[str, ClusterAssignment] = {
             ev.cluster: pinned[ev.cluster] for ev in evidence if ev.cluster in pinned
         }
         todo = [ev for ev in evidence if ev.cluster not in pinned]
         with Registry(Workspace(ep.workspace_root).registry_path) as reg:
-            if not can_pin:
+            if previous is None or previous.turns is None:
                 # No earlier run to build on: drop any exemplars it left behind.
                 reg.delete_episode(ep.id)
+            else:
+                # Earlier clusters nothing inherits are matched afresh below: drop their
+                # exemplars first, or they would count twice. Exemplars follow the label.
+                inherited = set(sources.values())
+                for c in previous.clusters:
+                    if c.character_id is not None and c.cluster not in inherited:
+                        reg.delete_exemplars(ep.id, c.cluster)
+                reg.relabel_exemplars(ep.id, {src: cur for cur, src in sources.items()})
             matched = match(
                 todo,
                 reg.actors(),
@@ -107,6 +115,6 @@ class CharactersStage:
                 episode=ep.id,
                 threshold=threshold,
                 clusters=[result[ev.cluster] for ev in evidence],
+                turns=turns.turns,
             ),
         )
-        write_json(prev_turns_path, turns)

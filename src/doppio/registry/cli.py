@@ -42,14 +42,13 @@ def rematch(
         )
         raise typer.Exit(1)
 
-    assignments_path, prev_turns_path = stage.outputs(ep)
+    (assignments_path,) = stage.outputs(ep)
     old: dict[str, int | None] = {}
     if assignments_path.exists():
         old = {c.cluster: c.character_id for c in read_json(assignments_path, Assignments).clusters}
     with Registry(ws.registry_path) as reg:
         reg.delete_episode(ep.id)
     assignments_path.unlink(missing_ok=True)
-    prev_turns_path.unlink(missing_ok=True)
 
     run_stages(ep, ws.config, [stage], from_stage="characters")
 

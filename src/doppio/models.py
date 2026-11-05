@@ -60,3 +60,6 @@ class Assignments(BaseModel):
     episode: str
     threshold: float
     clusters: list[ClusterAssignment]
+    # The turns the cluster labels refer to; the next run pins against them. Written with
+    # the assignments so the two can never disagree. Absent in older files.
+    turns: list[Turn] | None = None

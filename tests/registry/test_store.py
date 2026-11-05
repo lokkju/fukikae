@@ -144,3 +144,30 @@ def test_newer_schema_rejected(tmp_path: Path):
 def test_foreign_keys_on(reg: Registry):
     with pytest.raises(sqlite3.IntegrityError):
         reg.add_exemplars(999, "e1", "c0", np.stack([unit(1, 0)]), 1.0)
+
+
+def test_delete_exemplars_drops_one_cluster_and_recomputes(tmp_path):
+    with Registry(tmp_path / "r.sqlite") as reg:
+        aid, _ = reg.create_actor_with_character(np.array([1, 0, 0], dtype=np.float32))
+        reg.add_exemplars(aid, "e1", "A", np.array([[1, 0, 0]], dtype=np.float32), 5.0)
+        reg.add_exemplars(aid, "e1", "B", np.array([[0, 1, 0]], dtype=np.float32), 5.0)
+        reg.recompute_centroid(aid)
+        reg.delete_exemplars("e1", "B")
+        assert reg.exemplar_count(aid) == 1
+        c = reg.actors()[0].centroid
+        assert c is not None and abs(float(c[0]) - 1.0) < 1e-6
+        reg.delete_exemplars("e1", "A")  # none left: the last centroid stays
+        assert reg.exemplar_count(aid) == 0
+        assert reg.actors()[0].centroid is not None
+
+
+def test_relabel_exemplars_swaps_labels(tmp_path):
+    with Registry(tmp_path / "r.sqlite") as reg:
+        aid, _ = reg.create_actor_with_character(np.array([1, 0, 0], dtype=np.float32))
+        reg.add_exemplars(aid, "e1", "A", np.array([[1, 0, 0]], dtype=np.float32), 5.0)
+        reg.add_exemplars(aid, "e1", "B", np.array([[0, 1, 0]], dtype=np.float32), 5.0)
+        reg.relabel_exemplars("e1", {"A": "B", "B": "A"})
+        reg.delete_exemplars("e1", "A")  # was B's [0, 1, 0]
+        c = reg.actors()[0].centroid
+        assert reg.exemplar_count(aid) == 1
+        assert c is not None and abs(float(c[0]) - 1.0) < 1e-6

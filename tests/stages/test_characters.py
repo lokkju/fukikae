@@ -66,7 +66,9 @@ def test_first_run_creates_actors_for_new_only(tmp_path):
     with registry(ep) as reg:
         assert len(reg.actors()) == 1
         assert reg.exemplar_count(1) == 2 and a["S0"].actor_id == 1
-    assert (ep.work / "05-characters" / "turns.prev.json").exists()
+    stored = assignments(ep).turns
+    assert stored is not None and [t.speaker for t in stored] == ["S0", "S1"]
+    assert not (ep.work / "05-characters" / "turns.prev.json").exists()
 
 
 def test_second_episode_matches_same_character(tmp_path):
@@ -152,6 +154,7 @@ def test_rerun_without_assignments_does_not_duplicate_exemplars(tmp_path):
     first = assignments(ep).clusters[0]
     for p in CharactersStage().outputs(ep):
         p.unlink()
+    assert [p.name for p in CharactersStage().outputs(ep)] == ["assignments.json"]
     CharactersStage().run(ep, CFG)
     again = assignments(ep).clusters[0]
     with registry(ep) as reg:
@@ -168,3 +171,57 @@ def test_previous_extra_is_rematched_not_pinned(tmp_path):
     write_diarize(ep, {"S0": ([unit([1, 0, 0])], 40.0)}, [(0, 20, "S0")])
     CharactersStage().run(ep, CFG)
     assert assignments(ep).clusters[0].status == "new"
+
+
+def test_previous_assignments_without_turns_cannot_pin(tmp_path):
+    ep = make_ep(tmp_path)
+    write_diarize(ep, {"S0": ([unit([1, 0, 0])], 40.0)}, [(0, 20, "S0")])
+    CharactersStage().run(ep, CFG)
+    path = ep.work / "05-characters" / "assignments.json"
+    prev = read_json(path, Assignments)
+    write_json(path, prev.model_copy(update={"turns": None}))
+    CharactersStage().run(ep, CFG)
+    got = assignments(ep).clusters[0]
+    assert got.status == "matched"  # re-matched, not pinned
+    with registry(ep) as reg:
+        assert reg.exemplar_count(1) == 1  # episode's old exemplars were dropped first
+
+
+def test_pin_uses_turns_stored_with_assignments(tmp_path):
+    ep = make_ep(tmp_path)
+    write_diarize(
+        ep,
+        {"A": ([unit([1, 0, 0])], 40.0), "B": ([unit([0, 1, 0])], 40.0)},
+        [(0, 20, "A"), (20, 40, "B")],
+    )
+    CharactersStage().run(ep, CFG)
+    first = {c.cluster: c.character_id for c in assignments(ep).clusters}
+    # labels swapped by the new diarization; only the stored turns say who is who
+    write_diarize(
+        ep,
+        {"A": ([unit([0, 1, 0])], 40.0), "B": ([unit([1, 0, 0])], 40.0)},
+        [(0, 20, "B"), (20, 40, "A")],
+    )
+    CharactersStage().run(ep, CFG)
+    now = {c.cluster: c.character_id for c in assignments(ep).clusters}
+    assert all(c.status == "pinned" for c in assignments(ep).clusters)
+    assert now == {"A": first["B"], "B": first["A"]}
+
+
+def test_orphaned_cluster_exemplars_are_dropped(tmp_path):
+    ep = make_ep(tmp_path)
+    write_diarize(ep, {"S0": ([unit([1, 0, 0])], 40.0)}, [(0, 20, "S0")])
+    CharactersStage().run(ep, CFG)
+    first = assignments(ep).clusters[0]
+    # a re-diarization that only renames the label: pinned, exemplars follow the new label
+    write_diarize(ep, {"S7": ([unit([1, 0, 0])], 40.0)}, [(0, 20, "S7")])
+    CharactersStage().run(ep, CFG)
+    assert assignments(ep).clusters[0].status == "pinned"
+    # S7's speech now sits in a bigger cluster with only 1/3 coverage: nothing inherits it
+    write_diarize(ep, {"X": ([unit([1, 0, 0])], 60.0)}, [(0, 60, "X")])
+    CharactersStage().run(ep, CFG)
+    got = assignments(ep).clusters[0]
+    assert got.status == "matched" and got.character_id == first.character_id
+    with registry(ep) as reg:
+        assert len(reg.actors()) == 1
+        assert reg.exemplar_count(1) == 1

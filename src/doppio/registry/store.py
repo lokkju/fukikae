@@ -233,6 +233,43 @@ class Registry:
             con.execute("DELETE FROM actors WHERE id = ?", (drop,))
             self._recompute(con, keep)
 
+    def delete_exemplars(self, episode: str, cluster: str) -> None:
+        """Remove one cluster's exemplars in an episode and recompute the affected actors.
+
+        Like delete_episode, an actor left with none keeps its last centroid.
+        """
+        with self._tx() as con:
+            affected = [
+                r[0]
+                for r in con.execute(
+                    "SELECT DISTINCT actor_id FROM exemplars WHERE episode = ? AND cluster = ?",
+                    (episode, cluster),
+                )
+            ]
+            con.execute(
+                "DELETE FROM exemplars WHERE episode = ? AND cluster = ?", (episode, cluster)
+            )
+            for aid in affected:
+                self._recompute(con, aid)
+
+    def relabel_exemplars(self, episode: str, mapping: dict[str, str]) -> None:
+        """Rename clusters of an episode's exemplars at once (old -> new; swaps are fine)."""
+        moves = {o: n for o, n in mapping.items() if o != n}
+        if not moves:
+            return
+        tmp = "\x00"
+        with self._tx() as con:
+            for old, new in moves.items():
+                con.execute(
+                    "UPDATE exemplars SET cluster = ? WHERE episode = ? AND cluster = ?",
+                    (tmp + new, episode, old),
+                )
+            for new in moves.values():
+                con.execute(
+                    "UPDATE exemplars SET cluster = ? WHERE episode = ? AND cluster = ?",
+                    (new, episode, tmp + new),
+                )
+
     def delete_episode(self, episode: str) -> None:
         """Remove an episode's exemplars and recompute each affected unlocked actor.
 

@@ -99,32 +99,41 @@ def _intervals(turns: list[Turn]) -> dict[str, list[tuple[float, float]]]:
     return out
 
 
-def pin(
+def pin_sources(
     previous: Assignments, previous_turns: Diarization, current_turns: Diarization
-) -> dict[str, ClusterAssignment]:
-    """Carry earlier assignments onto the current clusters by overlap in time.
+) -> dict[str, str]:
+    """Map each current cluster that pins to the previous cluster it inherits from.
 
-    A current cluster inherits the assignment of the previous cluster it overlaps most
-    when that overlap exceeds half of the current cluster's total turn time. Only
-    assignments with a character (matched, new, pinned) are inherited; `extra` and
-    `review` clusters are matched afresh on each run.
+    A current cluster inherits from the previous cluster it overlaps most in time when that
+    overlap exceeds half of the current cluster's total turn time. Only previous assignments
+    with a character (matched, new, pinned) are inherited; `extra` and `review` clusters are
+    matched afresh on each run.
     """
-    prev_by_label = {c.cluster: c for c in previous.clusters if c.character_id is not None}
+    assigned = {c.cluster for c in previous.clusters if c.character_id is not None}
     prev_iv = _intervals(previous_turns.turns)
-    pinned: dict[str, ClusterAssignment] = {}
+    sources: dict[str, str] = {}
     for label, cur in _intervals(current_turns.turns).items():
         total = sum(e - s for s, e in cur)
         if total <= 0:
             continue
         best_label, best_overlap = None, 0.0
         for plabel, piv in prev_iv.items():
-            if plabel not in prev_by_label:
+            if plabel not in assigned:
                 continue
             ov = sum(max(0.0, min(e, pe) - max(s, ps)) for s, e in cur for ps, pe in piv)
             if ov > best_overlap:
                 best_label, best_overlap = plabel, ov
         if best_label is not None and best_overlap > PIN_OVERLAP * total:
-            pinned[label] = prev_by_label[best_label].model_copy(
-                update={"cluster": label, "status": "pinned"}
-            )
-    return pinned
+            sources[label] = best_label
+    return sources
+
+
+def pin(
+    previous: Assignments, previous_turns: Diarization, current_turns: Diarization
+) -> dict[str, ClusterAssignment]:
+    """Carry earlier assignments onto the current clusters (see `pin_sources`), as `pinned`."""
+    prev_by_label = {c.cluster: c for c in previous.clusters}
+    return {
+        cur: prev_by_label[src].model_copy(update={"cluster": cur, "status": "pinned"})
+        for cur, src in pin_sources(previous, previous_turns, current_turns).items()
+    }
