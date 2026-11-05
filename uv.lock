@@ -1126,6 +1126,7 @@ dependencies = [
     { name = "numpy" },
     { name = "nvidia-ml-py" },
     { name = "pydantic" },
+    { name = "scipy" },
     { name = "typer" },
 ]
 
@@ -1169,6 +1170,7 @@ requires-dist = [
     { name = "pyannote-audio", marker = "extra == 'pyannote'", specifier = ">=4.0.7" },
     { name = "pydantic", specifier = ">=2" },
     { name = "qwen-asr", marker = "extra == 'qwen'", specifier = "==0.0.6" },
+    { name = "scipy", specifier = ">=1.18.1" },
     { name = "speechbrain", marker = "extra == 'pyannote'", specifier = ">=1.1.2" },
     { name = "torchaudio", marker = "extra == 'whisper'", specifier = ">=2.11.1" },
     { name = "transformers", marker = "extra == 'whisper'", specifier = ">=4.57.6,<5" },

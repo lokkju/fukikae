@@ -43,7 +43,7 @@ def _cache_path(ep: Episode) -> Path:
     return ep.workspace_root / ".doppio" / "hashcache.json"
 
 
-def _load_manifest(ep: Episode) -> Manifest:
+def load_manifest(ep: Episode) -> Manifest:
     path = _manifest_path(ep)
     if not path.exists():
         return Manifest()
@@ -53,7 +53,7 @@ def _load_manifest(ep: Episode) -> Manifest:
         return Manifest()
 
 
-def _save_manifest(ep: Episode, manifest: Manifest) -> None:
+def save_manifest(ep: Episode, manifest: Manifest) -> None:
     ep.work.mkdir(parents=True, exist_ok=True)
     write_json(_manifest_path(ep), manifest)
 
@@ -145,7 +145,7 @@ def run_stages(
     start = names.index(from_stage) if from_stage else 0
     stop = names.index(to_stage) + 1 if to_stage else len(stages)
 
-    manifest = _load_manifest(ep)
+    manifest = load_manifest(ep)
     cache = _HashCache(ep)
     ran: list[str] = []
     try:
@@ -173,14 +173,23 @@ def run_stages(
                     finished=datetime.now(UTC),
                     error=f"{type(e).__name__}: {e}",
                 )
-                _save_manifest(ep, manifest)
+                save_manifest(ep, manifest)
                 raise
             # Outputs changed; hash them fresh for later stages' keys.
             manifest.stages[stage.name] = StageRecord(
                 key=key, status="done", started=started, finished=datetime.now(UTC)
             )
-            _save_manifest(ep, manifest)
+            save_manifest(ep, manifest)
             ran.append(stage.name)
     finally:
         cache.save()
     return ran
+
+
+def mark_stale(ep: Episode, stage: str) -> bool:
+    """Forget a stage's manifest record so the next run redoes it; True if there was one."""
+    manifest = load_manifest(ep)
+    if manifest.stages.pop(stage, None) is None:
+        return False
+    save_manifest(ep, manifest)
+    return True

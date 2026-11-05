@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from typer.testing import CliRunner
 
 from doppio.cli import app
-from doppio.job import Manifest, StageRecord, _save_manifest
+from doppio.job import Manifest, StageRecord, save_manifest
 from doppio.registry.store import Registry
 from doppio.workspace import Workspace
 from tests.stages.test_characters import unit, write_diarize
@@ -22,7 +22,7 @@ def setup(tmp_path, done=True):
     if done:
         now = datetime.now(UTC)
         names = ["extract", "separate", "language", "asr", "diarize"]
-        _save_manifest(
+        save_manifest(
             ep,
             Manifest(stages={n: StageRecord(key="k", status="done", started=now) for n in names}),
         )
