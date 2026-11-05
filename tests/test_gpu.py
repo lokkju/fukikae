@@ -88,8 +88,29 @@ def _fake_nvml(count=2, init_error=False):
 
 
 def test_device_string_cuda(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setitem(sys.modules, "pynvml", _fake_nvml())
     assert device_string(Config(gpu_device=1)) == "cuda:1"
+
+
+def test_device_string_unset_env_uses_nvml_index(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setitem(sys.modules, "pynvml", _fake_nvml())
+    assert device_string(Config(gpu_device=0)) == "cuda:0"
+
+
+def test_device_string_maps_through_visible_devices(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,0")
+    monkeypatch.setitem(sys.modules, "pynvml", _fake_nvml())
+    assert device_string(Config(gpu_device=0)) == "cuda:1"
+    assert device_string(Config(gpu_device=1)) == "cuda:0"
+
+
+def test_device_string_card_not_visible(monkeypatch, capsys):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setitem(sys.modules, "pynvml", _fake_nvml())
+    assert device_string(Config(gpu_device=0)) == "cpu"
+    assert "CUDA_VISIBLE_DEVICES" in capsys.readouterr().err
 
 
 def test_device_string_missing_device(monkeypatch):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -61,8 +62,24 @@ def wait_for_vram(
         sleep(pause)
 
 
+def _torch_index(nvml_index: int) -> int | None:
+    """Torch's index for an NVML (PCI bus order) card; None when CUDA_VISIBLE_DEVICES hides it."""
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is None:
+        return nvml_index
+    try:
+        ids = [int(p) for p in visible.split(",") if p.strip()]
+    except ValueError:
+        _stderr_log(f"CUDA_VISIBLE_DEVICES={visible!r} is not a list of indices; using cpu")
+        return None
+    if nvml_index not in ids:
+        _stderr_log(f"GPU {nvml_index} is not in CUDA_VISIBLE_DEVICES={visible}; using cpu")
+        return None
+    return ids.index(nvml_index)
+
+
 def device_string(cfg: Config) -> str:
-    """`cuda:<n>` when NVML sees the configured device, else `cpu`. Never raises."""
+    """`cuda:<n>` (torch's index for the configured NVML card), else `cpu`. Never raises."""
     try:
         import pynvml
 
@@ -70,7 +87,8 @@ def device_string(cfg: Config) -> str:
         try:
             if 0 <= cfg.gpu_device < pynvml.nvmlDeviceGetCount():
                 pynvml.nvmlDeviceGetHandleByIndex(cfg.gpu_device)
-                return f"cuda:{cfg.gpu_device}"
+                idx = _torch_index(cfg.gpu_device)
+                return "cpu" if idx is None else f"cuda:{idx}"
             return "cpu"
         finally:
             pynvml.nvmlShutdown()

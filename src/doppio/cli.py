@@ -1,10 +1,14 @@
 """Command line entry point."""
 
+import os
 from pathlib import Path
 
 import typer
 
 from doppio import __version__
+
+# torch must number cards the way nvidia-smi and NVML do (gpu_device is an NVML index).
+os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
 app = typer.Typer(help="Automatically dub foreign-language TV into English.", no_args_is_help=True)
 
