@@ -72,6 +72,102 @@ def test_sherpa_model_files_are_cached(tmp_path, monkeypatch):
     assert calls == [f"{sherpa.RELEASE}/m.onnx"]
 
 
+def _write_wav(path: Path, seconds: float = 4.0) -> Path:
+    import wave
+
+    t = np.arange(int(seconds * 16000)) / 16000
+    pcm = (np.sin(2 * np.pi * 220 * t) * 8000).astype("<i2")
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(pcm.tobytes())
+    return path
+
+
+SPANS = [(0.0, 1.0), (1.0, 1.2), (2.0, 3.5)]  # the 0.2 s span is padded to 0.5 s
+
+
+def test_wespeaker_embed_body_with_stub_net(tmp_path):
+    import torch
+
+    from fukikae.backends.embed.wespeaker import WespeakerEmbedder
+
+    seen: list[tuple[int, ...]] = []
+
+    def net(x):
+        seen.append(tuple(x.shape))
+        return torch.full((x.shape[0], 256), 3.0) + torch.arange(256) / 100
+
+    e = WespeakerEmbedder({}, "cpu")
+    e._net, e._loaded = net, True  # noqa: SLF001
+    out = e.embed(_write_wav(tmp_path / "a.wav"), SPANS)
+    assert out.shape == (3, 256) and out.dtype == np.float32
+    np.testing.assert_allclose(np.linalg.norm(out, axis=1), 1.0, atol=1e-5)
+    assert seen == [(1, 1, 16000), (1, 1, 8000), (1, 1, 24000)]  # (batch, channel, samples)
+
+
+def test_wavlm_embed_body_with_stub_model(tmp_path):
+    import torch
+
+    from fukikae.backends.embed.wavlm_sv import WavlmSvEmbedder
+
+    calls: list[tuple[int, int]] = []
+
+    class Inputs(dict):
+        def to(self, _dev):
+            return self
+
+    def fe(wavs, sampling_rate, return_tensors, padding):  # noqa: ARG001
+        calls.append((len(wavs), sampling_rate))
+        assert return_tensors == "pt" and len(wavs[0]) >= 8000
+        return Inputs(input_values=torch.zeros(1, len(wavs[0])))
+
+    class Out:
+        embeddings = torch.arange(1.0, 513.0).reshape(1, 512)
+
+    e = WavlmSvEmbedder({}, "cpu")
+    e._fe, e._net, e._loaded = fe, lambda **_kw: Out(), True  # noqa: SLF001
+    out = e.embed(_write_wav(tmp_path / "a.wav"), SPANS)
+    assert out.shape == (3, 512)
+    np.testing.assert_allclose(np.linalg.norm(out, axis=1), 1.0, atol=1e-5)
+    assert calls == [(1, 16000)] * 3
+
+
+@pytest.mark.parametrize("name", ["campplus", "eres2netv2", "titanet"])
+def test_sherpa_embed_body_with_stub_extractor(name, tmp_path):
+    from fukikae.backends.embed import sherpa
+
+    cls = {
+        "campplus": sherpa.CampplusEmbedder,
+        "eres2netv2": sherpa.Eres2netv2Embedder,
+        "titanet": sherpa.TitanetEmbedder,
+    }[name]
+    fed: list[tuple[int, int, bool]] = []
+
+    class Stream:
+        def accept_waveform(self, sample_rate, waveform):
+            fed.append((sample_rate, len(waveform), waveform.dtype == np.float32))
+
+        def input_finished(self):
+            fed.append((0, 0, True))
+
+    class Extractor:
+        def create_stream(self):
+            return Stream()
+
+        def compute(self, _stream):
+            return [float(i + 1) for i in range(cls.dim)]  # a plain list, as sherpa returns
+
+    e = cls({}, "cpu")
+    e._ex, e._loaded = Extractor(), True  # noqa: SLF001
+    out = e.embed(_write_wav(tmp_path / "a.wav"), SPANS)
+    assert out.shape == (3, cls.dim) and out.dtype == np.float32
+    np.testing.assert_allclose(np.linalg.norm(out, axis=1), 1.0, atol=1e-5)
+    waves = [f for f in fed if f[0]]
+    assert waves == [(16000, 16000, True), (16000, 8000, True), (16000, 24000, True)]
+
+
 class _Member:
     kind = "embed"
     loaded: list[str] = []
@@ -103,9 +199,18 @@ def test_fusion_concatenates_normalized_members_and_renormalizes(monkeypatch):
         seen.append(cfg)
         return made[cfg.backend]
 
+    class A:
+        dim = 3
+
+    class B:
+        dim = 2
+
     monkeypatch.setattr(fusion, "create", fake_create)
+    monkeypatch.setattr(fusion, "backend_class", lambda _k, n: {"a": A, "b": B}[n])
     f = fusion.FusionEmbedder({"members": ["a", "b"], "member_options": {"b": {"x": 1}}}, "cpu")
+    assert f.dim == 0
     f.load()
+    assert f.dim == 5  # known before the first embed
     out = f.embed(Path("x.wav"), [(0, 1), (1, 2), (2, 3)])
     assert out.shape == (3, 5) and f.dim == 5
     np.testing.assert_allclose(np.linalg.norm(out, axis=1), 1.0, atol=1e-6)
@@ -133,8 +238,14 @@ def test_fusion_requires_load(tmp_path):
         FusionEmbedder({"members": ["a", "b"]}, "cpu").embed(tmp_path / "a.wav", [(0.0, 1.0)])
 
 
-@pytest.mark.gpu
-@pytest.mark.parametrize("name", sorted(NEW))
+def _real_params():
+    return [
+        pytest.param(n, marks=pytest.mark.slow if NEW[n][3] == "sherpa" else pytest.mark.gpu)
+        for n in sorted(NEW)
+    ]
+
+
+@pytest.mark.parametrize("name", _real_params())
 def test_real_model_separates_speakers_on_fairytail_e12(name):
     import importlib
 
@@ -151,7 +262,8 @@ def test_real_model_separates_speakers_on_fairytail_e12(name):
     segs = [s for s in segments(ws, eid, "diarization", lines) if s.label][:60]
     assert len({s.label for s in segs}) >= 2
     mod, cls, dim, _ = NEW[name]
-    e = getattr(importlib.import_module(mod), cls)({}, "cuda:0")
+    device = "cpu" if NEW[name][3] == "sherpa" else "cuda:0"
+    e = getattr(importlib.import_module(mod), cls)({}, device)
     e.load()
     try:
         audio = ws.work_dir(eid) / "01-separate" / "vocals_16k.wav"
@@ -165,4 +277,6 @@ def test_real_model_separates_speakers_on_fairytail_e12(name):
     for i in range(len(segs)):
         for j in range(i + 1, len(segs)):
             (same if segs[i].label == segs[j].label else diff).append(sim[i, j])
-    assert np.mean(same) > np.mean(diff)
+    # absolute floor: a broken embedding scores near 0; wespeaker measures 0.49, campplus 0.44
+    assert np.mean(same) >= 0.3
+    assert np.mean(same) > np.mean(diff) + 0.03

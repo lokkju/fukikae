@@ -17,7 +17,9 @@ class WespeakerEmbedder:
     kind: ClassVar[str] = "embed"
     languages: ClassVar[frozenset[str] | Literal["*"]] = "*"
     devices: ClassVar[frozenset[str]] = frozenset({"cuda", "cpu"})
-    vram_mb: ClassVar[int] = 700  # torch peak 40 MiB + CUDA context, estimated
+    vram_mb: ClassVar[int] = (
+        660  # measured 548 MiB (nvidia-smi delta on card 0, with context) + 20%
+    )
     dim: ClassVar[int] = 256
     extra: ClassVar[str] = "pyannote"
 

@@ -13,7 +13,7 @@ from typing import Any, ClassVar, Literal
 import numpy as np
 
 from fukikae.backends.embed._common import l2_rows
-from fukikae.backends.loader import create
+from fukikae.backends.loader import backend_class, create
 from fukikae.config import BackendConfig
 
 
@@ -39,6 +39,7 @@ class FusionEmbedder:
         self.dim = 0  # type: ignore[misc]
 
     def load(self) -> None:
+        self.dim = sum(int(backend_class("embed", m).dim) for m in self.members)  # type: ignore[attr-defined,misc]
         self._loaded = True
 
     def unload(self) -> None:
@@ -57,7 +58,9 @@ class FusionEmbedder:
                 parts.append(l2_rows(np.asarray(backend.embed(audio, spans))))  # type: ignore[attr-defined]
             finally:
                 backend.unload()
-        self.dim = sum(p.shape[1] for p in parts)  # type: ignore[misc]
+        got = sum(p.shape[1] for p in parts)
+        if got != self.dim:
+            raise RuntimeError(f"fusion: members gave {got} dims, declared {self.dim}")
         if not spans:
             return np.zeros((0, self.dim), dtype=np.float32)
         return l2_rows(np.concatenate(parts, axis=1))
