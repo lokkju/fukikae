@@ -24,7 +24,7 @@ Matchers by name (`make_matcher`), each taking `threshold` and `min_new_seconds`
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
@@ -109,8 +109,8 @@ class AllEpisodesMatcher(Protocol):
     def fit_all(
         self,
         order: list[str],
-        embs: dict[str, np.ndarray],
-        segs: dict[str, Sequence[SegmentLike]],
+        embs: Mapping[str, np.ndarray],
+        segs: Mapping[str, Sequence[SegmentLike]],
     ) -> dict[str, list[int | None]]: ...
 
 
@@ -308,10 +308,12 @@ class _ScoringMatcher:
 class KnnMatcher(_ScoringMatcher):
     """Each of a cluster's rows (its longest `max_rows`) takes its `k` nearest exemplar rows
     among all actors' and votes for their actors with their cosine similarity; the actor
-    with the largest vote total is the cluster's best, scored by the mean similarity of the
-    votes it got. A speaker heard in several registers keeps the exemplars of each, so a
-    cluster in one register finds its own exemplars where the actor's mean lies between
-    registers. Options: `k` (default 5)."""
+    with the largest vote total is the cluster's best. Its score is the cosine of the
+    cluster's mean with the local centroid (normalized mean) of the exemplar rows that voted
+    for it: the centroid matcher's mean-vs-mean scale, so one threshold reads the same for
+    both (single rows are noisy, and row-to-row similarity runs far lower). A speaker heard
+    in several registers keeps the exemplars of each, so a cluster in one register finds its
+    own exemplars where the actor's mean lies between registers. Options: `k` (default 5)."""
 
     name: ClassVar[str] = "knn"
 
@@ -344,12 +346,19 @@ class KnnMatcher(_ScoringMatcher):
         sims = _unit_rows(rows) @ self._x.T  # (rows, exemplars)
         k = min(self.k, sims.shape[1])
         nn = np.argpartition(-sims, k - 1, axis=1)[:, :k]
-        votes: dict[int, list[float]] = {}
+        votes: dict[int, float] = {}
+        voted: dict[int, set[int]] = {}
         for r in range(len(sims)):
             for j in nn[r]:
-                votes.setdefault(int(self._owner[j]), []).append(float(sims[r, j]))
-        aid = max(votes, key=lambda a: (sum(votes[a]), -a))
-        return aid, float(np.mean(votes[aid]))
+                a = int(self._owner[j])
+                votes[a] = votes.get(a, 0.0) + float(sims[r, j])
+                voted.setdefault(a, set()).add(int(j))
+        aid = max(votes, key=lambda a: (votes[a], -a))
+        local = mean_embedding(self._x[sorted(voted[aid])])
+        if local is None:
+            return None
+        m = np.asarray(mean, dtype=np.float64)
+        return aid, float(local @ (m / (np.linalg.norm(m) or 1.0)))
 
 
 def _spherical_kmeans(x: np.ndarray, k: int, iters: int = 25) -> np.ndarray:
@@ -515,9 +524,11 @@ class LdaMatcher(_ScoringMatcher):
 
 
 class JointMatcher:
-    """One agglomerative clustering of every episode's segments at once: average linkage on
-    cosine similarity (the mean pairwise similarity of two groups' rows), merging the most
-    similar pair while it reaches `threshold`, never merging two groups that hold segments
+    """One agglomerative clustering of every episode's segments at once, merging the most
+    similar pair of groups while their similarity reaches `threshold`: with
+    `linkage="centroid"` (default) the cosine of the two groups' mean rows, the scale the
+    centroid matcher's threshold is on; with `"average"` the mean pairwise cosine of their
+    rows, which noisy single rows pull far lower; never merging two groups that hold segments
     of one episode overlapping in time (cannot-link; the constraint carries through every
     merge). `seed="clusters"` starts each episode's diarization cluster as one group
     (segments without a cluster start alone); `seed="segments"` starts every segment alone.
@@ -532,9 +543,13 @@ class JointMatcher:
         threshold: float = 0.6,
         min_new_seconds: float = 20.0,
         seed: str = "clusters",
+        linkage: str = "centroid",
     ) -> None:
         if seed not in ("clusters", "segments"):
             raise ValueError(f'joint: seed must be "clusters" or "segments", not {seed!r}')
+        if linkage not in ("centroid", "average"):
+            raise ValueError(f'joint: linkage must be "centroid" or "average", not {linkage!r}')
+        self.linkage = linkage
         self.threshold = float(threshold)
         self.min_new_seconds = float(min_new_seconds)
         self.seed = seed
@@ -542,8 +557,8 @@ class JointMatcher:
     def fit_all(
         self,
         order: list[str],
-        embs: dict[str, np.ndarray],
-        segs: dict[str, Sequence[SegmentLike]],
+        embs: Mapping[str, np.ndarray],
+        segs: Mapping[str, Sequence[SegmentLike]],
     ) -> dict[str, list[int | None]]:
         items: list[tuple[str, int]] = []
         rows: list[np.ndarray] = []
@@ -591,7 +606,13 @@ class JointMatcher:
                     if ga != gb:
                         cannot[ga, gb] = cannot[gb, ga] = True
         alive = np.ones(n_groups, dtype=bool)
-        sim = (sums @ sums.T) / np.outer(counts, counts)
+
+        def scale(i: np.ndarray | int) -> np.ndarray:
+            if self.linkage == "average":
+                return np.asarray(counts[i], dtype=np.float64)
+            return np.asarray(np.linalg.norm(sums[i], axis=-1), dtype=np.float64)
+
+        sim = (sums @ sums.T) / np.outer(scale(np.arange(n_groups)), scale(np.arange(n_groups)))
         sim[cannot] = -np.inf
         np.fill_diagonal(sim, -np.inf)
         parent = np.arange(n_groups)
@@ -607,7 +628,8 @@ class JointMatcher:
             parent[parent == b] = a
             cannot[a] |= cannot[b]
             cannot[:, a] = cannot[a]
-            row = (sums @ sums[a]) / (counts * counts[a])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                row = (sums @ sums[a]) / (scale(np.arange(n_groups)) * scale(a))
             row[~alive] = -np.inf
             row[cannot[a]] = -np.inf
             row[a] = -np.inf

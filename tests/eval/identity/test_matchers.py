@@ -287,3 +287,51 @@ def test_simulate_drives_a_joint_matcher():
     assert by[("E01", "B")] == by[("E02", "B")]
     with pytest.raises(ValueError, match="state"):
         simulate(["E01", "E02"], m, segs, embs, state=RegistryState())
+
+
+# ---- score scale: noisy rows, comparable to the centroid matcher's mean-vs-mean cosine ----
+
+
+def noisy_voice(base: np.ndarray, n: int, rng: np.random.Generator) -> np.ndarray:
+    """Rows whose pairwise cosine is ~0.5 while their mean points along `base`."""
+    return np.vstack([unit(base + rng.normal(0, 0.45, DIM)) for _ in range(n)])
+
+
+def test_knn_scores_on_the_centroid_scale():
+    """knn's score is the cosine of the cluster mean with the local centroid (normalized
+    mean) of the winner's voted exemplar rows, the centroid matcher's mean-vs-mean scale,
+    not the mean row-to-row similarity, which noise pulls far lower."""
+    rng = np.random.default_rng(11)
+    st = RegistryState()
+    st.create(noisy_voice(E[0], 40, rng))
+    st.create(noisy_voice(E[5], 40, rng))
+    rows = noisy_voice(E[0], 20, rng)
+    m = KnnMatcher(k=5)
+    m._prepare(st)  # noqa: SLF001
+    mean = unit(rows.mean(axis=0))
+    got = m._best(rows, mean)  # noqa: SLF001
+    assert got is not None
+    aid, score = got
+    ex = np.vstack([*st.exemplars[1], *st.exemplars[2]])  # actor 1's rows first (40)
+    sims = rows @ ex.T
+    voted = sorted({int(j) for r in range(len(rows)) for j in np.argsort(-sims[r])[:5] if j < 40})
+    assert aid == 1
+    assert score == pytest.approx(float(mean @ unit(ex[voted].mean(axis=0))), abs=1e-5)
+    assert score > float(np.mean(np.sort(sims, axis=1)[:, -5:])) + 0.1
+
+
+def test_joint_centroid_linkage_links_noisy_rows_of_one_voice():
+    rng = np.random.default_rng(12)
+    segs = {
+        "E01": [Seg("E01", 3.0 * i, 3.0 * i + 3.0, cluster="S0") for i in range(20)],
+        "E02": [Seg("E02", 3.0 * i, 3.0 * i + 3.0, cluster="S0") for i in range(20)],
+    }
+    embs = {"E01": noisy_voice(E[0], 20, rng), "E02": noisy_voice(E[0], 20, rng)}
+    cen = JointMatcher(threshold=0.6, min_new_seconds=0.0).fit_all(["E01", "E02"], embs, segs)
+    assert set(cen["E01"]) == set(cen["E02"]) == {1}
+    avg = JointMatcher(threshold=0.6, min_new_seconds=0.0, linkage="average").fit_all(
+        ["E01", "E02"], embs, segs
+    )
+    assert set(avg["E01"]) != set(avg["E02"])
+    with pytest.raises(ValueError, match="linkage"):
+        JointMatcher(linkage="single")
