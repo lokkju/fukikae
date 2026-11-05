@@ -1,0 +1,52 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# ///
+"""Cut 90 s test clips (stream copy) of the two Chimera episodes into $DOPPIO_TEST_MEDIA.
+
+Reads from ~/doppio-ws/media/Chimera (2021)/Season 1/ (override: DOPPIO_SOURCE_MEDIA) and
+writes S01E01-clip.mkv and S01E02-clip.mkv, plus S01E01-full.mkv and S01E02-full.mkv symlinks.
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+EPISODES = ("S01E01", "S01E02")
+
+
+def main() -> int:
+    dest_env = os.environ.get("DOPPIO_TEST_MEDIA")
+    if not dest_env:
+        print("DOPPIO_TEST_MEDIA is not set; refusing to run", file=sys.stderr)
+        return 2
+    dest = Path(dest_env).expanduser()
+    src = Path(
+        os.environ.get("DOPPIO_SOURCE_MEDIA", "~/doppio-ws/media/Chimera (2021)/Season 1")
+    ).expanduser()
+    dest.mkdir(parents=True, exist_ok=True)
+    for code in EPISODES:
+        matches = sorted(src.glob(f"*{code}*.mkv"))
+        if not matches:
+            print(f"no {code} episode under {src}", file=sys.stderr)
+            return 1
+        episode = matches[0].resolve()
+        clip = dest / f"{code}-clip.mkv"
+        subprocess.run(
+            [
+                "ffmpeg", "-nostdin", "-v", "error", "-y",
+                "-ss", "00:05:00", "-i", str(episode), "-t", "90",
+                "-map", "0", "-c", "copy", str(clip),
+            ],
+            check=True,
+        )  # fmt: skip
+        link = dest / f"{code}-full.mkv"
+        link.unlink(missing_ok=True)
+        link.symlink_to(episode)
+        print(f"{clip}  {link} -> {episode}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
