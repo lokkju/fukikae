@@ -156,6 +156,8 @@ def test_interrupted_stage_reruns(ep, cfg):
     # The interrupted write left the previous complete output untouched, no temp files.
     assert (ep.work / "b.txt").read_text() == "x!"
     assert list(ep.work.glob(".*.tmp*")) == []
+    m = read_json(ep.work / "manifest.json", Manifest)
+    assert m.stages["b"].status == "failed"
     assert run_stages(ep, cfg2, [FakeA(counts), FakeB(counts)]) == ["b"]
     assert (ep.work / "b.txt").read_text() == "y!"
 
