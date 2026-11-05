@@ -101,6 +101,9 @@ def auto_label_cmd(
     min_overlap: float = typer.Option(
         0.6, "--min-overlap", min=0.0, max=1.0, help="Share of a span one name must cover."
     ),
+    alias: list[str] = typer.Option(
+        None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
+    ),
     report: bool = typer.Option(
         False, "--report", help="Print per-cluster purity and name spread."
     ),
@@ -111,7 +114,13 @@ def auto_label_cmd(
 
     refs = [e.strip() for e in episodes.split(",") if e.strip()]
     try:
-        result = autolabel.auto_label(workspace, refs, out, subtitle_track, min_overlap)
+        aliases: dict[str, str] = {}
+        for item in alias or []:
+            src, sep, dst = item.partition("=")
+            if not sep or not src.strip() or not dst.strip():
+                raise ValueError(f"--alias {item!r}: expected FROM=TO")
+            aliases[src.strip()] = dst.strip()
+        result = autolabel.auto_label(workspace, refs, out, subtitle_track, min_overlap, aliases)
     except (FileNotFoundError, ValueError, MediaError) as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e

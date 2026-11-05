@@ -165,3 +165,84 @@ def test_cli_auto_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     assert r.exit_code == 0, r.output
     assert (out / "labels.yaml").is_file()
     assert "purity" in r.output
+
+
+def test_name_variants_collapse_and_thought_suffixes() -> None:
+    text = (
+        HEADER
+        + _dlg("0:00:01.00", "0:00:02.00", "MAKAROV (WRAITH)")
+        + _dlg("0:00:03.00", "0:00:04.00", "MAKAROV(WRAITH)")
+        + _dlg("0:00:05.00", "0:00:06.00", "MAKAROV  (WRAITH)")
+        + _dlg("0:00:07.00", "0:00:08.00", "MAKAROV")
+        + _dlg("0:00:09.00", "0:00:10.00", "WRAITH/I")
+        + _dlg("0:00:11.00", "0:00:12.00", "erza/os")
+        + _dlg("0:00:13.00", "0:00:14.00", "GRAY (V.O.)")
+        + _dlg("0:00:15.00", "0:00:16.00", "NATSU/HAPPY")
+        + _dlg("0:00:17.00", "0:00:18.00", "NATSU/I/HAPPY")
+    )
+    names = [ln.name for ln in parse_ass(text)]
+    assert names == [
+        "MAKAROV (WRAITH)",
+        "MAKAROV (WRAITH)",
+        "MAKAROV (WRAITH)",
+        "MAKAROV",
+        "WRAITH",
+        "erza",
+        "GRAY",
+    ]
+
+
+def test_alias_applies_case_insensitively() -> None:
+    text = (
+        HEADER + _dlg("0:00:01.00", "0:00:02.00", "Nabaru") + _dlg("0:00:03.00", "0:00:04.00", "X")
+    )
+    assert [ln.name for ln in parse_ass(text, {"NABARU": "NEBARU"})] == ["NEBARU", "X"]
+
+
+def _alias_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    media = _setup(tmp_path, monkeypatch)
+    ass = tmp_path / "ws/.fukikae/episodes/S01E01/eval/subtitles.ass"
+    ass.write_text(
+        HEADER
+        + _dlg("0:00:00.00", "0:00:04.00", "NABARU")
+        + _dlg("0:00:05.00", "0:00:09.00", "LUCY")
+        + _dlg("0:00:10.00", "0:00:14.00", "NEBARU")
+        + _dlg("0:00:15.00", "0:00:16.00", "MAKAROV")
+        + _dlg("0:00:17.00", "0:00:18.00", "MAKAROV (WRAITH)"),
+        encoding="utf-8",
+    )
+    return media
+
+
+def _labels(out: Path) -> list[str]:
+    return [c.label for c in load_labels(out / "labels.yaml") if c.episode == "S01E01"]
+
+
+def test_alias_option_and_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    media = _alias_setup(tmp_path, monkeypatch)
+    refs = [str(media / "Show - S01E01.mkv")]
+    root = tmp_path / "ws"
+    autolabel.auto_label(root, refs, tmp_path / "o1")
+    assert _labels(tmp_path / "o1") == ["NABARU", "NEBARU", "LUCY"]
+    autolabel.auto_label(root, refs, tmp_path / "o2", aliases={"nabaru": "NEBARU"})
+    assert _labels(tmp_path / "o2") == ["NEBARU", "NEBARU", "LUCY"]
+    (root / "labels-aliases.yaml").write_text("NABARU: NEBARU\n", encoding="utf-8")
+    autolabel.auto_label(root, refs, tmp_path / "o3")
+    assert _labels(tmp_path / "o3") == ["NEBARU", "NEBARU", "LUCY"]
+
+
+def test_report_lists_collapses_and_suggestions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media = _alias_setup(tmp_path, monkeypatch)
+    refs = [str(media / "Show - S01E01.mkv")]
+    result = autolabel.auto_label(tmp_path / "ws", refs, tmp_path / "o")
+    report = autolabel.format_report(result)
+    assert "alias suggestions" in report
+    assert "NABARU = NEBARU" in report or "NEBARU = NABARU" in report
+    assert "MAKAROV = MAKAROV (WRAITH)" in report
+    result = autolabel.auto_label(
+        tmp_path / "ws", refs, tmp_path / "o", aliases={"NABARU": "NEBARU"}
+    )
+    report = autolabel.format_report(result)
+    assert "NABARU -> NEBARU" in report
