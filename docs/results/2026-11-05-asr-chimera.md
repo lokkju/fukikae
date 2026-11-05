@@ -7,7 +7,22 @@ Character error rate against the episode's Korean subtitle track (stream 2, `sub
 | qwen3_asr | Qwen/Qwen3-ASR-1.7B (qwen-asr 0.0.6) | 0.1251 | 121 s |
 | faster_whisper | large-v3 (faster-whisper 1.2.1, ctranslate2 4.8.5) | 0.1287 | 140 s |
 
-Winner: `qwen3_asr`, by 0.0036 CER (about 3% relative) and 19 s. That is a narrow margin on one episode; the subtitle track is not a verbatim transcript (it drops repeated words and some interjections), so both numbers carry a floor of reference mismatch. Qwen3-ASR produced 152 segments and faster-whisper 610 (VAD removed 32:08 of the audio before decoding), which has no effect on the CER but matters for downstream segmentation.
+Result: a tie within reference noise. The 0.0036 CER gap (about 3% relative) comes from one episode and one run, and does not separate the backends. With Latin and digit runs removed from both sides the two are 0.1177 and 0.1173 (faster_whisper marginally ahead), see below.
+
+Run order was qwen3_asr first, then faster_whisper, in one process, one run each. The model weights were already on disk in the Hugging Face cache (downloaded earlier that day by the backend tests); neither model had been loaded in that process before, so each runtime includes its own load and CUDA warm-up, and qwen3_asr also paid the process's first CUDA initialization. The 19 s runtime gap is a single measurement under those conditions and is not evidence of a speed difference.
+
+`qwen3_asr` is the provisional Korean default, mainly because it produced 152 segments against 610 for faster-whisper (VAD removed 32:08 of the audio before decoding), which suits downstream segmentation, and on the small runtime and CER edge. Confirm on a second episode before treating it as settled.
+
+## Effect of Latin text in the reference
+
+The subtitle keeps some English as Latin text (for example `ANFO`, `IED`, `social psychology`, `spontaneous human combustion`). After normalization the reference has 7100 characters, 262 of them (41 tokens) Latin letters or digits. A Hangul transcription of those words can never match them, so every such token is a guaranteed error on both sides, about 3.7% of the reference.
+
+| scoring | qwen3_asr | faster_whisper |
+|---|---|---|
+| as reported | 0.1251 | 0.1287 |
+| Latin/digit runs removed from reference and hypothesis | 0.1177 | 0.1173 |
+
+(Computed from the saved transcripts and the srt, no model re-run.) Qwen3-ASR emitted 125 Latin characters and faster-whisper 144; where they differ from the reference spelling they cost extra, which is the 0.0036 gap that disappears once those runs are removed. The Korean reference text itself is the same for both.
 
 ## Command
 
@@ -35,7 +50,7 @@ Reference first, hypothesis second (normalized text, no spaces).
 qwen3_asr:
 
 - English loanwords written in Hangul phonetically where the subtitle keeps Latin text: `spontaneoushumancombustion` against `스펀티네이스휴먼컴버스전`; `socialpsychology` against `소셜사이클러즈` (mishears the word).
-- Dropped a repeated shout the subtitle keeps: `야야야아어떻게` against `어어떻게`.
+- Dropped a repeated shout the subtitle keeps: `야야야아어떻게` against `어어떻게` (the subtitle does keep repeats, e.g. `없어 없어 없어 없어`).
 - Overlapping speech: `돈이어디서나서요` against `돈이어디서나왔어음아요`.
 
 faster_whisper:
