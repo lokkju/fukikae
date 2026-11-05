@@ -28,7 +28,10 @@ whisper = [
 qwen = [
     "qwen-asr==0.0.6",
 ]
-pyannote = []
+pyannote = [
+    "pyannote-audio>=4.0.7",
+    "speechbrain>=1.1.2",
+]
 
 [project.entry-points."doppio.backends.asr"]
 faster_whisper = "doppio.backends.asr.faster_whisper:FasterWhisperTranscriber"
@@ -41,6 +44,12 @@ qwen3_asr = "doppio.backends.asr.qwen3:Qwen3AsrTranscriber"
 [project.entry-points."doppio.backends.align"]
 wav2vec2 = "doppio.backends.align.wav2vec2:Wav2Vec2Aligner"
 qwen3_forced_aligner = "doppio.backends.align.qwen3:Qwen3ForcedAligner"
+
+[project.entry-points."doppio.backends.diarize"]
+pyannote = "doppio.backends.diarize.pyannote:PyannoteDiarizer"
+
+[project.entry-points."doppio.backends.embed"]
+ecapa = "doppio.backends.embed.ecapa:EcapaEmbedder"
 
 [project.entry-points."doppio.backends.separation"]
 demucs = "doppio.backends.separation.demucs:DemucsSeparator"
