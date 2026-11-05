@@ -17,7 +17,7 @@ class WavlmSvEmbedder:
     kind: ClassVar[str] = "embed"
     languages: ClassVar[frozenset[str] | Literal["*"]] = "*"
     devices: ClassVar[frozenset[str]] = frozenset({"cuda", "cpu"})
-    vram_mb: ClassVar[int] = 1500
+    vram_mb: ClassVar[int] = 1100  # torch peak 452 MiB + CUDA context, estimated
     dim: ClassVar[int] = 512
     extra: ClassVar[str] = "wavlm"
 
