@@ -89,6 +89,7 @@ from typer.testing import CliRunner
 from doppio.cli import app
 from doppio import __version__
 
+
 def test_version():
     r = CliRunner().invoke(app, ["--version"])
     assert r.exit_code == 0
@@ -120,15 +121,25 @@ def test_version():
 
 ```python
 def test_transcript_roundtrip(tmp_path):
-    t = Transcript(language="ko", backend="x", word_timing=True,
-                   segments=[Segment(start=0.0, end=1.5, text="안녕", words=[Word(start=0.0, end=1.5, text="안녕")])])
+    t = Transcript(
+        language="ko",
+        backend="x",
+        word_timing=True,
+        segments=[
+            Segment(start=0.0, end=1.5, text="안녕", words=[Word(start=0.0, end=1.5, text="안녕")])
+        ],
+    )
     write_json(tmp_path / "t.json", t)
     assert read_json(tmp_path / "t.json", Transcript) == t
 
+
 def test_read_rejects_newer_schema(tmp_path):
-    (tmp_path / "t.json").write_text('{"schema_version": 99, "language": "ko", "backend": "x", "word_timing": false, "segments": []}')
+    (tmp_path / "t.json").write_text(
+        '{"schema_version": 99, "language": "ko", "backend": "x", "word_timing": false, "segments": []}'
+    )
     with pytest.raises(ArtifactVersionError):
         read_json(tmp_path / "t.json", Transcript)
+
 
 def test_atomic_path_leaves_nothing_on_error(tmp_path):
     target = tmp_path / "a.wav"
@@ -161,14 +172,19 @@ def test_atomic_path_leaves_nothing_on_error(tmp_path):
 
 ```python
 def test_language_override_wins(tmp_path):
-    (tmp_path / "doppio.toml").write_text('[asr]\nbackend="faster_whisper"\nmodel="large-v3"\n[asr.lang.ko]\nbackend="qwen3_asr"\nmodel="Qwen/Qwen3-ASR-1.7B"\n')
+    (tmp_path / "doppio.toml").write_text(
+        '[asr]\nbackend="faster_whisper"\nmodel="large-v3"\n[asr.lang.ko]\nbackend="qwen3_asr"\nmodel="Qwen/Qwen3-ASR-1.7B"\n'
+    )
     c = load_config(tmp_path, user_config=None)
     assert c.resolve("asr", "ko") == BackendConfig("qwen3_asr", {"model": "Qwen/Qwen3-ASR-1.7B"})
     assert c.resolve("asr", "fr") == BackendConfig("faster_whisper", {"model": "large-v3"})
 
-def test_override_inherits_backend_and_options(tmp_path): ...
+
+def test_override_inherits_backend_and_options(tmp_path):
+    ...
     # [translate] backend="openai_compat" model="a" max_speed=1.25 ; [translate.pair.ko-en] model="b"
     # resolve("translate", pair="ko-en") == BackendConfig("openai_compat", {"model": "b", "max_speed": 1.25})
+
 
 def test_workspace_overrides_user_config(tmp_path): ...
 def test_missing_backend_raises(tmp_path): ...  # ConfigError mentions "diarize"
@@ -203,9 +219,11 @@ def test_create_unknown_lists_installed(fake_eps):
     with pytest.raises(ConfigError, match="fake"):
         create("asr", BackendConfig("nope", {}), "cpu")
 
+
 def test_create_passes_options(fake_eps):
     b = create("asr", BackendConfig("fake", {"model": "m"}), "cpu")
     assert b.options == {"model": "m"}
+
 
 def test_import_failure_names_extra(broken_ep): ...  # BackendUnavailable mentions "doppio[whisper]"
 def test_backends_list_cli(fake_eps): ...  # output contains "asr" and "fake"
@@ -233,13 +251,23 @@ def test_backends_list_cli(fake_eps): ...  # output contains "asr" and "fake"
 - [ ] **Step 1: Write the failing tests** with two fake stages (`a` writes `a.txt` from a config value; `b` reads `a.txt`, writes `b.txt`) and a call counter:
 
 ```python
-def test_second_run_skips(ep, cfg): run_stages(...); assert run_stages(...) == []
+def test_second_run_skips(ep, cfg):
+    run_stages(...)
+    assert run_stages(...) == []
+
+
 def test_config_change_reruns_downstream(ep, cfg): ...  # change a's option -> ["a", "b"]
-def test_same_output_content_stops_propagation(ep, cfg): ...  # a's key changes but writes identical a.txt -> ["a"]
+def test_same_output_content_stops_propagation(
+    ep, cfg
+): ...  # a's key changes but writes identical a.txt -> ["a"]
 def test_hand_edit_reruns_only_downstream(ep, cfg): ...  # edit a.txt -> ["b"]
 def test_from_stage_forces(ep, cfg): ...  # from_stage="b" -> ["b"]
-def test_failure_records_and_reraises(ep, cfg): ...  # b raises; manifest b.status == "failed"; a still "done"
-def test_interrupted_stage_reruns(ep, cfg): ...  # b raises KeyboardInterrupt after writing via atomic_path; b.txt absent; next run runs b
+def test_failure_records_and_reraises(
+    ep, cfg
+): ...  # b raises; manifest b.status == "failed"; a still "done"
+def test_interrupted_stage_reruns(
+    ep, cfg
+): ...  # b raises KeyboardInterrupt after writing via atomic_path; b.txt absent; next run runs b
 ```
 
 - [ ] **Step 2:** Run, expect FAIL.
@@ -283,22 +311,39 @@ def test_interrupted_stage_reruns(ep, cfg): ...  # b raises KeyboardInterrupt af
 
 ```python
 def test_episode_id_from_awkward_path(tmp_path):
-    p = tmp_path / "Chimera (2021)" / "Season 1" / "Chimera - S01E01 - A Strange Shadow WEBDL-1080p.mkv"
-    ...; assert ws.find_episode(str(p)).id == "S01E01"
+    p = (
+        tmp_path
+        / "Chimera (2021)"
+        / "Season 1"
+        / "Chimera - S01E01 - A Strange Shadow WEBDL-1080p.mkv"
+    )
+    ...
+    assert ws.find_episode(str(p)).id == "S01E01"
+
 
 def test_choose_track_prefers_source_language():
-    probe = ProbeResult(audio=[AudioTrack(1, "aac", 2, "eng", None, True), AudioTrack(2, "aac", 6, "jpn", None, False)], subtitles=[])
+    probe = ProbeResult(
+        audio=[
+            AudioTrack(1, "aac", 2, "eng", None, True),
+            AudioTrack(2, "aac", 6, "jpn", None, False),
+        ],
+        subtitles=[],
+    )
     assert choose_audio_track(probe, "ja", None).index == 2
-    assert choose_audio_track(probe, None, None).index == 2   # first non-English
+    assert choose_audio_track(probe, None, None).index == 2  # first non-English
+
 
 @pytest.mark.media
 def test_extract_on_readonly_source_with_spaces(tmp_path, readonly_copy):
     # readonly_copy: a fixture copying a generated 5 s 5.1 test tone mkv (made with ffmpeg lavfi) into
     # "dir (x)/it's a file.mkv" and chmod -R a-w on its directory
-    ...; run_stages(ep, cfg, [ExtractStage()])
+    ...
+    run_stages(ep, cfg, [ExtractStage()])
     info = soundfile.info(ep.work / "00-extract" / "audio.wav")
     assert (info.samplerate, info.channels) == (44100, 2)
-    assert sorted(readonly_copy.parent.iterdir()) == [readonly_copy]  # nothing written beside the source
+    assert sorted(readonly_copy.parent.iterdir()) == [
+        readonly_copy
+    ]  # nothing written beside the source
 ```
 
 (The 5.1 tone fixture uses `ffmpeg -f lavfi`, so this test needs ffmpeg but no Plex media; mark it `media` only because it shells out. Keep it running in CI-less local runs via `-m media`.)
@@ -390,8 +435,15 @@ def test_extract_on_readonly_source_with_spaces(tmp_path, readonly_copy):
 
 ```python
 def test_clean_spans_drop_overlap_and_short():
-    turns = [Turn(start=0, end=5, speaker="A"), Turn(start=4, end=8, speaker="B"), Turn(start=10, end=11.5, speaker="A"), Turn(start=12, end=20, speaker="A")]
-    assert clean_spans(turns, "A") == [(12.1, 19.9)]      # 0-5 overlaps B; 10-11.5 too short after padding
+    turns = [
+        Turn(start=0, end=5, speaker="A"),
+        Turn(start=4, end=8, speaker="B"),
+        Turn(start=10, end=11.5, speaker="A"),
+        Turn(start=12, end=20, speaker="A"),
+    ]
+    assert clean_spans(turns, "A") == [
+        (12.1, 19.9)
+    ]  # 0-5 overlaps B; 10-11.5 too short after padding
 ```
 
   Stage test with fakes: `clusters.npz` holds a key per cluster including one with zero rows. `@pytest.mark.gpu`: on the Chimera clip, at least 2 clusters, embeddings unit-norm.
