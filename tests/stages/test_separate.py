@@ -176,3 +176,31 @@ def test_background_option_reaches_backend(monkeypatch, ep, mode):
     assert got == [{"background": mode}]
     key = SeparateStage().config_key(cfg, ep)
     assert key["options"] == {"background": mode}
+
+
+def test_table_without_backend_keeps_options(monkeypatch, ep):
+    got = []
+
+    def create(_kind, bc, device):
+        got.append((bc.backend, bc.options))
+        return FakeSeparator(bc.options, device)
+
+    FakeSeparator.events = []
+    FakeSeparator.fail = False
+    monkeypatch.setattr(separate, "create", create)
+    monkeypatch.setattr(separate, "device_string", lambda _cfg: "cpu")
+    cfg = Config(raw={"separation": {"background": "stems"}})
+    SeparateStage().run(ep, cfg)
+    assert got == [("demucs", {"background": "stems"})]
+    assert SeparateStage().config_key(cfg, ep) != SeparateStage().config_key(Config(), ep)
+
+
+def test_unload_runs_when_load_raises(monkeypatch, fake, ep):
+    def bad_load(_self):
+        FakeSeparator.events.append("load")
+        raise RuntimeError("half loaded")
+
+    monkeypatch.setattr(FakeSeparator, "load", bad_load)
+    with pytest.raises(RuntimeError, match="half loaded"):
+        SeparateStage().run(ep, Config())
+    assert fake.events == ["load", "unload"]

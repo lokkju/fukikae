@@ -37,7 +37,13 @@ class SeparateStage:
         try:
             return cfg.resolve("separation")
         except ConfigError:
-            return BackendConfig("demucs", {})
+            table = cfg.raw.get("separation")
+            options = (
+                {k: v for k, v in table.items() if k not in ("lang", "pair")}
+                if isinstance(table, dict)
+                else {}
+            )
+            return BackendConfig("demucs", options)
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
         bc = self._backend_cfg(cfg)
@@ -60,8 +66,8 @@ class SeparateStage:
         scratch = out_dir / ".scratch"
         shutil.rmtree(scratch, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
-        backend.load()
         try:
+            backend.load()
             sep = cast(Separator, backend).separate(self.inputs(ep)[0], scratch)
             with atomic_path(final_vocals) as tmp:
                 shutil.copyfile(sep.vocals, tmp)
