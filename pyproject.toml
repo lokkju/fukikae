@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=2.5.4",
     "nvidia-ml-py>=13.615.71",
     "pydantic>=2",
+    "scipy>=1.18.1",
     "typer>=0.15.0",
 ]
 

@@ -18,12 +18,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from doppio.artifacts import read_json, write_json
 from doppio.config import Config
 from doppio.models import Assignments, ClusterAssignment, Diarization
-from doppio.registry.matching import ClusterEvidence, match, mean_embedding, pin, pin_sources
+from doppio.registry.matching import load_clusters, match, mean_embedding, pin, pin_sources
 from doppio.registry.store import Registry
 from doppio.workspace import Episode, Workspace
 
@@ -51,15 +49,7 @@ class CharactersStage:
         turns = read_json(turns_path, Diarization)
         threshold = cfg.registry.match_threshold
 
-        rows: dict[str, np.ndarray] = {}
-        evidence: list[ClusterEvidence] = []
-        with np.load(clusters_path) as z:
-            for label in [str(x) for x in z["labels"]]:
-                emb = np.asarray(z[f"{label}/embeddings"], dtype=np.float32)
-                rows[label] = emb
-                evidence.append(
-                    ClusterEvidence(label, mean_embedding(emb), float(z[f"{label}/clean_seconds"]))
-                )
+        evidence, rows = load_clusters(clusters_path)
 
         pinned: dict[str, ClusterAssignment] = {}
         sources: dict[str, str] = {}

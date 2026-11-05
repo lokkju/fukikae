@@ -149,6 +149,26 @@ class Registry:
             "SELECT COUNT(*) FROM exemplars WHERE actor_id = ?", (actor_id,)
         ).fetchone()[0]
 
+    def episode_counts(self, actor_id: int) -> dict[str, int]:
+        """Exemplar count per episode for one actor."""
+        rows = self._con.execute(
+            "SELECT episode, COUNT(*) FROM exemplars WHERE actor_id = ? GROUP BY episode"
+            " ORDER BY episode",
+            (actor_id,),
+        ).fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def cluster_actors(self, episode: str, cluster: str) -> list[int]:
+        """Ids of the actors holding exemplars of one episode cluster."""
+        return [
+            r[0]
+            for r in self._con.execute(
+                "SELECT DISTINCT actor_id FROM exemplars WHERE episode = ? AND cluster = ?"
+                " ORDER BY actor_id",
+                (episode, cluster),
+            )
+        ]
+
     # writes
 
     def create_actor_with_character(self, centroid: np.ndarray) -> tuple[int, int]:
@@ -286,3 +306,33 @@ class Registry:
             con.execute("DELETE FROM exemplars WHERE episode = ?", (episode,))
             for aid in affected:
                 self._recompute(con, aid)
+
+    def split_cluster(self, actor_id: int, episode: str, cluster: str) -> tuple[int, int]:
+        """Move one episode cluster's exemplars to a new actor with a new character.
+
+        Returns (new actor id, new character id). Both actors' centroids are recomputed
+        (a locked actor keeps its own).
+        """
+        with self._tx() as con:
+            rows = con.execute(
+                "SELECT id, embedding FROM exemplars WHERE actor_id = ? AND episode = ?"
+                " AND cluster = ?",
+                (actor_id, episode, cluster),
+            ).fetchall()
+            if not rows:
+                raise KeyError((actor_id, episode, cluster))
+            mean = np.stack([np.frombuffer(r[1], dtype=np.float32) for r in rows]).mean(axis=0)
+            new_aid = con.execute(
+                "INSERT INTO actors(centroid) VALUES (?)", (_to_blob(_normalized(mean)),)
+            ).lastrowid
+            new_cid = con.execute(
+                "INSERT INTO characters(actor_id) VALUES (?)", (new_aid,)
+            ).lastrowid
+            assert new_aid is not None and new_cid is not None
+            con.execute(
+                "UPDATE exemplars SET actor_id = ? WHERE actor_id = ? AND episode = ?"
+                " AND cluster = ?",
+                (new_aid, actor_id, episode, cluster),
+            )
+            self._recompute(con, actor_id)
+        return new_aid, new_cid

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -26,6 +27,20 @@ def mean_embedding(rows: np.ndarray) -> np.ndarray | None:
     mean = np.asarray(rows, dtype=np.float32).mean(axis=0)
     norm = float(np.linalg.norm(mean))
     return None if norm == 0.0 else mean / norm
+
+
+def load_clusters(path: Path) -> tuple[list[ClusterEvidence], dict[str, np.ndarray]]:
+    """Read a diarize stage's clusters.npz: evidence per cluster and its embedding rows."""
+    rows: dict[str, np.ndarray] = {}
+    evidence: list[ClusterEvidence] = []
+    with np.load(path) as z:
+        for label in [str(x) for x in z["labels"]]:
+            emb = np.asarray(z[f"{label}/embeddings"], dtype=np.float32)
+            rows[label] = emb
+            evidence.append(
+                ClusterEvidence(label, mean_embedding(emb), float(z[f"{label}/clean_seconds"]))
+            )
+    return evidence, rows
 
 
 def match(
