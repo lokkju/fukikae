@@ -15,10 +15,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-demucs = []
+demucs = [
+    "demucs>=4.0.1",
+]
 whisper = []
 qwen = []
 pyannote = []
+
+[project.entry-points."doppio.backends.separation"]
+demucs = "doppio.backends.separation.demucs:DemucsSeparator"
 
 [project.urls]
 License = "https://polyformproject.org/licenses/shield/1.0.0"

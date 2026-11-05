@@ -11,6 +11,7 @@ from doppio.config import BackendConfig, ConfigError
 # Backend name -> extra that installs it. Read without importing the backend, so the
 # hint survives a failed import. Each backend task adds its own line.
 EXTRAS: dict[str, str] = {
+    "demucs": "demucs",
     "faster_whisper": "whisper",
 }
 
