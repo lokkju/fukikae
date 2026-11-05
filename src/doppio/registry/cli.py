@@ -146,7 +146,7 @@ def cluster(
     from doppio.job import load_manifest
     from doppio.models import Assignments, ClusterAssignment, Diarization
     from doppio.registry.cluster import seed_clusters
-    from doppio.registry.matching import load_clusters, mean_embedding
+    from doppio.registry.matching import ClusterEvidence, load_clusters, mean_embedding
     from doppio.stages.characters import CharactersStage
 
     ws = Workspace(workspace)
@@ -172,7 +172,7 @@ def cluster(
     if not_done:
         raise _fail(f"diarize stage not done for {', '.join(not_done)}; run `doppio run` first")
 
-    with _open(workspace) as reg:
+    with _open(workspace) as reg, reg.transaction():  # all of it, or none of it
         if reg.actors():
             raise _fail(
                 "the registry already has actors; batch seeding needs an empty one. "
@@ -185,14 +185,25 @@ def cluster(
             cfg.registry.min_new_seconds,
         )
         member: dict[tuple[str, str], tuple[int, int]] = {}
+        review: dict[tuple[str, str], int] = {}
         for g in groups:
-            allrows = np.concatenate([loaded[e][1][c] for e, c in g])
-            centroid = mean_embedding(allrows)
+            gev: dict[tuple[str, str], ClusterEvidence] = {
+                (e, c): next(x for x in loaded[e][0] if x.cluster == c) for e, c in g
+            }
+            # One character per episode: of a group's clusters in one episode, the one with
+            # the most clean speech is matched; the others go to review and add nothing.
+            keep: dict[str, str] = {}
+            for m in sorted(g, key=lambda m: (-gev[m].clean_seconds, m)):
+                keep.setdefault(m[0], m[1])
+            kept = sorted((e, c) for e, c in keep.items())
+            centroid = mean_embedding(np.concatenate([loaded[e][1][c] for e, c in kept]))
             assert centroid is not None
             aid, cid = reg.create_actor_with_character(centroid)
             for e, c in g:
-                ev = next(x for x in loaded[e][0] if x.cluster == c)
-                reg.add_exemplars(aid, e, c, loaded[e][1][c], ev.clean_seconds)
+                if keep[e] != c:
+                    review[(e, c)] = aid
+                    continue
+                reg.add_exemplars(aid, e, c, loaded[e][1][c], gev[(e, c)].clean_seconds)
                 member[(e, c)] = (aid, cid)
             reg.recompute_centroid(aid)
 
@@ -203,14 +214,15 @@ def cluster(
         out = []
         for ev in evs:
             hit = member.get((ep.id, ev.cluster))
+            rev = review.get((ep.id, ev.cluster))
             out.append(
                 ClusterAssignment(
                     cluster=ev.cluster,
-                    actor_id=hit[0] if hit else None,
+                    actor_id=hit[0] if hit else rev,
                     character_id=hit[1] if hit else None,
                     score=None,
                     clean_seconds=ev.clean_seconds,
-                    status="matched" if hit else "extra",
+                    status="matched" if hit else "review" if rev else "extra",
                 )
             )
         (path,) = stage.outputs(ep)
