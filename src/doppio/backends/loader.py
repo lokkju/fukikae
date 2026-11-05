@@ -40,7 +40,12 @@ def _load(kind: str, name: str, ep: Any) -> type[Backend]:
         return cast(type[Backend], ep.load())
     except ImportError as e:
         extra = EXTRAS.get(name)
-        hint = f"pip install 'doppio[{extra}]'" if extra else "install its dependencies"
+        hint = (
+            f"install the extra: `uv sync --extra {extra}` in a checkout, "
+            f"or `uv tool install 'doppio[{extra}]'`"
+            if extra
+            else "install its dependencies"
+        )
         raise BackendUnavailable(f"{kind} backend {name!r} cannot be imported ({e}); {hint}") from e
 
 

@@ -55,8 +55,9 @@ def test_create_passes_options():
 
 @pytest.mark.usefixtures("broken_ep")
 def test_import_failure_names_extra():
-    with pytest.raises(BackendUnavailable, match=r"doppio\[whisper\]"):
+    with pytest.raises(BackendUnavailable, match=r"doppio\[whisper\]") as e:
         create("asr", BackendConfig("faster_whisper", {}), "cpu")
+    assert "uv " in str(e.value) and "pip" not in str(e.value)
     assert available("asr") == {"fake": FakeTranscriber}
 
 
