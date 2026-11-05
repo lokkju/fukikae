@@ -285,7 +285,7 @@ class Registry:
             for aid in (keep, drop):
                 if con.execute("SELECT 1 FROM actors WHERE id = ?", (aid,)).fetchone() is None:
                     raise KeyError(aid)
-            dropped = [
+            dropped: list[int] = [
                 r[0]
                 for r in con.execute(
                     "SELECT id FROM characters WHERE actor_id = ? ORDER BY id", (drop,)
@@ -294,7 +294,7 @@ class Registry:
             row = con.execute(
                 "SELECT MIN(id) FROM characters WHERE actor_id = ?", (keep,)
             ).fetchone()
-            target = row[0]
+            target: int | None = row[0]
             if target is None and dropped:  # keep has no character: adopt drop's first
                 target = dropped.pop(0)
                 con.execute("UPDATE characters SET actor_id = ? WHERE id = ?", (keep, target))
@@ -302,7 +302,9 @@ class Registry:
             con.execute("DELETE FROM characters WHERE actor_id = ?", (drop,))
             con.execute("DELETE FROM actors WHERE id = ?", (drop,))
             self._recompute(con, keep)
-        return {} if target is None else dict.fromkeys(dropped, target)
+        if target is None:
+            return {}
+        return dict.fromkeys(dropped, target)
 
     def delete_episode(self, episode: str) -> list[int]:
         """Remove an episode's exemplars and recompute each affected unlocked actor.
