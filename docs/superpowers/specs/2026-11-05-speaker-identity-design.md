@@ -12,10 +12,11 @@ Subtitles that name every speaker (Crunchyroll's ASS) now give automatic ground 
 
 1. An identity evaluation harness that scores any combination of segmentation, embedder and matching against subtitle ground truth, on several series and languages, in minutes and without the GPU stages re-running when only matching changes.
 2. Metrics that separate failure modes: segmentation purity and coverage, embedding separability (with segmentation held to ground truth), cross-episode identity (strict spec metric and a speech-weighted majority metric), and merges.
-3. A pipeline configuration that passes the bar below on the Fairy Tail held-out episode, on at least one non-Japanese test set, and on at least one live-action test set.
+3. Tested default **profiles** rather than one winning configuration (operator decision, 2026-11-05): the best embedder, segmentation, matcher and threshold may differ by genre (anime vs live action) and by language. Each profile is chosen on its own test sets and passes the bar on its own held-out episode: at minimum an anime profile (Fairy Tail), a live-action profile (The Cyberfarm, Grid), and a general default used when nothing more specific applies. Where data allows, language-specific variants (Japanese, Korean, Russian, Spanish, Chinese) layer on top; a variant ships only when it measurably beats the profile beneath it.
+4. Profiles are configuration, not code: a workspace selects one with `profile = "anime"` (or `"live-action"`), the profile supplies defaults for every identity stage, and the existing per-language tables (`[embed.lang.ko]`, ...) override it, which override nothing the workspace sets explicitly. Resolution order: workspace explicit > per-language override > profile > built-in default.
 
 **The bar (my call, refining the foundation spec's 90% wording for a measurable gate):** a *recurring character* has at least 20 s of labeled speech in each episode compared. Pass: at least 90% of recurring characters keep at least 80% of their speech on a single character id, and no two recurring characters share their modal id. The strict per-clip metric (every clip on one id) is still reported. Spans labeled `?` and overlapped speech are excluded from every metric; each run also reports coverage (share of ground-truth speech that received a usable segment and id), so no method wins by labeling less.
-4. Every new model is a backend behind the existing protocols (embed, diarize) or a new kind where none fits (segment).
+5. Every new model is a backend behind the existing protocols (embed, diarize) or a new kind where none fits (segment).
 
 ## Non-goals
 
@@ -62,7 +63,7 @@ Brainstormed widely; grouped by the failure they attack. Expected payoff is a gu
 3. **Segmentation comparison** with the best embedder: pyannote (default and tuned) vs subtitle-line vs ASR-guided.
 4. **Matching**: exemplar/kNN and per-series adaptation (LDA/PLDA from labeled episodes), evaluated on the held-out episode. Adaptation is an optional stage: it uses subtitle names when a release has them, or an operator-labeled seed, and the registry stores the per-series projection; the default pipeline still runs without it. Season-level joint clustering is evaluated as an alternative matcher behind config; the existing per-episode diarize-then-match flow stays the default unless it measures better.
 5. **Separation**: one dialogue-separation model vs Demucs, with the best of 2-4.
-6. **Threshold sweep and final config** on the held-out pairs; write results; make the winners the defaults.
+6. **Threshold sweep and profiles**: per profile, sweep on its tuning episodes and confirm on its held-out episode; write results; ship the profiles (`anime`, `live-action`, the general default, and any language variant that earned its place) as built-in config presets.
 
 Steps 2-5 each end with a results note and a keep/drop decision recorded as a ruling.
 
