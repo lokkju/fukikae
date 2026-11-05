@@ -21,8 +21,8 @@ def test_doctor_runs():
 def test_run_command_extracts(tmp_path, readonly_copy):
     ws = tmp_path / "ws"
     ws.mkdir()
-    r = CliRunner().invoke(app, ["run", str(ws), str(readonly_copy)])
+    r = CliRunner().invoke(app, ["run", str(ws), str(readonly_copy), "--to", "extract"])
     assert r.exit_code == 0, r.output
     assert len(list((ws / ".doppio" / "episodes").rglob("audio.wav"))) == 1
-    again = CliRunner().invoke(app, ["run", str(ws), str(readonly_copy)])
+    again = CliRunner().invoke(app, ["run", str(ws), str(readonly_copy), "--to", "extract"])
     assert "up to date" in again.output
