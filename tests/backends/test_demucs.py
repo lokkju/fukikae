@@ -18,6 +18,8 @@ def test_declaration():
     assert DemucsSeparator.vram_mb == 6000
     assert DemucsSeparator({}, "cpu").model == "htdemucs_ft"
     assert DemucsSeparator({"model": "htdemucs"}, "cpu").model == "htdemucs"
+    assert DemucsSeparator({}, "cpu").background_mode == "residual"
+    assert DemucsSeparator({"background": "stems"}, "cpu").background_mode == "stems"
     with pytest.raises(ValueError):
         DemucsSeparator({"background": "x"}, "cpu")
     assert EXTRAS["demucs"] == "demucs"

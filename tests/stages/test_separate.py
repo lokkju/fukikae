@@ -157,3 +157,22 @@ def test_waits_then_runs_when_vram_frees(monkeypatch, fake, ep):
     SeparateStage().run(ep, Config())
     assert fake.events == ["load", "separate", "unload"]
     assert fake.seen[0][1] == "cuda:0"
+
+
+@pytest.mark.parametrize("mode", ["residual", "stems"])
+def test_background_option_reaches_backend(monkeypatch, ep, mode):
+    got = []
+
+    def create(_kind, bc, device):
+        got.append(bc.options)
+        return FakeSeparator(bc.options, device)
+
+    FakeSeparator.events = []
+    FakeSeparator.fail = False
+    monkeypatch.setattr(separate, "create", create)
+    monkeypatch.setattr(separate, "device_string", lambda _cfg: "cpu")
+    cfg = Config(raw={"separation": {"backend": "demucs", "background": mode}})
+    SeparateStage().run(ep, cfg)
+    assert got == [{"background": mode}]
+    key = SeparateStage().config_key(cfg, ep)
+    assert key["options"] == {"background": mode}
