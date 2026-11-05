@@ -68,7 +68,9 @@ def run(
     from doppio import runctx
     from doppio.job import run_stages
     from doppio.media import MediaError
+    from doppio.stages.asr import AsrStage
     from doppio.stages.extract import ExtractStage
+    from doppio.stages.language import LanguageStage
     from doppio.stages.separate import SeparateStage
     from doppio.workspace import Workspace
 
@@ -76,7 +78,8 @@ def run(
     ws = Workspace(workspace)
     try:
         ep = ws.find_episode(episode)
-        ran = run_stages(ep, ws.config, [ExtractStage(), SeparateStage()], from_stage, to_stage)
+        stages = [ExtractStage(), SeparateStage(), LanguageStage(), AsrStage()]
+        ran = run_stages(ep, ws.config, stages, from_stage, to_stage)
     except (FileNotFoundError, MediaError, ValueError) as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
