@@ -2,9 +2,11 @@
 
 The tuning episodes are resolved in order against an in-memory registry (the first builds it,
 each later one resolves against what came before) and scored together. A held-out episode is
-resolved against the registry the tuning episodes built and scored separately: the tuning
-episodes count as one pooled episode beside it, so its recurring characters are the ones with
-at least 20 s in the tuning episodes together and 20 s in the held-out one.
+resolved against the registry the tuning episodes built (Ruling R7) and scored separately:
+each character's id is its modal id in the tuning episodes, and its share, purity, coverage
+and merges come from the held-out speech alone (`metrics.score(reference=...)`). Its recurring
+characters have at least `--min-speech` (default 5 s, Ruling R6) in the tuning episodes
+together and in the held-out one.
 
 Reads pipeline artifacts (``04-diarize/turns.json``, ``01-separate/vocals_16k.wav``) and the
 subtitles; writes only the embedding cache, extracted subtitle tracks under
@@ -303,7 +305,7 @@ def run_identity(
     hold_nc: dict[str, float] = {}
     if hold_id is not None:
         p_segs, p_assign, p_gt = _pooled(ids, hold_id, segs, assign, gt)
-        hold_score = score(p_assign, p_segs, min_speech=floor, gt=p_gt)
+        hold_score = score(p_assign, p_segs, min_speech=floor, gt=p_gt, reference=[POOLED])
         hold_nc = nearest_centroid_accuracy(*stacked(ids), *stacked([hold_id]))
     settings = {
         "workspace": str(ws.root),
@@ -352,7 +354,7 @@ def format_score(
     rows = [title]
     for ep in s.episodes:
         rows.append(f"  {ep}")
-        rows.append(f"    {'character':<20}{'speech':>8}{'id':>5}{'here':>7}{'all':>7}  bar")
+        rows.append(f"    {'character':<20}{'speech':>8}{'id':>5}{'here':>7}{'share':>7}  bar")
         for c in s.characters:
             if ep not in c.by_episode:
                 continue
@@ -420,7 +422,7 @@ def format_run(r: IdentityRun) -> str:
     if r.holdout is not None:
         title = (
             f"held out: {r.holdout_episode} (against the registry the tuning episodes built; "
-            "tuning episodes scored as one pooled episode)"
+            "ids from the tuning episodes, shares from the held-out speech)"
         )
         rows.append(format_score(r.holdout, title, floor, r.holdout_nc))
     return "\n".join(rows)
@@ -463,10 +465,11 @@ def identity_cmd(
     holdout: str = typer.Option(
         None,
         "--holdout",
-        help="Held-out episode, resolved against the registry all tuning episodes built and "
-        "scored separately; the tuning episodes count as one pooled episode beside it, so a "
-        "recurring character needs --min-speech in the tuning episodes together and in the "
-        "held-out one (Ruling R7).",
+        help="Held-out episode, resolved against the registry all tuning episodes built "
+        "(pooled into one registry, Ruling R7) and scored separately: each character's id is "
+        "its modal id in the tuning episodes, and its share is the held-out speech on that id. "
+        "A recurring character needs --min-speech in the tuning episodes together and in the "
+        "held-out one.",
     ),
     gt: str = typer.Option(
         "ass", "--gt", help="Ground truth: ass (Name field), sdh (speaker tags) or colour."

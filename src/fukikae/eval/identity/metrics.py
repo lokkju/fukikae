@@ -18,6 +18,13 @@ Speech on no character id (an `extra` or `review` cluster) counts in a name's to
 as its modal id. Unlabeled segments (no ground-truth name, or `?`) count nowhere except in
 coverage, which is the share of ground-truth speech covered by segments that are labeled and
 have a character id (with `gt`), else the share of labeled segment time that has an id.
+
+Held-out scoring (`reference`): the reference episodes (the tuning episodes, pooled as one)
+only pick each character's modal id. Share, passing, strict, weighted share, purity and
+coverage are computed from the other (held-out) episodes' speech alone, and a merge is two
+recurring characters whose held-out speech is mostly on the same id. Recurring still needs
+`min_speech` in every episode, reference included. A character with 70 s on id 4 in the
+tuning episodes and 10 s on id 9 in the held-out one therefore scores 0%, not 87.5%.
 """
 
 from __future__ import annotations
@@ -45,16 +52,17 @@ Assignment = Mapping[tuple[str, int], int | None]
 @dataclass(frozen=True)
 class CharacterScore:
     name: str
-    speech: float  # labeled seconds over all episodes compared
+    speech: float  # labeled seconds over the scored episodes
     by_episode: dict[str, float]
-    modal_id: int | None
+    modal_id: int | None  # from the reference episodes when given, else all scored speech
     share: float  # of `speech` on `modal_id`
     share_by_episode: dict[str, float]  # of each episode's speech on `modal_id`
-    ids: dict[int | None, float]  # seconds per character id (None: no id)
+    ids: dict[int | None, float]  # scored seconds per character id (None: no id)
     recurring: bool  # meets the bar's speech minimum in every episode
     passing: bool  # recurring and share >= keep
     labeled_everywhere: bool  # labeled in every episode compared (strict/weighted set)
-    strict: bool  # every segment on one character id
+    strict: bool  # every scored segment on `modal_id`
+    scored_modal_id: int | None = None  # the modal id of the scored speech (for merges)
 
 
 @dataclass(frozen=True)
@@ -117,10 +125,14 @@ def score(
     share: float = SHARE,
     *,
     gt: Mapping[str, Sequence[GroundTruthLine]] | None = None,
+    reference: Sequence[str] = (),
 ) -> IdentityScore:
     """Score `assign` ((episode, index into segs[episode]) -> character id or None) over the
-    episodes in `segs`. A segment missing from `assign` has no id."""
+    episodes in `segs`. A segment missing from `assign` has no id. Episodes in `reference`
+    only decide modal ids (see the module docstring)."""
     episodes = list(segs)
+    ref = set(reference)
+    scored_eps = [ep for ep in episodes if ep not in ref]
     speech: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     on_id: dict[str, dict[str, dict[int | None, float]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(float))
@@ -139,6 +151,8 @@ def score(
             d = s.duration
             speech[key][ep] += d
             on_id[key][ep][cid] += d
+            if ep in ref:
+                continue
             labeled_time += d
             if cid is not None:
                 by_id[cid][key] += d
@@ -148,13 +162,18 @@ def score(
     chars: list[CharacterScore] = []
     for key in sorted(speech, key=lambda k: (-sum(speech[k].values()), display[k])):
         ids: dict[int | None, float] = defaultdict(float)
-        for per in on_id[key].values():
+        picked: dict[int, float] = defaultdict(float)
+        for ep, per in on_id[key].items():
             for cid, d in per.items():
-                ids[cid] += d
+                if ep not in ref:
+                    ids[cid] += d
+                if cid is not None and (ep in ref or not ref):
+                    picked[cid] += d
         total = sum(ids.values())
         real = {cid: d for cid, d in ids.items() if cid is not None}
-        modal = max(sorted(real), key=lambda c: real[c]) if real else None
-        frac = real[modal] / total if modal is not None and total > 0 else 0.0
+        modal = max(sorted(picked), key=lambda c: picked[c]) if picked else None
+        scored_modal = max(sorted(real), key=lambda c: real[c]) if real else None
+        frac = ids.get(modal, 0.0) / total if modal is not None and total > 0 else 0.0
         per_ep = {
             ep: on_id[key][ep].get(modal, 0.0) / speech[key][ep]
             if modal is not None and speech[key][ep]
@@ -178,7 +197,8 @@ def score(
                 recurring=recurring,
                 passing=recurring and frac >= keep - 1e-9,
                 labeled_everywhere=everywhere,
-                strict=len(ids) == 1 and None not in ids,
+                strict=modal is not None and set(ids) == {modal},
+                scored_modal_id=scored_modal,
             )
         )
 
@@ -187,8 +207,8 @@ def score(
     fraction = passing / len(rec) if rec else 0.0
     by_modal: dict[int, list[str]] = defaultdict(list)
     for c in rec:
-        if c.modal_id is not None:
-            by_modal[c.modal_id].append(c.name)
+        if c.scored_modal_id is not None:
+            by_modal[c.scored_modal_id].append(c.name)
     merges = [
         (a, b, cid)
         for cid in sorted(by_modal)
@@ -221,7 +241,7 @@ def score(
 
     if gt is not None:
         gt_total = cov = 0.0
-        for ep in episodes:
+        for ep in scored_eps:
             lines = _union([(g.start, g.end) for g in gt.get(ep, [])])
             gt_total += _length(lines)
             cov += _intersection(_union(covered.get(ep, [])), lines)

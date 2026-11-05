@@ -95,6 +95,10 @@ def test_identity_cli_tune_and_holdout(tmp_path: Path, monkeypatch: pytest.Monke
     assert data["tune"]["score"]["recurring"] == 2
     assert data["holdout"]["episode"] == "S01E03"
     assert data["holdout"]["score"]["verdict"] == "pass"
+    # Held-out shares are over the held-out speech alone (6 clean spans of 3.8 s each).
+    lucy = next(c for c in data["holdout"]["score"]["characters"] if c["name"] == "LUCY")
+    assert lucy["speech"] == pytest.approx(22.8)
+    assert lucy["by_episode"]["tune"] == pytest.approx(45.6)
     assert data["settings"]["embedder"] == {"backend": "ecapa", "options": {}}
     assert data["settings"]["threshold"] == 0.6
     assert data["settings"]["min_speech"] == 5.0
@@ -172,3 +176,4 @@ def test_identity_help_documents_the_pooled_holdout():
     r = CliRunner().invoke(app, ["eval", "identity", "--help"], env={"COLUMNS": "200"})
     assert r.exit_code == 0
     assert "pooled" in r.output and "--min-speech" in r.output
+    assert "modal id in the tuning episodes" in r.output
