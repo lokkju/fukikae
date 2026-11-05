@@ -19,8 +19,26 @@ DEFAULT_SOUNDS = frozenset(
         "grunts", "groans", "chuckles", "whispers", "cries", "sobs", "yells", "shouts",
         "ríe", "susurra", "susurrando", "asiente", "gime", "recita", "silabeando", "suspira",
         "llora", "grita", "todos", "ambos", "música", "risas", "aplausos",
+        "sigh", "gasp", "scoffs", "mutters", "whimpers", "snores", "coughs", "yelling",
+        "radio", "tv", "vídeo", "video", "смех", "вздох", "вздыхает", "кричит",
+        "웃", "한숨", "음성", "소리", "신음", "경적", "자막", "함께", "音声", "声",
     }
 )  # fmt: skip
+
+# A tag starting with one of these words is a fragment or a language note, not a name.
+LEADING_WORDS = frozenset(
+    {"in", "on", "over", "through", "with", "from", "at", "of", "for", "to", "en", "sur", "por",
+     "по", "в", "acento", "voz", "sound", "sounds"}
+)  # fmt: skip
+_CJK = re.compile(r"[\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\u3400-\u9fff\uac00-\ud7af]")
+# `A과 B`, `A와 B`, `A랑 B` (Korean) and `AとB`, `A和B` (Japanese, Chinese): several speakers.
+_PAIR = re.compile(
+    r"[\uac00-\ud7af]+[과와랑]\s+[\uac00-\ud7af]+"
+    r"|[\u3040-\u30ff\u3400-\u9fff]+[と和与跟][\u3040-\u30ff\u3400-\u9fff]+"
+)
+_HANGUL_DESCRIPTION_END = re.compile(
+    r"[며면서다음]$"
+)  # `웃으며`, `울린다`, `조작음`: an action or sound
 
 MAX_NAME_CHARS = 24
 MAX_NAME_WORDS = 4
@@ -28,6 +46,19 @@ _NAME_CHARS = re.compile(r"[\w .'’\-]+")
 _DASH = re.compile(r"^\s*[-–—]\s*")
 _BRACKET = re.compile(r"^[(\[（【]\s*([^)\]）】]{1,40}?)\s*[)\]）】]\s*(.*)$", re.DOTALL)
 _COLON = re.compile(r"^([^:：(\[]{1,40}?)\s*[:：]\s*(.*)$", re.DOTALL)
+
+
+def _is_description(name: str, sounds: frozenset[str]) -> bool:
+    folded = name.casefold()
+    entries = {x.casefold() for x in sounds}
+    words = folded.split()
+    if folded in entries or any(w in entries for w in words):
+        return True
+    if any(_CJK.search(e) and e in folded for e in entries):
+        return True  # no spaces in Hangul/CJK: a listed word anywhere in the tag
+    if words[0] in LEADING_WORDS or _PAIR.search(name):
+        return True
+    return bool(_HANGUL_DESCRIPTION_END.search(words[-1]) and _CJK.search(words[-1]))
 
 
 def valid_name(name: str, sounds: frozenset[str], upper_only: bool = False) -> bool:
@@ -39,7 +70,7 @@ def valid_name(name: str, sounds: frozenset[str], upper_only: bool = False) -> b
         return False
     if not _NAME_CHARS.fullmatch(name) or not any(c.isalpha() for c in name):
         return False
-    if name.casefold() in {s.casefold() for s in sounds}:
+    if sounds and _is_description(name, sounds):
         return False
     cased = name.upper() != name.lower()
     if cased and name == name.lower():

@@ -399,13 +399,19 @@ def check_alignment(
     force: bool = False,
     min_share: float = MIN_SHARE,
     min_gain: float = MIN_GAIN,
+    label: str = "",
 ) -> tuple[list[GroundTruthLine], AlignmentReport, bool]:
     """(lines, report, offset applied). Refuses below `min_share` at the best offset unless
-    `force`; moves the lines back by the best offset when that gains `min_gain` of overlap
-    and reaches `min_share` (a junk offset is never applied)."""
+    `force`; zero lines refuse the same way; moves the lines back by the best offset when
+    that gains `min_gain` of overlap and reaches `min_share` (a junk offset is never applied)."""
     rep = alignment(lines, speech_turns)
     if not lines:
-        return lines, rep, False
+        if force:
+            return lines, rep, False
+        raise AlignmentError(
+            f"no {label or 'speaker lines'}: the subtitles name no speaker, so every span "
+            "would be '?'. Pass --force to continue anyway"
+        )
     if rep.share_at_offset < min_share and not force:
         raise AlignmentError(
             f"subtitles do not line up with the speech: {rep.overlap_share:.0%} overlap as is, "

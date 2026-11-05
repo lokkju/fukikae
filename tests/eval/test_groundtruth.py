@@ -365,3 +365,44 @@ def test_choose_text_track_prefers_marked_most_tagged(
     _fake_extract({2: "1\n00:00:01,000 --> 00:00:02,000\nplain\n", 6: "", 5: ""}, monkeypatch)
     with pytest.raises(MediaError, match="speaker information"):
         autolabel.choose_text_track(Path("x.mkv"), pr, tmp_path, "sdh", "en")
+
+
+# ---- fix round 1 ----
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "(어두운 음악)", "(살짝 웃으며) 그래", "(피식 웃으며) 응", "(놀라며) 어",
+        "(새하의 한숨) 휴",
+        "(휴대전화 안내 음성) 안내", "(자막) 안녕", "(함께) 네", "(어진과 새하) 네",
+        "(어진와 새하) 네", "(문이 쓱 열린다)", "(타이어 마찰음) 응", "(사이렌이 울린다) 응",
+        "(Sam sighs) ok", "(Victor sighs) ok", "[in English] hello", "[in Korean] hello",
+        "ACENTO FRANCÉS: hola", "EN ESPAÑOL: hola", "(RADIO) hola", "(TV) hola", "(CHUCKLES) ok",
+        "(小明和小红) 你好", "(音乐声) 你好", "(笑) 你好", "[Sam gasps] hey",
+    ],
+)  # fmt: skip
+def test_non_speaker_tags_are_rejected(line: str) -> None:
+    assert extract_tag(line) is None
+
+
+@pytest.mark.parametrize(
+    "line,name",
+    [("(새하) 뭐야", "새하"), ("КОСТЯ: Привет", "КОСТЯ"), ("(LOLA) hola", "LOLA"),
+     ("[Jane Doe] hi", "Jane Doe"), ("(SAEHA) hi", "SAEHA")],
+)  # fmt: skip
+def test_speaker_tags_still_accepted(line: str, name: str) -> None:
+    assert extract_tag(line) is not None and extract_tag(line)[0] == name  # type: ignore[index]
+
+
+def test_zero_lines_refuse_unless_forced(tmp_path: Path) -> None:
+    with pytest.raises(AlignmentError, match="no sdh speaker lines.*S01E01"):
+        check_alignment([], _turns([(0.0, 1.0)]), label="sdh speaker lines in S01E01")
+    assert check_alignment([], _turns([(0.0, 1.0)]), force=True)[0] == []
+    root, sub = _ws(tmp_path, _srt(("00:00:00,000", "00:00:04,000", "no tags here")))
+    ref = str(tmp_path / "media" / "Show - S01E01.mkv")
+    with pytest.raises(AlignmentError, match="sdh"):
+        autolabel.auto_label(root, [ref], tmp_path / "o", source="sdh", gt_file=sub)
+    sub.write_text("", encoding="utf-8")
+    with pytest.raises(AlignmentError, match="S01E01"):
+        autolabel.auto_label(root, [ref], tmp_path / "o", source="ass", gt_file=sub)

@@ -294,7 +294,12 @@ def auto_label(
             seen=seen,
             hits=hits,
         )
-        truth, report, applied = check_alignment(truth, speech_turns(ep.work), force=force)
+        truth, report, applied = check_alignment(
+            truth,
+            speech_turns(ep.work),
+            force=force,
+            label=f"{source} speaker lines in {ep.id} ({path.name})",
+        )
         aligned.append((ep.id, report, applied))
         lines = [Line(t.start, t.end, t.speaker, "") for t in truth]
         with np.load(npz) as z:
