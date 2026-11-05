@@ -36,10 +36,31 @@ def test_rematch_runs_and_reports(tmp_path):
     assert "None -> 1" in r.output
     r = runner.invoke(app, ["registry", "rematch", str(ws.root), str(src)])
     assert r.exit_code == 0, r.output
-    assert "no cluster changed" in r.output
+    # judged afresh: the actor only this episode made is replaced, never self-matched
+    assert "S0: 1 -> 2" in r.output
     with Registry(ws.registry_path) as reg:
-        assert len(reg.actors()) == 1
-        assert reg.exemplar_count(1) == 1  # not doubled
+        assert [a.id for a in reg.actors()] == [2]
+        assert reg.exemplar_count(2) == 1  # not doubled
+
+
+def test_interrupted_rematch_keeps_assignments(tmp_path, monkeypatch):
+    import doppio.job
+
+    ws, src = setup(tmp_path)
+    assert runner.invoke(app, ["registry", "rematch", str(ws.root), str(src)]).exit_code == 0
+
+    def boom(*_a, **_k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(doppio.job, "run_stages", boom)
+    runner.invoke(app, ["registry", "rematch", str(ws.root), str(src)])
+    monkeypatch.undo()
+    ep = ws.find_episode(str(src))
+    assert (ep.work / "05-characters" / "assignments.json").exists()
+    with Registry(ws.registry_path) as reg:
+        assert [a.id for a in reg.actors()] == [1] and reg.exemplar_count(1) == 1
+    r = runner.invoke(app, ["registry", "rematch", str(ws.root), str(src)])
+    assert "S0: 1 -> 2" in r.output  # never `None -> x`
 
 
 def test_rematch_needs_earlier_stages(tmp_path):

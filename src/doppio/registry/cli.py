@@ -14,11 +14,14 @@ def rematch(
     workspace: Path = typer.Argument(..., help="Workspace directory."),
     episode: str = typer.Argument(..., help="Episode file path or SxxEyy code."),
 ) -> None:
-    """Forget an episode's registry contributions and match its clusters again."""
+    """Forget an episode's registry contributions and match its clusters again.
+
+    Actors only this episode created are deleted first (unless curated), so its clusters
+    are judged against the rest of the series, never against their own earlier result.
+    """
+    from doppio import job
     from doppio.artifacts import read_json
-    from doppio.job import load_manifest, run_stages
     from doppio.models import Assignments
-    from doppio.registry.store import Registry
     from doppio.stages.characters import CharactersStage
 
     ws = Workspace(workspace)
@@ -28,8 +31,8 @@ def rematch(
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
 
-    stage = CharactersStage()
-    records = load_manifest(ep).stages
+    stage = CharactersStage(rematch=True)
+    records = job.load_manifest(ep).stages
     missing = [
         n
         for n in ("extract", "separate", "language", "asr", "diarize")
@@ -47,11 +50,9 @@ def rematch(
     old: dict[str, int | None] = {}
     if assignments_path.exists():
         old = {c.cluster: c.character_id for c in read_json(assignments_path, Assignments).clusters}
-    with Registry(ws.registry_path) as reg:
-        reg.delete_episode(ep.id)
-    assignments_path.unlink(missing_ok=True)
-
-    run_stages(ep, ws.config, [stage], from_stage="characters")
+    # The stage rebuilds the episode's exemplars in one transaction and replaces
+    # assignments.json atomically afterwards, so an interrupted rematch changes nothing.
+    job.run_stages(ep, ws.config, [stage], from_stage="characters")
 
     changed = 0
     for c in read_json(assignments_path, Assignments).clusters:
