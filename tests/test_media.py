@@ -30,8 +30,8 @@ def test_choose_track_override_and_fallback():
 @pytest.mark.ffmpeg
 def test_probe_real(readonly_copy):
     result = probe(readonly_copy)
-    assert [(t.channels, t.language) for t in result.audio] == [(6, "jpn"), (2, "eng")]
-    assert result.audio[1].default
+    assert [(t.channels, t.language) for t in result.audio] == [(2, "eng"), (6, "jpn")]
+    assert result.audio[0].default
 
 
 @pytest.mark.ffmpeg
