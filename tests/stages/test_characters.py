@@ -345,3 +345,24 @@ def test_failed_run_leaves_registry_untouched(tmp_path, monkeypatch):
     CharactersStage().run(ep, CFG)
     with registry(ep) as reg:
         assert len(reg.actors()) == 2
+
+
+def test_split_half_of_a_pinned_speaker_goes_to_review(tmp_path):
+    ep = make_ep(tmp_path)
+    write_diarize(ep, {"S0": ([unit([1, 0, 0])], 40.0)}, [(0, 40, "S0")])
+    CharactersStage().run(ep, CFG)
+    first = assignments(ep).clusters[0]
+    # a diarize rerun splits the speaker: S0 keeps most turns (pinned); S1 holds the rest
+    # plus new speech, too little overlap to pin, but it best-matches S0's actor
+    write_diarize(
+        ep,
+        {"S0": ([unit([1, 0, 0])], 30.0), "S1": ([unit([1, 0.05, 0])], 25.0)},
+        [(0, 30, "S0"), (30, 40, "S1"), (50, 70, "S1")],
+    )
+    CharactersStage().run(ep, CFG)
+    got = {c.cluster: c for c in assignments(ep).clusters}
+    assert got["S0"].status == "pinned" and got["S0"].actor_id == first.actor_id
+    assert got["S1"].status == "review" and got["S1"].actor_id == first.actor_id
+    assert got["S1"].character_id is None
+    with registry(ep) as reg:
+        assert reg.cluster_actors(ep.id, "S1") == []  # review adds no exemplars

@@ -38,6 +38,18 @@ def test_match_new_extra_and_review():
     assert by["S4"].score is None
 
 
+def test_claimed_actor_sends_cluster_to_review():
+    ev = [
+        ClusterEvidence("S0", unit([1, 0.1, 0]), 60.0),
+        ClusterEvidence("S1", unit([0, 1, 0.1]), 60.0),
+    ]
+    got = match(ev, [actor(1, [1, 0, 0]), actor(2, [0, 1, 0])], 0.8, 20.0, claimed={1})
+    by = {c.cluster: c for c in got}
+    assert by["S0"].status == "review" and by["S0"].actor_id == 1
+    assert by["S0"].character_id is None
+    assert by["S1"].status == "matched" and by["S1"].actor_id == 2
+
+
 def test_matched_uses_first_character():
     a = actor(1, [1, 0, 0])
     chars = [
