@@ -4,12 +4,12 @@ from typing import Any, ClassVar
 
 import pytest
 
-from doppio.artifacts import read_json
-from doppio.config import Config
-from doppio.models import Segment, Transcript, Word
-from doppio.stages import asr
-from doppio.stages.asr import AsrStage
-from doppio.workspace import Episode
+from fukikae.artifacts import read_json
+from fukikae.config import Config
+from fukikae.models import Segment, Transcript, Word
+from fukikae.stages import asr
+from fukikae.stages.asr import AsrStage
+from fukikae.workspace import Episode
 
 LOG: list[Any] = []
 
@@ -216,7 +216,7 @@ def test_gpu_asr_and_align_on_clip(clip_ep):
 
 @pytest.mark.usefixtures("fakes")
 def test_eval_out_dir_gets_its_own_manifest_record(ep):
-    from doppio.job import load_manifest, run_stages
+    from fukikae.job import load_manifest, run_stages
 
     assert AsrStage().name == "asr"
     evals = AsrStage(backend="fa", out_dir="eval/asr-fa")

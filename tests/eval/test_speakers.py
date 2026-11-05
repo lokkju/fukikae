@@ -5,10 +5,10 @@ import numpy as np
 import yaml
 from typer.testing import CliRunner
 
-from doppio.artifacts import write_json
-from doppio.eval.cli import eval_app
-from doppio.eval.speakers import LabeledClip, load_labels, sample, score, verdict
-from doppio.models import Assignments, ClusterAssignment
+from fukikae.artifacts import write_json
+from fukikae.eval.cli import eval_app
+from fukikae.eval.speakers import LabeledClip, load_labels, sample, score, verdict
+from fukikae.models import Assignments, ClusterAssignment
 
 
 def _assign(episode: str, mapping: dict[str, int | None]) -> Assignments:
@@ -67,7 +67,7 @@ def test_null_character_is_inconsistent_and_not_merged() -> None:
 
 
 def test_verdict_bar() -> None:
-    from doppio.eval.speakers import SpeakerScore
+    from fukikae.eval.speakers import SpeakerScore
 
     assert verdict(SpeakerScore(10, 9, [], 0.9)) == "pass"
     assert verdict(SpeakerScore(10, 9, [("a", "b")], 0.9)) == "tune"
@@ -76,7 +76,7 @@ def test_verdict_bar() -> None:
 
 
 def _make_episode(root: Path, eid: str) -> Path:
-    work = root / ".doppio" / "episodes" / eid
+    work = root / ".fukikae" / "episodes" / eid
     (work / "01-separate").mkdir(parents=True)
     (work / "04-diarize").mkdir(parents=True)
     (work / "05-characters").mkdir(parents=True)
@@ -107,7 +107,7 @@ def _make_episode(root: Path, eid: str) -> Path:
 def _ws(tmp_path: Path) -> Path:
     root = tmp_path / "ws"
     root.mkdir()
-    (root / "doppio.toml").write_text("")
+    (root / "fukikae.toml").write_text("")
     return root
 
 
@@ -170,7 +170,7 @@ def _labels_file(tmp_path: Path, label_text: str) -> Path:
 
 def test_written_labels_are_quoted_and_quoted_question_mark_loads(tmp_path: Path) -> None:
     path = tmp_path / "labels.yaml"
-    from doppio.eval.speakers import write_labels
+    from fukikae.eval.speakers import write_labels
 
     write_labels(path, [_clip("S01E01", "SPEAKER_00", "")])
     assert 'label: ""' in path.read_text()

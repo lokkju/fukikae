@@ -1,6 +1,6 @@
-# doppio
+# fukikae
 
-doppio automatically dubs foreign-language TV into English. The pipeline extracts audio, separates speech from the background, transcribes, diarizes and builds a registry of recurring characters; translation, synthesis and mixing follow in later stages.
+fukikae automatically dubs foreign-language TV into English. The pipeline extracts audio, separates speech from the background, transcribes, diarizes and builds a registry of recurring characters; translation, synthesis and mixing follow in later stages.
 
 ## Commands
 
@@ -12,6 +12,6 @@ uv run pyright
 mise -C . exec -- ffprobe -version   # ffmpeg comes from mise, not the host
 ```
 
-Heavy backends are optional extras: `doppio[demucs]`, `[whisper]`, `[qwen]`, `[pyannote]`.
+Heavy backends are optional extras: `fukikae[demucs]`, `[whisper]`, `[qwen]`, `[pyannote]`.
 
 License: PolyForm Shield 1.0.0.

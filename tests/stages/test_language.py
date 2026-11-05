@@ -4,10 +4,10 @@ from typing import Any, ClassVar
 
 import pytest
 
-from doppio.config import Config
-from doppio.stages import language
-from doppio.stages.language import LanguageStage
-from doppio.workspace import Episode
+from fukikae.config import Config
+from fukikae.stages import language
+from fukikae.stages.language import LanguageStage
+from fukikae.workspace import Episode
 
 
 class FakeLid:

@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from doppio.artifacts import atomic_path, read_json
-from doppio.config import Config, load_config
-from doppio.job import Manifest, cache_key, run_stages
-from doppio.workspace import Episode
+from fukikae.artifacts import atomic_path, read_json
+from fukikae.config import Config, load_config
+from fukikae.job import Manifest, cache_key, run_stages
+from fukikae.workspace import Episode
 
 
 class FakeA:
@@ -57,7 +57,7 @@ class FakeB:
 
 
 def make_cfg(root: Path, value: str) -> Config:
-    (root / "doppio.toml").write_text(f'[fake]\nvalue = "{value}"\n')
+    (root / "fukikae.toml").write_text(f'[fake]\nvalue = "{value}"\n')
     return load_config(root, user_config=None)
 
 
@@ -171,4 +171,4 @@ def test_external_source_fingerprinted_by_stat(ep, cfg):
     assert cache_key(S({}), ep, cfg) == k1
     ep.source.write_bytes(b"media, longer")
     assert cache_key(S({}), ep, cfg) != k1
-    assert not (ep.workspace_root / ".doppio").exists()
+    assert not (ep.workspace_root / ".fukikae").exists()

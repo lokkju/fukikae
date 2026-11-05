@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from doppio.backends import loader
-from doppio.backends.align.wav2vec2 import MODELS, Wav2Vec2Aligner, ctc_align, split_words
-from doppio.models import Transcript
+from fukikae.backends import loader
+from fukikae.backends.align.wav2vec2 import MODELS, Wav2Vec2Aligner, ctc_align, split_words
+from fukikae.models import Transcript
 
 
 def test_declaration_and_registration():
@@ -59,7 +59,7 @@ def test_unsupported_language_raises():
 
 @pytest.mark.gpu
 def test_aligns_korean_clip(clip_ep):
-    from doppio.backends.asr.faster_whisper import FasterWhisperTranscriber
+    from fukikae.backends.asr.faster_whisper import FasterWhisperTranscriber
 
     audio = clip_ep.work / "01-separate" / "vocals_16k.wav"
     w = FasterWhisperTranscriber({}, "cuda:0")

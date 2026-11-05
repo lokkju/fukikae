@@ -3,14 +3,14 @@ from datetime import UTC, datetime
 import numpy as np
 from typer.testing import CliRunner
 
-from doppio.artifacts import read_json
-from doppio.cli import app
-from doppio.job import Manifest, StageRecord, load_manifest, save_manifest
-from doppio.models import Assignments
-from doppio.registry.cluster import seed_clusters
-from doppio.registry.matching import ClusterEvidence, mean_embedding
-from doppio.registry.store import Registry
-from doppio.workspace import Workspace
+from fukikae.artifacts import read_json
+from fukikae.cli import app
+from fukikae.job import Manifest, StageRecord, load_manifest, save_manifest
+from fukikae.models import Assignments
+from fukikae.registry.cluster import seed_clusters
+from fukikae.registry.matching import ClusterEvidence, mean_embedding
+from fukikae.registry.store import Registry
+from fukikae.workspace import Workspace
 from tests.stages.test_characters import unit, write_diarize
 
 runner = CliRunner()
@@ -147,7 +147,7 @@ def test_cli_ops(tmp_path):
 
 
 def _ep(ws, eid):
-    from doppio.workspace import Episode
+    from fukikae.workspace import Episode
 
     return Episode(source=ws.root / "x", id=eid, work=ws.work_dir(eid), workspace_root=ws.root)
 
@@ -194,9 +194,9 @@ def test_cli_cluster_two_clusters_of_one_episode_then_run(tmp_path):
     """A seeded group holding two clusters of one episode: the one with more clean speech
     is matched, the other goes to review; the next characters run pins the seeded clusters
     and keeps the second one in review against its claimed actor."""
-    from doppio.config import Config
-    from doppio.job import run_stages
-    from doppio.stages.characters import CharactersStage
+    from fukikae.config import Config
+    from fukikae.job import run_stages
+    from fukikae.stages.characters import CharactersStage
 
     ws = make_ws(tmp_path)
     ep = _ep(ws, "S01E01")
@@ -217,7 +217,7 @@ def test_cli_cluster_two_clusters_of_one_episode_then_run(tmp_path):
         assert reg.cluster_actors("S01E01", "S2") == []
         assert reg.exemplar_count(1) == 18
 
-    # what the next `doppio run` does for this episode
+    # what the next `fukikae run` does for this episode
     run_stages(ep, Config(), [CharactersStage()])
     by = {c.cluster: c for c in read_json(path, Assignments).clusters}
     assert by["S0"].status == "pinned" and by["S1"].status == "pinned"

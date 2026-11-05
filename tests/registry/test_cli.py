@@ -2,10 +2,10 @@ from datetime import UTC, datetime
 
 from typer.testing import CliRunner
 
-from doppio.cli import app
-from doppio.job import Manifest, StageRecord, save_manifest
-from doppio.registry.store import Registry
-from doppio.workspace import Workspace
+from fukikae.cli import app
+from fukikae.job import Manifest, StageRecord, save_manifest
+from fukikae.registry.store import Registry
+from fukikae.workspace import Workspace
 from tests.stages.test_characters import unit, write_diarize
 
 runner = CliRunner()
@@ -44,7 +44,7 @@ def test_rematch_runs_and_reports(tmp_path):
 
 
 def test_interrupted_rematch_keeps_assignments(tmp_path, monkeypatch):
-    import doppio.job
+    import fukikae.job
 
     ws, src = setup(tmp_path)
     assert runner.invoke(app, ["registry", "rematch", str(ws.root), str(src)]).exit_code == 0
@@ -52,7 +52,7 @@ def test_interrupted_rematch_keeps_assignments(tmp_path, monkeypatch):
     def boom(*_a, **_k):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(doppio.job, "run_stages", boom)
+    monkeypatch.setattr(fukikae.job, "run_stages", boom)
     runner.invoke(app, ["registry", "rematch", str(ws.root), str(src)])
     monkeypatch.undo()
     ep = ws.find_episode(str(src))

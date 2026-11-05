@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from doppio.workspace import Workspace
+from fukikae.workspace import Workspace
 
 
 def test_episode_id_from_awkward_path(tmp_path):
@@ -16,7 +16,7 @@ def test_episode_id_from_awkward_path(tmp_path):
     ep = ws.find_episode(str(p))
     assert ep.id == "S01E01"
     assert ep.source == p
-    assert ep.work == tmp_path / "ws" / ".doppio" / "episodes" / "S01E01"
+    assert ep.work == tmp_path / "ws" / ".fukikae" / "episodes" / "S01E01"
     assert ep.workspace_root == tmp_path / "ws"
 
 
@@ -34,7 +34,7 @@ def test_find_by_code_under_source(tmp_path):
     (media / "Show - S01E01 - y.mkv").touch()
     ws_root = tmp_path / "ws"
     ws_root.mkdir()
-    (ws_root / "doppio.toml").write_text(f'source = "{tmp_path / "media"}"\n')
+    (ws_root / "fukikae.toml").write_text(f'source = "{tmp_path / "media"}"\n')
     ws = Workspace(ws_root)
     assert ws.find_episode("s01e02").source == f
     assert ws.find_episode("S01E02").id == "S01E02"
@@ -42,5 +42,5 @@ def test_find_by_code_under_source(tmp_path):
 
 def test_paths(tmp_path):
     ws = Workspace(tmp_path)
-    assert ws.registry_path == tmp_path / ".doppio" / "registry" / "registry.sqlite"
-    assert ws.work_dir("S01E01") == Path(tmp_path / ".doppio" / "episodes" / "S01E01")
+    assert ws.registry_path == tmp_path / ".fukikae" / "registry" / "registry.sqlite"
+    assert ws.work_dir("S01E01") == Path(tmp_path / ".fukikae" / "episodes" / "S01E01")

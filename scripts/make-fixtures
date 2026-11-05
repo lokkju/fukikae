@@ -2,9 +2,9 @@
 # /// script
 # requires-python = ">=3.12"
 # ///
-"""Cut 90 s test clips (stream copy) of the two Chimera episodes into $DOPPIO_TEST_MEDIA.
+"""Cut 90 s test clips (stream copy) of the two Chimera episodes into $FUKIKAE_TEST_MEDIA.
 
-Reads from ~/doppio-ws/media/Chimera (2021)/Season 1/ (override: DOPPIO_SOURCE_MEDIA) and
+Reads from ~/fukikae-ws/media/Chimera (2021)/Season 1/ (override: FUKIKAE_SOURCE_MEDIA) and
 writes S01E01-clip.mkv and S01E02-clip.mkv, plus S01E01-full.mkv and S01E02-full.mkv symlinks.
 """
 
@@ -17,13 +17,13 @@ EPISODES = ("S01E01", "S01E02")
 
 
 def main() -> int:
-    dest_env = os.environ.get("DOPPIO_TEST_MEDIA")
+    dest_env = os.environ.get("FUKIKAE_TEST_MEDIA")
     if not dest_env:
-        print("DOPPIO_TEST_MEDIA is not set; refusing to run", file=sys.stderr)
+        print("FUKIKAE_TEST_MEDIA is not set; refusing to run", file=sys.stderr)
         return 2
     dest = Path(dest_env).expanduser()
     src = Path(
-        os.environ.get("DOPPIO_SOURCE_MEDIA", "~/doppio-ws/media/Chimera (2021)/Season 1")
+        os.environ.get("FUKIKAE_SOURCE_MEDIA", "~/fukikae-ws/media/Chimera (2021)/Season 1")
     ).expanduser()
     dest.mkdir(parents=True, exist_ok=True)
     for code in EPISODES:

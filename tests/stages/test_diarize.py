@@ -4,12 +4,12 @@ from typing import Any, ClassVar
 import numpy as np
 import pytest
 
-from doppio.artifacts import read_json
-from doppio.config import Config
-from doppio.models import Diarization, Turn
-from doppio.stages import diarize
-from doppio.stages.diarize import MAX_SPANS_PER_CLUSTER, DiarizeStage, clean_spans
-from doppio.workspace import Episode
+from fukikae.artifacts import read_json
+from fukikae.config import Config
+from fukikae.models import Diarization, Turn
+from fukikae.stages import diarize
+from fukikae.stages.diarize import MAX_SPANS_PER_CLUSTER, DiarizeStage, clean_spans
+from fukikae.workspace import Episode
 
 LOG: list[Any] = []
 

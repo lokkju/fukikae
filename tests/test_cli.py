@@ -1,8 +1,8 @@
 import pytest
 from typer.testing import CliRunner
 
-from doppio import __version__
-from doppio.cli import app
+from fukikae import __version__
+from fukikae.cli import app
 
 
 def test_version():
@@ -23,15 +23,15 @@ def test_run_command_extracts(tmp_path, readonly_copy):
     ws.mkdir()
     r = CliRunner().invoke(app, ["run", str(ws), str(readonly_copy), "--to", "extract"])
     assert r.exit_code == 0, r.output
-    assert len(list((ws / ".doppio" / "episodes").rglob("audio.wav"))) == 1
+    assert len(list((ws / ".fukikae" / "episodes").rglob("audio.wav"))) == 1
     again = CliRunner().invoke(app, ["run", str(ws), str(readonly_copy), "--to", "extract"])
     assert "up to date" in again.output
 
 
 def _user_errors():
-    from doppio.backends.loader import BackendUnavailable
-    from doppio.config import ConfigError
-    from doppio.gpu import VramTimeout
+    from fukikae.backends.loader import BackendUnavailable
+    from fukikae.config import ConfigError
+    from fukikae.gpu import VramTimeout
 
     return [
         VramTimeout("not enough free VRAM"),
@@ -42,7 +42,7 @@ def _user_errors():
 
 @pytest.mark.parametrize("exc", _user_errors(), ids=lambda e: type(e).__name__)
 def test_run_reports_user_errors_without_traceback(tmp_path, monkeypatch, exc):
-    import doppio.job
+    import fukikae.job
 
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -52,7 +52,7 @@ def test_run_reports_user_errors_without_traceback(tmp_path, monkeypatch, exc):
     def boom(*_a, **_k):
         raise exc
 
-    monkeypatch.setattr(doppio.job, "run_stages", boom)
+    monkeypatch.setattr(fukikae.job, "run_stages", boom)
     r = CliRunner().invoke(app, ["run", str(ws), str(src), "--no-wait"])
     assert r.exit_code == 1
     assert isinstance(r.exception, SystemExit)
@@ -61,7 +61,7 @@ def test_run_reports_user_errors_without_traceback(tmp_path, monkeypatch, exc):
 
 @pytest.mark.parametrize("exc", _user_errors(), ids=lambda e: type(e).__name__)
 def test_eval_asr_reports_user_errors_without_traceback(tmp_path, monkeypatch, exc):
-    import doppio.eval.asr
+    import fukikae.eval.asr
 
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -71,7 +71,7 @@ def test_eval_asr_reports_user_errors_without_traceback(tmp_path, monkeypatch, e
     def boom(*_a, **_k):
         raise exc
 
-    monkeypatch.setattr(doppio.eval.asr, "evaluate", boom)
+    monkeypatch.setattr(fukikae.eval.asr, "evaluate", boom)
     r = CliRunner().invoke(
         app, ["eval", "asr", str(ws), str(src), "--subtitle-track", "2", "--backend", "x"]
     )

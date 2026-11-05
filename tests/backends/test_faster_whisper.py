@@ -1,8 +1,8 @@
 import pytest
 
-from doppio.backends import loader
-from doppio.backends.asr.faster_whisper import FasterWhisperTranscriber
-from doppio.models import Transcript
+from fukikae.backends import loader
+from fukikae.backends.asr.faster_whisper import FasterWhisperTranscriber
+from fukikae.models import Transcript
 
 
 def test_declaration():
