@@ -12,7 +12,7 @@ Subtitles that name every speaker (Crunchyroll's ASS) now give automatic ground 
 
 1. An identity evaluation harness that scores any combination of segmentation, embedder and matching against subtitle ground truth, on several series and languages, in minutes and without the GPU stages re-running when only matching changes.
 2. Metrics that separate failure modes: segmentation purity and coverage, embedding separability (with segmentation held to ground truth), cross-episode identity (strict spec metric and a speech-weighted majority metric), and merges.
-3. A pipeline configuration that passes the bar below on the Fairy Tail held-out episode, and on at least one non-Japanese test set.
+3. A pipeline configuration that passes the bar below on the Fairy Tail held-out episode, on at least one non-Japanese test set, and on at least one live-action test set.
 
 **The bar (my call, refining the foundation spec's 90% wording for a measurable gate):** a *recurring character* has at least 20 s of labeled speech in each episode compared. Pass: at least 90% of recurring characters keep at least 80% of their speech on a single character id, and no two recurring characters share their modal id. The strict per-clip metric (every clip on one id) is still reported. Spans labeled `?` and overlapped speech are excluded from every metric; each run also reports coverage (share of ground-truth speech that received a usable segment and id), so no method wins by labeling less.
 4. Every new model is a backend behind the existing protocols (embed, diarize) or a new kind where none fits (segment).
@@ -74,7 +74,8 @@ Steps 2-5 each end with a results note and a keep/drop decision recorded as a ru
 - Chinese: Link Click S03 (Bridon Arc) E04-E06, Crunchyroll WEB-DL, dual audio (Chinese original plus English dub, verified; CR English ASS).
 - Russian: not yet found. The 2026-11-05 survey searched only Crunchyroll releases, which carry no Russian audio (Crunchyroll left Russia in 2022). Russian sources (dub and fansub groups such as AniLibria, Anidub, SHIZA Project, whose ASS scripts often name speakers; Russian streaming originals; Russian subtitle archives) are being searched separately.
 - Name-field coverage on the Spanish and Chinese sets is unverified until the files are in the library; checked first when they arrive.
-- Chimera (Korean) has no speaker ground truth; used only to check the chosen config doesn't break on live action (cluster counts, review rate), not scored.
+- Live action (required, not optional): the product is for foreign TV generally, and anime voices are stylized in ways live-action actors aren't, so a config tuned on anime alone proves little. At least one live-action set with speaker ground truth must be in the evaluation before the final config is chosen. Ground-truth sources being surveyed: SDH/CC tracks with speaker tags on foreign originals, colour-coded broadcast subtitles (a consistent per-character colour scores consistency without names), published scripts aligned through ASR, and partially tagged series already in the library (Grid, Parallels, Mr. Sunshine, Nocturne). Partial labels are usable: every metric scores only labeled spans and reports coverage.
+- Chimera (Korean) has no speaker ground truth yet; until a source is found it's used only to check the chosen config doesn't break on live action (cluster counts, review rate).
 
 ## Constraints
 
