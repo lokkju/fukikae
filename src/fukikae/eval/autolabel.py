@@ -2,11 +2,12 @@
 
 import re
 import shutil
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 from fukikae.artifacts import atomic_path
 from fukikae.eval.speakers import LabeledClip, label_key, write_labels
@@ -33,15 +34,48 @@ def _seconds(stamp: str) -> float:
     return int(h) * 3600 + int(m) * 60 + float(s)
 
 
+_THOUGHT = re.compile(r"\s*(?:/\s*(?:I|OS|OC|VO)|\((?:V\.O\.|O\.S\.)\))\s*$", re.IGNORECASE)
+
+
+def canonical_name(name: str) -> str:
+    """The name without a trailing thought/off-screen marker (`/I`, `/OS`, `(V.O.)`), with
+    whitespace collapsed and spacing around parentheses normalized."""
+    name = _THOUGHT.sub("", name.strip())
+    name = re.sub(r"\s*\(\s*", " (", name)
+    name = re.sub(r"\s*\)", ")", name)
+    return re.sub(r"\s+", " ", name).strip()
+
+
 def _usable(name: str) -> bool:
-    name = name.strip()
     if not name or label_key(name) in IGNORED_NAMES:
         return False
     return not _MULTI.search(name)
 
 
-def parse_ass(text: str) -> list[Line]:
-    """Dialogue lines that name exactly one speaker, in file order."""
+def normalize_aliases(aliases: dict[str, str] | None) -> dict[str, str]:
+    """FROM (canonical, case-insensitive) -> TO (canonical spelling)."""
+    return {label_key(canonical_name(a)): canonical_name(b) for a, b in (aliases or {}).items()}
+
+
+def load_alias_file(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected a mapping of FROM: TO")
+    return {str(a): str(b) for a, b in data.items()}
+
+
+def parse_ass(
+    text: str,
+    aliases: dict[str, str] | None = None,
+    seen: dict[str, Counter[str]] | None = None,
+    hits: Counter[tuple[str, str]] | None = None,
+) -> list[Line]:
+    """Dialogue lines that name exactly one speaker, in file order. Names are canonicalized,
+    then mapped through `aliases`. `seen` collects raw spellings per canonical key and `hits`
+    counts alias uses as (canonical FROM, TO), for the report."""
+    amap = normalize_aliases(aliases)
     fields = [f.strip().casefold() for f in _DEFAULT_FORMAT.split(",")]
     lines: list[Line] = []
     in_events = False
@@ -63,8 +97,16 @@ def parse_ass(text: str) -> list[Line]:
                 start, end = _seconds(d["start"]), _seconds(d["end"])
             except (KeyError, ValueError):
                 continue
-            name = d.get("name", "").strip()
+            raw = d.get("name", "").strip()
+            name = canonical_name(raw)
             if _usable(name):
+                if seen is not None:
+                    seen.setdefault(label_key(name), Counter())[raw] += 1
+                target = amap.get(label_key(name))
+                if target is not None and label_key(target) != label_key(name):
+                    if hits is not None:
+                        hits[(name, target)] += 1
+                    name = target
                 lines.append(Line(start, end, name, d.get("text", "")))
     return lines
 
@@ -155,6 +197,41 @@ class AutoLabelResult:
     clusters: list[ClusterReport]
     # name -> (speech seconds, clusters it spreads over as (episode, cluster))
     names: dict[str, tuple[float, set[tuple[str, str]]]]
+    collapsed: list[tuple[str, list[str]]] = field(default_factory=list)
+    aliased: list[tuple[str, str, int]] = field(default_factory=list)
+    suggestions: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _within_one(a: str, b: str) -> bool:
+    if abs(len(a) - len(b)) > 1 or a == b:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b, strict=True)) == 1
+    short, long = sorted((a, b), key=len)
+    return any(long[:i] + long[i + 1 :] == short for i in range(len(long)))
+
+
+def _strip_paren(name: str) -> str:
+    return re.sub(r"\s*\(.*?\)", "", name).strip()
+
+
+def suggest_aliases(names: dict[str, str], amap: dict[str, str]) -> list[tuple[str, str]]:
+    """Pairs of canonical names (key -> display) that look like one speaker and that no alias
+    already joins: equal once a parenthetical is removed, or one edit apart at 5+ letters."""
+
+    def final(k: str) -> str:
+        return label_key(amap.get(k, k))
+
+    keys = sorted(names)
+    out: list[tuple[str, str]] = []
+    for i, a in enumerate(keys):
+        for b in keys[i + 1 :]:
+            if final(a) == final(b):
+                continue
+            pa, pb = label_key(_strip_paren(names[a])), label_key(_strip_paren(names[b]))
+            if pa == pb or (len(a) >= 5 and len(b) >= 5 and _within_one(a, b)):
+                out.append((names[a], names[b]))
+    return out
 
 
 def auto_label(
@@ -163,8 +240,12 @@ def auto_label(
     out: Path,
     subtitle_track: int | None = None,
     min_overlap: float = 0.6,
+    aliases: dict[str, str] | None = None,
 ) -> AutoLabelResult:
     ws = Workspace(root)
+    merged = {**load_alias_file(Path(root) / "labels-aliases.yaml"), **(aliases or {})}
+    seen: dict[str, Counter[str]] = {}
+    hits: Counter[tuple[str, str]] = Counter()
     clips: list[LabeledClip] = []
     reports: list[ClusterReport] = []
     names: dict[str, tuple[float, set[tuple[str, str]]]] = {}
@@ -175,7 +256,7 @@ def auto_label(
         if not npz.is_file():
             raise FileNotFoundError(f"{ep.id}: no diarization at {npz}")
         ass = prepare_subtitles(ep, subtitle_track)
-        lines = parse_ass(ass.read_text(encoding="utf-8", errors="replace"))
+        lines = parse_ass(ass.read_text(encoding="utf-8", errors="replace"), merged, seen, hits)
         with np.load(npz) as z:
             for cluster in [str(x) for x in z["labels"]]:
                 spans = [
@@ -205,7 +286,19 @@ def auto_label(
                     )
                 )
     write_labels(out / "labels.yaml", clips)
-    return AutoLabelResult(clips, reports, {display[k]: v for k, v in names.items()})
+    shown = {k: canonical_name(next(iter(c))) for k, c in seen.items()}
+    collapsed = [
+        (shown[k], sorted(c)) for k, c in sorted(seen.items()) if len({label_key(r) for r in c}) > 1
+    ]
+    aliased = [(a, b, n) for (a, b), n in sorted(hits.items())]
+    return AutoLabelResult(
+        clips,
+        reports,
+        {display[k]: v for k, v in names.items()},
+        collapsed,
+        aliased,
+        suggest_aliases(shown, normalize_aliases(merged)),
+    )
 
 
 def format_report(result: AutoLabelResult) -> str:
@@ -225,4 +318,16 @@ def format_report(result: AutoLabelResult) -> str:
     rows.append("names")
     for name, (secs, where) in sorted(result.names.items(), key=lambda kv: -kv[1][0]):
         rows.append(f"  {name:<16} {secs:>8.1f}s  {len(where)} clusters")
+    if result.collapsed:
+        rows.append("spelling variants merged")
+        for name, raws in result.collapsed:
+            rows.append(f"  {name}: {', '.join(raws)}")
+    if result.aliased:
+        rows.append("aliases applied")
+        for a, b, n in result.aliased:
+            rows.append(f"  {a} -> {b} ({n} lines)")
+    if result.suggestions:
+        rows.append("alias suggestions (not applied; use --alias FROM=TO)")
+        for a, b in result.suggestions:
+            rows.append(f"  {a} = {b}")
     return "\n".join(rows)
