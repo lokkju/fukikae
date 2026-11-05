@@ -20,5 +20,8 @@ def test_cer_one_substitution() -> None:
 
 
 def test_parse_srt_concatenates_cues_in_order() -> None:
-    srt = "1\n00:00:01,000 --> 00:00:02,000\n<i>안녕</i>\n\n2\n00:00:03,000 --> 00:00:04,000\n하세요\n두 줄\n"
+    srt = (
+        "1\n00:00:01,000 --> 00:00:02,000\n<i>안녕</i>\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\n하세요\n두 줄\n"
+    )
     assert parse_srt(srt) == ["<i>안녕</i>", "하세요 두 줄"]
