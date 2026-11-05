@@ -24,3 +24,18 @@ def main(
     Args:
         version: Print the version and exit.
     """
+
+
+backends_app = typer.Typer(help="Inspect installed model backends.", no_args_is_help=True)
+app.add_typer(backends_app, name="backends")
+
+
+@backends_app.command("list")
+def backends_list() -> None:
+    """List installed backends for each kind."""
+    from doppio.backends.base import KINDS
+    from doppio.backends.loader import names
+
+    for kind in KINDS:
+        found = names(kind)
+        typer.echo(f"{kind}: {', '.join(found) if found else '(none)'}")
