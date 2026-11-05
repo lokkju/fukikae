@@ -99,7 +99,7 @@ packages = ["src/fukikae"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-m 'not gpu and not media'"
+addopts = "-m 'not gpu and not media and not slow'"
 markers = [
     "gpu: needs a GPU and FUKIKAE_TEST_MEDIA",
     "media: needs real media from FUKIKAE_TEST_MEDIA",
