@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 
 from doppio import __version__
+from doppio.eval.cli import eval_app
 
 # torch must number cards the way nvidia-smi and NVML do (gpu_device is an NVML index).
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -31,6 +32,8 @@ def main(
         version: Print the version and exit.
     """
 
+
+app.add_typer(eval_app, name="eval")
 
 backends_app = typer.Typer(help="Inspect installed model backends.", no_args_is_help=True)
 app.add_typer(backends_app, name="backends")
