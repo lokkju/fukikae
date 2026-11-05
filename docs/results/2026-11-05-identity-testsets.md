@@ -14,7 +14,7 @@ Five workspaces under `~/fukikae-ws/` (media and workspaces stay outside the rep
 | cyberfarm | ru | E01, E02 | E04 (E03 spare) | sdh | 83%, 75% / 83% | 0 | 0 | 0.00 | none | 71% | 0.50 | 21% | 100% (2 characters) | insufficient |
 | linkclick-en | en dub | E04, E05 | E06 | sdh | 67%, 80% / 69% | 0 | 0 | 0.00 | none | 67% | 0.25 | 17% | 28% | insufficient |
 
-Alignment is the share of subtitle time over detected speech at the best global offset; the best offset was within 0.2 s everywhere and none was applied. All sets clear the 0.6 alignment bar. Two sets (cyberfarm, linkclick-en) have no recurring character in the tune pair and are dropped from the comparison tasks; the reason is under each set. The bar (pass at 0.90 with no merges) is the foundation's, so "fail" for the three scored sets means below 0.75.
+Alignment is the share of subtitle time over detected speech at the best global offset; the best offset was within 0.2 s everywhere and none was applied. All sets clear the 0.6 alignment bar. Two sets (cyberfarm, linkclick-en) have no recurring character in the tune pair and are dropped from the comparison tasks; the reason is under each set. The bar is the foundation's: pass needs a fraction of at least 0.90 and no merges, so "fail" is any fraction below 0.90 or any merge.
 
 ## fairytail (ja)
 
@@ -28,7 +28,7 @@ Alignment is the share of subtitle time over detected speech at the best global 
 ## fairytail-en (English dub of the same files)
 
 - Files: the same E12 to E14. Audio: `eng`, stream 2 (checked). `source_language = "en"`, ASR `faster_whisper`, aligner wav2vec2. E11 was not run for this set.
-- Ground truth: `ass`, the same English track and aliases file (copied). Coverage 43%; E12 172 of 200 segments labeled, E13 111 of 139. Alignment is better than the ja track (85 to 87%) because the dub follows the English script.
+- Ground truth: `ass`, the same English track and aliases file (copied). Coverage 43%; E12 172 of 200 segments labeled, E13 111 of 139. Alignment is better than the ja track (85 to 87%); I infer that the dub follows the English script, which I have not checked line by line.
 - Aliases: `NABARU: NEBARU` (copied); no others, same declines as above.
 - Baseline: 10 recurring, 7 passing, fraction 0.70, one merge (CANA + JUVIA on id 10), verdict fail. Nearest-centroid accuracy 72%; TOUKA is again the outlier at 3%, ERZA 96%, HAPPY 86%, LAXUS 91%, the rest 100%.
 
