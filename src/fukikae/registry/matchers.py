@@ -32,7 +32,7 @@ import numpy as np
 from scipy.cluster.hierarchy import fcluster, linkage
 
 from fukikae.models import ClusterAssignment
-from fukikae.registry.matching import ClusterEvidence, decide, match, mean_embedding
+from fukikae.registry.matching import ClusterEvidence, decide, mean_embedding
 from fukikae.registry.store import Actor, Character
 
 # The diarize stage embeds at most this many spans per cluster (the longest), so a cluster's
@@ -147,17 +147,15 @@ def group_segments(
     return list(groups.items())
 
 
-class CentroidMatcher:
-    """Today's pipeline logic (`stages.characters` on a fresh run, `registry.matching.match`):
-    each cluster's evidence is the normalized mean of its longest `max_rows` segment
-    embeddings and the total length of all its segments; a cluster whose best actor scores
-    at least `threshold` is `matched` (only the best-scoring cluster per actor; the others are
-    `review`, no character), else `new` with at least `min_new_seconds`, else `extra`. New and
-    matched clusters add their rows to the actor, whose centroid is then recomputed. Subtitle
-    segments are first grouped per episode by agglomerative cosine clustering at distance
-    1 - threshold."""
+class _ScoringMatcher:
+    """The one per-episode flow (grouping, the longest `max_rows` rows per cluster,
+    `registry.matching.decide`, rows added to the actor) with the cluster-to-actor score
+    left to `_best`, in the space `_project` maps embeddings into (the identity here).
+    The default `_prepare`/`_best` are the centroid scorer, computed as
+    `registry.matching.match` computes it. The state keeps raw rows; projection happens at
+    matching time."""
 
-    name: ClassVar[str] = "centroid"
+    name: ClassVar[str] = "scoring"
 
     def __init__(
         self,
@@ -172,84 +170,26 @@ class CentroidMatcher:
         # created actor and character.
         self.last: list[ClusterAssignment] = []
         self.last_groups: list[tuple[str, list[int]]] = []
-
-    def fit_episode(
-        self,
-        state: RegistryState,
-        episode: str,  # noqa: ARG002 - part of the protocol
-        embs: np.ndarray,
-        segs: Sequence[SegmentLike],
-    ) -> list[int | None]:
-        embs = np.asarray(embs, dtype=np.float32)
-        if len(embs) != len(segs):
-            raise ValueError(f"{len(segs)} segments but {len(embs)} embeddings")
-        groups = group_segments(embs, segs, 1.0 - self.threshold)
-        rows: dict[str, np.ndarray] = {}
-        evidence: list[ClusterEvidence] = []
-        for label, idx in groups:
-            longest = sorted(idx, key=lambda i: segs[i].duration, reverse=True)[: self.max_rows]
-            rows[label] = embs[longest]
-            evidence.append(
-                ClusterEvidence(
-                    label, mean_embedding(rows[label]), float(sum(segs[i].duration for i in idx))
-                )
-            )
-        result = match(
-            evidence,
-            state.actor_list(),
-            self.threshold,
-            self.min_new_seconds,
-            characters=state.character_list(),
-        )
-        touched: list[ClusterAssignment] = []
-        char: dict[str, int | None] = {}
-        for a in result:
-            if a.status == "new":
-                aid, cid = state.create(rows[a.cluster])
-                a = a.model_copy(update={"actor_id": aid, "character_id": cid})
-            elif a.status == "matched" and a.actor_id is not None:
-                state.add(a.actor_id, rows[a.cluster])
-            touched.append(a)
-            char[a.cluster] = a.character_id
-        self.last = touched
-        self.last_groups = groups
-        out: list[int | None] = [None] * len(segs)
-        for label, idx in groups:
-            for i in idx:
-                out[i] = char[label]
-        return out
-
-
-class _ScoringMatcher:
-    """The centroid matcher's flow (grouping, the longest `max_rows` rows per cluster,
-    `registry.matching.decide`, rows added to the actor) with the cluster-to-actor score
-    left to `_best`, in the space `_project` maps embeddings into (the identity here).
-    The state keeps raw rows; projection happens at matching time."""
-
-    name: ClassVar[str] = "scoring"
-
-    def __init__(
-        self,
-        threshold: float = 0.6,
-        min_new_seconds: float = 20.0,
-        max_rows: int = MAX_ROWS_PER_CLUSTER,
-    ) -> None:
-        self.threshold = float(threshold)
-        self.min_new_seconds = float(min_new_seconds)
-        self.max_rows = int(max_rows)
-        self.last: list[ClusterAssignment] = []
-        self.last_groups: list[tuple[str, list[int]]] = []
+        self._centroids: list[tuple[int, np.ndarray]] = []
 
     def _project(self, x: np.ndarray) -> np.ndarray:
         return np.asarray(x, dtype=np.float32)
 
     def _prepare(self, state: RegistryState) -> None:
-        """Called once per episode before scoring, with the state as it stands."""
+        """Called once per episode before scoring, with the state as it stands; here, each
+        actor's centroid (`RegistryState.centroid`) in actor order."""
+        self._centroids = [(a, c) for a in state.actors if (c := state.centroid(a)) is not None]
 
-    def _best(self, rows: np.ndarray, mean: np.ndarray) -> tuple[int, float] | None:
+    def _best(self, rows: np.ndarray, mean: np.ndarray) -> tuple[int, float] | None:  # noqa: ARG002
         """The best (actor id, score) for a cluster's rows and normalized mean, against the
-        state `_prepare` saw."""
-        raise NotImplementedError
+        state `_prepare` saw; here the cosine with each centroid, first best on ties."""
+        top: tuple[int, float] | None = None
+        for aid, c in self._centroids:
+            denom = float(np.linalg.norm(c) * np.linalg.norm(mean))
+            sc = float(np.dot(c, mean)) / denom if denom else 0.0
+            if top is None or sc > top[1]:
+                top = (aid, sc)
+        return top
 
     def _before(self, episode: str) -> None:
         """Called first in each fit_episode."""
@@ -305,6 +245,19 @@ class _ScoringMatcher:
         return out
 
 
+class CentroidMatcher(_ScoringMatcher):
+    """Today's pipeline logic (`stages.characters` on a fresh run, `registry.matching.match`):
+    each cluster's evidence is the normalized mean of its longest `max_rows` segment
+    embeddings and the total length of all its segments; a cluster whose best actor scores
+    at least `threshold` is `matched` (only the best-scoring cluster per actor; the others are
+    `review`, no character), else `new` with at least `min_new_seconds`, else `extra`. New and
+    matched clusters add their rows to the actor, whose centroid is then recomputed. Subtitle
+    segments are first grouped per episode by agglomerative cosine clustering at distance
+    1 - threshold."""
+
+    name: ClassVar[str] = "centroid"
+
+
 class KnnMatcher(_ScoringMatcher):
     """Each of a cluster's rows (its longest `max_rows`) takes its `k` nearest exemplar rows
     among all actors' and votes for their actors with their cosine similarity; the actor
@@ -313,7 +266,10 @@ class KnnMatcher(_ScoringMatcher):
     for it: the centroid matcher's mean-vs-mean scale, so one threshold reads the same for
     both (single rows are noisy, and row-to-row similarity runs far lower). A speaker heard
     in several registers keeps the exemplars of each, so a cluster in one register finds its
-    own exemplars where the actor's mean lies between registers. Options: `k` (default 5)."""
+    own exemplars where the actor's mean lies between registers. The local centroid is
+    built from the exemplars nearest the cluster, so the score runs somewhat above the
+    centroid matcher's for the same cluster (an upward bias, more so for small k): the same
+    threshold is a little more permissive here. Options: `k` (default 5)."""
 
     name: ClassVar[str] = "knn"
 
@@ -464,7 +420,6 @@ class LdaMatcher(_ScoringMatcher):
         self._train_x: list[np.ndarray] = []
         self._train_y: list[str] = []
         self._lda: Any = None
-        self._cents: dict[int, np.ndarray] = {}
 
     def _before(self, episode: str) -> None:
         if episode in self._seen:
@@ -495,24 +450,14 @@ class LdaMatcher(_ScoringMatcher):
         return _unit_rows(self._lda.transform(np.asarray(x, dtype=np.float64))).astype(np.float32)
 
     def _prepare(self, state: RegistryState) -> None:
-        self._cents = {}
-        for aid in state.actors:
-            if self._lda is None:
-                c = state.centroid(aid)
-            else:
-                c = mean_embedding(self._project(np.vstack(state.exemplars[aid])))
-            if c is not None:
-                self._cents[aid] = np.asarray(c, dtype=np.float64)
-
-    def _best(self, rows: np.ndarray, mean: np.ndarray) -> tuple[int, float] | None:  # noqa: ARG002
-        top: tuple[int, float] | None = None
-        m = np.asarray(mean, dtype=np.float64)
-        for aid, c in self._cents.items():
-            denom = float(np.linalg.norm(c) * np.linalg.norm(m))
-            s = float(c @ m) / denom if denom else 0.0
-            if top is None or s > top[1]:
-                top = (aid, s)
-        return top
+        if self._lda is None:
+            super()._prepare(state)
+            return
+        self._centroids = [
+            (a, c)
+            for a in state.actors
+            if (c := mean_embedding(self._project(np.vstack(state.exemplars[a])))) is not None
+        ]
 
     def _after(self, episode: str, embs: np.ndarray, segs: Sequence[SegmentLike]) -> None:
         self._seen.append(episode)
@@ -528,7 +473,13 @@ class JointMatcher:
     similar pair of groups while their similarity reaches `threshold`: with
     `linkage="centroid"` (default) the cosine of the two groups' mean rows, the scale the
     centroid matcher's threshold is on; with `"average"` the mean pairwise cosine of their
-    rows, which noisy single rows pull far lower; never merging two groups that hold segments
+    rows, which noisy single rows pull far lower;
+    with `episode_cannot_link` (default on), segments of different diarization clusters of
+    one episode never end in one group either: within an episode the diarizer has already
+    decided they are different speakers (and every segmentation drops overlapped speech, so
+    the time-overlap rule alone almost never fires). It also forbids rejoining a speaker the
+    diarizer split in two within an episode. Segments without a cluster (subtitles, asr)
+    are untouched by it; never merging two groups that hold segments
     of one episode overlapping in time (cannot-link; the constraint carries through every
     merge). `seed="clusters"` starts each episode's diarization cluster as one group
     (segments without a cluster start alone); `seed="segments"` starts every segment alone.
@@ -544,7 +495,11 @@ class JointMatcher:
         min_new_seconds: float = 20.0,
         seed: str = "clusters",
         linkage: str = "centroid",
+        episode_cannot_link: bool = True,
     ) -> None:
+        if not isinstance(episode_cannot_link, bool):
+            raise ValueError("joint: episode_cannot_link must be true or false")
+        self.episode_cannot_link = episode_cannot_link
         if seed not in ("clusters", "segments"):
             raise ValueError(f'joint: seed must be "clusters" or "segments", not {seed!r}')
         if linkage not in ("centroid", "average"):
@@ -605,6 +560,23 @@ class JointMatcher:
                     ga, gb = g[ka], g[kb]
                     if ga != gb:
                         cannot[ga, gb] = cannot[gb, ga] = True
+        if self.episode_cannot_link:
+            keys: dict[int, set[tuple[str, str]]] = {}
+            for k, (ep, i) in enumerate(items):
+                c = segs[ep][i].cluster
+                if c is not None:
+                    keys.setdefault(int(g[k]), set()).add((ep, str(c)))
+            by_ep: dict[str, list[int]] = {}
+            for gid, ks in keys.items():
+                for ep in {e for e, _ in ks}:
+                    by_ep.setdefault(ep, []).append(gid)
+            for ep, gids in by_ep.items():
+                for x in range(len(gids)):
+                    kx = {c for e, c in keys[gids[x]] if e == ep}
+                    for y in range(x + 1, len(gids)):
+                        ky = {c for e, c in keys[gids[y]] if e == ep}
+                        if kx != ky or len(kx) > 1:
+                            cannot[gids[x], gids[y]] = cannot[gids[y], gids[x]] = True
         alive = np.ones(n_groups, dtype=bool)
 
         def scale(i: np.ndarray | int) -> np.ndarray:

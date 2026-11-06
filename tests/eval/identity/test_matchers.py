@@ -335,3 +335,43 @@ def test_joint_centroid_linkage_links_noisy_rows_of_one_voice():
     assert set(avg["E01"]) != set(avg["E02"])
     with pytest.raises(ValueError, match="linkage"):
         JointMatcher(linkage="single")
+
+
+# ---- fix round 1 ----
+
+
+def test_centroid_shares_the_scoring_flow():
+    """One fit_episode flow for every per-episode matcher; centroid is its centroid scorer."""
+    from fukikae.registry import matchers as mod
+
+    for cls in (CentroidMatcher, KnnMatcher, MultiCentroidMatcher, LdaMatcher):
+        assert issubclass(cls, mod._ScoringMatcher)  # noqa: SLF001
+        assert "fit_episode" not in cls.__dict__
+
+
+def test_joint_episode_cannot_link_keeps_clusters_of_one_episode_apart():
+    """Two non-overlapping segments of different diarization clusters in one episode, same
+    voice: never one group with episode_cannot_link (the default); one group without it."""
+    rng = np.random.default_rng(13)
+    v = noisy(E[2], 2, rng, sd=0.01)
+    segs = [Seg("E01", 0.0, 15.0, cluster="S0"), Seg("E01", 30.0, 45.0, cluster="S1")]
+    for seed in ("clusters", "segments"):
+        on = JointMatcher(min_new_seconds=0.0, seed=seed).fit_all(
+            ["E01"], {"E01": v}, {"E01": segs}
+        )
+        assert on["E01"][0] != on["E01"][1]
+        off = JointMatcher(min_new_seconds=0.0, seed=seed, episode_cannot_link=False).fit_all(
+            ["E01"], {"E01": v}, {"E01": segs}
+        )
+        assert off["E01"][0] == off["E01"][1]
+
+
+def test_joint_episode_cannot_link_still_links_across_episodes():
+    rng = np.random.default_rng(14)
+    segs = {
+        "E01": [Seg("E01", 0.0, 15.0, cluster="S0")],
+        "E02": [Seg("E02", 0.0, 15.0, cluster="S3")],
+    }
+    embs = {"E01": noisy(E[2], 1, rng, 0.01), "E02": noisy(E[2], 1, rng, 0.01)}
+    out = JointMatcher(min_new_seconds=0.0).fit_all(["E01", "E02"], embs, segs)
+    assert out["E01"] == out["E02"] == [1]
