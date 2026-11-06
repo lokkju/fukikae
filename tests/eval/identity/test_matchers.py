@@ -375,3 +375,58 @@ def test_joint_episode_cannot_link_still_links_across_episodes():
     embs = {"E01": noisy(E[2], 1, rng, 0.01), "E02": noisy(E[2], 1, rng, 0.01)}
     out = JointMatcher(min_new_seconds=0.0).fit_all(["E01", "E02"], embs, segs)
     assert out["E01"] == out["E02"] == [1]
+
+
+# ---- Ruling R11: unclustered segments group by centroid linkage ----
+
+
+def noisy_subtitle_series() -> tuple[dict[str, list[Segment]], dict[str, np.ndarray]]:
+    """Two voices as unclustered 2 s segments (subtitle-like) in two episodes. Single rows are
+    noisy: the mean pairwise cosine within a voice is ~0.52, under the 0.6 threshold, while
+    a voice's mean row sits far above it."""
+    rng = np.random.default_rng(5)
+    dim = 16
+    eye = np.eye(dim)
+
+    def voice(i: int, n: int) -> np.ndarray:
+        return np.vstack([unit(eye[i] + rng.normal(0, 0.25, dim)) for _ in range(n)])
+
+    segs, embs = {}, {}
+    for ep in ("E01", "E02"):
+        segs[ep] = segs_for(ep, ["A"] * 12 + ["B"] * 12)
+        embs[ep] = np.vstack([voice(0, 12), voice(1, 12)]).astype(np.float32)
+    return segs, embs
+
+
+def test_subtitle_segmentation_under_centroid_no_longer_zeroes_out():
+    """Average linkage left every noisy segment alone (2 s, under min_new_seconds): all
+    extras. Centroid linkage groups each voice (an outlier row may stay alone) and links it
+    across episodes."""
+    from collections import Counter
+
+    segs, embs = noisy_subtitle_series()
+    assign = simulate(["E01", "E02"], CentroidMatcher(), segs, embs)
+    modal: dict[tuple[str, str | None], int | None] = {}
+    for key in [(ep, lab) for ep in ("E01", "E02") for lab in ("A", "B")]:
+        ids = Counter(cid for (ep, i), cid in assign.items() if (ep, segs[ep][i].label) == key)
+        modal[key], n = ids.most_common(1)[0]
+        assert n >= 7  # most of the 12
+    assert None not in modal.values()
+    assert modal[("E01", "A")] != modal[("E01", "B")]
+    assert modal[("E02", "A")] == modal[("E01", "A")]
+    assert modal[("E02", "B")] == modal[("E01", "B")]
+
+
+def test_group_segments_uses_centroid_linkage():
+    from fukikae.registry.matchers import group_segments
+
+    segs, embs = noisy_subtitle_series()
+    groups = sorted(
+        (sorted(idx) for _, idx in group_segments(embs["E01"], segs["E01"], 0.4)),
+        key=len,
+        reverse=True,
+    )
+    assert set(groups[0]) <= set(range(12)) or set(groups[0]) <= set(range(12, 24))
+    assert len(groups[0]) >= 10 and len(groups[1]) >= 10
+    assert set(groups[0]).isdisjoint(groups[1])
+    assert {groups[0][0] < 12, groups[1][0] < 12} == {True, False}

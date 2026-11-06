@@ -29,7 +29,6 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
 import numpy as np
-from scipy.cluster.hierarchy import fcluster, linkage
 
 from fukikae.models import ClusterAssignment
 from fukikae.registry.matching import ClusterEvidence, decide, mean_embedding
@@ -124,8 +123,11 @@ def group_segments(
     embs: np.ndarray, segs: Sequence[SegmentLike], distance: float
 ) -> list[tuple[str, list[int]]]:
     """(cluster label, segment indices) in order of first appearance. Diarization segments
-    keep their cluster; segments without one are grouped by average-linkage cosine distance
-    at `distance` (`registry.cluster.seed_clusters` uses the same linkage)."""
+    keep their cluster; segments without one are grouped by centroid linkage (Ruling R11):
+    the most similar pair of groups merges while the cosine of their mean rows is at least
+    1 - `distance`, never joining segments that overlap in time (`JointMatcher` with
+    `seed="segments"` on the one episode). Average linkage, the mean pairwise cosine of
+    single noisy rows, ran far below that scale and left almost every segment alone."""
     with_cluster = [s.cluster is not None for s in segs]
     if any(with_cluster) and not all(with_cluster):
         raise ValueError("segments mix diarization clusters and unclustered segments")
@@ -136,11 +138,14 @@ def group_segments(
     elif len(segs) == 1:
         labels = ["G1"]
     else:
-        x = np.asarray(embs, dtype=np.float64)
-        ids = fcluster(
-            linkage(x, method="average", metric="cosine"), t=distance, criterion="distance"
+        joint = JointMatcher(
+            threshold=1.0 - distance,
+            min_new_seconds=float("-inf"),
+            seed="segments",
+            episode_cannot_link=False,
         )
-        labels = [f"G{int(g)}" for g in ids]
+        ids = joint.fit_all(["_"], {"_": np.asarray(embs)}, {"_": segs})["_"]
+        labels = [f"G{g}" for g in ids]
     groups: dict[str, list[int]] = {}
     for i, lab in enumerate(labels):
         groups.setdefault(lab, []).append(i)
