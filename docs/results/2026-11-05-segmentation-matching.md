@@ -8,13 +8,13 @@ On each tuning pair (fairytail E12 then E13, `ass`; fairytail-en E12 then E13, `
 
 - **Segmentation** (8): `diarization` (pyannote community-1 as shipped: clustering threshold 0.6, `embedding_exclude_overlap` on), five tuned pyannote variants `pyannote-t<threshold>-eo<0|1>` (threshold 0.5, 0.6, 0.7 times exclude_overlap on/off, less the shipped cell), `subtitles` (the ground-truth lines) and `asr` (transcript sentences split where 1.5 s word windows differ by cosine distance above 0.8).
 - **Embedder** (Ruling R9): ECAPA, WeSpeaker and ERes2NetV2 on the anime sets; WeSpeaker on grid, plus ECAPA there for the baseline.
-- **Matcher** (12 settings): `centroid`; `knn` k 3, 5, 9; `multi-centroid` max_centroids 2, 3; `lda` dims 16, 32, all; `joint` threshold 0.5, 0.6, 0.7.
+- **Matcher** (12 settings): `centroid`; `knn` k 3, 5, 9; `multi-centroid` max_centroids 2, 3; `lda` dims 16, 32, all; `joint` threshold 0.5, 0.6, 0.7. The sweep ran before `joint` had its `episode_cannot_link` option, so every `joint` row in the sweep tables is joint with that option off (it may merge two diarization clusters of one episode); the option's own comparison is in "Joint with episode cannot-link" below.
 
 That is 764 harness runs, all scored with `eval identity` semantics (recurring at 5 s per episode, Ruling R6). Raw output: `~/fukikae-ws/segmatch/results.jsonl` (one line per run, with per-character shares), drivers `sweep.py`, `diarize_variants.py`, `asr_split.py`, `tables.py` beside it.
 
 Pyannote variants were re-diarized into `~/fukikae-ws/<set>-pyannote-<variant>/`, which hold symlinks to the originals' `fukikae.toml`, aliases, `vocals_16k.wav` and `transcript.json` and their own `04-diarize/turns.json`; the original workspaces were only read. Community-1 clusters with VBx, which has no `min_cluster_size` (the 3.x agglomerative clustering's parameter); the backend refuses that option on a VBx pipeline, so the grid is threshold times exclude_overlap only.
 
-The ASR split threshold came from the tuning episodes: adjacent 1.5 s ECAPA windows of one speaker on fairytail E12 sit at a median cosine distance of 0.62 (95th percentile 0.78), so the planned 0.5 would have split 84% of same-speaker window pairs; 0.8 splits 4% and still catches 75% of the 12 in-sentence speaker changes. Word windows use the Task 5 genre winner: ECAPA on anime (the default Task 5 kept), WeSpeaker on grid.
+The ASR split threshold came from the tuning episodes: adjacent 1.5 s ECAPA windows of one speaker on fairytail E12 sit at a median cosine distance of 0.62 (95th percentile 0.78), so the planned 0.5 would have split 84% of same-speaker window pairs; 0.8 splits 4% and still catches 75% of the 12 in-sentence speaker changes. That basis is thin: fairytail-en E12 has 1 in-sentence speaker change and grid E02 has 2, so 0.8 is a fairytail E12 figure applied to all three sets. Word windows use the Task 5 genre winner: ECAPA on anime (the default Task 5 kept), WeSpeaker on grid.
 
 ## How to read the tables
 
@@ -32,7 +32,9 @@ The bar's fraction rewards collapse: an id that swallows several recurring chara
 | pyannote-t0.5-eo0, ECAPA, centroid | 0.67 | 6/9 | 4 | JUVIA+LUCY; JUVIA+TOUKA; LUCY+TOUKA | 84% | 0.33 | 35% | 69% |
 | pyannote-t0.5-eo0, ECAPA, joint (0.6) | 0.89 | 8/9 | 5 | 6 pairs (CANA, JUVIA, LUCY, TOUKA on one id) | 91% | 0.42 | 39% | 69% |
 
-Nothing reaches the bar, and nothing removes the JUVIA+LUCY merge. Every configuration that raises the fraction above 0.44 does it by putting TOUKA, LUCY and JUVIA (and with joint, CANA) on one id. The one gain that adds no merge is the embedder (WeSpeaker, from Task 5), worth two clean characters; no matcher or segmentation adds a clean character on top of it without adding merges.
+| diarization, WeSpeaker, joint (0.5 or 0.6, episode cannot-link) | 0.56 | 5/9 | 5 | JUVIA+LUCY | 81% | | | |
+
+Nothing reaches the bar, and nothing removes the JUVIA+LUCY merge. In the sweep, every configuration that raised the fraction above 0.44 did it by putting TOUKA, LUCY and JUVIA (and with joint, CANA) on one id; joint at 0.7 is not merge-free here either (diarization with WeSpeaker or ECAPA: 0.67 with 6 merged pairs, against centroid's 0.44 with 1). The one gain without new merges in the sweep is the embedder (WeSpeaker, from Task 5), worth two clean characters. Joint with episode cannot-link adds a fifth clean character on top of it with the same single merge (strict and coverage were not recorded in that re-run).
 
 ### Anime, English dub (fairytail-en)
 
@@ -43,6 +45,8 @@ Nothing reaches the bar, and nothing removes the JUVIA+LUCY merge. Every configu
 | pyannote-t0.6-eo0, WeSpeaker, joint (0.7) | 0.70 | 7/10 | 7 | none | 83% | 0.00 | 50% | 71% |
 | pyannote-t0.6-eo0, WeSpeaker, joint (0.6) | 0.90 | 9/10 | 8 | CANA+JUVIA | 89% | 0.00 | 51% | 71% |
 | subtitles, WeSpeaker, joint (0.5) | 0.73 | 8/11 | 8 | none | 81% | 0.00 | 86% | 73% |
+
+| diarization, WeSpeaker, joint (0.5 or 0.6, episode cannot-link) | 0.80 | 8/10 | 7 | CANA+JUVIA | 81% | | | |
 
 The dub is where matching helps. `joint` at 0.7 removes the CANA+JUVIA merge at the same fraction; at 0.6 on the exclude_overlap-off diarization it reaches 0.90 with the merge back. The best merge-free run is subtitles segmentation with WeSpeaker and joint at 0.5: 8 of 11 recurring characters clean, 81% of speech on the modal id, coverage 86%. Subtitle segmentation is an oracle segmentation (it cuts at the ground truth's own line boundaries) and is not available at dubbing time, so it bounds what a better segmenter could give; it is not a candidate profile.
 
@@ -55,7 +59,7 @@ The dub is where matching helps. `joint` at 0.7 removes the CANA+JUVIA merge at 
 | diarization, WeSpeaker, joint (0.6) | 1.00 | 2/2 | 2 | none | 81% | 0.17 | 14% | 96% |
 | pyannote-t0.6-eo0, ECAPA, joint (0.5) | 1.00 | 2/2 | 2 | none | 88% | 0.33 | 15% | 81% |
 
-`joint` passes both recurring characters (새벽 goes from 67% to 88% on its id) at every threshold and on every diarization variant, with any embedder. Two characters on 12% coverage: one character is the whole difference.
+`joint` without episode cannot-link passes both recurring characters (새벽 goes from 67% to 88% on its id) on the shipped diarization at every threshold with either embedder, and on most variants; at 0.7 three variant cells stay at 0.50 (t0.5-eo1 with WeSpeaker, t0.5-eo1 with ECAPA, t0.5-eo0 with ECAPA). The gain comes from rejoining 새벽's two clusters within one episode, so joint with episode cannot-link is back at the baseline (0.50, 1/2, 73%) at every threshold. Two characters on 12% coverage: one character is the whole difference.
 
 ## Per-character effect on the known confusions
 
@@ -75,7 +79,9 @@ fairytail (ja):
 | pyannote-t0.5-eo0, ecapa, joint (0.7) | 63% (id 3) | 91% (id 3) | 82% (id 3) | 96% (id 12) | 100% (id 1) | 94% (id 8) | JUVIA+LUCY; JUVIA+TOUKA; LUCY+TOUKA |
 | asr, wespeaker, joint (0.5) | 62% (id 4) | 85% (id 4) | 82% (id 4) | 94% (id 4) | 97% (id 2) | 80% (id 9) | all six CANA/JUVIA/LUCY/TOUKA pairs |
 
-TOUKA rises from 15% only by joining LUCY's id; no run gives TOUKA an id of her own with more than 15%. On the Japanese track these four voices are one voice to every embedder, matcher and segmentation tried. ERZA does gain on her own id under joint (65% to 94-97%), a real improvement hidden inside runs that fail on merges.
+| diarization, wespeaker, joint (0.5-0.7, episode cannot-link) | 68% (id 13) | 67% (id 4) | 40% (id 4) | 94% (id 5) | - | 97% (id 8) | JUVIA+LUCY |
+
+In the sweep, TOUKA rose from 15% only by joining LUCY's id. Joint with episode cannot-link is the first configuration that gives TOUKA an id of her own with more than 15% (68%) and lifts ERZA (65% to 97%) without adding a merge; JUVIA+LUCY stays, since their clusters in E12 and E13 link across the episodes. With exclude_overlap off (t0.5-eo0, t0.6-eo0) episode cannot-link still leaves TOUKA, LUCY and JUVIA on one id at 0.5 and 0.6: the variant diarization itself puts them in one cluster.
 
 fairytail-en:
 
@@ -90,12 +96,41 @@ fairytail-en:
 
 On the dub, TOUKA is fixable: the exclude_overlap-off diarization (t0.6-eo0) gives her 90% on an id of her own with WeSpeaker under lda or joint, where the baseline gave her no id at all. JUVIA stays at 25-26% with any diarization segmentation, which means pyannote itself splits her across clusters; only subtitle segmentation lifts her (87%). Breaking CANA+JUVIA (joint at 0.7) costs CANA (95% to 52-54%).
 
+## Joint with episode cannot-link
+
+`episode_cannot_link` (default on since fix round 1) forbids any group holding segments of two different diarization clusters of one episode. The original time-overlap cannot-link never fired: every segmentation drops overlapped speech, so no two segments overlap. Without it, joint merged distinct clusters of one episode freely, which is what produced the Japanese mega-merges; with it, joint can no longer rejoin a speaker that pyannote split in two within an episode. Re-run on the tuning pairs with cached embeddings (`~/fukikae-ws/segmatch/joint_ecl.py`, `joint_ecl.json`), seed clusters, diarization segmentation:
+
+| Set | Segmentation | Embedder | Threshold | Cannot-link on: fraction, clean, merges, share | Off: fraction, clean, merges, share |
+|---|---|---|---|---|---|
+| fairytail | diarization | WeSpeaker | 0.5 | 0.56, 5, 1, 81% | 0.89, 1, 11, 93% |
+| fairytail | diarization | WeSpeaker | 0.6 | 0.56, 5, 1, 81% | 0.78, 4, 6, 91% |
+| fairytail | diarization | WeSpeaker | 0.7 | 0.44, 4, 1, 80% | 0.67, 3, 6, 90% |
+| fairytail | diarization | ECAPA | 0.5 | 0.56, 4, 1, 82% | 0.89, 3, 10, 92% |
+| fairytail | diarization | ECAPA | 0.6 | 0.44, 3, 1, 80% | 0.78, 4, 6, 91% |
+| fairytail | diarization | ECAPA | 0.7 | 0.44, 3, 1, 80% | 0.67, 3, 6, 90% |
+| fairytail | t0.6-eo0 | WeSpeaker | 0.5 / 0.6 / 0.7 | 0.56, 5, 3, 81% / 0.56, 5, 3, 81% / 0.44, 4, 1, 76% | 0.89, 1, 11 / 0.78, 4, 6 / 0.56, 3, 3 |
+| fairytail | t0.6-eo0 | ECAPA | 0.5 / 0.6 / 0.7 | 0.56, 5, 3 / 0.44, 4, 3 / 0.44, 4, 3 | 0.78, 2, 10 / 0.78, 2, 10 / 0.67, 3, 6 |
+| fairytail | t0.5-eo0 | WeSpeaker | 0.5 / 0.6 / 0.7 | 0.78, 5, 3, 87% / 0.78, 5, 3, 87% / 0.67, 4, 3, 85% | 1.00, 4, 10 / 0.78, 4, 6 / 0.67, 4, 3 |
+| fairytail | t0.5-eo0 | ECAPA | 0.5 / 0.6 / 0.7 | 0.78, 5, 3 / 0.78, 5, 3 / 0.67, 4, 3 | 1.00, 4, 10 / 0.89, 5, 6 / 0.67, 4, 3 |
+| fairytail-en | diarization | WeSpeaker | 0.5 / 0.6 / 0.7 | 0.80, 7, 1, 81% / 0.80, 7, 1, 81% / 0.70, 7, 0, 77% | 0.90, 5, 4, 93% / 0.90, 6, 2, 91% / 0.70, 7, 0, 79% |
+| fairytail-en | diarization | ECAPA | 0.5 / 0.6 / 0.7 | 0.80, 7, 1, 81% / 0.80, 7, 1, 81% / 0.70, 7, 0, 77% | 0.90, 5, 4 / 0.90, 6, 2 / 0.70, 7, 0 |
+| fairytail-en | t0.6-eo0 | WeSpeaker | 0.5 / 0.6 / 0.7 | 0.80, 7, 1, 86% / 0.80, 7, 1, 86% / 0.70, 7, 0, 82% | 0.90, 5, 4 / 0.90, 8, 1, 89% / 0.70, 7, 0, 83% |
+| fairytail-en | t0.6-eo0 | ECAPA | 0.5 / 0.6 / 0.7 | 0.80, 7, 1, 86% / 0.80, 7, 1, 86% / 0.70, 7, 0, 82% | 0.90, 6, 2 / 0.90, 6, 2 / 0.70, 7, 0 |
+| fairytail-en | t0.5-eo0 | WeSpeaker | 0.5 / 0.6 / 0.7 | 0.80, 7, 1, 87% / 0.80, 7, 1, 87% / 0.70, 7, 0, 83% | 0.90, 5, 4 / 0.90, 6, 2 / 0.70, 7, 0 |
+| fairytail-en | t0.5-eo0 | ECAPA | 0.5 / 0.6 / 0.7 | 0.80, 7, 1, 87% / 0.80, 7, 1, 87% / 0.70, 7, 0, 83% | 0.90, 5, 4 / 0.90, 6, 2 / 0.70, 5, 1 |
+| grid | diarization | WeSpeaker | 0.5 / 0.6 / 0.7 | 0.50, 1, 0, 73% (each) | 1.00, 2, 0, 81% / 81% / 78% |
+| grid | diarization | ECAPA | 0.5 / 0.6 / 0.7 | 0.50, 1, 0, 73% (each) | 1.00, 2, 0, 85% / 85% / 81% |
+
+Centroid for comparison: fairytail WeSpeaker 0.44, clean 4, 1 merge, 72%; fairytail-en ECAPA 0.70, clean 6, 1 merge, 72%; grid 0.50, clean 1, 73%. The merges left with the option on are JUVIA+LUCY (ja) and CANA+JUVIA (dub, gone at 0.7 at the cost of CANA's share, 95% to 52-54%); the three-way TOUKA/LUCY/JUVIA merge on the eo0 variants comes from the variant diarization putting them in one cluster.
+
+So episode cannot-link is the better default on anime: on ja it turns joint from the worst merger into the best clean count (5 against centroid's 4), on the dub it gives 7 clean at 0.5-0.6 with one merge (against 5-6 clean with 2-4 merges off) and is identical at 0.7. On grid it gives up joint's whole gain, which came from rejoining a split cluster within an episode. The trade is the over-split problem: off rejoins pyannote's within-episode splits (새벽, ERZA at times) and also merges different speakers; on does neither.
+
 ## Matchers, one by one
 
 - **knn**: no gain at threshold 0.6 on any set. With the local-centroid score it lands on centroid's decisions in most cells; k 3/5/9 move single characters back and forth.
 - **multi-centroid**: identical to centroid or within one character everywhere. With two tuning episodes an actor has at most two clusters' rows, so the extra centroids have little to model.
 - **lda**: fit on E12's labels, applied to E13. No clean gain on fairytail; on fairytail-en it lifts speech share (72% to 84% on t0.6-eo0) and TOUKA, but not the fraction. dims 16, 32 and all gave the same result in most cells (the E12 labels give few classes).
-- **joint**: the only matcher that changes outcomes. It merges more freely than per-episode matching (one clustering pass, centroid linkage); that fixes characters the registry splits (ERZA, 새벽, TOUKA on the dub) and produces the mega-merges on the Japanese track. Threshold 0.7 is merge-free on the dub and grid; 0.5 and 0.6 merge on both anime sets. ERes2NetV2's compressed similarity range puts every character on one id under joint at 0.5-0.6 (36 to 55 merge pairs), so joint with ERes2NetV2 is unusable at these thresholds.
+- **joint**: the only matcher that changes outcomes. Without episode cannot-link it merges more freely than per-episode matching (one clustering pass, centroid linkage); that fixes characters the registry splits (ERZA, 새벽, TOUKA on the dub) and produces the mega-merges on the Japanese track. Without the option, threshold 0.7 is merge-free on the dub and on grid's shipped diarization, but not on the Japanese track (6 merged pairs); 0.5 and 0.6 merge on both anime sets. With the option, see the section above. ERes2NetV2's compressed similarity range puts every character on one id under joint at 0.5-0.6 (36 to 55 merge pairs), so joint with ERes2NetV2 is unusable at these thresholds.
 
 ## Segmentations, one by one
 
@@ -105,9 +140,9 @@ On the dub, TOUKA is fixable: the exclude_overlap-off diarization (t0.6-eo0) giv
 
 ## Recommendation for Tasks 7 to 9
 
-- **Anime**: carry WeSpeaker, both the shipped pyannote and `exclude_overlap = false` at threshold 0.6 (the latter only pays off with joint or lda, on the dub), and two matchers: `centroid` (the pipeline today) and `joint` at 0.7 (`seed = clusters`). Drop knn and multi-centroid (no gain); keep lda only as an option, not a profile default (it needs labeled episodes, and it gained share but no characters). Drop ERes2NetV2 with joint. The Japanese female-voice collapse (TOUKA, LUCY, JUVIA, CANA) is not fixed by any segmentation or matcher here; Task 8's adaptation is the remaining lever, and the bar on the Japanese track looks out of reach without it.
-- **Live action**: carry WeSpeaker, shipped pyannote (variants change nothing on grid), and `joint` at 0.6 or 0.7 alongside centroid for Task 9's threshold sweep. Grid's two recurring characters can't distinguish more than that.
-- **Task 7 (pipeline matcher)**: `joint` has no registry state and needs every episode at once; in the pipeline it fits a batch re-resolve (`registry resolve --all`) better than the per-episode characters stage. If it goes in, the cannot-link and centroid linkage are already in `registry/matchers.py`.
+- **Anime**: carry WeSpeaker, both the shipped pyannote and `exclude_overlap = false` at threshold 0.6 (the latter only pays off with joint or lda, on the dub), and two matchers: `centroid` (the pipeline today) and `joint` with `episode_cannot_link` on (`seed = clusters`) at 0.6 or 0.7: 0.6 gives the best clean counts on both tracks (ja 5, dub 7) with one merge each, 0.7 is merge-free on the dub only. Before fix round 1 this line recommended joint at 0.7 on the strength of the dub alone; on the Japanese track joint without the option at 0.7 merges six pairs. Drop knn and multi-centroid (no gain); keep lda only as an option, not a profile default (it needs labeled episodes, and it gained share but no characters). Drop ERes2NetV2 with joint. The Japanese female-voice collapse (TOUKA, LUCY, JUVIA, CANA) is not fixed by any segmentation or matcher here; Task 8's adaptation is the remaining lever, and the bar on the Japanese track looks out of reach without it.
+- **Live action**: carry WeSpeaker, shipped pyannote (variants change little on grid), and centroid. Joint helps grid only with `episode_cannot_link = false` (2/2 at 0.5 and 0.6), by rejoining one character's split clusters; with two recurring characters that is one character, so carry joint (option off, 0.6) to Task 9 as a candidate and decide there.
+- **Task 7 (pipeline matcher)**: `joint` has no registry state and needs every episode at once; in the pipeline it fits a batch re-resolve (`registry resolve --all`) better than the per-episode characters stage. If it goes in, the cannot-link rules (time overlap, and episode cannot-link) and centroid linkage are already in `registry/matchers.py`. Episode cannot-link is inert for segments without a diarization cluster (subtitles, asr).
 - **Fix before Task 9**: `group_segments` should use centroid linkage (as `joint` does) for unclustered segments, or subtitle and asr segmentation can't be compared fairly under per-episode matchers. That changes no diarization result (diarization segments keep their clusters).
 
 Each keep/drop above is a ruling candidate for the ledger with the numbers in this note.
