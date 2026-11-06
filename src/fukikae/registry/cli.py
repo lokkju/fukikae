@@ -484,3 +484,51 @@ def adapt(
         f"lda projection for series {series!r}: {len(x)} labeled rows, {len(set(y))} labels, "
         f"{projection.matrix.shape[1]} dims, from {', '.join(e.id for e in eps)}"
     )
+
+
+@registry_app.command("resolve")
+def resolve(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    episodes: str = typer.Option(
+        ..., "--episodes", help="Comma-separated episodes resolved together, e.g. S01E12,S01E13."
+    ),
+    matcher: str = typer.Option("joint", "--matcher", help="Batch matcher: joint."),
+    threshold: float = typer.Option(
+        None, "--threshold", help="Cosine to merge groups (default: registry match_threshold)."
+    ),
+    matcher_option: list[str] = typer.Option(
+        None,
+        "--matcher-option",
+        help="k=v joint option: episode_cannot_link (true), linkage (centroid); repeat.",
+    ),
+) -> None:
+    """Re-resolve several episodes at once with the joint matcher, rewriting the registry and
+    their assignments.
+
+    Every listed episode needs a done diarize stage. Actors only these episodes made are
+    replaced (unless locked, named or voiced); every other actor is matched against and
+    never merged with another. One registry transaction; assignments.json written after it.
+    """
+    from fukikae.errors import user_errors
+    from fukikae.eval.identity.cli import parse_options
+    from fukikae.registry.resolve import resolve_episodes
+
+    if matcher != "joint":
+        raise _fail(
+            f"--matcher {matcher}: resolve runs the batch matcher joint; per-episode matchers "
+            "run in the characters stage (`fukikae run`, `registry rematch`)"
+        )
+    ws = Workspace(workspace)
+    eps = _worked_episodes(ws, episodes)
+    try:
+        opts = parse_options(matcher_option, "--matcher-option")
+        thr = ws.config.registry.match_threshold if threshold is None else threshold
+        s = resolve_episodes(ws, eps, thr, options=opts)
+    except user_errors() as e:
+        raise _fail(str(e)) from e
+    typer.echo(
+        f"resolved {', '.join(s.episodes)} with joint at {thr:g}: {s.matched} clusters matched "
+        f"to existing actors, {len(s.new_actors)} new actors"
+        f"{' (' + ', '.join(map(str, s.new_actors)) + ')' if s.new_actors else ''}, "
+        f"{s.extras} extras; pruned {', '.join(map(str, s.pruned)) or 'none'}"
+    )
