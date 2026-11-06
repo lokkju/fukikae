@@ -547,7 +547,7 @@ def identity_cmd(
     segmentation_option: list[str] = typer.Option(
         None,
         "--segmentation-option",
-        help="asr only: k=v, one of window (s, 1.5), split (cosine distance, 0.5), "
+        help="asr only: k=v, one of window (s, 1.5), split (cosine distance, 0.8), "
         "max_gap (s, 1.0); repeat.",
     ),
     embedder: str = typer.Option(
