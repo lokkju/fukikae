@@ -24,7 +24,7 @@ Matchers by name (`make_matcher`), each taking `threshold` and `min_new_seconds`
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol
 
@@ -508,7 +508,11 @@ class JointMatcher:
         order: list[str],
         embs: Mapping[str, np.ndarray],
         segs: Mapping[str, Sequence[SegmentLike]],
+        always_cannot_link: Collection[str] = (),
     ) -> dict[str, list[int | None]]:
+        """`always_cannot_link` names episodes whose distinct clusters never share a group
+        even with `episode_cannot_link` off (`registry resolve` keeps existing actors apart
+        this way)."""
         items: list[tuple[str, int]] = []
         rows: list[np.ndarray] = []
         for ep in order:
@@ -554,11 +558,12 @@ class JointMatcher:
                     ga, gb = g[ka], g[kb]
                     if ga != gb:
                         cannot[ga, gb] = cannot[gb, ga] = True
-        if self.episode_cannot_link:
+        always = set(always_cannot_link)
+        if self.episode_cannot_link or always:
             keys: dict[int, set[tuple[str, str]]] = {}
             for k, (ep, i) in enumerate(items):
                 c = segs[ep][i].cluster
-                if c is not None:
+                if c is not None and (self.episode_cannot_link or ep in always):
                     keys.setdefault(int(g[k]), set()).add((ep, str(c)))
             by_ep: dict[str, list[int]] = {}
             for gid, ks in keys.items():
