@@ -40,7 +40,9 @@ from fukikae.workspace import Workspace
 Kind = Literal["diarization", "subtitles", "asr"]
 KINDS: tuple[str, ...] = ("diarization", "subtitles", "asr")
 ASR_WINDOW_S = 1.5
-ASR_SPLIT = 0.5
+# Adjacent 1.5 s ECAPA windows of one speaker: median distance 0.62, 95th pct 0.78
+# (fairytail E12, a tuning episode).
+ASR_SPLIT = 0.8
 ASR_MAX_GAP_S = 1.0
 # Sentence-final punctuation in the scripts the test sets use (Latin, CJK, Korean uses Latin).
 _TERMINAL = re.compile(r"[.!?。！？．…]")
