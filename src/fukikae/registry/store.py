@@ -6,11 +6,13 @@ to an actor. Embeddings are stored as float32 bytes.
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +44,14 @@ CREATE TABLE IF NOT EXISTS exemplars (
     seconds REAL
 );
 CREATE TABLE IF NOT EXISTS id_high_water (tbl TEXT PRIMARY KEY, last INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS projections (
+    series TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    matrix BLOB NOT NULL,
+    mean BLOB NOT NULL,
+    created TEXT NOT NULL,
+    PRIMARY KEY (series, kind)
+);
 CREATE INDEX IF NOT EXISTS exemplars_actor ON exemplars(actor_id);
 CREATE INDEX IF NOT EXISTS exemplars_episode ON exemplars(episode);
 """
@@ -63,6 +73,26 @@ class Character:
     name: str | None
     voice: dict | None
     locked: bool
+
+
+@dataclass(frozen=True)
+class StoredProjection:
+    series: str
+    kind: str
+    matrix: np.ndarray  # (dim, k)
+    mean: np.ndarray  # (dim,)
+    created: str  # ISO 8601, UTC
+
+
+def _array_blob(a: np.ndarray) -> bytes:
+    """An array with its shape and dtype (``np.save``), never pickled."""
+    buf = io.BytesIO()
+    np.save(buf, np.asarray(a), allow_pickle=False)
+    return buf.getvalue()
+
+
+def _blob_array(b: bytes) -> np.ndarray:
+    return np.load(io.BytesIO(b), allow_pickle=False)
 
 
 def _to_blob(v: np.ndarray) -> bytes:
@@ -179,7 +209,51 @@ class Registry:
             )
         ]
 
+    def exemplar_rows(self) -> dict[int, np.ndarray]:
+        """Every actor's exemplar rows, (n, dim) float32; an actor with none is absent."""
+        rows: dict[int, list[np.ndarray]] = {}
+        for aid, blob in self._con.execute(
+            "SELECT actor_id, embedding FROM exemplars ORDER BY actor_id, id"
+        ):
+            rows.setdefault(aid, []).append(np.frombuffer(blob, dtype=np.float32))
+        return {aid: np.vstack(r) for aid, r in rows.items()}
+
+    def protected_actors(self) -> set[int]:
+        """Actors someone has curated, which pruning never deletes: locked or named, or with
+        a character that has a name or a voice."""
+        return {
+            r[0]
+            for r in self._con.execute(
+                "SELECT id FROM actors WHERE locked OR name IS NOT NULL"
+                " UNION SELECT actor_id FROM characters"
+                " WHERE name IS NOT NULL OR voice IS NOT NULL"
+            )
+        }
+
+    def load_projection(self, series: str, kind: str) -> StoredProjection | None:
+        row = self._con.execute(
+            "SELECT matrix, mean, created FROM projections WHERE series = ? AND kind = ?",
+            (series, kind),
+        ).fetchone()
+        if row is None:
+            return None
+        return StoredProjection(series, kind, _blob_array(row[0]), _blob_array(row[1]), row[2])
+
     # writes
+
+    def save_projection(self, series: str, kind: str, matrix: np.ndarray, mean: np.ndarray) -> str:
+        """Store the series' projection of this kind, replacing any earlier one; returns its
+        creation time."""
+        created = datetime.now(UTC).isoformat()
+        with self._tx() as con:
+            con.execute(
+                "INSERT INTO projections(series, kind, matrix, mean, created)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(series, kind) DO UPDATE SET matrix = excluded.matrix,"
+                " mean = excluded.mean, created = excluded.created",
+                (series, kind, _array_blob(matrix), _array_blob(mean), created),
+            )
+        return created
 
     def _next_id(self, con: sqlite3.Connection, table: str) -> int:
         """An id above any this table has ever held, so a deleted id is never handed out

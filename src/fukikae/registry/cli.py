@@ -362,3 +362,125 @@ def actor(
             reg.set_actor(actor_id, name=name, external_id=external_id)
         except KeyError as e:
             raise _fail(f"no actor {actor_id}") from e
+
+
+def _worked_episodes(ws: Workspace, episodes: str) -> list[Episode]:
+    """The listed episodes (SxxEyy codes or media paths), each with a done diarize stage in
+    this workspace; anything else is refused as not an episode of this workspace."""
+    from fukikae.job import load_manifest
+    from fukikae.stages.characters import CharactersStage
+
+    refs = [e.strip() for e in episodes.split(",") if e.strip()]
+    if not refs:
+        raise _fail("--episodes names no episode")
+    eps: list[Episode] = []
+    for ref in refs:
+        try:
+            ep = _episode(ws, ref)
+        except (FileNotFoundError, ValueError) as e:
+            raise _fail(f"{ref}: not an episode of this workspace ({e})") from e
+        rec = load_manifest(ep).stages.get("diarize")
+        if (
+            rec is None
+            or rec.status != "done"
+            or any(not p.exists() for p in CharactersStage().inputs(ep))
+        ):
+            raise _fail(
+                f"{ref}: not an episode of this workspace with a done diarize stage "
+                f"(nothing under {ep.work / '04-diarize'}); run `fukikae run` first"
+            )
+        eps.append(ep)
+    if len({e.id for e in eps}) != len(eps):
+        raise _fail("--episodes names an episode twice")
+    return eps
+
+
+@registry_app.command("adapt")
+def adapt(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    episodes: str = typer.Option(
+        ..., "--episodes", help="Comma-separated labeled episodes (SxxEyy codes or files)."
+    ),
+    gt: str = typer.Option(
+        "ass", "--gt", help="Ground truth: ass (Name field), sdh (speaker tags) or colour."
+    ),
+    gt_file: Path = typer.Option(
+        None, "--gt-file", help="Sidecar subtitle file, or a directory matched by SxxEyy."
+    ),
+    subtitle_track: int = typer.Option(
+        None, "--subtitle-track", help="Absolute stream index of the ground-truth track."
+    ),
+    alias: list[str] = typer.Option(
+        None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
+    ),
+    dims: int = typer.Option(None, "--dims", min=1, help="Components to keep (default all)."),
+    force: bool = typer.Option(
+        False, "--force", help="Fit even when the subtitles do not line up with the speech."
+    ),
+) -> None:
+    """Fit the series' LDA projection from labeled episodes, replacing the previous one.
+
+    Each episode's diarization clean spans are labeled from its subtitles (as `eval identity`
+    labels them) and the labeled rows of its clusters.npz, the embeddings the characters
+    stage matches, train the projection. `[characters] matcher = "lda"` then matches in it.
+    """
+    import numpy as np
+
+    from fukikae.artifacts import read_json
+    from fukikae.errors import user_errors
+    from fukikae.eval.autolabel import speech_turns
+    from fukikae.eval.groundtruth import KINDS, check_alignment
+    from fukikae.eval.groundtruth.base import load_alias_file
+    from fukikae.eval.identity.cli import _ground_truth, parse_aliases
+    from fukikae.eval.identity.segments import diarization_segments
+    from fukikae.models import Diarization
+    from fukikae.registry.projection import KIND_LDA, fit_lda, series_of
+
+    if gt not in KINDS:
+        raise _fail(f"unknown --gt {gt!r}; use one of {', '.join(KINDS)}")
+    ws = Workspace(workspace)
+    eps = _worked_episodes(ws, episodes)
+    refs = [e.strip() for e in episodes.split(",") if e.strip()]
+    x: list[np.ndarray] = []
+    y: list[str] = []
+    try:
+        aliases = {**load_alias_file(ws.root / "labels-aliases.yaml"), **parse_aliases(alias)}
+        for ref, ep in zip(refs, eps, strict=True):
+            path, lines = _ground_truth(
+                ws, ref, ep.id, gt, gt_file, len(eps), subtitle_track, aliases
+            )
+            lines, _, _ = check_alignment(
+                lines,
+                speech_turns(ep.work),
+                force=force,
+                label=f"{gt} speaker lines in {ep.id} ({path.name})",
+            )
+            turns = read_json(ep.work / "04-diarize" / "turns.json", Diarization).turns
+            label_of = {
+                (s.cluster, round(s.start, 6), round(s.end, 6)): s.label
+                for s in diarization_segments(ep.id, turns, lines)
+            }
+            with np.load(ep.work / "04-diarize" / "clusters.npz") as z:
+                for cluster in [str(c) for c in z["labels"]]:
+                    emb = np.asarray(z[f"{cluster}/embeddings"], dtype=np.float32)
+                    spans = np.asarray(z[f"{cluster}/spans"]).reshape(-1, 2)
+                    for row, (a, b) in zip(emb, spans, strict=True):
+                        lab = label_of.get((cluster, round(float(a), 6), round(float(b), 6)))
+                        if lab is not None:
+                            x.append(row)
+                            y.append(lab)
+    except user_errors() as e:
+        raise _fail(str(e)) from e
+    projection = fit_lda(np.vstack(x), y, dims) if x else None
+    if projection is None:
+        raise _fail(
+            f"too few labels to fit on: {len(x)} labeled rows; LDA needs two speaker labels "
+            "with at least two labeled rows each"
+        )
+    series = series_of(ws.config)
+    with _open(workspace) as reg:
+        reg.save_projection(series, KIND_LDA, projection.matrix, projection.mean)
+    typer.echo(
+        f"lda projection for series {series!r}: {len(x)} labeled rows, {len(set(y))} labels, "
+        f"{projection.matrix.shape[1]} dims, from {', '.join(e.id for e in eps)}"
+    )

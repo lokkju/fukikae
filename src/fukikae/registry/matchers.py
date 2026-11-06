@@ -432,27 +432,16 @@ class LdaMatcher(_ScoringMatcher):
         self._lda = self._fit()
 
     def _fit(self) -> Any:
-        from collections import Counter
+        from fukikae.registry.projection import fit_lda
 
-        counts = Counter(self._train_y)
-        keep = [i for i, y in enumerate(self._train_y) if counts[y] >= 2]
-        classes = {self._train_y[i] for i in keep}
-        if len(classes) < 2:
+        if not self._train_x:
             return None
-        from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-
-        x = np.vstack([self._train_x[i] for i in keep]).astype(np.float64)
-        y = [self._train_y[i] for i in keep]
-        top = min(len(classes) - 1, x.shape[1])
-        n = top if self.dims is None else min(self.dims, top)
-        return LinearDiscriminantAnalysis(solver="eigen", shrinkage="auto", n_components=n).fit(
-            x, y
-        )
+        return fit_lda(np.vstack(self._train_x), self._train_y, self.dims)
 
     def _project(self, x: np.ndarray) -> np.ndarray:
         if self._lda is None:
             return np.asarray(x, dtype=np.float32)
-        return _unit_rows(self._lda.transform(np.asarray(x, dtype=np.float64))).astype(np.float32)
+        return self._lda.apply(x)
 
     def _prepare(self, state: RegistryState) -> None:
         if self._lda is None:

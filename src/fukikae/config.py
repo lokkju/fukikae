@@ -41,9 +41,11 @@ class Config:
     profile_raw: dict[str, Any] = field(default_factory=dict)
 
     def resolve(
-        self, kind: str, language: str | None = None, pair: str | None = None
+        self, kind: str, language: str | None = None, pair: str | None = None, key: str = "backend"
     ) -> BackendConfig:
-        """Pick the backend for a stage: pair table over language table over base."""
+        """Pick the backend for a stage: pair table over language table over base. `key`
+        names the table's selector (``matcher`` for ``[characters]``); the result's
+        `backend` holds its value."""
         merged: dict[str, Any] = {}
         # Later layers win: profile, then the workspace's own tables over it.
         for source in (self.profile_raw, self.raw):
@@ -51,23 +53,23 @@ class Config:
             if not isinstance(table, dict):
                 continue
             base = {k: v for k, v in table.items() if k not in ("lang", "pair")}
-            merged = _layer(merged, base)
-            for group, key in (("lang", language), ("pair", pair)):
-                if key is None:
+            merged = _layer(merged, base, key)
+            for group, name in (("lang", language), ("pair", pair)):
+                if name is None:
                     continue
-                override = table.get(group, {}).get(key)
+                override = table.get(group, {}).get(name)
                 if isinstance(override, dict):
-                    merged = _layer(merged, override)
-        backend = merged.pop("backend", None)
+                    merged = _layer(merged, override, key)
+        backend = merged.pop(key, None)
         if not backend:
-            raise ConfigError(f"no backend configured for {kind!r}")
-        options = {k: v for k, v in merged.items() if k not in _RESERVED}
+            raise ConfigError(f"no {key} configured for {kind!r}")
+        options = {k: v for k, v in merged.items() if k not in (*_RESERVED, key)}
         return BackendConfig(str(backend), options)
 
 
-def _layer(merged: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
+def _layer(merged: dict[str, Any], over: dict[str, Any], key: str = "backend") -> dict[str, Any]:
     """Apply one layer; a different backend gets only its own options (Ruling R4)."""
-    if "backend" in over and merged.get("backend") not in (None, over["backend"]):
+    if key in over and merged.get(key) not in (None, over[key]):
         return dict(over)
     return {**merged, **over}
 
