@@ -108,6 +108,19 @@ def resolve_episodes(
     loaded = {ep.id: load_clusters(stage.inputs(ep)[1]) for ep in episodes}
     seconds = {(e, ev.cluster): ev.clean_seconds for e, (evs, _) in loaded.items() for ev in evs}
 
+    dims = {
+        e: next((r.shape[1] for r in rows.values() if len(r)), 0) for e, (_, rows) in loaded.items()
+    }
+    dim = next((d for d in dims.values() if d), 0)
+    ref = next((e for e in order if dims[e]), None)
+    for e in order:
+        if dims[e] and dims[e] != dim:
+            raise ValueError(
+                f"{e}'s clusters are {dims[e]}-dimensional but {ref}'s are {dim}-dimensional: "
+                "the embedder changed between them. Re-run the diarize stage of the older "
+                "episodes with one embedder, then resolve"
+            )
+
     for ep in episodes:  # stale until its assignments are rewritten
         mark_stale(ep, "characters")
 
@@ -132,13 +145,14 @@ def resolve_episodes(
 
         embs: dict[str, np.ndarray] = {}
         segs: dict[str, list[_Row]] = {}
-        dim = next((r.shape[1] for _, rows in loaded.values() for r in rows.values() if len(r)), 0)
-        bad = [aid for aid, rows in anchors if dim and rows.shape[1] != dim]
+        bad = [(aid, rows.shape[1]) for aid, rows in anchors if dim and rows.shape[1] != dim]
         if bad:
+            aid, d = bad[0]
             raise ValueError(
-                f"actors {', '.join(map(str, bad))} hold embeddings of another dimension than "
-                f"these episodes' clusters ({dim}); the embedder changed. Resolve with the "
-                "embedder the registry was built with, or re-run diarize for its episodes"
+                f"actor {aid} holds {d}-dimensional embeddings but the listed episodes' "
+                f"clusters are {dim}-dimensional: the embedder changed since the registry was "
+                "built. Re-embed the registry's episodes with one embedder (re-run their "
+                "diarize stage, then `registry rematch` or resolve them together)"
             )
         if anchors:
             embs[ANCHORS] = np.vstack([rows for _, rows in anchors])

@@ -459,3 +459,36 @@ def test_unknown_or_batch_matcher_is_refused(tmp_path):
         CharactersStage().run(ep2, with_raw({"characters": {"matcher": "knn"}}))
     with pytest.raises(ConfigError, match="dims"):
         CharactersStage().run(ep2, with_raw({"characters": {"matcher": "lda", "dims": 0}}))
+
+
+def test_centroid_matching_refuses_actors_of_another_dimension(tmp_path):
+    from fukikae.config import ConfigError
+
+    ep1, ep2 = lda_setup(tmp_path, project=False)
+    with registry(ep1) as reg:
+        aid, _ = reg.create_actor_with_character(np.ones(5, dtype=np.float32))
+        reg.add_exemplars(aid, "other", "X", np.ones((1, 5), dtype=np.float32), 30.0)
+    with pytest.raises(ConfigError, match="embedder changed"):
+        CharactersStage().run(ep2, CFG)
+
+
+def test_lda_refuses_actor_rows_of_another_dimension(tmp_path):
+    from fukikae.config import ConfigError
+
+    ep1, ep2 = lda_setup(tmp_path)
+    with registry(ep1) as reg:
+        aid, _ = reg.create_actor_with_character(np.ones(5, dtype=np.float32))
+        reg.add_exemplars(aid, "other", "X", np.ones((1, 5), dtype=np.float32), 30.0)
+    with pytest.raises(ConfigError, match="registry adapt"):
+        CharactersStage().run(ep2, with_raw(LDA))
+
+
+def test_adapt_and_stage_docs_say_to_leave_out_held_out_episodes():
+    from typer.testing import CliRunner
+
+    from fukikae.cli import app
+    from fukikae.stages import characters
+
+    assert "held-out" in (characters.__doc__ or "")
+    r = CliRunner().invoke(app, ["registry", "adapt", "--help"], env={"COLUMNS": "200"})
+    assert "held-out" in r.output
