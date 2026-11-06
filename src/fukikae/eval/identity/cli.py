@@ -204,6 +204,7 @@ def run_identity(
     subtitle_track: int | None = None,
     aliases: dict[str, str] | None = None,
     force: bool = False,
+    from_assignments: bool = False,
 ) -> IdentityRun:
     import numpy as np
 
@@ -227,7 +228,11 @@ def run_identity(
         raise ValueError(
             f"unknown segmentation {segmentation!r}; use one of {', '.join(SEG_KINDS)}"
         )
-    if matcher not in MATCHERS:
+    if from_assignments:
+        if segmentation != "diarization":
+            raise ValueError("--from-assignments scores diarization clusters; use diarization")
+        matcher = "assignments"
+    elif matcher not in MATCHERS:
         raise ValueError(f"unknown matcher {matcher!r}; use one of {', '.join(sorted(MATCHERS))}")
     if not tune:
         raise ValueError("--tune names no episode")
@@ -237,7 +242,7 @@ def run_identity(
     hold_id = episode_id(Path(holdout)) if holdout else None
     if hold_id is not None and hold_id in ids:
         raise ValueError(f"held-out episode {hold_id} is also a tuning episode")
-    if hold_id is not None and hasattr(MATCHERS[matcher], "fit_all"):
+    if hold_id is not None and hasattr(MATCHERS.get(matcher), "fit_all"):
         raise ValueError(
             f"matcher {matcher} clusters every episode at once and keeps no registry to "
             "resolve a held-out episode against; score it without --holdout"
@@ -259,10 +264,12 @@ def run_identity(
     )
     thr = cfg.registry.match_threshold if threshold is None else float(threshold)
     min_new = cfg.registry.min_new_seconds if min_new_seconds is None else float(min_new_seconds)
-    try:
-        the_matcher = make_matcher(matcher, threshold=thr, min_new_seconds=min_new, **m_opts)
-    except TypeError as e:
-        raise ValueError(f"matcher {matcher}: {e}") from e
+    the_matcher: Any = None
+    if not from_assignments:
+        try:
+            the_matcher = make_matcher(matcher, threshold=thr, min_new_seconds=min_new, **m_opts)
+        except TypeError as e:
+            raise ValueError(f"matcher {matcher}: {e}") from e
     merged_aliases = {**load_alias_file(ws.root / "labels-aliases.yaml"), **(aliases or {})}
 
     refs = list(tune) + ([holdout] if holdout else [])
@@ -319,7 +326,24 @@ def run_identity(
         for eid in order:
             embs[eid] = cache.get_or_compute(eid, segs[eid], emb_cfg, audio_of(eid), embed=embed)
 
-    if hasattr(the_matcher, "fit_all"):
+    if from_assignments:
+        from fukikae.artifacts import read_json
+        from fukikae.models import Assignments
+
+        assign = {}
+        for eid in order:
+            path = ws.work_dir(eid) / "05-characters" / "assignments.json"
+            if not path.is_file():
+                raise FileNotFoundError(f"{eid}: no assignments at {path}")
+            a = read_json(path, Assignments)
+            char = {c.cluster: c.character_id for c in a.clusters}
+            counts: dict[str, int] = {}
+            for c in a.clusters:
+                counts[c.status] = counts.get(c.status, 0) + 1
+            infos[eid].statuses = counts
+            for i, s in enumerate(segs[eid]):
+                assign[(eid, i)] = char.get(str(s.cluster))
+    elif hasattr(the_matcher, "fit_all"):
         assign = simulate(order, the_matcher, segs, embs)
     else:
         rec = _Recording(the_matcher)
@@ -579,6 +603,12 @@ def identity_cmd(
     ),
     no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
     json_out: Path = typer.Option(None, "--json", help="Also write the full result as JSON."),
+    from_assignments: bool = typer.Option(
+        False,
+        "--from-assignments",
+        help="Score the pipeline's 05-characters/assignments.json (the characters stage or "
+        "`registry resolve`) instead of running a matcher; diarization segmentation only.",
+    ),
 ) -> None:
     """Score cross-episode speaker identity against subtitle ground truth, offline."""
     from fukikae import runctx
@@ -605,6 +635,7 @@ def identity_cmd(
             subtitle_track=subtitle_track,
             aliases=parse_aliases(alias),
             force=force,
+            from_assignments=from_assignments,
         )
     except user_errors() as e:
         typer.echo(f"error: {e}", err=True)

@@ -237,3 +237,53 @@ def test_identity_cli_asr_segmentation(tmp_path: Path, monkeypatch: pytest.Monke
     assert data["settings"]["segmentation_options"] == {"window": 1.5}
     assert data["tune"]["score"]["verdict"] == "pass"
     assert data["episodes"][0]["segments"] == 12
+
+
+def write_assignments(root: Path, ep: str, chars: dict[str, int | None]) -> None:
+    from fukikae.models import Assignments, ClusterAssignment
+
+    path = root / ".fukikae" / "episodes" / ep / "05-characters" / "assignments.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        path,
+        Assignments(
+            episode=ep,
+            threshold=0.6,
+            clusters=[
+                ClusterAssignment(
+                    cluster=c,
+                    actor_id=cid,
+                    character_id=cid,
+                    score=None,
+                    clean_seconds=20.0,
+                    status="matched" if cid else "extra",
+                )
+                for c, cid in chars.items()
+            ],
+        ),
+    )
+
+
+def test_identity_cli_scores_the_pipelines_assignments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fukikae.eval.identity import cache as mod
+
+    root = setup_ws(tmp_path, ["S01E01", "S01E02"])
+    monkeypatch.setattr(mod, "ResidentEmbedder", FakeResident)
+    write_assignments(root, "S01E01", {"SPEAKER_00": 1, "SPEAKER_01": 2})
+    write_assignments(root, "S01E02", {"SPEAKER_00": 1, "SPEAKER_01": 1})
+    out = tmp_path / "r.json"
+    base = ["eval", "identity", str(root), "--tune", "S01E01,S01E02", "--gt-file",
+            str(tmp_path / "gt"), "--from-assignments", "--json", str(out)]  # fmt: skip
+    r = CliRunner().invoke(app, base)
+    assert r.exit_code == 0, r.output
+    data = json.loads(out.read_text())
+    assert data["settings"]["matcher"] == "assignments"
+    assert [m[:2] for m in data["tune"]["score"]["merges"]] == [["LAXUS", "LUCY"]]
+    write_assignments(root, "S01E02", {"SPEAKER_00": 1, "SPEAKER_01": 2})
+    r = CliRunner().invoke(app, base)
+    assert r.exit_code == 0, r.output
+    assert json.loads(out.read_text())["tune"]["score"]["verdict"] == "pass"
+    r = CliRunner().invoke(app, [*base, "--segmentation", "subtitles"])
+    assert r.exit_code == 1 and "diarization" in r.output
