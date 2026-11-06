@@ -2,6 +2,7 @@
 rewriting the registry and the episodes' assignments in one transaction."""
 
 from datetime import UTC, datetime
+from typing import Any
 
 import numpy as np
 import pytest
@@ -235,3 +236,48 @@ def test_episode_cannot_link_off_lets_one_character_take_two_clusters(tmp_path):
     e1, _ = by_cluster(ws, "S01E01")
     e2, _ = by_cluster(ws, "S01E02")
     assert e1["S0"].character_id == e1["S1"].character_id == e2["S0"].character_id
+
+
+def test_existing_actors_never_merge_even_with_episode_cannot_link_off(tmp_path):
+    """The live-action configuration: episode_cannot_link off. Anchors still stay apart
+    (always_cannot_link), though their voices are close enough to merge at 0.5."""
+    ws = make_ws(tmp_path, {"S01E05": {"S0": (noisy(unit([1, 0.45, 0]), seed=5), 30.0)}})
+    with Registry(ws.registry_path) as reg:
+        for center in (unit([1, 0.5, 0]), unit([1, -0.0, 0])):
+            aid, _ = reg.create_actor_with_character(center)
+            reg.add_exemplars(aid, "S01E09", "X", np.array(noisy(center, seed=aid)), 30.0)
+            reg.recompute_centroid(aid)
+    r = resolve(ws, "S01E05", "--threshold", "0.5", "--matcher-option", "episode_cannot_link=false")
+    assert r.exit_code == 0, r.output
+    e5, _ = by_cluster(ws, "S01E05")
+    assert e5["S0"].status == "matched" and e5["S0"].actor_id == 1
+    with Registry(ws.registry_path) as reg:
+        assert [a.id for a in reg.actors()] == [1, 2]
+        assert reg.episode_counts(2) == {"S01E09": 6}
+
+
+def test_resolve_refuses_an_anchor_of_another_dimension(tmp_path):
+    ws = make_ws(tmp_path, {"S01E05": {"S0": (noisy(A, seed=5), 30.0)}})
+    with Registry(ws.registry_path) as reg:
+        aid, _ = reg.create_actor_with_character(np.ones(5, dtype=np.float32))
+        reg.add_exemplars(aid, "S01E09", "X", np.ones((2, 5), dtype=np.float32), 30.0)
+    r = resolve(ws, "S01E05")
+    assert r.exit_code == 1
+    assert f"actor {aid}" in r.output and "embedder changed" in r.output
+
+
+def test_resolve_refuses_episodes_of_different_dimensions(tmp_path):
+    ws = make_ws(tmp_path, {"S01E01": SEASON["S01E01"]})
+    ep = episode(ws, "S01E02")
+    add_episode(ws, "S01E02", {"S0": (noisy(A, seed=3), 30.0)})
+    # rewrite E02's rows as 4-dimensional (another embedder)
+    arrays: dict[str, Any] = {"labels": np.array(["S0"], dtype=str)}
+    arrays["S0/embeddings"] = np.ones((3, 4), dtype=np.float32) / 2
+    arrays["S0/spans"] = np.zeros((3, 2))
+    arrays["S0/clean_seconds"] = np.array(30.0)
+    np.savez(ep.work / "04-diarize" / "clusters.npz", **arrays)
+    r = resolve(ws, "S01E01,S01E02")
+    assert r.exit_code == 1
+    assert "S01E02" in r.output and "embedder changed" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.actors() == []

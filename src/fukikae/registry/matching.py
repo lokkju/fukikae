@@ -62,6 +62,18 @@ def match(
     lowest-id character from `characters`.
     """
     scored = [a for a in actors if a.centroid is not None]
+    dim = next((len(ev.embedding) for ev in evidence if ev.embedding is not None), 0)
+    for a in scored:
+        assert a.centroid is not None
+        if dim and len(a.centroid) != dim:
+            from fukikae.config import ConfigError
+
+            raise ConfigError(
+                f"actor {a.id} holds {len(a.centroid)}-dimensional embeddings but this "
+                f"episode's clusters are {dim}-dimensional: the embedder changed since the "
+                "registry was built. Re-embed the registry's episodes with one embedder "
+                "(re-run their diarize stage, then `registry rematch`)"
+            )
     tops: dict[str, tuple[int, float] | None] = {}
     for ev in evidence:
         top: tuple[int, float] | None = None

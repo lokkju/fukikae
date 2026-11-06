@@ -423,6 +423,8 @@ def adapt(
     Each episode's diarization clean spans are labeled from its subtitles (as `eval identity`
     labels them) and the labeled rows of its clusters.npz, the embeddings the characters
     stage matches, train the projection. `[characters] matcher = "lda"` then matches in it.
+    Leave the held-out episode(s) out: a projection must never be fit on an episode it
+    later resolves for evaluation.
     """
     import numpy as np
 

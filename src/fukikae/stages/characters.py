@@ -27,6 +27,8 @@ normalized mean against each actor's centroid; ``lda`` scores the same means in 
 stored LDA space (`fukikae registry adapt`), option ``dims`` keeping only the first
 components. Without a stored projection ``lda`` falls back to ``centroid`` with a warning.
 The batch ``joint`` matcher needs a season at once and is `fukikae registry resolve`.
+Fit the projection only on episodes it will not later resolve for evaluation: leave the
+held-out episode(s) out of `registry adapt`.
 """
 
 from __future__ import annotations
@@ -189,6 +191,14 @@ class CharactersStage:
                 for a in reg.actors():  # a locked actor matches by its own centroid
                     if a.centroid is not None and (a.locked or a.id not in actor_rows):
                         actor_rows[a.id] = a.centroid[None, :]
+                for aid, r in actor_rows.items():
+                    if r.shape[1] != projection.dim:
+                        raise ConfigError(
+                            f"actor {aid} holds {r.shape[1]}-dimensional embeddings but the "
+                            f"lda projection takes {projection.dim}: the embedder changed. "
+                            "Re-embed the registry's episodes with one embedder and run "
+                            "`fukikae registry adapt` again"
+                        )
                 matched = decide(
                     rest,
                     projected_tops(rest, rows, actor_rows, projection),
