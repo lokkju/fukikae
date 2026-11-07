@@ -42,6 +42,9 @@ wavlm = [
     "torch>=2.8",
     "transformers>=4.57.6,<5",
 ]
+dialogue = [
+    "dbs",
+]
 
 [project.entry-points."fukikae.backends.asr"]
 faster_whisper = "fukikae.backends.asr.faster_whisper:FasterWhisperTranscriber"
@@ -129,3 +132,6 @@ include = ["src", "tests"]
 exclude = [".venv", "**/__pycache__"]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
+
+[tool.uv.sources]
+dbs = { git = "https://github.com/JusperLee/Dynamic-Band-Splitting.git", rev = "ff526463a58ee0278e7bd05c4b8bce112b743e34" }
