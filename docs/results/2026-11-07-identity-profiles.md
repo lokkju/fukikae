@@ -114,13 +114,17 @@ Scratch workspaces `~/fukikae-ws/t9hold/<set>` carry the profile, re-ran extract
 | anime | fairytail (ja) | 0.56, JUVIA+LUCY | E14 | 11 | 6 | 0.55 | CHARLE+HAPPY+WENDY; CANA+LUCY; KIRIA+NATSU | 70% | 0.21 | 50% | fail |
 | anime | fairytail-en | 0.80, CANA+JUVIA | E14 | 10 | 6 | 0.60 | HAPPY+LUCY+WENDY | 66% | 0.29 | 55% | fail |
 | live-action (provisional) | grid | 1.00, none | E05 | 5 | 4 | 0.80 | 새하+어진 | 80% | 0.67 | 16% | fail |
+| default | fairytail (ja) | 0.44, JUVIA+LUCY | E14 | 11 | 6 | 0.55 | CHARLE+HAPPY+WENDY; CANA+LUCY; KIRIA+NATSU | 70% | 0.21 | 47% | fail |
+| default | fairytail-en | 0.70, CANA+JUVIA | E14 | 10 | 6 | 0.60 | HAPPY+LUCY+WENDY | 66% | 0.29 | 55% | fail |
 
 Neither anime profile reaches the bar on E14. In both tracks id 2, which the tuning pair built for HAPPY, absorbs WENDY (106 s in E14 on ja, 138 s on the dub, against 7 to 24 s in E12 and E13) and, with her, CHARLE on ja and LUCY on the dub; id 2 is only 56% (ja) and 74% (dub) WENDY. The dub also fails LUCY, WHITE MAGE, CHARLE and NEBARU on E14; ja fails LUCY, WHITE MAGE, KIRIA and JUVIA. One hypothesis is that a speech-heavy character the tuning pair holds only as a few seconds gets pulled onto the nearest well-populated id; no ablation was run, so this is not established. The grid result is not a gate: 5 recurring at the holdout's definition against 2 in tuning, and the 새하+어진 merge (id 2, 48% 어진) is a pair the tuning pair never exercised. All three ship as measured, with the failures stated here and no re-tuning on E14 or E05.
+
+The default profile (WeSpeaker, centroid at 0.6, the per-episode characters stage) was held out on the same two E14 tracks the anime profile used. Copies of the anime holdout workspaces at `~/fukikae-ws/t9hold-default/<set>` dropped `profile = "anime"` (so the default applies) and their registries and characters outputs; the diarize outputs were reused, since the two profiles resolve the same diarize and embed settings, so no stage but characters re-ran and nothing was embedded. `fukikae run` ran the characters stage on E12, E13 and then E14, and `eval identity --from-assignments --tune S01E12,S01E13 --holdout S01E14 --gt ass` scored it once. Outputs: `~/fukikae-ws/segmatch/t9/<set>-default-holdout.txt`. The tuning rows match the sweep's centroid rows at 0.6 (ja 0.44 with JUVIA+LUCY, dub 0.70 with CANA+JUVIA). It fails on both tracks with the same fraction, merges, share and strict score as the anime profile's joint resolve (ja 0.55, dub 0.60), id 2 again holding WENDY with HAPPY and CHARLE (ja) or HAPPY and LUCY (dub): on E14 the per-episode centroid stage and the batch joint resolve end in the same place.
 
 The anime evidence is a single show (Fairy Tail 100 Years Quest, two audio tracks of the same episodes) with 9 to 10 recurring characters, so the two anime holdouts are not independent.
 
 ## What remains
 
 - Live-action ground truth (D9): Grid's CC track tags speakers on 12 to 16% of speech, which leaves the profile resting on a handful of characters.
-- The anime female voices (TOUKA, LUCY, JUVIA, CANA on ja; WENDY, HAPPY, CHARLE on E14) were not separated by any of the embedders and matchers tested in these tasks, on one show; Task 8's adaptation and dialogue stem did not close it.
+- The anime female voices (TOUKA, LUCY, JUVIA, CANA on ja; WENDY, HAPPY, CHARLE on E14) were not separated by any of the embedders and matchers tested in these tasks, on one show; LDA adaptation (Tasks 6 and 7) and Task 8's dialogue stem did not close it.
 - Face and active-speaker detection as the next lever (`docs/ideas.md`).

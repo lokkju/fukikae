@@ -1,6 +1,7 @@
 # General default (Task 9, docs/results/2026-11-07-identity-profiles.md): WeSpeaker embeddings and
 # the centroid matcher at 0.6, the best single setting summed over all three tuning sets (Fairy
 # Tail ja and en dub, Grid): 11 clean characters, 2 merges, the same at 0.5, 0.55 and 0.6.
+# It fails the 90% held-out bar on Fairy Tail E14: fraction 0.55 on ja, 0.60 on the dub.
 # ASR backends are not set here; they stay the stages' own fallbacks.
 [registry]
 min_new_seconds = 20.0
