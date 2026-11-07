@@ -12,6 +12,7 @@ from fukikae.config import BackendConfig, ConfigError
 # hint survives a failed import. Each backend task adds its own line.
 EXTRAS: dict[str, str] = {
     "demucs": "demucs",
+    "dialogue": "dialogue",
     "faster_whisper": "whisper",
     "wav2vec2": "whisper",
     "qwen3_asr": "qwen",
