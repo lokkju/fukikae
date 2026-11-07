@@ -87,7 +87,8 @@ class Exemplar:
 @dataclass(frozen=True)
 class ReembedResult:
     centroids: list[int]  # actors whose centroid is now the mean of their new exemplars
-    cleared: list[int]  # actors with no exemplars whose centroid had another dimension
+    kept: list[int]  # locked or exemplar-less actors whose centroid stayed as stored
+    mapped: list[int]  # locked or exemplar-less actors given a mapped centroid
     projections: list[tuple[str, str, int]]  # (series, kind, dim) dropped
 
 
@@ -302,16 +303,23 @@ class Registry:
             )
         return created
 
-    def replace_embeddings(self, embeddings: dict[int, np.ndarray]) -> ReembedResult:
+    def replace_embeddings(
+        self,
+        embeddings: dict[int, np.ndarray],
+        keep: set[int] | None = None,
+        fixed: dict[int, np.ndarray] | None = None,
+    ) -> ReembedResult:
         """Give every exemplar a new embedding (an embedder change), in one transaction.
 
-        `embeddings` must cover every exemplar id, all of one dimension. Then every actor
-        with exemplars, locked or not, gets the normalized mean of its new rows as its
-        centroid (a centroid in the old space matches nothing); an actor with none keeps its
-        centroid only when it already has the new dimension, else it is cleared. Stored
+        `embeddings` must cover every exemplar id, all of one dimension. Each unlocked actor
+        with exemplars gets the normalized mean of its new rows as its centroid. A locked or
+        exemplar-less actor with a centroid is never recomputed from exemplars (Ruling R20):
+        it must be in `keep` (centroid left exactly as stored) or `fixed` (given that
+        centroid, e.g. one mapped into the new space); one in neither refuses. Stored
         projections of another input dimension are deleted. Names, locks, voices, external
         ids and the id high-water mark are untouched.
         """
+        keep, fixed = set(keep or ()), dict(fixed or {})
         dims = {len(np.ravel(v)) for v in embeddings.values()}
         if len(dims) > 1:
             raise ValueError(f"new embeddings have several dimensions: {sorted(dims)}")
@@ -321,39 +329,49 @@ class Registry:
                 raise ValueError(
                     "the exemplars changed while they were being re-embedded; run reembed again"
                 )
-            if not ids:
-                return ReembedResult([], [], [])
-            (dim,) = dims
+            dim = next(iter(dims), None)
             for eid, v in embeddings.items():
                 con.execute(
                     "UPDATE exemplars SET embedding = ? WHERE id = ?", (_to_blob(np.ravel(v)), eid)
                 )
-            centroids, cleared = [], []
-            for aid, blob in con.execute("SELECT id, centroid FROM actors ORDER BY id").fetchall():
+            centroids, kept, mapped = [], [], []
+            for aid, blob, locked in con.execute(
+                "SELECT id, centroid, locked FROM actors ORDER BY id"
+            ).fetchall():
                 rows = [
                     np.frombuffer(r[0], dtype=np.float32)
                     for r in con.execute(
                         "SELECT embedding FROM exemplars WHERE actor_id = ?", (aid,)
                     )
                 ]
-                if rows:
+                if aid in fixed:
+                    con.execute(
+                        "UPDATE actors SET centroid = ? WHERE id = ?",
+                        (_to_blob(_normalized(fixed[aid])), aid),
+                    )
+                    mapped.append(aid)
+                elif aid in keep:
+                    kept.append(aid)
+                elif rows and not locked:
                     mean = np.stack(rows).mean(axis=0)
                     con.execute(
                         "UPDATE actors SET centroid = ? WHERE id = ?",
                         (_to_blob(_normalized(mean)), aid),
                     )
                     centroids.append(aid)
-                elif blob is not None and len(blob) // 4 != dim:
-                    con.execute("UPDATE actors SET centroid = NULL WHERE id = ?", (aid,))
-                    cleared.append(aid)
+                elif blob is not None:
+                    raise ValueError(
+                        f"actor {aid} is locked or has no exemplars: its centroid must be kept "
+                        "or mapped, never recomputed; run reembed again"
+                    )
             dropped = []
             for p in self.projections():
-                if p.matrix.shape[0] != dim:
+                if dim is not None and p.matrix.shape[0] != dim:
                     con.execute(
                         "DELETE FROM projections WHERE series = ? AND kind = ?", (p.series, p.kind)
                     )
                     dropped.append((p.series, p.kind, int(p.matrix.shape[0])))
-            return ReembedResult(centroids, cleared, dropped)
+            return ReembedResult(centroids, kept, mapped, dropped)
 
     def _next_id(self, con: sqlite3.Connection, table: str) -> int:
         """An id above any this table has ever held, so a deleted id is never handed out
