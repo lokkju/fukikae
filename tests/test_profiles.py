@@ -84,7 +84,8 @@ TYPICAL = (
 @pytest.mark.parametrize("text", ["", TYPICAL])
 def test_no_profile_resolves_as_before(tmp_path, text):
     c = _ws(tmp_path, text)
-    kinds = ["asr", "align", "lid", "separation", "diarize", "embed", "translate", "tts"]
+    # The shipped default profile now names embed, diarize and separation (Task 9).
+    kinds = ["asr", "align", "lid", "translate", "tts"]
     for kind in kinds:
         for lang, pair in ((None, None), ("ko", None), ("ja", "ja-en"), ("ko", "ko-en")):
             want = _old_resolve(c.raw, kind, lang, pair)
@@ -115,3 +116,37 @@ def test_extract_config_key_records_audio_title(tmp_path, monkeypatch):
     assert stage.config_key(base, ep)["track"] == 1  # type: ignore[arg-type]
     key = stage.config_key(titled, ep)  # type: ignore[arg-type]
     assert key["track"] == 2 and key["audio_title"] == "Castilian"
+
+
+SHIPPED = ("default", "anime", "live-action")
+
+
+@pytest.mark.parametrize("name", SHIPPED)
+def test_every_profile_table_names_its_backend(name):
+    for kind, table in cfgmod.load_profile(name).items():
+        if kind == "registry":
+            continue
+        key = "matcher" if kind == "characters" else "backend"
+        assert isinstance(table, dict) and table.get(key), f"{name}: [{kind}] lacks {key}"
+
+
+@pytest.mark.parametrize("name", SHIPPED)
+def test_shipped_profiles_resolve_to_the_tested_backends(tmp_path, name):
+    c = _ws(tmp_path, f'profile="{name}"\n')
+    assert c.resolve("embed").backend == "wespeaker"
+    assert c.resolve("diarize").backend == "pyannote"
+    assert c.resolve("separation").backend == "demucs"  # Ruling R15
+    assert c.resolve("characters", key="matcher").backend == "centroid"
+    assert c.registry.match_threshold == 0.6
+
+
+def test_profile_workspace_override_still_wins(tmp_path):
+    c = _ws(tmp_path, 'profile="anime"\n[embed]\nbackend="ecapa"\n')
+    assert c.resolve("embed").backend == "ecapa"
+
+
+def test_live_action_profile_is_flagged_provisional():
+    text = (
+        cfgmod.resources.files("fukikae.profiles").joinpath("live-action.toml").read_text("utf-8")
+    )
+    assert "PROVISIONAL" in text

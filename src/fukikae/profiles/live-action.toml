@@ -1,4 +1,24 @@
-# Task 9 fills this profile with tested values; until then it equals default.toml.
+# PROVISIONAL live-action profile (Ruling R16). Written from one tuning pair of Grid
+# (Korean, E02 + E04): two recurring characters on 12% subtitle coverage, so one character is
+# the whole difference between candidates. Revisit when D9's ground truth lands.
+#
+# Grid's best setting is joint WITHOUT episode_cannot_link at 0.6 (2 of 2 recurring pass,
+# against centroid's 1 of 2): it rejoins one character's split clusters inside an episode.
+# Run it with
+#   fukikae registry resolve <workspace> --episodes S01E02,S01E04,... --matcher-option episode_cannot_link=false
+# since the characters stage cannot run joint and keeps centroid.
 [registry]
 min_new_seconds = 20.0
 match_threshold = 0.6
+
+[separation]
+backend = "demucs"   # Ruling R15: the dialogue backend stays opt-in
+
+[diarize]
+backend = "pyannote"
+
+[embed]
+backend = "wespeaker"
+
+[characters]
+matcher = "centroid"   # the per-episode stage; joint is a batch command (see above)

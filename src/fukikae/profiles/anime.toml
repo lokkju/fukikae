@@ -1,4 +1,24 @@
-# Task 9 fills this profile with tested values; until then it equals default.toml.
+# Anime (Task 9, docs/results/2026-11-07-identity-profiles.md). Tuned on Fairy Tail E12-E13
+# (ja and en dub); held out E14. Best measured setting: WeSpeaker, the shipped pyannote
+# diarization, and the joint matcher with episode_cannot_link on at 0.6 (12 clean characters
+# of 19 recurring, 2 merges, against centroid's 10 and 2).
+#
+# Joint resolves a whole season at once, so the characters stage cannot run it (the stage
+# keeps centroid, the per-episode fallback). Run it after diarizing the episodes:
+#   fukikae registry resolve <workspace> --episodes S01E12,S01E13,...
+# which reads match_threshold from here and has episode_cannot_link on by default.
 [registry]
 min_new_seconds = 20.0
 match_threshold = 0.6
+
+[separation]
+backend = "demucs"   # Ruling R15: the dialogue backend stays opt-in
+
+[diarize]
+backend = "pyannote"
+
+[embed]
+backend = "wespeaker"
+
+[characters]
+matcher = "centroid"   # the per-episode stage; joint is a batch command (see above)
