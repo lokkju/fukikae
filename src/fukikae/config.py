@@ -41,11 +41,17 @@ class Config:
     profile_raw: dict[str, Any] = field(default_factory=dict)
 
     def resolve(
-        self, kind: str, language: str | None = None, pair: str | None = None, key: str = "backend"
+        self,
+        kind: str,
+        language: str | None = None,
+        pair: str | None = None,
+        key: str = "backend",
+        default: str | None = None,
     ) -> BackendConfig:
         """Pick the backend for a stage: pair table over language table over base. `key`
         names the table's selector (``matcher`` for ``[characters]``); the result's
-        `backend` holds its value."""
+        `backend` holds its value. With no selector set anywhere, `default` is used with the
+        tables' options (ConfigError when `default` is None)."""
         merged: dict[str, Any] = {}
         # Later layers win: profile, then the workspace's own tables over it.
         for source in (self.profile_raw, self.raw):
@@ -60,7 +66,7 @@ class Config:
                 override = table.get(group, {}).get(name)
                 if isinstance(override, dict):
                     merged = _layer(merged, override, key)
-        backend = merged.pop(key, None)
+        backend = merged.pop(key, None) or default
         if not backend:
             raise ConfigError(f"no {key} configured for {kind!r}")
         options = {k: v for k, v in merged.items() if k not in (*_RESERVED, key)}

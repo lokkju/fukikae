@@ -281,3 +281,70 @@ def test_resolve_refuses_episodes_of_different_dimensions(tmp_path):
     assert "S01E02" in r.output and "embedder changed" in r.output
     with Registry(ws.registry_path) as reg:
         assert reg.actors() == []
+
+
+def _capture_resolve(monkeypatch):
+    """Replace only resolve_episodes; record what the CLI passes it."""
+    from fukikae.registry import resolve as resolve_mod
+
+    seen: dict[str, Any] = {}
+
+    def fake(_ws, eps, threshold, min_new_seconds=None, options=None):  # noqa: ARG001
+        seen.update(episodes=[e.id for e in eps], threshold=threshold, options=options)
+        return resolve_mod.ResolveSummary([e.id for e in eps], 0, [], 0, [])
+
+    monkeypatch.setattr(resolve_mod, "resolve_episodes", fake)
+    return seen
+
+
+def _set_language(ws: Workspace, eid: str, lang: str) -> None:
+    from fukikae.artifacts import write_json
+    from fukikae.stages.language import LanguageResult
+
+    path = ws.work_dir(eid) / "02-language" / "language.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, LanguageResult(language=lang, confidence=0.9, source="detected"))
+
+
+def test_resolve_without_flags_uses_the_profile_and_flags_override_it(tmp_path, monkeypatch):
+    """No typer default may beat the profile's [resolve] values (Ruling R17)."""
+    ws = make_ws(tmp_path)
+    (ws.root / "fukikae.toml").write_text('profile = "anime"\n')
+    seen = _capture_resolve(monkeypatch)
+    args = ["registry", "resolve", str(ws.root), "--episodes", "S01E01,S01E02"]
+    r = runner.invoke(app, args)
+    assert r.exit_code == 0, r.output
+    assert seen == {
+        "episodes": ["S01E01", "S01E02"],
+        "threshold": 0.6,
+        "options": {"episode_cannot_link": True},
+    }
+    r = runner.invoke(
+        app, [*args, "--threshold", "0.75", "--matcher-option", "episode_cannot_link=false"]
+    )
+    assert r.exit_code == 0, r.output
+    assert seen["threshold"] == 0.75 and seen["options"] == {"episode_cannot_link": False}
+
+
+def test_resolve_reads_the_language_override_of_the_detected_language(tmp_path, monkeypatch):
+    ws = make_ws(tmp_path)
+    (ws.root / "fukikae.toml").write_text(
+        'profile = "anime"\nsource_language = "en"\n[resolve.lang.ja]\nthreshold = 0.65\n'
+    )
+    for eid in ("S01E01", "S01E02"):
+        _set_language(ws, eid, "ja")
+    seen = _capture_resolve(monkeypatch)
+    r = runner.invoke(app, ["registry", "resolve", str(ws.root), "--episodes", "S01E01,S01E02"])
+    assert r.exit_code == 0, r.output
+    assert seen["threshold"] == 0.65
+
+
+def test_resolve_refuses_episodes_detected_in_different_languages(tmp_path, monkeypatch):
+    ws = make_ws(tmp_path)
+    _set_language(ws, "S01E01", "ja")
+    _set_language(ws, "S01E02", "en")
+    seen = _capture_resolve(monkeypatch)
+    r = runner.invoke(app, ["registry", "resolve", str(ws.root), "--episodes", "S01E01,S01E02"])
+    assert r.exit_code == 1
+    assert "S01E01: ja" in r.output and "S01E02: en" in r.output
+    assert seen == {}
