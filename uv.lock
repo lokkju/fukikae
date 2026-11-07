@@ -1047,6 +1047,20 @@ wheels = [
 ]
 
 [[package]]
+name = "dbs"
+version = "1.0.0"
+source = { git = "https://github.com/JusperLee/Dynamic-Band-Splitting.git?rev=ff526463a58ee0278e7bd05c4b8bce112b743e34#ff526463a58ee0278e7bd05c4b8bce112b743e34" }
+dependencies = [
+    { name = "einops" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "rotary-embedding-torch" },
+    { name = "safetensors" },
+    { name = "soundfile" },
+    { name = "torch" },
+]
+
+[[package]]
 name = "decorator"
 version = "5.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1433,6 +1447,9 @@ demucs = [
     { name = "demucs", version = "4.0.1", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "demucs", version = "4.1.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
 ]
+dialogue = [
+    { name = "dbs" },
+]
 pyannote = [
     { name = "pyannote-audio" },
     { name = "speechbrain" },
@@ -1466,6 +1483,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dbs", marker = "extra == 'dialogue'", git = "https://github.com/JusperLee/Dynamic-Band-Splitting.git?rev=ff526463a58ee0278e7bd05c4b8bce112b743e34" },
     { name = "demucs", marker = "extra == 'demucs'", specifier = ">=4.0.1" },
     { name = "faster-whisper", marker = "extra == 'whisper'", specifier = ">=1.2.1" },
     { name = "huggingface-hub", specifier = ">=0.34.0,<1.0" },
@@ -1487,7 +1505,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'whisper'", specifier = ">=4.57.6,<5" },
     { name = "typer", specifier = ">=0.15.0" },
 ]
-provides-extras = ["demucs", "pyannote", "qwen", "sherpa", "wavlm", "whisper"]
+provides-extras = ["demucs", "dialogue", "pyannote", "qwen", "sherpa", "wavlm", "whisper"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4199,6 +4217,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c0/8f/0722ca900cc807c13a6a0c696dacf35430f72e0ec571c4275d2371fca3e9/rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36", size = 230680, upload-time = "2026-04-12T08:24:00.75Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb", size = 310654, upload-time = "2026-04-12T08:24:02.83Z" },
+]
+
+[[package]]
+name = "rotary-embedding-torch"
+version = "0.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "einops" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fc/63/776d55b395aed9d2815afc1740056e919691d1be1ceee203d101d33d1674/rotary_embedding_torch-0.9.1.tar.gz", hash = "sha256:f43c39cd9c0aaa17d47e876db89a552a203dd8af35e7980f484ab7ad7ea8bf69", size = 13246, upload-time = "2026-06-20T23:39:14.667Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ea/63/ca681366df98d207876c6ad7761ef6910668c83ec766fd5a70c56b9c3567/rotary_embedding_torch-0.9.1-py3-none-any.whl", hash = "sha256:489ef53e21ab4c4eb35c0c97b551d724f5eea71c2bca39acb8fee8d88b142a76", size = 17423, upload-time = "2026-06-20T23:39:13.427Z" },
 ]
 
 [[package]]
