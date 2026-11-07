@@ -24,7 +24,9 @@ class DialogueSeparator:
     kind: ClassVar[str] = "separation"
     languages: ClassVar[frozenset[str] | Literal["*"]] = "*"
     devices: ClassVar[frozenset[str]] = frozenset({"cuda", "cpu"})
-    vram_mb: ClassVar[int] = 3000
+    vram_mb: ClassVar[int] = (
+        2990  # measured peak 2486 MiB (nvidia-smi delta, 90 s clip, 6 s chunks) + 20%
+    )
     extra: ClassVar[str] = "dialogue"
 
     def __init__(self, options: dict[str, Any], device: str) -> None:
