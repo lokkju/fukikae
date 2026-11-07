@@ -122,3 +122,77 @@ def test_separates_dialogue_clip(tmp_path):
     assert 20 * np.log10(_rms(resid) / _rms(audio[:n])) < -30
     lo, hi = 60 * 44100, 70 * 44100
     assert _rms(v[lo:hi]) > _rms(b[lo:hi])
+
+
+def test_real_glue_against_stub_dbs(tmp_path, monkeypatch):
+    """load() and _run_model run their real code against a stub ``dbs`` package."""
+    import sys
+    import types
+
+    torch = pytest.importorskip("torch")
+    calls: dict = {}
+
+    class _Model:
+        def eval(self):
+            return self
+
+        def to(self, device):
+            calls["device"] = device
+            return self
+
+    class DBSTIGER:
+        @staticmethod
+        def from_pretrained(name):
+            calls["name"] = name
+            return _Model()
+
+    def separate(model, mixture, protocol, sample_rate=None):  # noqa: ARG001
+        calls.update(shape=tuple(mixture.shape), protocol=protocol, rate=sample_rate)
+        # [B, 3, T] in the order music, sfx, speech
+        out = torch.stack([mixture * 0.1, mixture * 0.2, mixture * 0.7], dim=1)
+        return out
+
+    models = types.SimpleNamespace(DBSTIGER=DBSTIGER)
+    engine = types.SimpleNamespace(separate=separate)
+    pkg = types.SimpleNamespace(models=models, engine=engine)
+    monkeypatch.setitem(sys.modules, "dbs", pkg)
+    monkeypatch.setitem(sys.modules, "dbs.models", models)
+    monkeypatch.setitem(sys.modules, "dbs.engine", engine)
+
+    audio, wav = _mix(tmp_path)
+    d = DialogueSeparator({"chunk_seconds": 4, "hop_seconds": 2}, "cpu")
+    d.load()
+    assert calls["name"] == "JusperLee/DBS-TIGER-DnR" and calls["device"] == "cpu"
+    sep = d.separate(audio, tmp_path / "out")
+    assert calls["shape"] == (1, 1, wav.shape[1])
+    assert calls["rate"] == 44100
+    assert calls["protocol"] == {"mode": "chunked", "chunk_seconds": 4.0, "hop_seconds": 2.0}
+    v = _read(sep.vocals)
+    assert np.allclose(v[:, 0], 0.7 * wav.mean(0), atol=1e-3)  # speech is the third stem
+
+
+@pytest.mark.gpu
+def test_real_model_stem_order(tmp_path):
+    """Real DBS-TIGER: the third stem is speech (energy concentrates in the dialogue)."""
+    media = os.environ.get("FUKIKAE_TEST_MEDIA")
+    if not media:
+        pytest.skip("FUKIKAE_TEST_MEDIA not set")
+    from fukikae.stages.extract import ExtractStage
+
+    root = tmp_path / "ws"
+    work = root / "episodes" / "e1"
+    clip = Path(media).expanduser() / "S01E01-clip.mkv"
+    ep = Episode(source=clip, id="e1", work=work, workspace_root=root)
+    ExtractStage().run(ep, Config(source_language="ko"))
+    d = DialogueSeparator({}, "cuda:0")
+    d.load()
+    try:
+        wav = _read(work / "00-extract" / "audio.wav")
+        stems = d._run_model(wav.mean(1).astype(np.float32), 44100)
+    finally:
+        d.unload()
+    assert stems.shape[0] == 3
+    lo, hi = 60 * 44100, 70 * 44100
+    music, sfx, speech = (_rms(s[lo:hi]) for s in stems)
+    print(f"rms in 60-70 s: music {music:.4f} sfx {sfx:.4f} speech {speech:.4f}")
+    assert speech > music and speech > sfx
