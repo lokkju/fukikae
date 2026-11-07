@@ -124,9 +124,11 @@ SHIPPED = ("default", "anime", "live-action")
 @pytest.mark.parametrize("name", SHIPPED)
 def test_every_profile_table_names_its_backend(name):
     for kind, table in cfgmod.load_profile(name).items():
+        # [registry] holds plain numbers; [resolve] selects its matcher by `matcher`, as
+        # [characters] does (Ruling R17), so neither names a `backend`.
         if kind == "registry":
             continue
-        key = "matcher" if kind == "characters" else "backend"
+        key = "matcher" if kind in ("characters", "resolve") else "backend"
         assert isinstance(table, dict) and table.get(key), f"{name}: [{kind}] lacks {key}"
 
 
@@ -150,3 +152,37 @@ def test_live_action_profile_is_flagged_provisional():
         cfgmod.resources.files("fukikae.profiles").joinpath("live-action.toml").read_text("utf-8")
     )
     assert "PROVISIONAL" in text
+
+
+def test_no_profile_workspace_with_separation_options_keeps_demucs(tmp_path):
+    c = _ws(tmp_path, '[separation]\nmodel="htdemucs"\n')
+    assert c.resolve("separation") == BackendConfig("demucs", {"model": "htdemucs"})
+
+
+def _settings(tmp_path, text, **cli):
+    from fukikae.registry.cli import resolve_settings
+
+    c = _ws(tmp_path, text)
+    return resolve_settings(c, cli.get("matcher"), cli.get("threshold"), cli.get("options"))
+
+
+def test_resolve_settings_come_from_the_profile(tmp_path):
+    assert _settings(tmp_path, 'profile="anime"\n') == ("joint", 0.6, {"episode_cannot_link": True})
+    assert _settings(tmp_path, 'profile="live-action"\n') == (
+        "joint",
+        0.6,
+        {"episode_cannot_link": False},
+    )
+
+
+def test_resolve_cli_flags_override_the_profile(tmp_path):
+    got = _settings(
+        tmp_path, 'profile="anime"\n', threshold=0.7, options={"episode_cannot_link": False}
+    )
+    assert got == ("joint", 0.7, {"episode_cannot_link": False})
+
+
+def test_resolve_without_a_profile_keeps_todays_defaults(tmp_path):
+    c = _ws(tmp_path, "")
+    assert _settings(tmp_path, "") == ("joint", c.registry.match_threshold, {})
+    assert c.registry.match_threshold == 0.6

@@ -16,4 +16,4 @@ backend = "pyannote"
 backend = "wespeaker"
 
 [characters]
-matcher = "centroid"   # the per-episode stage; joint is a batch command (see above)
+matcher = "centroid"   # the per-episode stage; joint is a batch command, `fukikae registry resolve`
