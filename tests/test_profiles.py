@@ -163,7 +163,9 @@ def _settings(tmp_path, text, **cli):
     from fukikae.registry.cli import resolve_settings
 
     c = _ws(tmp_path, text)
-    return resolve_settings(c, cli.get("matcher"), cli.get("threshold"), cli.get("options"))
+    return resolve_settings(
+        c, cli.get("matcher"), cli.get("threshold"), cli.get("options"), cli.get("language")
+    )
 
 
 def test_resolve_settings_come_from_the_profile(tmp_path):
@@ -186,3 +188,21 @@ def test_resolve_without_a_profile_keeps_todays_defaults(tmp_path):
     c = _ws(tmp_path, "")
     assert _settings(tmp_path, "") == ("joint", c.registry.match_threshold, {})
     assert c.registry.match_threshold == 0.6
+
+
+def test_resolve_table_without_matcher_still_applies(tmp_path):
+    """A workspace [resolve] with no matcher on the default profile: joint, and its own
+    threshold and options, never dropped for the built-ins."""
+    text = "[resolve]\nthreshold = 0.75\nepisode_cannot_link = false\n"
+    assert _settings(tmp_path, text) == ("joint", 0.75, {"episode_cannot_link": False})
+
+
+def test_profile_matcher_and_workspace_threshold_merge(tmp_path):
+    text = 'profile="anime"\n[resolve]\nthreshold = 0.7\n'
+    assert _settings(tmp_path, text) == ("joint", 0.7, {"episode_cannot_link": True})
+
+
+def test_resolve_language_override_follows_the_given_language(tmp_path):
+    text = 'profile="anime"\n[resolve.lang.ja]\nthreshold = 0.65\n'
+    assert _settings(tmp_path, text, language="ja")[1] == 0.65
+    assert _settings(tmp_path, text, language="en")[1] == 0.6

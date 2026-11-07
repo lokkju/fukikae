@@ -490,18 +490,19 @@ def adapt(
 
 
 def resolve_settings(
-    cfg: Any, matcher: str | None, threshold: float | None, options: dict[str, Any] | None
+    cfg: Any,
+    matcher: str | None,
+    threshold: float | None,
+    options: dict[str, Any] | None,
+    language: str | None = None,
 ) -> tuple[str, float, dict[str, Any]]:
     """The batch matcher, threshold and matcher options: explicit flags over the ``[resolve]``
     table (workspace over language over profile, Ruling R17) over the built-ins (joint, the
-    registry's match_threshold, no options)."""
-    from fukikae.config import ConfigError
-
-    try:
-        table = cfg.resolve("resolve", cfg.source_language, key="matcher")
-        name, opts = table.backend, dict(table.options)
-    except ConfigError:
-        name, opts = "joint", {}
+    registry's match_threshold, no options). A ``[resolve]`` table without ``matcher`` means
+    joint and still applies its other keys. `language` picks ``[resolve.lang.<code>]``: the
+    episodes' language as the characters stage reads it (`episodes_language`)."""
+    table = cfg.resolve("resolve", language, key="matcher", default="joint")
+    name, opts = table.backend, dict(table.options)
     thr = opts.pop("threshold", None)
     if thr is None:
         thr = cfg.registry.match_threshold
@@ -510,6 +511,22 @@ def resolve_settings(
         float(threshold if threshold is not None else thr),
         {**opts, **(options or {})},
     )
+
+
+def episodes_language(cfg: Any, eps: list[Episode]) -> str | None:
+    """The language the characters stage matches these episodes in (each one's detected
+    ``language.json``, else ``source_language``); refuses episodes of different languages,
+    which belong in separate workspaces."""
+    from fukikae.stages.characters import CharactersStage
+
+    langs = {ep.id: CharactersStage._language(ep, cfg) for ep in eps}
+    if len(set(langs.values())) > 1:
+        raise _fail(
+            "the episodes are in different languages ("
+            + ", ".join(f"{e}: {lang or 'unknown'}" for e, lang in langs.items())
+            + "); each audio language is its own workspace and registry"
+        )
+    return next(iter(langs.values()), None)
 
 
 @registry_app.command("resolve")
@@ -545,9 +562,15 @@ def resolve(
     from fukikae.registry.resolve import resolve_episodes
 
     ws = Workspace(workspace)
+    eps = _worked_episodes(ws, episodes)
     try:
+        cfg = ws.config
         matcher, thr, opts = resolve_settings(
-            ws.config, matcher, threshold, parse_options(matcher_option, "--matcher-option")
+            cfg,
+            matcher,
+            threshold,
+            parse_options(matcher_option, "--matcher-option"),
+            episodes_language(cfg, eps),
         )
     except (ValueError, *user_errors()) as e:
         raise _fail(str(e)) from e
@@ -556,7 +579,6 @@ def resolve(
             f"--matcher {matcher}: resolve runs the batch matcher joint; per-episode matchers "
             "run in the characters stage (`fukikae run`, `registry rematch`)"
         )
-    eps = _worked_episodes(ws, episodes)
     try:
         s = resolve_episodes(ws, eps, thr, options=opts)
     except user_errors() as e:
