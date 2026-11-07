@@ -43,6 +43,7 @@ def test_declaration():
     with pytest.raises(ValueError):
         DialogueSeparator({"background": "x"}, "cpu")
     assert EXTRAS["dialogue"] == "dialogue"
+    assert DialogueSeparator.vram_mb >= 5400  # full-episode measurement, not a clip
 
 
 def test_registered():

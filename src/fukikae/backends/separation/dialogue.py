@@ -24,9 +24,9 @@ class DialogueSeparator:
     kind: ClassVar[str] = "separation"
     languages: ClassVar[frozenset[str] | Literal["*"]] = "*"
     devices: ClassVar[frozenset[str]] = frozenset({"cuda", "cpu"})
-    vram_mb: ClassVar[int] = (
-        2990  # measured peak 2486 MiB (nvidia-smi delta, 90 s clip, 6 s chunks) + 20%
-    )
+    # Length-dependent (dbs chunked() keeps full-length buffers on the device). Measured on
+    # fairytail S01E12, 23.8 min: nvidia-smi delta 4508 MiB, + 20%. A 90 s clip needs 2486.
+    vram_mb: ClassVar[int] = 5410
     extra: ClassVar[str] = "dialogue"
 
     def __init__(self, options: dict[str, Any], device: str) -> None:
