@@ -4,9 +4,8 @@
 #
 # Grid's best setting is joint WITHOUT episode_cannot_link at 0.6 (2 of 2 recurring pass,
 # against centroid's 1 of 2): it rejoins one character's split clusters inside an episode.
-# Run it with
-#   fukikae registry resolve <workspace> --episodes S01E02,S01E04,... --matcher-option episode_cannot_link=false
-# since the characters stage cannot run joint and keeps centroid.
+# The characters stage cannot run joint and keeps centroid; `fukikae registry resolve`
+# reads [resolve] below.
 [registry]
 min_new_seconds = 20.0
 match_threshold = 0.6
@@ -21,4 +20,9 @@ backend = "pyannote"
 backend = "wespeaker"
 
 [characters]
-matcher = "centroid"   # the per-episode stage; joint is a batch command (see above)
+matcher = "centroid"   # the per-episode stage; joint runs through [resolve]
+
+[resolve]   # `fukikae registry resolve` (Ruling R17); CLI flags override
+matcher = "joint"
+threshold = 0.6
+episode_cannot_link = false

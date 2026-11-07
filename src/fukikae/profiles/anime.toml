@@ -3,10 +3,8 @@
 # diarization, and the joint matcher with episode_cannot_link on at 0.6 (12 clean characters
 # of 19 recurring, 2 merges, against centroid's 10 and 2).
 #
-# Joint resolves a whole season at once, so the characters stage cannot run it (the stage
-# keeps centroid, the per-episode fallback). Run it after diarizing the episodes:
-#   fukikae registry resolve <workspace> --episodes S01E12,S01E13,...
-# which reads match_threshold from here and has episode_cannot_link on by default.
+# Joint resolves a whole season at once, so the characters stage cannot run it (that stage
+# keeps centroid). `fukikae registry resolve <workspace> --episodes ...` reads [resolve] below.
 [registry]
 min_new_seconds = 20.0
 match_threshold = 0.6
@@ -21,4 +19,9 @@ backend = "pyannote"
 backend = "wespeaker"
 
 [characters]
-matcher = "centroid"   # the per-episode stage; joint is a batch command (see above)
+matcher = "centroid"   # the per-episode stage; joint runs through [resolve]
+
+[resolve]   # `fukikae registry resolve` (Ruling R17); CLI flags override
+matcher = "joint"
+threshold = 0.6
+episode_cannot_link = true
