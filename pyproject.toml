@@ -72,6 +72,7 @@ fusion = "fukikae.backends.embed.fusion:FusionEmbedder"
 
 [project.entry-points."fukikae.backends.separation"]
 demucs = "fukikae.backends.separation.demucs:DemucsSeparator"
+dialogue = "fukikae.backends.separation.dialogue:DialogueSeparator"
 
 [project.urls]
 License = "https://polyformproject.org/licenses/shield/1.0.0"
