@@ -3,10 +3,13 @@ registry state built from the episodes resolved before it.
 
 `Matcher.fit_episode(state, episode, embs, segs)` returns one character id per segment
 (None for a segment no character takes: an extra, or a cluster sent to review) and updates
-`state` the way the characters stage updates the registry. The identity harness replays
-whole series through it offline; the characters stage can select a matcher by name later
-(Task 7). Segments are any objects with ``start``, ``end``, ``duration`` and ``cluster``
-attributes (`fukikae.eval.identity.segments.Segment`); this module imports nothing from eval.
+`state` the way the characters stage updates the registry. The identity harness
+(`fukikae eval identity`) replays whole series through these classes offline. The pipeline
+does not select from this module: the characters stage has its own ``centroid`` and ``lda``
+matching (`registry.matching`, `registry.projection`, the projection stored by `registry
+adapt`), and `fukikae registry resolve` runs `JointMatcher` (`registry.resolve`). Segments
+are any objects with ``start``, ``end``, ``duration`` and ``cluster`` attributes
+(`fukikae.eval.identity.segments.Segment`); this module imports nothing from eval.
 
 Matchers by name (`make_matcher`), each taking `threshold` and `min_new_seconds`:
 
@@ -463,23 +466,29 @@ class LdaMatcher(_ScoringMatcher):
 
 
 class JointMatcher:
-    """One agglomerative clustering of every episode's segments at once, merging the most
-    similar pair of groups while their similarity reaches `threshold`: with
-    `linkage="centroid"` (default) the cosine of the two groups' mean rows, the scale the
-    centroid matcher's threshold is on; with `"average"` the mean pairwise cosine of their
-    rows, which noisy single rows pull far lower;
-    with `episode_cannot_link` (default on), segments of different diarization clusters of
-    one episode never end in one group either: within an episode the diarizer has already
-    decided they are different speakers (and every segmentation drops overlapped speech, so
-    the time-overlap rule alone almost never fires). It also forbids rejoining a speaker the
-    diarizer split in two within an episode. Segments without a cluster (subtitles, asr)
-    are untouched by it; never merging two groups that hold segments
-    of one episode overlapping in time (cannot-link; the constraint carries through every
-    merge). `seed="clusters"` starts each episode's diarization cluster as one group
-    (segments without a cluster start alone); `seed="segments"` starts every segment alone.
-    Groups with at least `min_new_seconds` of segment time become characters, numbered from
-    1 in order of first appearance (episode order, then segment order); the rest get no id.
-    There is no registry state: the harness hands it every episode (`fit_all`)."""
+    """One agglomerative clustering of every episode's segments at once; no registry state.
+
+    Seeding: `seed="clusters"` (default) starts each episode's diarization cluster as one
+    group, and segments without a cluster start alone; `seed="segments"` starts every segment
+    alone. The most similar pair of groups then merges while its similarity reaches
+    `threshold`: with `linkage="centroid"` (default) the cosine of the two groups' mean rows,
+    the scale the centroid matcher's threshold is on; with `"average"` the mean pairwise
+    cosine of their rows, which noisy single rows pull far lower.
+
+    Constraints, carried through every merge: two groups holding segments of one episode that
+    overlap in time never merge. With `episode_cannot_link` (default on), segments of
+    different diarization clusters of one episode never share a group either, since the
+    diarizer has already called them different speakers (every segmentation drops overlapped
+    speech, so the time-overlap rule alone almost never fires); this also stops it rejoining
+    a speaker the diarizer split in two. Segments without a cluster (subtitle and asr
+    segmentations) are untouched by it. `fit_all`'s `always_cannot_link` applies the same
+    rule to named episodes whatever `episode_cannot_link` says.
+
+    Groups with at least `min_new_seconds` of segment time become characters, numbered from 1
+    in order of first appearance (episode order, then segment order); the rest get no id.
+    Callers hand it every episode through `fit_all`: the identity harness, and `fukikae
+    registry resolve` (`registry.resolve`), which adds the registry's existing actors as one
+    pseudo-episode in `always_cannot_link` so they never merge with each other."""
 
     name: ClassVar[str] = "joint"
 
