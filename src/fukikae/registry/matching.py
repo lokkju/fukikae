@@ -71,8 +71,8 @@ def match(
             raise ConfigError(
                 f"actor {a.id} holds {len(a.centroid)}-dimensional embeddings but this "
                 f"episode's clusters are {dim}-dimensional: the embedder changed since the "
-                "registry was built. Re-embed the registry's episodes with one embedder "
-                "(re-run their diarize stage, then `registry rematch`)"
+                "registry was built. Run `fukikae registry reembed <workspace>` to re-embed "
+                "the registry with the configured embedder, then re-run the pipeline"
             )
     tops: dict[str, tuple[int, float] | None] = {}
     for ev in evidence:

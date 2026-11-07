@@ -85,6 +85,18 @@ def _fail(msg: str) -> typer.Exit:
     return typer.Exit(1)
 
 
+def _same_dims(dims: dict[str, int], hint: str) -> None:
+    """Refuse episodes whose clusters.npz rows have different dimensions (the embedder
+    changed between their diarize runs); `dims` maps episode -> dimension, 0 for none."""
+    found = {e: d for e, d in dims.items() if d}
+    if len(set(found.values())) > 1:
+        raise _fail(
+            "the episodes' clusters come from different embedders ("
+            + ", ".join(f"{e}: {d}-dimensional" for e, d in found.items())
+            + f"). {hint}"
+        )
+
+
 def _stale(ws: Workspace, episodes: list[str]) -> None:
     """Delete each episode's `characters` manifest record and say so."""
     from fukikae.job import mark_stale
@@ -183,6 +195,14 @@ def cluster(
                 "Use per-episode matching (`fukikae run`, `registry rematch`)."
             )
         loaded = {ep.id: load_clusters(stage.inputs(ep)[1]) for ep in eps}
+        _same_dims(
+            {
+                e: next((r.shape[1] for r in rows.values() if len(r)), 0)
+                for e, (_, rows) in loaded.items()
+            },
+            "Re-run the older episodes' diarize stage with the configured embedder "
+            "(`fukikae run`), then cluster",
+        )
         groups = seed_clusters(
             {eid: ev for eid, (ev, _) in loaded.items()},
             threshold if threshold is not None else 1.0 - cfg.registry.match_threshold,
@@ -446,6 +466,7 @@ def adapt(
     refs = [e.strip() for e in episodes.split(",") if e.strip()]
     x: list[np.ndarray] = []
     y: list[str] = []
+    emb_dims: dict[str, int] = {}
     try:
         aliases = {**load_alias_file(ws.root / "labels-aliases.yaml"), **parse_aliases(alias)}
         for ref, ep in zip(refs, eps, strict=True):
@@ -466,6 +487,8 @@ def adapt(
             with np.load(ep.work / "04-diarize" / "clusters.npz") as z:
                 for cluster in [str(c) for c in z["labels"]]:
                     emb = np.asarray(z[f"{cluster}/embeddings"], dtype=np.float32)
+                    if len(emb):
+                        emb_dims.setdefault(ep.id, emb.shape[1])
                     spans = np.asarray(z[f"{cluster}/spans"]).reshape(-1, 2)
                     for row, (a, b) in zip(emb, spans, strict=True):
                         lab = label_of.get((cluster, round(float(a), 6), round(float(b), 6)))
@@ -474,6 +497,12 @@ def adapt(
                             y.append(lab)
     except user_errors() as e:
         raise _fail(str(e)) from e
+    _same_dims(
+        emb_dims,
+        "If the registry was built with the old embedder, run `fukikae registry reembed "
+        "<workspace>` first; then re-run the older episodes' diarize stage (`fukikae run`) "
+        "and adapt",
+    )
     projection = fit_lda(np.vstack(x), y, dims) if x else None
     if projection is None:
         raise _fail(
@@ -486,6 +515,58 @@ def adapt(
     typer.echo(
         f"lda projection for series {series!r}: {len(x)} labeled rows, {len(set(y))} labels, "
         f"{projection.matrix.shape[1]} dims, from {', '.join(e.id for e in eps)}"
+    )
+
+
+def _dims(c: Any) -> str:
+    return ", ".join(f"{n} x {d}-d" for d, n in sorted(c.items())) or "none"
+
+
+@registry_app.command("reembed")
+def reembed(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Check and report counts per dimension; change nothing."
+    ),
+) -> None:
+    """Re-embed every exemplar with the configured embedder after an embedder change.
+
+    Each exemplar is embedded again from its episode's diarize spans and separated stem, then
+    every centroid is recomputed and projections of another dimension are dropped, in one
+    registry transaction. Names, locks, voices and external ids are kept. Run it before
+    re-running diarize with the new embedder (the exemplars' cluster labels refer to the
+    existing diarization), then re-run the pipeline.
+    """
+    from fukikae.errors import user_errors
+    from fukikae.registry import reembed as rr
+
+    ws = Workspace(workspace)
+    try:
+        p = rr.plan(ws)
+    except user_errors() as e:
+        raise _fail(str(e)) from e
+    typer.echo(f"embedder: {p.embedder.backend} ({p.dim}-d)")
+    typer.echo(f"exemplars: {_dims(p.exemplar_dims)}")
+    typer.echo(f"centroids: {_dims(p.centroid_dims)}")
+    drop = [x for x in p.projection_dims if x[2] != p.dim]
+    typer.echo(
+        "projections: "
+        + (", ".join(f"{s}/{k} ({d}-d)" for s, k, d in p.projection_dims) or "none")
+        + (f"; {len(drop)} of another dimension to drop" if drop else "")
+    )
+    typer.echo(f"{p.spans} spans to embed from {len(p.work)} episodes")
+    if dry_run:
+        typer.echo("dry run: nothing changed")
+        return
+    try:
+        r = rr.run(ws, p)
+    except user_errors() as e:
+        raise _fail(f"{e}; nothing was changed") from e
+    typer.echo(
+        f"re-embedded {p.spans} exemplars as {p.dim}-d; {len(r.centroids)} centroids "
+        f"recomputed; cleared {', '.join(map(str, r.cleared)) or 'none'} (no exemplars); "
+        f"dropped projections {', '.join(f'{s}/{k}' for s, k, _ in r.projections) or 'none'}. "
+        "Now re-run the pipeline (`fukikae run`)"
     )
 
 

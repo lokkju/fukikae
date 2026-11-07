@@ -121,3 +121,18 @@ def test_adapt_refuses_unlabeled_episodes(tmp_path):
     r = adapt(ws, "S01E12", "--force")
     assert r.exit_code == 1
     assert "labels" in r.output
+
+
+def test_adapt_refuses_episodes_of_different_dimensions(tmp_path):
+    ws = make_ws(tmp_path, ["S01E12", "S01E13"])
+    path = ws.work_dir("S01E13") / "04-diarize" / "clusters.npz"
+    with np.load(path) as z:
+        arrays = {k: z[k] for k in z.files}
+    for lb in NAMES:
+        n = len(arrays[f"{lb}/embeddings"])
+        arrays[f"{lb}/embeddings"] = np.ones((n, DIM + 2), dtype=np.float32) / 3
+    np.savez(path, **arrays)
+    r = adapt(ws, "S01E12,S01E13")
+    assert r.exit_code == 1
+    assert "S01E13" in r.output and f"{DIM + 2}-dimensional" in r.output
+    assert "registry reembed" in r.output

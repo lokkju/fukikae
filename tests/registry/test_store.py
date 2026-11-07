@@ -205,3 +205,15 @@ def test_deleted_ids_are_never_reused(tmp_path: Path):
         reg.add_exemplars(a1, "e1", "S0", np.stack([unit(1, 0)]), 3.0)
         a4, c4 = reg.split_cluster(a1, "e1", "S0")
         assert (a4, c4) == (a3 + 1, c3 + 1)
+
+
+def test_exemplar_rows_of_mixed_dimensions_point_to_reembed(tmp_path):
+    import pytest
+
+    reg = Registry(tmp_path / "r.db")
+    aid, _ = reg.create_actor_with_character(np.ones(3, dtype=np.float32))
+    reg.add_exemplars(aid, "S01E01", "S0", np.ones((2, 3), dtype=np.float32), 9.0)
+    reg.add_exemplars(aid, "S01E02", "S0", np.ones((2, 4), dtype=np.float32), 9.0)
+    with pytest.raises(ValueError, match=r"actor 1 .*3, 4.*registry reembed"):
+        reg.exemplar_rows()
+    reg.close()

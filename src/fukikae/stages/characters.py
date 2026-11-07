@@ -196,7 +196,7 @@ class CharactersStage:
                         raise ConfigError(
                             f"actor {aid} holds {r.shape[1]}-dimensional embeddings but the "
                             f"lda projection takes {projection.dim}: the embedder changed. "
-                            "Re-embed the registry's episodes with one embedder and run "
+                            "Run `fukikae registry reembed <workspace>`, then "
                             "`fukikae registry adapt` again"
                         )
                 matched = decide(
