@@ -27,11 +27,12 @@ def test_profile_layers_under_language_and_workspace(tmp_path, monkeypatch):
 
 
 def test_workspace_base_beats_profile(tmp_path, monkeypatch):
-    _with_profile(monkeypatch, {"embed": {"backend": "x", "opt": 1, "lang": {"ja": {"opt": 2}}}})
-    c = _ws(tmp_path, 'profile="anime"\n[embed]\nbackend="z"\n')
-    assert c.resolve("embed", "ja") == BackendConfig("z", {})
-    c = _ws(tmp_path, 'profile="anime"\n[embed]\nopt=9\n')
-    assert c.resolve("embed", "ja") == BackendConfig("x", {"opt": 9})
+    tables = {"diarize": {"backend": "x", "opt": 1, "lang": {"ja": {"opt": 2}}}}
+    _with_profile(monkeypatch, tables)
+    c = _ws(tmp_path, 'profile="anime"\n[diarize]\nbackend="z"\n')
+    assert c.resolve("diarize", "ja") == BackendConfig("z", {})
+    c = _ws(tmp_path, 'profile="anime"\n[diarize]\nopt=9\n')
+    assert c.resolve("diarize", "ja") == BackendConfig("x", {"opt": 9})
 
 
 def test_unknown_profile_lists_available(tmp_path):
@@ -206,3 +207,25 @@ def test_resolve_language_override_follows_the_given_language(tmp_path):
     text = 'profile="anime"\n[resolve.lang.ja]\nthreshold = 0.65\n'
     assert _settings(tmp_path, text, language="ja")[1] == 0.65
     assert _settings(tmp_path, text, language="en")[1] == 0.6
+
+
+def test_workspace_embed_options_without_backend_fail_naming_the_backend(tmp_path):
+    """`[embed] model = "speechbrain/..."` used to mean ECAPA; under the WeSpeaker default
+    it must fail at resolution, not at model load."""
+    c = _ws(tmp_path, '[embed]\nmodel = "speechbrain/spkrec-ecapa-voxceleb"\n')
+    with pytest.raises(ConfigError, match=r"model.*default profile.*wespeaker.*Set `backend`"):
+        c.resolve("embed")
+    c = _ws(tmp_path, '[embed.lang.ja]\nmodel = "speechbrain/spkrec-ecapa-voxceleb"\n')
+    assert c.resolve("embed", "en").backend == "wespeaker"
+    with pytest.raises(ConfigError, match="backend"):
+        c.resolve("embed", "ja")
+
+
+def test_workspace_embed_options_with_backend_resolve(tmp_path):
+    text = '[embed]\nbackend = "ecapa"\nmodel = "speechbrain/spkrec-ecapa-voxceleb"\n'
+    c = _ws(tmp_path, text)
+    assert c.resolve("embed") == BackendConfig(
+        "ecapa", {"model": "speechbrain/spkrec-ecapa-voxceleb"}
+    )
+    c = _ws(tmp_path, '[embed]\nbackend = "ecapa"\n[embed.lang.ja]\nmodel = "m"\n')
+    assert c.resolve("embed", "ja") == BackendConfig("ecapa", {"model": "m"})

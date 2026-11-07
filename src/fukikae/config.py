@@ -10,6 +10,10 @@ from typing import Any
 
 _DEFAULT_USER_CONFIG = object()
 _RESERVED = ("backend", "lang", "pair")
+# Kinds whose profile backend differs from what a workspace table's options were written for
+# before profiles existed (embed was ECAPA, now WeSpeaker): a workspace table that sets
+# options must name its backend, or the options would silently move to another model.
+_WORKSPACE_NEEDS_BACKEND = frozenset({"embed"})
 
 
 class ConfigError(Exception):
@@ -53,22 +57,36 @@ class Config:
         `backend` holds its value. With no selector set anywhere, `default` is used with the
         tables' options (ConfigError when `default` is None)."""
         merged: dict[str, Any] = {}
+        ws_options: list[str] = []  # option keys the workspace sets
+        ws_selects = False  # whether the workspace names the backend
         # Later layers win: profile, then the workspace's own tables over it.
         for source in (self.profile_raw, self.raw):
             table = source.get(kind)
             if not isinstance(table, dict):
                 continue
             base = {k: v for k, v in table.items() if k not in ("lang", "pair")}
-            merged = _layer(merged, base, key)
+            layers = [base]
             for group, name in (("lang", language), ("pair", pair)):
                 if name is None:
                     continue
                 override = table.get(group, {}).get(name)
                 if isinstance(override, dict):
-                    merged = _layer(merged, override, key)
+                    layers.append(override)
+            for layer in layers:
+                merged = _layer(merged, layer, key)
+                if source is self.raw:
+                    ws_selects = ws_selects or key in layer
+                    ws_options += [k for k in layer if k not in (*_RESERVED, key)]
         backend = merged.pop(key, None) or default
         if not backend:
             raise ConfigError(f"no {key} configured for {kind!r}")
+        if kind in _WORKSPACE_NEEDS_BACKEND and ws_options and not ws_selects:
+            raise ConfigError(
+                f"[{kind}] in the workspace config sets {', '.join(sorted(set(ws_options)))} "
+                f"without `{key}`, so it would apply to the {self.profile} profile's {kind} "
+                f"backend {backend!r}. Set `{key}` in that table to the backend those options "
+                f'are for (e.g. {key} = "{backend}" to keep it)'
+            )
         options = {k: v for k, v in merged.items() if k not in (*_RESERVED, key)}
         return BackendConfig(str(backend), options)
 

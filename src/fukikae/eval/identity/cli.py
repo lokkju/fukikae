@@ -117,12 +117,11 @@ def embedder_config(cfg: Config, backend: str | None, options: dict[str, Any]) -
     """`backend` with exactly `options`; with no backend, the workspace's embedder (as the
     diarize stage resolves it) with `options` laid over its own."""
     from fukikae.config import BackendConfig
-    from fukikae.stages.asr import _resolve
 
     if backend:
         return BackendConfig(backend, dict(options))
 
-    base = _resolve(cfg, "embed", None, "ecapa")
+    base = cfg.resolve("embed")
     return BackendConfig(base.backend, {**base.options, **options})
 
 
@@ -575,7 +574,9 @@ def identity_cmd(
         "max_gap (s, 1.0); repeat.",
     ),
     embedder: str = typer.Option(
-        None, "--embedder", help="Embed backend (default: the workspace's, else ecapa)."
+        None,
+        "--embedder",
+        help="Embed backend (default: the workspace's [embed], else its profile's).",
     ),
     embedder_option: list[str] = typer.Option(
         None, "--embedder-option", help="k=v embedder option; repeat."
