@@ -76,6 +76,22 @@ class Character:
 
 
 @dataclass(frozen=True)
+class Exemplar:
+    id: int
+    actor_id: int
+    episode: str
+    cluster: str | None
+    embedding: np.ndarray
+
+
+@dataclass(frozen=True)
+class ReembedResult:
+    centroids: list[int]  # actors whose centroid is now the mean of their new exemplars
+    cleared: list[int]  # actors with no exemplars whose centroid had another dimension
+    projections: list[tuple[str, str, int]]  # (series, kind, dim) dropped
+
+
+@dataclass(frozen=True)
 class StoredProjection:
     series: str
     kind: str
@@ -210,13 +226,44 @@ class Registry:
         ]
 
     def exemplar_rows(self) -> dict[int, np.ndarray]:
-        """Every actor's exemplar rows, (n, dim) float32; an actor with none is absent."""
+        """Every actor's exemplar rows, (n, dim) float32; an actor with none is absent.
+
+        Raises ValueError for an actor whose exemplars have different dimensions (the
+        embedder changed part-way): `fukikae registry reembed` recovers.
+        """
         rows: dict[int, list[np.ndarray]] = {}
         for aid, blob in self._con.execute(
             "SELECT actor_id, embedding FROM exemplars ORDER BY actor_id, id"
         ):
             rows.setdefault(aid, []).append(np.frombuffer(blob, dtype=np.float32))
+        for aid, r in rows.items():
+            dims = sorted({len(x) for x in r})
+            if len(dims) > 1:
+                raise ValueError(
+                    f"actor {aid} holds exemplars of different dimensions "
+                    f"({', '.join(map(str, dims))}): the embedder changed part-way. Run "
+                    "`fukikae registry reembed <workspace>` to re-embed every exemplar with "
+                    "the configured embedder, then re-run the pipeline"
+                )
         return {aid: np.vstack(r) for aid, r in rows.items()}
+
+    def exemplars(self) -> list[Exemplar]:
+        """Every exemplar, in id order (within an episode cluster, the order of its
+        ``clusters.npz`` rows)."""
+        return [
+            Exemplar(r[0], r[1], r[2], r[3], np.frombuffer(r[4], dtype=np.float32).copy())
+            for r in self._con.execute(
+                "SELECT id, actor_id, episode, cluster, embedding FROM exemplars ORDER BY id"
+            )
+        ]
+
+    def projections(self) -> list[StoredProjection]:
+        rows = self._con.execute(
+            "SELECT series, kind, matrix, mean, created FROM projections ORDER BY series, kind"
+        ).fetchall()
+        return [
+            StoredProjection(r[0], r[1], _blob_array(r[2]), _blob_array(r[3]), r[4]) for r in rows
+        ]
 
     def protected_actors(self) -> set[int]:
         """Actors someone has curated, which pruning never deletes: locked or named, or with
@@ -254,6 +301,59 @@ class Registry:
                 (series, kind, _array_blob(matrix), _array_blob(mean), created),
             )
         return created
+
+    def replace_embeddings(self, embeddings: dict[int, np.ndarray]) -> ReembedResult:
+        """Give every exemplar a new embedding (an embedder change), in one transaction.
+
+        `embeddings` must cover every exemplar id, all of one dimension. Then every actor
+        with exemplars, locked or not, gets the normalized mean of its new rows as its
+        centroid (a centroid in the old space matches nothing); an actor with none keeps its
+        centroid only when it already has the new dimension, else it is cleared. Stored
+        projections of another input dimension are deleted. Names, locks, voices, external
+        ids and the id high-water mark are untouched.
+        """
+        dims = {len(np.ravel(v)) for v in embeddings.values()}
+        if len(dims) > 1:
+            raise ValueError(f"new embeddings have several dimensions: {sorted(dims)}")
+        with self._tx() as con:
+            ids = {r[0] for r in con.execute("SELECT id FROM exemplars")}
+            if ids != set(embeddings):
+                raise ValueError(
+                    "the exemplars changed while they were being re-embedded; run reembed again"
+                )
+            if not ids:
+                return ReembedResult([], [], [])
+            (dim,) = dims
+            for eid, v in embeddings.items():
+                con.execute(
+                    "UPDATE exemplars SET embedding = ? WHERE id = ?", (_to_blob(np.ravel(v)), eid)
+                )
+            centroids, cleared = [], []
+            for aid, blob in con.execute("SELECT id, centroid FROM actors ORDER BY id").fetchall():
+                rows = [
+                    np.frombuffer(r[0], dtype=np.float32)
+                    for r in con.execute(
+                        "SELECT embedding FROM exemplars WHERE actor_id = ?", (aid,)
+                    )
+                ]
+                if rows:
+                    mean = np.stack(rows).mean(axis=0)
+                    con.execute(
+                        "UPDATE actors SET centroid = ? WHERE id = ?",
+                        (_to_blob(_normalized(mean)), aid),
+                    )
+                    centroids.append(aid)
+                elif blob is not None and len(blob) // 4 != dim:
+                    con.execute("UPDATE actors SET centroid = NULL WHERE id = ?", (aid,))
+                    cleared.append(aid)
+            dropped = []
+            for p in self.projections():
+                if p.matrix.shape[0] != dim:
+                    con.execute(
+                        "DELETE FROM projections WHERE series = ? AND kind = ?", (p.series, p.kind)
+                    )
+                    dropped.append((p.series, p.kind, int(p.matrix.shape[0])))
+            return ReembedResult(centroids, cleared, dropped)
 
     def _next_id(self, con: sqlite3.Connection, table: str) -> int:
         """An id above any this table has ever held, so a deleted id is never handed out

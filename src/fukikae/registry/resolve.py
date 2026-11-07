@@ -122,8 +122,9 @@ def resolve_episodes(
         if dims[e] and dims[e] != dim:
             raise ValueError(
                 f"{e}'s clusters are {dims[e]}-dimensional but {ref}'s are {dim}-dimensional: "
-                "the embedder changed between them. Re-run the diarize stage of the older "
-                "episodes with one embedder, then resolve"
+                "the embedder changed between them. If the registry holds exemplars of the "
+                "older episodes, run `fukikae registry reembed <workspace>` first; then re-run "
+                "the older episodes' diarize stage (`fukikae run`) and resolve"
             )
 
     result: dict[str, dict[str, ClusterAssignment]] = {e: {} for e in order}
@@ -153,8 +154,8 @@ def resolve_episodes(
             raise ValueError(
                 f"actor {aid} holds {d}-dimensional embeddings but the listed episodes' "
                 f"clusters are {dim}-dimensional: the embedder changed since the registry was "
-                "built. Re-embed the registry's episodes with one embedder (re-run their "
-                "diarize stage, then `registry rematch` or resolve them together)"
+                "built. Run `fukikae registry reembed <workspace>` to re-embed the registry "
+                "with the configured embedder, then resolve"
             )
         # Every refusal is above: a refused resolve leaves the characters records alone.
         for ep in episodes:  # stale until its assignments are rewritten
