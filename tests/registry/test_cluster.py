@@ -246,3 +246,21 @@ def test_cli_cluster_interrupted_leaves_registry_empty(tmp_path, monkeypatch):
         assert reg.actors() == [] and reg.characters() == []
     r = runner.invoke(app, ["registry", "cluster", str(ws.root), "--episodes", eps])
     assert r.exit_code == 0, r.output
+
+
+def test_cli_cluster_refuses_episodes_of_different_dimensions(tmp_path):
+    ws = make_ws(tmp_path)
+    path = ws.work_dir("S01E03") / "04-diarize" / "clusters.npz"
+    with np.load(path) as z:
+        arrays = {k: z[k] for k in z.files}
+    for lb in [str(x) for x in arrays["labels"]]:
+        n = len(arrays[f"{lb}/embeddings"])
+        arrays[f"{lb}/embeddings"] = np.ones((n, 4), dtype=np.float32) / 2
+    np.savez(path, **arrays)
+    r = runner.invoke(
+        app, ["registry", "cluster", str(ws.root), "--episodes", "S01E01,S01E02,S01E03"]
+    )
+    assert r.exit_code == 1
+    assert "S01E03" in r.output and "4-dimensional" in r.output and "diarize" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.actors() == []

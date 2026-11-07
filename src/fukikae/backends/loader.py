@@ -12,12 +12,19 @@ from fukikae.config import BackendConfig, ConfigError
 # hint survives a failed import. Each backend task adds its own line.
 EXTRAS: dict[str, str] = {
     "demucs": "demucs",
+    "dialogue": "dialogue",
     "faster_whisper": "whisper",
     "wav2vec2": "whisper",
     "qwen3_asr": "qwen",
     "qwen3_forced_aligner": "qwen",
     "pyannote": "pyannote",
     "ecapa": "pyannote",
+    "wespeaker": "pyannote",
+    "wavlm_sv": "wavlm",
+    "campplus": "sherpa",
+    "eres2netv2": "sherpa",
+    "titanet": "sherpa",
+    "fusion": "pyannote",
 }
 
 
@@ -58,6 +65,16 @@ def available(kind: str) -> dict[str, type[Backend]]:
         except BackendUnavailable:
             continue
     return out
+
+
+def backend_class(kind: str, name: str) -> type[Backend]:
+    """The backend class registered under `name`, without instantiating it."""
+    eps = _entry_points(kind)
+    ep = eps.get(name)
+    if ep is None:
+        installed = ", ".join(sorted(eps)) or "none"
+        raise ConfigError(f"unknown {kind} backend {name!r}; installed: {installed}")
+    return _load(kind, name, ep)
 
 
 def create(kind: str, cfg: BackendConfig, device: str) -> Backend:

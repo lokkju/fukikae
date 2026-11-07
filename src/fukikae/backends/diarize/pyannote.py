@@ -1,4 +1,15 @@
-"""Speaker diarization with pyannote.audio (gated model; needs a Hugging Face token)."""
+"""Speaker diarization with pyannote.audio (gated model; needs a Hugging Face token).
+
+Tuning options, each left at the model's own value when unset:
+
+- `clustering_threshold`: the clustering step's distance threshold (community-1's VBx uses
+  it for the agglomerative initialisation, default 0.6, range 0.5 to 0.8; the 3.x
+  agglomerative clustering uses it as the merge distance).
+- `min_cluster_size`: the 3.x agglomerative clustering's smallest cluster; VBx pipelines
+  (community-1) have no such parameter and refuse it.
+- `exclude_overlap`: compute the clustering embeddings without overlapped frames
+  (`embedding_exclude_overlap`; community-1 ships with it on).
+"""
 
 from __future__ import annotations
 
@@ -23,6 +34,24 @@ def _read_wav16k(path: Path) -> np.ndarray:
     return raw.astype(np.float32) / 32768.0
 
 
+def _number(options: dict[str, Any], key: str) -> float | None:
+    v = options.get(key)
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int | float):
+        raise ValueError(f"pyannote option {key} must be a number, not {v!r}")
+    return float(v)
+
+
+def _count(options: dict[str, Any], key: str) -> int | None:
+    v = options.get(key)
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        raise ValueError(f"pyannote option {key} must be a whole number of at least 1, not {v!r}")
+    return v
+
+
 class PyannoteDiarizer:
     name: ClassVar[str] = "pyannote"
     kind: ClassVar[str] = "diarize"
@@ -35,6 +64,12 @@ class PyannoteDiarizer:
         self.model: str = str(options.get("model", DEFAULT_MODEL))
         self.min_speakers: int | None = options.get("min_speakers")
         self.max_speakers: int | None = options.get("max_speakers")
+        self.clustering_threshold = _number(options, "clustering_threshold")
+        self.min_cluster_size = _count(options, "min_cluster_size")
+        eo = options.get("exclude_overlap")
+        if eo is not None and not isinstance(eo, bool):
+            raise ValueError(f"pyannote option exclude_overlap must be true or false, not {eo!r}")
+        self.exclude_overlap: bool | None = eo
         self.device = device
         self._pipeline: Any = None
         self.peak_vram_mb: float | None = None
@@ -63,7 +98,29 @@ class PyannoteDiarizer:
             raise RuntimeError(
                 f"could not load {self.model}; accept its terms at https://huggingface.co/{self.model}"
             )
+        self.tune(pipeline)
         self._pipeline = pipeline.to(torch.device(self.device))
+
+    def tune(self, pipeline: Any) -> None:
+        """Apply the tuning options to a loaded pipeline (nothing when none is set)."""
+        changes: dict[str, Any] = {}
+        if self.clustering_threshold is not None:
+            changes["threshold"] = self.clustering_threshold
+        if self.min_cluster_size is not None:
+            changes["min_cluster_size"] = self.min_cluster_size
+        if changes:
+            params = pipeline.parameters(instantiated=True)
+            clustering = dict(params.get("clustering", {}))
+            missing = [k for k in changes if k not in clustering]
+            if missing:
+                raise ValueError(
+                    f"{self.model}: its clustering has no {', '.join(missing)} parameter "
+                    f"(it has {', '.join(sorted(clustering)) or 'none'})"
+                )
+            clustering.update(changes)
+            pipeline.instantiate({**params, "clustering": clustering})
+        if self.exclude_overlap is not None:
+            pipeline.embedding_exclude_overlap = self.exclude_overlap
 
     def unload(self) -> None:
         self._pipeline = None
