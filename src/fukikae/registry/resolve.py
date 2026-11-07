@@ -23,10 +23,11 @@ One registry transaction removes the listed episodes' exemplars, creates the new
 the rows of every matched and new cluster, recomputes centroids (a locked actor keeps its own)
 and prunes the unclaimed orphans: an interrupted resolve leaves the registry as it was. Ids
 come from the registry's high-water mark and are never reused. Each episode's ``characters``
-manifest record is deleted before the transaction and written back, done and current, after
-its ``assignments.json`` (with the turns, for pinning) is written, so an interruption after
-the commit leaves at most a stale characters stage, which the next `fukikae run` or another
-resolve redoes.
+manifest record is deleted inside the transaction, once every check that can refuse has
+passed and before any registry write lands, and written back, done and current, after its
+``assignments.json`` (with the turns, for pinning) is written: a refused resolve changes
+nothing, and an interruption after the commit leaves at most a stale characters stage, which
+the next `fukikae run` or another resolve redoes.
 """
 
 from __future__ import annotations
@@ -92,9 +93,13 @@ def resolve_episodes(
     cfg = ws.config
     min_new = cfg.registry.min_new_seconds if min_new_seconds is None else float(min_new_seconds)
     opts = dict(options or {})
-    for reserved in ("threshold", "min_new_seconds"):
-        if reserved in opts:
-            raise ValueError(f"joint option {reserved}: pass it as --{reserved.replace('_', '-')}")
+    if "threshold" in opts:
+        raise ValueError("joint option threshold: pass it as --threshold or [resolve] threshold")
+    if "min_new_seconds" in opts:
+        raise ValueError(
+            "joint option min_new_seconds: resolve uses the workspace's [registry] "
+            "min_new_seconds; set it there"
+        )
     if opts.get("seed", "clusters") != "clusters":
         raise ValueError('joint option seed: resolve assigns whole clusters; keep seed "clusters"')
     try:
@@ -120,9 +125,6 @@ def resolve_episodes(
                 "the embedder changed between them. Re-run the diarize stage of the older "
                 "episodes with one embedder, then resolve"
             )
-
-    for ep in episodes:  # stale until its assignments are rewritten
-        mark_stale(ep, "characters")
 
     result: dict[str, dict[str, ClusterAssignment]] = {e: {} for e in order}
     new_actors: list[int] = []
@@ -154,6 +156,9 @@ def resolve_episodes(
                 "built. Re-embed the registry's episodes with one embedder (re-run their "
                 "diarize stage, then `registry rematch` or resolve them together)"
             )
+        # Every refusal is above: a refused resolve leaves the characters records alone.
+        for ep in episodes:  # stale until its assignments are rewritten
+            mark_stale(ep, "characters")
         if anchors:
             embs[ANCHORS] = np.vstack([rows for _, rows in anchors])
             segs[ANCHORS] = [

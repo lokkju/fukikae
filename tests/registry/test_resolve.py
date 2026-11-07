@@ -348,3 +348,38 @@ def test_resolve_refuses_episodes_detected_in_different_languages(tmp_path, monk
     assert r.exit_code == 1
     assert "S01E01: ja" in r.output and "S01E02: en" in r.output
     assert seen == {}
+
+
+def _snapshot(ws: Workspace, eids):
+    with Registry(ws.registry_path) as reg:
+        actors = [(a.id, a.name, a.locked, np.asarray(a.centroid).tolist()) for a in reg.actors()]
+        rows = {aid: r.tolist() for aid, r in reg.exemplar_rows().items()}
+        chars = reg.characters()
+    eps = {
+        e: (
+            load_manifest(episode(ws, e)).stages.get("characters"),
+            (ws.work_dir(e) / "05-characters" / "assignments.json").read_text(),
+        )
+        for e in eids
+    }
+    return actors, rows, chars, eps
+
+
+def test_refused_resolve_leaves_characters_records_and_registry_intact(tmp_path):
+    ws = make_ws(tmp_path)
+    assert resolve(ws, "S01E01,S01E02").exit_code == 0
+    with Registry(ws.registry_path) as reg:  # an actor from another embedder
+        aid, _ = reg.create_actor_with_character(np.ones(5, dtype=np.float32))
+        reg.add_exemplars(aid, "S01E09", "X", np.ones((2, 5), dtype=np.float32), 30.0)
+    before = _snapshot(ws, ["S01E01", "S01E02"])
+    assert all(rec is not None and rec.status == "done" for rec, _ in before[3].values())
+    r = resolve(ws, "S01E01,S01E02")
+    assert r.exit_code == 1 and "embedder changed" in r.output
+    assert _snapshot(ws, ["S01E01", "S01E02"]) == before
+
+
+def test_min_new_seconds_option_says_where_it_is_set(tmp_path):
+    ws = make_ws(tmp_path)
+    r = resolve(ws, "S01E01,S01E02", "--matcher-option", "min_new_seconds=5")
+    assert r.exit_code == 1
+    assert "[registry] min_new_seconds" in r.output and "--min-new-seconds" not in r.output
