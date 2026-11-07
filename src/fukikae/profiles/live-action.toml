@@ -1,0 +1,29 @@
+# PROVISIONAL live-action profile (Ruling R16). Written from one tuning pair of Grid
+# (Korean, E02 + E04): two recurring characters on 12% subtitle coverage, so one character is
+# the whole difference between candidates. Revisit when D9's ground truth lands.
+# It fails the 90% held-out bar on Grid E05: fraction 0.80 (4 of 5 recurring).
+#
+# Grid's best setting is joint WITHOUT episode_cannot_link at 0.6 (2 of 2 recurring pass,
+# against centroid's 1 of 2): it rejoins one character's split clusters inside an episode.
+# The characters stage cannot run joint and keeps centroid; `fukikae registry resolve`
+# reads [resolve] below.
+[registry]
+min_new_seconds = 20.0
+match_threshold = 0.6
+
+[separation]
+backend = "demucs"   # Ruling R15: the dialogue backend stays opt-in
+
+[diarize]
+backend = "pyannote"
+
+[embed]
+backend = "wespeaker"
+
+[characters]
+matcher = "centroid"   # the per-episode stage; joint runs through [resolve]
+
+[resolve]   # `fukikae registry resolve` (Ruling R17); CLI flags override
+matcher = "joint"
+threshold = 0.6
+episode_cannot_link = false

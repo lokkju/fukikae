@@ -366,3 +366,129 @@ def test_split_half_of_a_pinned_speaker_goes_to_review(tmp_path):
     assert got["S1"].character_id is None
     with registry(ep) as reg:
         assert reg.cluster_actors(ep.id, "S1") == []  # review adds no exemplars
+
+
+# ---- matcher option: centroid (default) or lda with the series' stored projection ----
+
+LDA = {"characters": {"matcher": "lda"}}
+ONTO_E0 = np.array([[1.0], [0.0], [0.0]])  # keeps only the first axis
+
+
+def lda_setup(tmp_path, project=True):
+    """E1 makes an actor at [1, 1, 0]; E2's cluster at [1, 0, 1] has cosine 0.5 with it
+    (new under centroid) and cosine 1 once projected onto the first axis."""
+    ep1, ep2 = make_ep(tmp_path, "e1"), make_ep(tmp_path, "e2")
+    write_diarize(ep1, {"S0": ([unit([1, 1, 0])], 40.0)}, [(0, 20, "S0")])
+    CharactersStage().run(ep1, CFG)
+    if project:
+        with registry(ep1) as reg:
+            reg.save_projection("default", "lda", ONTO_E0, np.zeros(3))
+    write_diarize(ep2, {"S3": ([unit([1, 0, 1])], 30.0)}, [(0, 20, "S3")])
+    return ep1, ep2
+
+
+def with_raw(raw, profile_raw=None, source_language=None):
+    return Config(
+        registry=CFG.registry,
+        raw=raw,
+        profile_raw=profile_raw or {},
+        source_language=source_language,
+    )
+
+
+def test_centroid_is_the_default_matcher_and_its_key_is_unchanged(tmp_path):
+    _, ep2 = lda_setup(tmp_path)
+    assert CharactersStage().config_key(CFG, ep2) == {"threshold": 0.8, "min_new_seconds": 20.0}
+    CharactersStage().run(ep2, CFG)
+    assert assignments(ep2).clusters[0].status == "new"
+
+
+def test_lda_matcher_applies_the_stored_projection(tmp_path):
+    ep1, ep2 = lda_setup(tmp_path)
+    cfg = with_raw(LDA)
+    CharactersStage().run(ep2, cfg)
+    c = assignments(ep2).clusters[0]
+    assert c.status == "matched" and c.actor_id == assignments(ep1).clusters[0].actor_id
+    assert c.score == pytest.approx(1.0)
+    key = CharactersStage().config_key(cfg, ep2)
+    assert key["matcher"]["name"] == "lda" and key["matcher"]["projection"]
+
+
+def test_lda_without_a_projection_falls_back_to_centroid_with_a_warning(tmp_path, caplog):
+    import logging
+
+    _, ep2 = lda_setup(tmp_path, project=False)
+    with caplog.at_level(logging.WARNING):
+        CharactersStage().run(ep2, with_raw(LDA))
+    assert assignments(ep2).clusters[0].status == "new"
+    assert "no lda projection" in caplog.text and "registry adapt" in caplog.text
+
+
+def test_lda_projection_of_another_dimension_is_an_error(tmp_path):
+    from fukikae.config import ConfigError
+
+    ep1, ep2 = lda_setup(tmp_path, project=False)
+    with registry(ep1) as reg:
+        reg.save_projection("default", "lda", np.ones((5, 1)), np.zeros(5))
+    with pytest.raises(ConfigError, match="registry adapt"):
+        CharactersStage().run(ep2, with_raw(LDA))
+
+
+def test_matcher_resolves_through_profile_and_language_layers():
+    from fukikae.stages.characters import matcher_config
+
+    prof = {"characters": {"matcher": "lda", "dims": 4}}
+    assert matcher_config(with_raw({}, prof), None).backend == "lda"
+    assert matcher_config(with_raw({}, prof), None).options == {"dims": 4}
+    # the workspace's own table wins over the profile (and gets only its own options)
+    got = matcher_config(with_raw({"characters": {"matcher": "centroid"}}, prof), None)
+    assert got.backend == "centroid" and got.options == {}
+    lang = {"characters": {"lang": {"ja": {"matcher": "lda"}}}}
+    assert matcher_config(with_raw(lang), "ja").backend == "lda"
+    assert matcher_config(with_raw(lang), "ko").backend == "centroid"
+    assert matcher_config(with_raw({}), None).backend == "centroid"
+
+
+def test_unknown_or_batch_matcher_is_refused(tmp_path):
+    from fukikae.config import ConfigError
+
+    _, ep2 = lda_setup(tmp_path)
+    with pytest.raises(ConfigError, match="registry resolve"):
+        CharactersStage().run(ep2, with_raw({"characters": {"matcher": "joint"}}))
+    with pytest.raises(ConfigError, match="centroid"):
+        CharactersStage().run(ep2, with_raw({"characters": {"matcher": "knn"}}))
+    with pytest.raises(ConfigError, match="dims"):
+        CharactersStage().run(ep2, with_raw({"characters": {"matcher": "lda", "dims": 0}}))
+
+
+def test_centroid_matching_refuses_actors_of_another_dimension(tmp_path):
+    from fukikae.config import ConfigError
+
+    ep1, ep2 = lda_setup(tmp_path, project=False)
+    with registry(ep1) as reg:
+        aid, _ = reg.create_actor_with_character(np.ones(5, dtype=np.float32))
+        reg.add_exemplars(aid, "other", "X", np.ones((1, 5), dtype=np.float32), 30.0)
+    with pytest.raises(ConfigError, match="embedder changed"):
+        CharactersStage().run(ep2, CFG)
+
+
+def test_lda_refuses_actor_rows_of_another_dimension(tmp_path):
+    from fukikae.config import ConfigError
+
+    ep1, ep2 = lda_setup(tmp_path)
+    with registry(ep1) as reg:
+        aid, _ = reg.create_actor_with_character(np.ones(5, dtype=np.float32))
+        reg.add_exemplars(aid, "other", "X", np.ones((1, 5), dtype=np.float32), 30.0)
+    with pytest.raises(ConfigError, match="registry adapt"):
+        CharactersStage().run(ep2, with_raw(LDA))
+
+
+def test_adapt_and_stage_docs_say_to_leave_out_held_out_episodes():
+    from typer.testing import CliRunner
+
+    from fukikae.cli import app
+    from fukikae.stages import characters
+
+    assert "held-out" in (characters.__doc__ or "")
+    r = CliRunner().invoke(app, ["registry", "adapt", "--help"], env={"COLUMNS": "200"})
+    assert "held-out" in r.output

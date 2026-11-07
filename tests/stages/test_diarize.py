@@ -86,6 +86,10 @@ class FakeEmbedder:
         return out
 
 
+# A profile naming the embedder, as every shipped profile does (no fallback in the stage).
+EMBED = {"embed": {"backend": "fake"}}
+
+
 @pytest.fixture
 def ep(tmp_path) -> Episode:
     root = tmp_path / "ws"
@@ -105,7 +109,9 @@ def fakes(monkeypatch):
 
 @pytest.mark.usefixtures("fakes")
 def test_stage_writes_turns_and_clusters_with_empty_cluster(ep):
-    DiarizeStage().run(ep, Config(raw={"diarize": {"backend": "x", "min_speakers": 2}}))
+    DiarizeStage().run(
+        ep, Config(raw={"diarize": {"backend": "x", "min_speakers": 2}}, profile_raw=EMBED)
+    )
     d = read_json(ep.work / "04-diarize" / "turns.json", Diarization)
     assert [t.speaker for t in d.turns] == ["S0", "S1", "S0"]
     z = np.load(ep.work / "04-diarize" / "clusters.npz")
@@ -120,7 +126,7 @@ def test_stage_writes_turns_and_clusters_with_empty_cluster(ep):
 
 @pytest.mark.usefixtures("fakes")
 def test_models_never_resident_together(ep):
-    DiarizeStage().run(ep, Config(raw={}))
+    DiarizeStage().run(ep, Config(raw={}, profile_raw=EMBED))
     assert [e for e in LOG if isinstance(e, str)] == [
         "diar-load",
         "diarize",
@@ -143,7 +149,7 @@ def test_span_cap_keeps_longest(ep, monkeypatch):
 
     classes = {"diarize": Many, "embed": FakeEmbedder}
     monkeypatch.setattr(diarize, "create", lambda kind, bc, dev: classes[kind](bc.options, dev))
-    DiarizeStage().run(ep, Config(raw={}))
+    DiarizeStage().run(ep, Config(raw={}, profile_raw=EMBED))
     z = np.load(ep.work / "04-diarize" / "clusters.npz")
     spans = z["S0/spans"]
     assert len(spans) == MAX_SPANS_PER_CLUSTER
@@ -158,13 +164,13 @@ def test_span_cap_keeps_longest(ep, monkeypatch):
 
 @pytest.mark.usefixtures("fakes")
 def test_diarize_passes_table_options(ep):
-    DiarizeStage().run(ep, Config(raw={"diarize": {"min_speakers": 2}}))
+    DiarizeStage().run(ep, Config(raw={"diarize": {"min_speakers": 2}}, profile_raw=EMBED))
     assert ("diar-init", {"min_speakers": 2}) in LOG
 
 
 @pytest.mark.gpu
 def test_chimera_clip_has_two_clusters(clip_ep):
-    DiarizeStage().run(clip_ep, Config(source_language="ko"))
+    DiarizeStage().run(clip_ep, Config(source_language="ko", raw={"embed": {"backend": "ecapa"}}))
     z = np.load(clip_ep.work / "04-diarize" / "clusters.npz")
     labels = list(z["labels"])
     assert len(labels) >= 2
@@ -173,3 +179,24 @@ def test_chimera_clip_has_two_clusters(clip_ep):
         if len(emb):
             assert emb.shape[1] == 192
             np.testing.assert_allclose(np.linalg.norm(emb, axis=1), 1.0, atol=1e-3)
+
+
+def test_workspace_embed_model_without_backend_fails_in_the_stage(tmp_path):
+    from fukikae.config import ConfigError, load_config
+
+    (tmp_path / "fukikae.toml").write_text('[embed]\nmodel = "speechbrain/spkrec-ecapa-voxceleb"\n')
+    cfg = load_config(tmp_path, user_config=None)
+    with pytest.raises(ConfigError, match="wespeaker"):
+        DiarizeStage().config_key(cfg, None)  # type: ignore[arg-type]
+
+
+def test_identity_embedder_config_has_no_ecapa_fallback(tmp_path):
+    from fukikae.config import ConfigError, load_config
+    from fukikae.eval.identity.cli import embedder_config
+
+    (tmp_path / "fukikae.toml").write_text("")
+    cfg = load_config(tmp_path, user_config=None)
+    assert embedder_config(cfg, None, {}).backend == "wespeaker"
+    (tmp_path / "fukikae.toml").write_text('[embed]\nmodel = "m"\n')
+    with pytest.raises(ConfigError, match="backend"):
+        embedder_config(load_config(tmp_path, user_config=None), None, {})

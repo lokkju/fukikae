@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
 _DEFAULT_USER_CONFIG = object()
 _RESERVED = ("backend", "lang", "pair")
+# Kinds whose profile backend differs from what a workspace table's options were written for
+# before profiles existed (embed was ECAPA, now WeSpeaker): a workspace table that sets
+# options must name its backend, or the options would silently move to another model.
+_WORKSPACE_NEEDS_BACKEND = frozenset({"embed"})
 
 
 class ConfigError(Exception):
@@ -36,32 +41,80 @@ class Config:
     gpu_device: int = 0
     registry: RegistrySettings = field(default_factory=RegistrySettings)
     raw: dict[str, Any] = field(default_factory=dict)
+    profile: str = "default"
+    profile_raw: dict[str, Any] = field(default_factory=dict)
 
     def resolve(
-        self, kind: str, language: str | None = None, pair: str | None = None
+        self,
+        kind: str,
+        language: str | None = None,
+        pair: str | None = None,
+        key: str = "backend",
+        default: str | None = None,
     ) -> BackendConfig:
-        """Pick the backend for a stage: pair table over language table over base."""
-        table = self.raw.get(kind)
-        if not isinstance(table, dict):
-            table = {}
-        merged: dict[str, Any] = {k: v for k, v in table.items() if k not in ("lang", "pair")}
-        layers = (("lang", language), ("pair", pair))
-        for group, key in layers:
-            if key is None:
+        """Pick the backend for a stage: pair table over language table over base. `key`
+        names the table's selector (``matcher`` for ``[characters]``); the result's
+        `backend` holds its value. With no selector set anywhere, `default` is used with the
+        tables' options (ConfigError when `default` is None)."""
+        merged: dict[str, Any] = {}
+        ws_options: list[str] = []  # option keys the workspace sets
+        ws_selects = False  # whether the workspace names the backend
+        # Later layers win: profile, then the workspace's own tables over it.
+        for source in (self.profile_raw, self.raw):
+            table = source.get(kind)
+            if not isinstance(table, dict):
                 continue
-            override = table.get(group, {}).get(key)
-            if not isinstance(override, dict):
-                continue
-            if "backend" in override and override["backend"] != merged.get("backend"):
-                # A different backend gets only its own options, not the previous one's.
-                merged = dict(override)
-            else:
-                merged.update(override)
-        backend = merged.pop("backend", None)
+            base = {k: v for k, v in table.items() if k not in ("lang", "pair")}
+            layers = [base]
+            for group, name in (("lang", language), ("pair", pair)):
+                if name is None:
+                    continue
+                override = table.get(group, {}).get(name)
+                if isinstance(override, dict):
+                    layers.append(override)
+            for layer in layers:
+                merged = _layer(merged, layer, key)
+                if source is self.raw:
+                    ws_selects = ws_selects or key in layer
+                    ws_options += [k for k in layer if k not in (*_RESERVED, key)]
+        backend = merged.pop(key, None) or default
         if not backend:
-            raise ConfigError(f"no backend configured for {kind!r}")
-        options = {k: v for k, v in merged.items() if k not in _RESERVED}
+            raise ConfigError(f"no {key} configured for {kind!r}")
+        if kind in _WORKSPACE_NEEDS_BACKEND and ws_options and not ws_selects:
+            raise ConfigError(
+                f"[{kind}] in the workspace config sets {', '.join(sorted(set(ws_options)))} "
+                f"without `{key}`, so it would apply to the {self.profile} profile's {kind} "
+                f"backend {backend!r}. Set `{key}` in that table to the backend those options "
+                f'are for (e.g. {key} = "{backend}" to keep it)'
+            )
+        options = {k: v for k, v in merged.items() if k not in (*_RESERVED, key)}
         return BackendConfig(str(backend), options)
+
+
+def _layer(merged: dict[str, Any], over: dict[str, Any], key: str = "backend") -> dict[str, Any]:
+    """Apply one layer; a different backend gets only its own options (Ruling R4)."""
+    if key in over and merged.get(key) not in (None, over[key]):
+        return dict(over)
+    return {**merged, **over}
+
+
+def profile_names() -> list[str]:
+    return sorted(
+        p.name.removesuffix(".toml")
+        for p in resources.files("fukikae.profiles").iterdir()
+        if p.name.endswith(".toml")
+    )
+
+
+def load_profile(name: str) -> dict[str, Any]:
+    """Read a profile shipped as package data; unknown names list the available ones."""
+    if name not in profile_names():
+        raise ConfigError(f"unknown profile {name!r}; available: {', '.join(profile_names())}")
+    text = resources.files("fukikae.profiles").joinpath(f"{name}.toml").read_text("utf-8")
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"profile {name}: {e}") from e
 
 
 def _deep_merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
@@ -98,7 +151,9 @@ def load_config(
         raw = _read(user_config)
     raw = _deep_merge(raw, _read(workspace / "fukikae.toml"))
 
-    reg = raw.get("registry", {})
+    profile = str(raw.get("profile", "default"))
+    profile_raw = load_profile(profile)
+    reg = {**profile_raw.get("registry", {}), **raw.get("registry", {})}
     defaults = RegistrySettings()
     source = raw.get("source")
     return Config(
@@ -111,4 +166,6 @@ def load_config(
             match_threshold=float(reg.get("match_threshold", defaults.match_threshold)),
         ),
         raw=raw,
+        profile=profile,
+        profile_raw=profile_raw,
     )

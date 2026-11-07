@@ -13,6 +13,7 @@ dependencies = [
     "nvidia-ml-py>=13.615.71",
     "pydantic>=2",
     "pyyaml>=6.0.3",
+    "scikit-learn>=1.9.1",
     "scipy>=1.18.1",
     "typer>=0.15.0",
 ]
@@ -34,6 +35,16 @@ pyannote = [
     "pyannote-audio>=4.0.7",
     "speechbrain>=1.1.2",
 ]
+sherpa = [
+    "sherpa-onnx>=2.0.1",
+]
+wavlm = [
+    "torch>=2.8",
+    "transformers>=4.57.6,<5",
+]
+dialogue = [
+    "dbs",
+]
 
 [project.entry-points."fukikae.backends.asr"]
 faster_whisper = "fukikae.backends.asr.faster_whisper:FasterWhisperTranscriber"
@@ -52,9 +63,16 @@ pyannote = "fukikae.backends.diarize.pyannote:PyannoteDiarizer"
 
 [project.entry-points."fukikae.backends.embed"]
 ecapa = "fukikae.backends.embed.ecapa:EcapaEmbedder"
+wespeaker = "fukikae.backends.embed.wespeaker:WespeakerEmbedder"
+wavlm_sv = "fukikae.backends.embed.wavlm_sv:WavlmSvEmbedder"
+campplus = "fukikae.backends.embed.sherpa:CampplusEmbedder"
+eres2netv2 = "fukikae.backends.embed.sherpa:Eres2netv2Embedder"
+titanet = "fukikae.backends.embed.sherpa:TitanetEmbedder"
+fusion = "fukikae.backends.embed.fusion:FusionEmbedder"
 
 [project.entry-points."fukikae.backends.separation"]
 demucs = "fukikae.backends.separation.demucs:DemucsSeparator"
+dialogue = "fukikae.backends.separation.dialogue:DialogueSeparator"
 
 [project.urls]
 License = "https://polyformproject.org/licenses/shield/1.0.0"
@@ -86,7 +104,7 @@ packages = ["src/fukikae"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-m 'not gpu and not media'"
+addopts = "-m 'not gpu and not media and not slow'"
 markers = [
     "gpu: needs a GPU and FUKIKAE_TEST_MEDIA",
     "media: needs real media from FUKIKAE_TEST_MEDIA",
@@ -115,3 +133,6 @@ include = ["src", "tests"]
 exclude = [".venv", "**/__pycache__"]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
+
+[tool.uv.sources]
+dbs = { git = "https://github.com/JusperLee/Dynamic-Band-Splitting.git", rev = "ff526463a58ee0278e7bd05c4b8bce112b743e34" }

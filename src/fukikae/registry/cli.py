@@ -1,6 +1,7 @@
 """`fukikae registry` commands."""
 
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -82,6 +83,18 @@ def _episode(ws: Workspace, ref: str) -> Episode:
 def _fail(msg: str) -> typer.Exit:
     typer.echo(f"error: {msg}", err=True)
     return typer.Exit(1)
+
+
+def _same_dims(dims: dict[str, int], hint: str) -> None:
+    """Refuse episodes whose clusters.npz rows have different dimensions (the embedder
+    changed between their diarize runs); `dims` maps episode -> dimension, 0 for none."""
+    found = {e: d for e, d in dims.items() if d}
+    if len(set(found.values())) > 1:
+        raise _fail(
+            "the episodes' clusters come from different embedders ("
+            + ", ".join(f"{e}: {d}-dimensional" for e, d in found.items())
+            + f"). {hint}"
+        )
 
 
 def _stale(ws: Workspace, episodes: list[str]) -> None:
@@ -182,6 +195,14 @@ def cluster(
                 "Use per-episode matching (`fukikae run`, `registry rematch`)."
             )
         loaded = {ep.id: load_clusters(stage.inputs(ep)[1]) for ep in eps}
+        _same_dims(
+            {
+                e: next((r.shape[1] for r in rows.values() if len(r)), 0)
+                for e, (_, rows) in loaded.items()
+            },
+            "Re-run the older episodes' diarize stage with the configured embedder "
+            "(`fukikae run`), then cluster",
+        )
         groups = seed_clusters(
             {eid: ev for eid, (ev, _) in loaded.items()},
             threshold if threshold is not None else 1.0 - cfg.registry.match_threshold,
@@ -362,3 +383,293 @@ def actor(
             reg.set_actor(actor_id, name=name, external_id=external_id)
         except KeyError as e:
             raise _fail(f"no actor {actor_id}") from e
+
+
+def _worked_episodes(ws: Workspace, episodes: str) -> list[Episode]:
+    """The listed episodes (SxxEyy codes or media paths), each with a done diarize stage in
+    this workspace; anything else is refused as not an episode of this workspace."""
+    from fukikae.job import load_manifest
+    from fukikae.stages.characters import CharactersStage
+
+    refs = [e.strip() for e in episodes.split(",") if e.strip()]
+    if not refs:
+        raise _fail("--episodes names no episode")
+    eps: list[Episode] = []
+    for ref in refs:
+        try:
+            ep = _episode(ws, ref)
+        except (FileNotFoundError, ValueError) as e:
+            raise _fail(f"{ref}: not an episode of this workspace ({e})") from e
+        rec = load_manifest(ep).stages.get("diarize")
+        if (
+            rec is None
+            or rec.status != "done"
+            or any(not p.exists() for p in CharactersStage().inputs(ep))
+        ):
+            raise _fail(
+                f"{ref}: not an episode of this workspace with a done diarize stage "
+                f"(nothing under {ep.work / '04-diarize'}); run `fukikae run` first"
+            )
+        eps.append(ep)
+    if len({e.id for e in eps}) != len(eps):
+        raise _fail("--episodes names an episode twice")
+    return eps
+
+
+@registry_app.command("adapt")
+def adapt(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    episodes: str = typer.Option(
+        ..., "--episodes", help="Comma-separated labeled episodes (SxxEyy codes or files)."
+    ),
+    gt: str = typer.Option(
+        "ass", "--gt", help="Ground truth: ass (Name field), sdh (speaker tags) or colour."
+    ),
+    gt_file: Path = typer.Option(
+        None, "--gt-file", help="Sidecar subtitle file, or a directory matched by SxxEyy."
+    ),
+    subtitle_track: int = typer.Option(
+        None, "--subtitle-track", help="Absolute stream index of the ground-truth track."
+    ),
+    alias: list[str] = typer.Option(
+        None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
+    ),
+    dims: int = typer.Option(None, "--dims", min=1, help="Components to keep (default all)."),
+    force: bool = typer.Option(
+        False, "--force", help="Fit even when the subtitles do not line up with the speech."
+    ),
+) -> None:
+    """Fit the series' LDA projection from labeled episodes, replacing the previous one.
+
+    Each episode's diarization clean spans are labeled from its subtitles (as `eval identity`
+    labels them) and the labeled rows of its clusters.npz, the embeddings the characters
+    stage matches, train the projection. `[characters] matcher = "lda"` then matches in it.
+    Leave the held-out episode(s) out: a projection must never be fit on an episode it
+    later resolves for evaluation.
+    """
+    import numpy as np
+
+    from fukikae.artifacts import read_json
+    from fukikae.errors import user_errors
+    from fukikae.eval.autolabel import speech_turns
+    from fukikae.eval.groundtruth import KINDS, check_alignment
+    from fukikae.eval.groundtruth.base import load_alias_file
+    from fukikae.eval.identity.cli import _ground_truth, parse_aliases
+    from fukikae.eval.identity.segments import diarization_segments
+    from fukikae.models import Diarization
+    from fukikae.registry.projection import KIND_LDA, fit_lda, series_of
+
+    if gt not in KINDS:
+        raise _fail(f"unknown --gt {gt!r}; use one of {', '.join(KINDS)}")
+    ws = Workspace(workspace)
+    eps = _worked_episodes(ws, episodes)
+    refs = [e.strip() for e in episodes.split(",") if e.strip()]
+    x: list[np.ndarray] = []
+    y: list[str] = []
+    emb_dims: dict[str, int] = {}
+    try:
+        aliases = {**load_alias_file(ws.root / "labels-aliases.yaml"), **parse_aliases(alias)}
+        for ref, ep in zip(refs, eps, strict=True):
+            path, lines = _ground_truth(
+                ws, ref, ep.id, gt, gt_file, len(eps), subtitle_track, aliases
+            )
+            lines, _, _ = check_alignment(
+                lines,
+                speech_turns(ep.work),
+                force=force,
+                label=f"{gt} speaker lines in {ep.id} ({path.name})",
+            )
+            turns = read_json(ep.work / "04-diarize" / "turns.json", Diarization).turns
+            label_of = {
+                (s.cluster, round(s.start, 6), round(s.end, 6)): s.label
+                for s in diarization_segments(ep.id, turns, lines)
+            }
+            with np.load(ep.work / "04-diarize" / "clusters.npz") as z:
+                for cluster in [str(c) for c in z["labels"]]:
+                    emb = np.asarray(z[f"{cluster}/embeddings"], dtype=np.float32)
+                    if len(emb):
+                        emb_dims.setdefault(ep.id, emb.shape[1])
+                    spans = np.asarray(z[f"{cluster}/spans"]).reshape(-1, 2)
+                    for row, (a, b) in zip(emb, spans, strict=True):
+                        lab = label_of.get((cluster, round(float(a), 6), round(float(b), 6)))
+                        if lab is not None:
+                            x.append(row)
+                            y.append(lab)
+    except user_errors() as e:
+        raise _fail(str(e)) from e
+    _same_dims(
+        emb_dims,
+        "If the registry was built with the old embedder, run `fukikae registry reembed "
+        "<workspace>` first; then re-run the older episodes' diarize stage (`fukikae run`) "
+        "and adapt",
+    )
+    projection = fit_lda(np.vstack(x), y, dims) if x else None
+    if projection is None:
+        raise _fail(
+            f"too few labels to fit on: {len(x)} labeled rows; LDA needs two speaker labels "
+            "with at least two labeled rows each"
+        )
+    series = series_of(ws.config)
+    with _open(workspace) as reg:
+        reg.save_projection(series, KIND_LDA, projection.matrix, projection.mean)
+    typer.echo(
+        f"lda projection for series {series!r}: {len(x)} labeled rows, {len(set(y))} labels, "
+        f"{projection.matrix.shape[1]} dims, from {', '.join(e.id for e in eps)}"
+    )
+
+
+def _dims(c: Any) -> str:
+    return ", ".join(f"{n} x {d}-d" for d, n in sorted(c.items())) or "none"
+
+
+@registry_app.command("reembed")
+def reembed(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Check and report counts per dimension; change nothing."
+    ),
+) -> None:
+    """Re-embed every exemplar with the configured embedder after an embedder change.
+
+    Each exemplar is embedded again from its episode's diarize spans and separated stem, then
+    every centroid is recomputed and projections of another dimension are dropped, in one
+    registry transaction. Names, locks, voices and external ids are kept. Run it before
+    re-running diarize with the new embedder (the exemplars' cluster labels refer to the
+    existing diarization), then re-run the pipeline.
+    """
+    from fukikae.errors import user_errors
+    from fukikae.registry import reembed as rr
+
+    ws = Workspace(workspace)
+    try:
+        p = rr.plan(ws)
+    except user_errors() as e:
+        raise _fail(str(e)) from e
+    typer.echo(f"embedder: {p.embedder.backend} ({p.dim}-d)")
+    typer.echo(f"exemplars: {_dims(p.exemplar_dims)}")
+    typer.echo(f"centroids: {_dims(p.centroid_dims)}")
+    drop = [x for x in p.projection_dims if x[2] != p.dim]
+    typer.echo(
+        "projections: "
+        + (", ".join(f"{s}/{k} ({d}-d)" for s, k, d in p.projection_dims) or "none")
+        + (f"; {len(drop)} of another dimension to drop" if drop else "")
+    )
+    typer.echo(f"{p.spans} spans to embed from {len(p.work)} episodes")
+    for aid in sorted(p.fixed):
+        typer.echo(p.treatment(aid))
+    if dry_run:
+        typer.echo("dry run: nothing changed")
+        return
+    try:
+        r = rr.run(ws, p)
+    except user_errors() as e:
+        raise _fail(f"{e}; nothing was changed") from e
+    typer.echo(
+        f"re-embedded {p.spans} exemplars as {p.dim}-d; {len(r.centroids)} centroids "
+        f"recomputed; kept {', '.join(map(str, r.kept)) or 'none'}; mapped "
+        f"{', '.join(map(str, r.mapped)) or 'none'}; "
+        f"dropped projections {', '.join(f'{s}/{k}' for s, k, _ in r.projections) or 'none'}. "
+        "Now re-run the pipeline (`fukikae run`)"
+    )
+
+
+def resolve_settings(
+    cfg: Any,
+    matcher: str | None,
+    threshold: float | None,
+    options: dict[str, Any] | None,
+    language: str | None = None,
+) -> tuple[str, float, dict[str, Any]]:
+    """The batch matcher, threshold and matcher options: explicit flags over the ``[resolve]``
+    table (workspace over language over profile, Ruling R17) over the built-ins (joint, the
+    registry's match_threshold, no options). A ``[resolve]`` table without ``matcher`` means
+    joint and still applies its other keys. `language` picks ``[resolve.lang.<code>]``: the
+    episodes' language as the characters stage reads it (`episodes_language`)."""
+    table = cfg.resolve("resolve", language, key="matcher", default="joint")
+    name, opts = table.backend, dict(table.options)
+    thr = opts.pop("threshold", None)
+    if thr is None:
+        thr = cfg.registry.match_threshold
+    return (
+        matcher or name,
+        float(threshold if threshold is not None else thr),
+        {**opts, **(options or {})},
+    )
+
+
+def episodes_language(cfg: Any, eps: list[Episode]) -> str | None:
+    """The language the characters stage matches these episodes in (each one's detected
+    ``language.json``, else ``source_language``); refuses episodes of different languages,
+    which belong in separate workspaces."""
+    from fukikae.stages.characters import CharactersStage
+
+    langs = {ep.id: CharactersStage._language(ep, cfg) for ep in eps}
+    if len(set(langs.values())) > 1:
+        raise _fail(
+            "the episodes are in different languages ("
+            + ", ".join(f"{e}: {lang or 'unknown'}" for e, lang in langs.items())
+            + "); each audio language is its own workspace and registry"
+        )
+    return next(iter(langs.values()), None)
+
+
+@registry_app.command("resolve")
+def resolve(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    episodes: str = typer.Option(
+        ..., "--episodes", help="Comma-separated episodes resolved together, e.g. S01E12,S01E13."
+    ),
+    matcher: str = typer.Option(
+        None, "--matcher", help="Batch matcher: joint (default: [resolve] matcher, else joint)."
+    ),
+    threshold: float = typer.Option(
+        None,
+        "--threshold",
+        help="Cosine to merge groups (default: [resolve] threshold, else match_threshold).",
+    ),
+    matcher_option: list[str] = typer.Option(
+        None,
+        "--matcher-option",
+        help="k=v joint option: episode_cannot_link (true), linkage (centroid); repeat. "
+        "Over the same keys in [resolve].",
+    ),
+) -> None:
+    """Re-resolve several episodes at once with the joint matcher, rewriting the registry and
+    their assignments.
+
+    Every listed episode needs a done diarize stage. Actors only these episodes made are
+    replaced (unless locked, named or voiced); every other actor is matched against and
+    never merged with another. One registry transaction; assignments.json written after it.
+    """
+    from fukikae.errors import user_errors
+    from fukikae.eval.identity.cli import parse_options
+    from fukikae.registry.resolve import resolve_episodes
+
+    ws = Workspace(workspace)
+    eps = _worked_episodes(ws, episodes)
+    try:
+        cfg = ws.config
+        matcher, thr, opts = resolve_settings(
+            cfg,
+            matcher,
+            threshold,
+            parse_options(matcher_option, "--matcher-option"),
+            episodes_language(cfg, eps),
+        )
+    except (ValueError, *user_errors()) as e:
+        raise _fail(str(e)) from e
+    if matcher != "joint":
+        raise _fail(
+            f"--matcher {matcher}: resolve runs the batch matcher joint; per-episode matchers "
+            "run in the characters stage (`fukikae run`, `registry rematch`)"
+        )
+    try:
+        s = resolve_episodes(ws, eps, thr, options=opts)
+    except user_errors() as e:
+        raise _fail(str(e)) from e
+    typer.echo(
+        f"resolved {', '.join(s.episodes)} with joint at {thr:g}: {s.matched} clusters matched "
+        f"to existing actors, {len(s.new_actors)} new actors"
+        f"{' (' + ', '.join(map(str, s.new_actors)) + ')' if s.new_actors else ''}, "
+        f"{s.extras} extras; pruned {', '.join(map(str, s.pruned)) or 'none'}"
+    )

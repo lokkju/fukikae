@@ -28,7 +28,7 @@ class EcapaEmbedder:
     kind: ClassVar[str] = "embed"
     languages: ClassVar[frozenset[str] | Literal["*"]] = "*"
     devices: ClassVar[frozenset[str]] = frozenset({"cuda", "cpu"})
-    vram_mb: ClassVar[int] = 1900  # measured peak 1570 MiB (nvidia-smi delta) + 20%
+    vram_mb: ClassVar[int] = 5240  # measured peak 4364 MiB (nvidia-smi delta, 30 s spans) + 20%
     dim: ClassVar[int] = 192
     extra: ClassVar[str] = "pyannote"
 

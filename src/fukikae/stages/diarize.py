@@ -71,10 +71,9 @@ class DiarizeStage:
 
     @staticmethod
     def _cfgs(cfg: Config) -> tuple[BackendConfig, BackendConfig]:
-        return (
-            _resolve(cfg, "diarize", None, "pyannote"),
-            _resolve(cfg, "embed", None, "ecapa"),
-        )
+        # Every profile names its embedder (Ruling R3), so no fallback: a missing or
+        # ambiguous [embed] is a ConfigError, never a silent ECAPA.
+        return _resolve(cfg, "diarize", None, "pyannote"), cfg.resolve("embed")
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
         diar, emb = self._cfgs(cfg)
