@@ -99,7 +99,10 @@ def test_identity_cli_tune_and_holdout(tmp_path: Path, monkeypatch: pytest.Monke
     lucy = next(c for c in data["holdout"]["score"]["characters"] if c["name"] == "LUCY")
     assert lucy["speech"] == pytest.approx(22.8)
     assert lucy["by_episode"]["tune"] == pytest.approx(45.6)
-    assert data["settings"]["embedder"] == {"backend": "ecapa", "options": {}}
+    assert data["settings"]["embedder"] == {
+        "backend": "wespeaker",
+        "options": {},
+    }
     assert data["settings"]["threshold"] == 0.6
     assert data["settings"]["min_speech"] == 5.0
     # Nearest-centroid accuracy: E1 trains, E2 tests; the tuning episodes train the holdout.

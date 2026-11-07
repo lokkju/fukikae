@@ -1,6 +1,19 @@
-# Built-in defaults, written down. A workspace without `profile` resolves exactly as it did
-# before profiles existed, so only values that were already built into the code belong here
-# (backend fallbacks such as demucs stay in their stages).
+# General default (Task 9, docs/results/2026-11-07-identity-profiles.md): WeSpeaker embeddings and
+# the centroid matcher at 0.6, the best single setting summed over all three tuning sets (Fairy
+# Tail ja and en dub, Grid): 11 clean characters, 2 merges, the same at 0.5, 0.55 and 0.6.
+# ASR backends are not set here; they stay the stages' own fallbacks.
 [registry]
 min_new_seconds = 20.0
 match_threshold = 0.6
+
+[separation]
+backend = "demucs"   # Ruling R15: the dialogue backend stays opt-in
+
+[diarize]
+backend = "pyannote"
+
+[embed]
+backend = "wespeaker"
+
+[characters]
+matcher = "centroid"   # the per-episode stage; joint is a batch command (see above)

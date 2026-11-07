@@ -50,8 +50,8 @@ def test_workspace_overrides_user_config(tmp_path):
 def test_missing_backend_raises(tmp_path):
     (tmp_path / "fukikae.toml").write_text('[asr]\nbackend="x"\n')
     c = load_config(tmp_path, user_config=None)
-    with pytest.raises(ConfigError, match="diarize"):
-        c.resolve("diarize", "ko")
+    with pytest.raises(ConfigError, match="translate"):
+        c.resolve("translate", "ko")
 
 
 def test_defaults_and_source(tmp_path):
