@@ -555,6 +555,8 @@ def reembed(
         + (f"; {len(drop)} of another dimension to drop" if drop else "")
     )
     typer.echo(f"{p.spans} spans to embed from {len(p.work)} episodes")
+    for aid in sorted(p.fixed):
+        typer.echo(p.treatment(aid))
     if dry_run:
         typer.echo("dry run: nothing changed")
         return
@@ -564,7 +566,8 @@ def reembed(
         raise _fail(f"{e}; nothing was changed") from e
     typer.echo(
         f"re-embedded {p.spans} exemplars as {p.dim}-d; {len(r.centroids)} centroids "
-        f"recomputed; cleared {', '.join(map(str, r.cleared)) or 'none'} (no exemplars); "
+        f"recomputed; kept {', '.join(map(str, r.kept)) or 'none'}; mapped "
+        f"{', '.join(map(str, r.mapped)) or 'none'}; "
         f"dropped projections {', '.join(f'{s}/{k}' for s, k, _ in r.projections) or 'none'}. "
         "Now re-run the pipeline (`fukikae run`)"
     )
