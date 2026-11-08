@@ -20,7 +20,7 @@ from fukikae.artifacts import read_json, write_json
 from fukikae.backends.base import Tagger
 from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
-from fukikae.config import BackendConfig, Config
+from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.models import Diarization, Tags, Turn
 from fukikae.workspace import Episode
@@ -55,6 +55,10 @@ class TagStage:
         options = {k: v for k, v in bc.options.items() if k not in skip}
         device = str(bc.options.get("device", "cpu"))
         name = bc.options.get("emotion_backend")
+        if name is not None and not str(name).strip():
+            raise ConfigError(
+                "[tag] emotion_backend is empty; leave the key out to use no second backend"
+            )
         emotion = None
         if name:
             sub = bc.options.get("emotion")

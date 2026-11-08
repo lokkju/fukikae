@@ -210,3 +210,13 @@ def test_shipped_profiles_take_emotion_from_emotion2vec(tmp_path, profile):
     cfg = load_config(tmp_path, user_config=None)
     assert cfg.resolve("tag").options["emotion_backend"] == "emotion2vec"
     assert cfg.resolve("tag").backend == "sensevoice"
+
+
+def test_empty_emotion_backend_is_rejected(ep):
+    from fukikae.config import ConfigError
+
+    cfg = Config(raw={"tag": {"backend": "fake", "enabled": True, "emotion_backend": ""}})
+    with pytest.raises(ConfigError, match="emotion_backend"):
+        TagStage().config_key(cfg, ep)
+    with pytest.raises(ConfigError, match="emotion_backend"):
+        TagStage().run(ep, cfg)

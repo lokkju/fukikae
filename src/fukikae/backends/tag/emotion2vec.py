@@ -54,12 +54,24 @@ class Emotion2vecTagger:
         if self._model is not None:
             return
         from funasr import AutoModel
-        from huggingface_hub import snapshot_download
 
-        path = snapshot_download(self.model, revision=self.revision)
+        path = self._snapshot()
         self._model = AutoModel(
             model=path, device=self.device, disable_update=True, disable_pbar=True
         )
+
+    def _snapshot(self) -> str:
+        """The pinned snapshot's path: the local cache first, a download only when it is
+        missing (never under HF_HUB_OFFLINE)."""
+        from huggingface_hub import constants, snapshot_download
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        try:
+            return snapshot_download(self.model, revision=self.revision, local_files_only=True)
+        except LocalEntryNotFoundError:
+            if constants.HF_HUB_OFFLINE:
+                raise
+        return snapshot_download(self.model, revision=self.revision)
 
     def unload(self) -> None:
         self._model = None
