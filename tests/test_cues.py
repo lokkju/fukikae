@@ -1,3 +1,5 @@
+import pytest
+
 from fukikae.cues import budget_chars, build_asr_cues, is_marked, windows
 from fukikae.models import (
     Assignments,
@@ -164,3 +166,45 @@ def test_is_marked():
     # SenseVoice gives no confidence; an unscored label counts as marked
     unscored = Delivery(reference=(0, 1), emotion="sad", emotion_confidence=None)
     assert is_marked(_cue(1, 0, 1, delivery=unscored))
+
+
+def test_fragment_at_a_turn_boundary_joins_the_next_cue():
+    # the turn change lands one character into "ロック": "ロ" must not become its own cue
+    seg = Segment(
+        start=0.0,
+        end=3.0,
+        text="ロックと言った。",
+        words=[
+            Word(start=0.5 + i * 0.25, end=0.52 + i * 0.25, text=t)
+            for i, t in enumerate("ロックと言った")
+        ],
+    )
+    turns = [Turn(start=0.0, end=0.6, speaker="S0"), Turn(start=0.6, end=3.0, speaker="S1")]
+    asg = _assignments(turns, [_cluster("S0", 1), _cluster("S1", 2)])
+    (cue,) = build_asr_cues(_transcript([seg]), asg, None, {}, "en", 1.25)
+    assert cue.source_text == "ロックと言った。" and cue.character_id == 2
+    assert cue.start == 0.5
+
+
+def test_fragment_ending_a_sentence_joins_the_previous_cue():
+    seg = Segment(
+        start=0.0,
+        end=3.0,
+        text="行くぞ。",
+        words=[
+            Word(start=0.5 + i * 0.25, end=0.52 + i * 0.25, text=t) for i, t in enumerate("行くぞ")
+        ],
+    )
+    turns = [Turn(start=0.0, end=0.95, speaker="S0"), Turn(start=0.95, end=3.0, speaker="S1")]
+    asg = _assignments(turns, [_cluster("S0", 1), _cluster("S1", 2)])
+    (cue,) = build_asr_cues(_transcript([seg]), asg, None, {}, "en", 1.25)
+    assert cue.source_text == "行くぞ。" and cue.character_id == 1
+
+
+def test_point_stamped_words_get_their_sound_until_the_next_word():
+    # the aligner gives 20 ms per character; the slot runs past the last stamp
+    words = [Word(start=i * 0.25, end=i * 0.25 + 0.02, text=t) for i, t in enumerate("はいはい")]
+    seg = Segment(start=0.0, end=2.0, text="はいはい", words=words)
+    asg = _assignments([Turn(start=0.0, end=3.0, speaker="S0")], [_cluster("S0", 1)])
+    (cue,) = build_asr_cues(_transcript([seg]), asg, None, {}, "en", 1.25)
+    assert cue.end == pytest.approx(0.75 + 0.3)
