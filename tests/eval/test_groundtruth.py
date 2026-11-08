@@ -553,3 +553,199 @@ def test_ruby_with_ideographic_space_between_names(tmp_path: Path) -> None:
 def test_hangul_two_word_tag_maps_to_given_name(tmp_path: Path) -> None:
     lines = _ja(tmp_path, "(김 철수) 안녕", "(철수) 응")
     assert _speakers(lines) == ["철수", "철수"]
+
+
+# ---- series colour maps (ARIB-shaped ASS) ----
+
+_ASS_HEAD = (
+    "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+)
+YELLOW, CYAN, GREEN = "\\c&H00FFFF&", "\\c&HFFFF00&", "\\c&H00FF00&"
+
+
+def _ass_ep(*events: tuple[float, str, str] | tuple[float, str, str, str]) -> str:
+    """(start, override block content, text[, style]) events, one second each."""
+    rows = []
+    for ev in events:
+        start, over, text = ev[:3]
+        style = ev[3] if len(ev) == 4 else "Default"
+        a, b = f"0:00:{start:05.2f}", f"0:00:{start + 1:05.2f}"
+        rows.append(f"Dialogue: 0,{a},{b},{style},,0,0,0,,{{{over}}}{text}")
+    return _ASS_HEAD + "\n".join(rows) + "\n"
+
+
+def _tagged(start: float, colour: str, name: str) -> tuple[float, str, str]:
+    return (start, colour + "\\fscx50", f"（{{\\fscx100}}{name}{{\\fscx50}}）{{\\fscx100}}行きます")
+
+
+def _eps(tmp_path: Path, **by_name: str) -> Path:
+    d = tmp_path / "gt"
+    d.mkdir()
+    for code, text in by_name.items():
+        (d / f"{code}.ass").write_text(text, encoding="utf-8")
+    return d
+
+
+def _colour_cues(text: str, tmp_path: Path, name: str = "x.ass") -> list:
+    from fukikae.eval.groundtruth.base import read_cues
+
+    return read_cues(_write(tmp_path, name, text))
+
+
+def test_series_map_pools_named_lines_across_episodes(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.base import Namer
+    from fukikae.eval.groundtruth.colour import colour_counts, propose_colour_map, read_colour
+
+    e1 = _ass_ep(_tagged(1, YELLOW, "りん"), _tagged(3, YELLOW, "りん"), (5, YELLOW, "はい"))
+    e2 = _ass_ep(_tagged(1, YELLOW, "りん"), _tagged(3, YELLOW, "りん"), (5, YELLOW, "いいえ"))
+    cues = {
+        "S01E01": _colour_cues(e1, tmp_path, "a.ass"),
+        "S01E02": _colour_cues(e2, tmp_path, "b.ass"),
+    }
+    counts = colour_counts(cues, Namer())
+    assert counts["S01E01"]["yellow"]["りん"] == 2
+    mapping, conflicts = propose_colour_map(counts)
+    assert mapping == {"yellow": "りん"} and conflicts == []
+    got = read_colour(cues["S01E01"], "S01E01", Namer(), colour_names=mapping)
+    assert [ln.speaker for ln in got] == ["りん", "りん", "りん"]
+
+
+def test_per_episode_alone_would_not_map(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.base import Namer
+    from fukikae.eval.groundtruth.colour import read_colour
+
+    e1 = _ass_ep(_tagged(1, YELLOW, "りん"), _tagged(3, YELLOW, "りん"), (5, YELLOW, "はい"))
+    got = read_colour(_colour_cues(e1, tmp_path), "S01E01", Namer())
+    assert [ln.speaker for ln in got] == ["りん", "りん", "yellow@S01E01"]
+
+
+def test_conflicting_colour_is_left_out_and_reported(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.base import Namer
+    from fukikae.eval.groundtruth.colour import colour_counts, propose_colour_map
+
+    e1 = _ass_ep(*[_tagged(i, CYAN, "直美") for i in range(1, 4)])
+    e2 = _ass_ep(*[_tagged(i, CYAN, "虎太郎") for i in range(1, 4)])
+    cues = {
+        "S01E01": _colour_cues(e1, tmp_path, "a.ass"),
+        "S01E02": _colour_cues(e2, tmp_path, "b.ass"),
+    }
+    mapping, conflicts = propose_colour_map(colour_counts(cues, Namer()))
+    assert "cyan" not in mapping
+    assert len(conflicts) == 1 and "直美" in conflicts[0] and "虎太郎" in conflicts[0]
+
+
+def test_unmapped_colour_dropped_by_default_and_kept_for_diagnostics(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.base import Namer
+    from fukikae.eval.groundtruth.colour import read_colour
+
+    text = _ass_ep((1, GREEN, "ひとつ"), (3, YELLOW, "ふたつ"))
+    cues = _colour_cues(text, tmp_path)
+    mp = {"yellow": "りん"}
+    drop = read_colour(cues, "S01E01", Namer(), colour_names=mp)
+    assert [ln.speaker for ln in drop] == ["りん"]
+    dropped = read_colour(cues, "S01E01", Namer(), colour_names=mp, anonymous="drop")
+    assert [ln.speaker for ln in dropped] == ["りん"]
+    series = read_colour(cues, "S01E01", Namer(), colour_names=mp, anonymous="series")
+    assert [ln.speaker for ln in series] == ["colour:green", "りん"]
+    other = read_colour(cues, "S01E02", Namer(), colour_names=mp, anonymous="series")
+    assert other[0].speaker == "colour:green"
+    ep = read_colour(cues, "S01E01", Namer(), colour_names=mp, anonymous="episode")
+    assert ep[0].speaker == "green@S01E01"
+
+
+def test_map_overrides_per_episode_cooccurrence(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.base import Namer
+    from fukikae.eval.groundtruth.colour import read_colour
+
+    text = _ass_ep(
+        *[_tagged(i, YELLOW, "直美") for i in range(1, 4)],
+        (5, YELLOW, "はい"),
+    )
+    cues = _colour_cues(text, tmp_path)
+    assert read_colour(cues, "S01E03", Namer())[-1].speaker == "直美"
+    got = read_colour(cues, "S01E03", Namer(), colour_names={"yellow": "りん"})
+    assert [ln.speaker for ln in got] == ["直美", "直美", "直美", "りん"]
+
+
+def test_fscx_blocks_and_colour_in_one_override(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.base import Namer
+    from fukikae.eval.groundtruth.colour import colour_counts
+
+    text = _ass_ep(_tagged(1, YELLOW, "りん"))
+    cues = _colour_cues(text, tmp_path)
+    assert colour_counts({"S01E01": cues}, Namer())["S01E01"]["yellow"] == {"りん": 1}
+
+
+def test_eight_digit_ass_colours_drop_the_alpha_byte(tmp_path: Path) -> None:
+    # ARIB converters write \c&H0000FF00 (AABBGGRR): green, not red
+    text = _ass_ep((1, "\\c&H0000FF00", "a"), (3, "\\c&H00FFFF00", "b"), (5, "\\c&H0000FFFF", "c"))
+    cues = _colour_cues(text, tmp_path)
+    assert [c.text.split(">")[0] for c in cues] == ["<c.green", "<c.cyan", "<c.yellow"]
+
+
+def test_ruby_style_events_are_ignored(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.base import Namer
+    from fukikae.eval.groundtruth.colour import read_colour
+
+    text = _ass_ep((1, YELLOW, "本文"), (1, YELLOW + "\\fscy50", "ほんぶん", "Rubi"))
+    cues = _colour_cues(text, tmp_path)
+    assert cues[1].style == "Rubi"
+    got = read_colour(cues, "S01E01", Namer(), colour_names={"yellow": "りん"})
+    assert [(ln.start, ln.end, ln.speaker) for ln in got] == [(1.0, 2.0, "りん")]
+
+
+def test_colour_map_file_roundtrip_and_validation(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.colour import load_colour_map, write_colour_map
+
+    p = tmp_path / "labels-colours.yaml"
+    write_colour_map(p, {"yellow": "りん", "cyan": "直美"})
+    assert load_colour_map(p) == {"yellow": "りん", "cyan": "直美"}
+    assert load_colour_map(tmp_path / "none.yaml") == {}
+    with pytest.raises(ValueError, match="mauve"):
+        write_colour_map(p, {"mauve": "x"})
+
+
+def test_read_ground_truth_passes_the_map(tmp_path: Path) -> None:
+    text = _ass_ep((1, YELLOW, "はい"), (3, GREEN, "ええ"))
+    p = _write(tmp_path, "S01E01.ass", text)
+    got = read_ground_truth(p, "colour", {}, colour_names={"yellow": "りん"})
+    assert [ln.speaker for ln in got] == ["りん"]
+    got = read_ground_truth(p, "colour", {}, colour_names={"yellow": "りん"}, anonymous="series")
+    assert [ln.speaker for ln in got] == ["りん", "colour:green"]
+    with pytest.raises(ValueError, match="colour map"):
+        read_ground_truth(p, "colour", {}, anonymous="series")
+
+
+def test_colour_map_cli_writes_and_refuses_overwrite(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    gt = _eps(
+        tmp_path,
+        S01E01=_ass_ep(_tagged(1, YELLOW, "りん"), _tagged(3, YELLOW, "りん")),
+        S01E02=_ass_ep(_tagged(1, YELLOW, "りん"), _tagged(3, CYAN, "直美")),
+    )
+    args = ["colour-map", str(ws), "--episodes", "S01E01,S01E02", "--gt-file", str(gt)]
+    r = CliRunner().invoke(eval_app, args)
+    assert r.exit_code == 0, r.output
+    assert "yellow" in r.output and "りん" in r.output
+    assert not (ws / "labels-colours.yaml").exists()
+    r = CliRunner().invoke(eval_app, [*args, "--write"])
+    assert r.exit_code == 0, r.output
+    assert (ws / "labels-colours.yaml").read_text(encoding="utf-8").count("りん") == 1
+    r = CliRunner().invoke(eval_app, [*args, "--write"])
+    assert r.exit_code == 1 and "--force" in r.output
+    r = CliRunner().invoke(eval_app, [*args, "--write", "--force"])
+    assert r.exit_code == 0, r.output
+
+
+def test_workspace_colour_map_loading_and_anonymous_errors(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.colour import workspace_colour_map, write_colour_map
+
+    assert workspace_colour_map(tmp_path, "colour", None) is None
+    with pytest.raises(ValueError, match="needs a colour map"):
+        workspace_colour_map(tmp_path, "colour", "series")
+    with pytest.raises(ValueError, match="colour ground truth only"):
+        workspace_colour_map(tmp_path, "sdh", "series")
+    write_colour_map(tmp_path / "labels-colours.yaml", {"yellow": "りん"})
+    assert workspace_colour_map(tmp_path, "colour", "series") == {"yellow": "りん"}
+    assert workspace_colour_map(tmp_path, "ass", None) is None
