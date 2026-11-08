@@ -40,6 +40,16 @@ _FINAL = frozenset("。！？!?…‥.")
 _MANNER = re.compile(r"[(（][^()（）]{1,40}[)）]")
 # A word under no turn takes the nearest turn this close, else it is an unknown extra.
 NEAREST_TURN_S = 1.0
+# A word stamped shorter than this (a forced aligner's per-character point) sounds until the
+# next word starts, for at most WORD_SOUND_S from its start.
+POINT_STAMP_S = 0.1
+WORD_SOUND_S = 0.3
+# A cue of at most this many characters (punctuation aside), shorter than FRAGMENT_S and
+# touching a neighbour of the same ASR segment within FRAGMENT_GAP_S, is a piece of that
+# neighbour cut off by a turn boundary falling inside a word.
+FRAGMENT_CHARS = 2
+FRAGMENT_S = 0.35
+FRAGMENT_GAP_S = 0.3
 
 
 def budget_chars(seconds: float, language: str, max_speed: float) -> int:
@@ -106,6 +116,53 @@ def _who(
     return a.character_id, None
 
 
+# A run of words for one speaker: ((character_id, extra), [(segment index, word), ...]).
+type _Group = tuple[tuple[int | None, str | None], list[tuple[int, Word]]]
+
+
+def _near(out: list[_Group], i: int, j: int) -> bool:
+    """Whether group j touches group i (within FRAGMENT_GAP_S) inside one of i's segments."""
+    if not 0 <= j < len(out):
+        return False
+    pairs, other = out[i][1], out[j][1]
+    if j < i:
+        gap, seg = pairs[0][1].start - other[-1][1].end, other[-1][0]
+    else:
+        gap, seg = other[0][1].start - pairs[-1][1].end, other[0][0]
+    return gap <= FRAGMENT_GAP_S and seg in {p[0] for p in pairs}
+
+
+def _join_fragments(groups: list[_Group]) -> list[_Group]:
+    """Fold turn-boundary fragments into a neighbour: one that ends a sentence into the cue
+    before it, any other into the cue after it, when that neighbour is in the same segment."""
+    out = list(groups)
+    i = 0
+    while i < len(out):
+        _, pairs = out[i]
+        ws = [w for _, w in pairs]
+        text = "".join(
+            ch for ch in "".join(w.text for w in ws) if not _is_punct(ch) and not ch.isspace()
+        )
+        if len(text) > FRAGMENT_CHARS or ws[-1].end - ws[0].start >= FRAGMENT_S:
+            i += 1
+            continue
+
+        ends_sentence = _is_punct(ws[-1].text.strip()[-1:])
+        prev_closed = i > 0 and out[i - 1][1][-1][1].text.strip()[-1:] in _FINAL
+        # a sentence end goes back; anything else goes forward, or back into an open sentence
+        order = [i - 1] if ends_sentence else [i + 1] + ([] if prev_closed else [i - 1])
+        j = next((j for j in order if _near(out, i, j)), None)
+        if j is None:
+            i += 1
+            continue
+        key, other = out[j]
+        merged = other + pairs if j < i else pairs + other
+        out[min(i, j)] = (key, merged)
+        del out[max(i, j)]
+        i = max(min(i, j), 0)
+    return out
+
+
 def _overlap(span: TagSpan, start: float, end: float) -> float:
     return max(0.0, min(span.end, end) - max(span.start, start))
 
@@ -124,31 +181,43 @@ def build_asr_cues(
     """Cues from word timings; see the module docstring for where a cue ends."""
     turns = assignments.turns or []
     by_cluster = {a.cluster: a for a in assignments.clusters}
-    words = [w for seg in transcript.segments for w in _segment_words(seg)]
-    words.sort(key=lambda w: (w.start, w.end))
+    # (segment index, speaker-time midpoint, word with its sounding end)
+    stamped = sorted(
+        ((i, w) for i, seg in enumerate(transcript.segments) for w in _segment_words(seg)),
+        key=lambda p: (p[1].start, p[1].end),
+    )
+    items: list[tuple[int, float, Word]] = []
+    for n, (i, w) in enumerate(stamped):
+        mid = (w.start + w.end) / 2
+        if w.end - w.start < POINT_STAMP_S:
+            nxt = stamped[n + 1][1].start if n + 1 < len(stamped) else math.inf
+            w = w.model_copy(update={"end": max(w.end, min(nxt, w.start + WORD_SOUND_S))})
+        items.append((i, mid, w))
 
-    groups: list[tuple[tuple[int | None, str | None], list[Word]]] = []
-    for w in words:
-        key = _who(_turn_at(turns, (w.start + w.end) / 2), by_cluster)
+    groups: list[_Group] = []
+    for seg_i, mid, w in items:
+        key = _who(_turn_at(turns, mid), by_cluster)
         if groups:
             cur_key, cur = groups[-1]
-            prev = cur[-1]
-            length = prev.end - cur[0].start
+            prev = cur[-1][1]
+            length = prev.end - cur[0][1].start
             split = (
                 key != cur_key
                 or w.start - prev.end > gap_s
                 or (prev.text.strip()[-1:] in _FINAL and length >= max_cue_s)
-                or w.end - cur[0].start > 2 * max_cue_s
+                or w.end - cur[0][1].start > 2 * max_cue_s
             )
             if not split:
-                cur.append(w)
+                cur.append((seg_i, w))
                 continue
-        groups.append((key, [w]))
+        groups.append((key, [(seg_i, w)]))
+    groups = _join_fragments(groups)
 
     events = [e for e in (tags.events if tags else []) if e.label == "singing"]
     emotions = tags.emotions if tags else []
     cues: list[DubCue] = []
-    for (character_id, extra), ws in groups:
+    for (character_id, extra), pairs in groups:
+        ws = [w for _, w in pairs]
         start, end = ws[0].start, max(w.end for w in ws)
         mid = (start + end) / 2
         if character_id is not None:

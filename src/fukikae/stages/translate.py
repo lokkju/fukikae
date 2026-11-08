@@ -55,7 +55,7 @@ SOURCES = ("auto", "asr", "subs")
 DEFAULT_MAX_SPEED = 1.25
 RETRY_BUDGET = 0.85
 # Bump when the prompt or the cue rules change what the stage writes for the same inputs.
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 
 
 class TranslateStage:
