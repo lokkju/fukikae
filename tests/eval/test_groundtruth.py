@@ -446,3 +446,80 @@ def test_korean_given_names_ending_in_description_characters(name: str) -> None:
 )
 def test_korean_action_endings_rejected(line: str) -> None:
     assert extract_tag(line) is None
+
+
+LRE = "‪"
+
+
+def _ja(tmp_path: Path, *texts: str) -> list[GroundTruthLine]:
+    cues = [
+        (f"00:00:{i * 2 + 1:02d},000", f"00:00:{i * 2 + 2:02d},000", t) for i, t in enumerate(texts)
+    ]
+    return read_ground_truth(_write(tmp_path, "ja.srt", _srt(*cues)), "sdh", None)
+
+
+def test_netflix_bidi_marks_do_not_hide_tags(tmp_path: Path) -> None:
+    lines = _ja(tmp_path, f"{LRE}（始）また行ってねえのか 面接")
+    assert _speakers(lines) == ["始"]
+
+
+def test_halfwidth_parens_and_tag_on_its_own_line(tmp_path: Path) -> None:
+    lines = _ja(tmp_path, f"{LRE}(カルベ) おい", f"{LRE}（始）\n{LRE}俺も会社に頭 下げてやったのに")
+    assert _speakers(lines) == ["カルベ", "始"]
+    assert (lines[1].start, lines[1].end) == (3.0, 4.0)
+
+
+def test_ruby_inside_tag_and_full_name_maps_to_given_name(tmp_path: Path) -> None:
+    lines = _ja(
+        tmp_path,
+        f"{LRE}（{LRE}有栖(ありす){LRE} {LRE}始(はじめ){LRE}）\n{LRE}ホント クズ兄貴だな",
+        f"{LRE}（始）また行ってねえのか",
+    )
+    assert _speakers(lines) == ["始", "始"]
+
+
+def test_full_name_without_short_form_is_kept(tmp_path: Path) -> None:
+    lines = _ja(tmp_path, f"{LRE}（有栖{LRE}良平(りょうへい){LRE}）あっ！")
+    assert _speakers(lines) == ["有栖良平"]
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "（通知音）", "（合成音声）", "（荒い息）", "（ふざけ合う声）", "（女性たちの悲鳴）",
+        "（男性）", "（３人）", "（アリスたち）", "（クラクション）", "（足音）",
+        "（アリス･チョータ）",
+    ],
+)  # fmt: skip
+def test_japanese_descriptions_groups_and_pairs_are_not_speakers(tag: str) -> None:
+    assert extract_tag(f"{tag}text") is None
+    assert extract_tag(f"{LRE}{tag}text") is None
+
+
+@pytest.mark.parametrize(
+    ("tag", "name"),
+    [("（チョータの母）", "チョータの母"), ("（琴音）", "琴音"), ("（さとみ）", "さとみ"),
+     ("（シブキ）", "シブキ")],
+)  # fmt: skip
+def test_japanese_names_still_accepted(tag: str, name: str) -> None:
+    assert extract_tag(f"{LRE}{tag}text") == (name, "text")
+
+
+def test_pair_rule_needs_two_characters_each_side() -> None:
+    assert extract_tag("（アリスとカルベ）text") is None
+    assert extract_tag("（さとみ）text") == ("さとみ", "text")
+
+
+def test_ass_override_blocks_split_parentheses(tmp_path: Path) -> None:
+    ass = (
+        "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect,"
+        " Text\nDialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,"
+        "{\\fscx50}（{\\fscx100}薫{\\fscx50}）{\\fscx100}どうして？\n"
+    )
+    lines = read_ground_truth(_write(tmp_path, "ja.ass", ass), "sdh", None)
+    assert _speakers(lines) == ["薫"]
+
+
+def test_existing_pair_rule_still_rejects_korean_and_chinese_pairs() -> None:
+    assert extract_tag("(새하와 새벽) text") is None
+    assert extract_tag("(张三和李四) text") is None
