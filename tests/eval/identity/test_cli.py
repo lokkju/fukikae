@@ -290,3 +290,174 @@ def test_identity_cli_scores_the_pipelines_assignments(
     assert json.loads(out.read_text())["tune"]["score"]["verdict"] == "pass"
     r = CliRunner().invoke(app, [*base, "--segmentation", "subtitles"])
     assert r.exit_code == 1 and "diarization" in r.output
+
+
+# ---- ledger rows ----
+
+
+def char(name: str, passing: bool, recurring: bool = True):
+    from fukikae.eval.identity.metrics import CharacterScore
+
+    return CharacterScore(
+        name=name, speech=10.0, by_episode={}, modal_id=1, share=0.9 if passing else 0.1,
+        share_by_episode={}, ids={1: 10.0}, recurring=recurring, passing=passing,
+        labeled_everywhere=True, strict=passing,
+    )  # fmt: skip
+
+
+def fake_score(chars, merges, fraction: float):
+    from fukikae.eval.identity.metrics import IdentityScore
+
+    return IdentityScore(
+        recurring=sum(c.recurring for c in chars), passing=sum(c.passing for c in chars),
+        fraction=fraction, merges=merges, strict_fraction=0.5, purity_by_id={}, coverage=0.4,
+        verdict="fail", labeled_recurring=3, weighted_share=0.7, episodes=[], characters=chars,
+    )  # fmt: skip
+
+
+def fake_run(root: Path, holdout: bool = True):
+    from fukikae.eval.identity.cli import IdentityRun
+
+    tune = fake_score(
+        [char("A", True), char("B", True), char("C", True), char("D", False)],
+        [("B", "C", 3)],
+        0.75,
+    )
+    hold = fake_score([char("A", True), char("B", False)], [], 0.5)
+    settings = {
+        "workspace": str(root), "tune": ["S01E01", "S01E02"],
+        "holdout": "S01E03" if holdout else None, "gt": "ass", "segmentation": "diarization",
+        "embedder": {"backend": "wespeaker", "options": {}}, "matcher": "centroid",
+        "matcher_options": {}, "threshold": 0.6, "min_new_seconds": 20.0, "min_speech": 5.0,
+        "profile": "live-action",
+    }  # fmt: skip
+    return IdentityRun(
+        settings, [], tune, hold if holdout else None, "S01E03" if holdout else None, 0, 0,
+        {"A": 1.0, "(overall)": 0.8}, {"(overall)": 0.6} if holdout else {},
+    )  # fmt: skip
+
+
+def test_clean_count_excludes_merged_and_failing():
+    from fukikae.eval.identity.metrics import clean_count
+
+    s = fake_score(
+        [
+            char("A", True),
+            char("B", True),
+            char("C", True),
+            char("D", False),
+            char("E", False, False),
+        ],
+        [("B", "C", 3)],
+        0.75,
+    )
+    assert clean_count(s) == 1
+
+
+def test_identity_rows_tune_and_holdout(tmp_path: Path):
+    from fukikae.config import load_config
+    from fukikae.eval.identity.cli import identity_rows
+    from fukikae.eval.identity.metrics import clean_count
+    from fukikae.eval.ledger import options_hash
+
+    root = tmp_path / "bbt-en"
+    root.mkdir()
+    (root / "fukikae.toml").write_text(
+        'profile = "live-action"\nsource_language = "en"\n[series]\ntitle = "BBT"\n'
+    )
+    cfg = load_config(root, user_config=None)
+    run = fake_run(root)
+    rows = identity_rows(run, cfg, "bbt", "pick")
+    assert [r.split for r in rows] == ["tune", "holdout"]
+    assert [r.episodes for r in rows] == [["S01E01", "S01E02"], ["S01E03"]]
+    t, h = rows
+    assert t.stage == "identity" and t.backend == "wespeaker"
+    assert t.model == "pyannote/wespeaker-voxceleb-resnet34-LM"
+    assert (t.language, t.genre, t.series, t.test_set, t.tag) == (
+        "en", "live-action", "BBT", "bbt", "pick",
+    )  # fmt: skip
+    assert t.workspace == str(root)
+    assert t.metrics["clean"] == clean_count(run.tune) == 1
+    assert t.metrics == {
+        "fraction": 0.75, "passing": 3, "recurring": 4, "clean": 1, "merges": 1,
+        "strict_fraction": 0.5, "weighted_share": 0.7, "coverage": 0.4, "verdict": "fail",
+        "nc_overall": 0.8,
+    }  # fmt: skip
+    assert t.detail == {"merges": [["B", "C", 3]], "nc": {"A": 1.0, "(overall)": 0.8}}
+    assert h.metrics["fraction"] == 0.5 and h.metrics["nc_overall"] == 0.6
+    assert h.metrics["clean"] == 1 and h.metrics["merges"] == 0
+    assert "workspace" not in t.options and "tune" not in t.options
+    assert "holdout" not in t.options
+    assert t.options["profile"] == "live-action"
+    assert t.options["profile_hash"] == options_hash(cfg.profile_raw)
+    # Tune and holdout of one run share the options hash, so they sit in one matrix row.
+    assert t.options_hash == h.options_hash
+    assert identity_rows(fake_run(root, holdout=False), cfg, "bbt", None)[0].split == "tune"
+    assert len(identity_rows(fake_run(root, holdout=False), cfg, "bbt", None)) == 1
+
+
+def test_identity_rows_without_nearest_centroid(tmp_path: Path):
+    import dataclasses
+
+    from fukikae.config import load_config
+    from fukikae.eval.identity.cli import identity_rows
+
+    cfg = load_config(tmp_path, user_config=None)
+    run = dataclasses.replace(fake_run(tmp_path, holdout=False), tune_nc={})
+    (row,) = identity_rows(run, cfg, "x", None)
+    assert "nc_overall" not in row.metrics and row.detail["nc"] == {}
+    assert row.language == "und"
+
+
+def test_identity_cli_appends_unless_no_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from fukikae.eval.identity import cli as mod
+    from fukikae.eval.ledger import read_rows
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    root = tmp_path / "aib"
+    root.mkdir()
+    (root / "fukikae.toml").write_text('source_language = "ja"\n')
+    monkeypatch.setattr(mod, "run_identity", lambda *_a, **_k: fake_run(root))
+    ledger = tmp_path / "results.jsonl"
+    base = ["eval", "identity", str(root), "--tune", "S01E01,S01E02", "--holdout", "S01E03"]
+    r = CliRunner().invoke(app, [*base, "--ledger", str(ledger)])
+    assert r.exit_code == 0, r.output
+    rows, warnings = read_rows(ledger)
+    assert warnings == [] and len(rows) == 2
+    assert {x.test_set for x in rows} == {"aib"} and {x.tag for x in rows} == {None}
+    assert {x.genre for x in rows} == {"default"}
+    r = CliRunner().invoke(app, [*base, "--ledger", str(ledger), "--no-ledger"])
+    assert r.exit_code == 0, r.output
+    assert len(read_rows(ledger)[0]) == 2
+    r = CliRunner().invoke(app, [*base, "--set", "kaze", "--tag", "t1"])
+    assert r.exit_code == 0, r.output
+    rows, _ = read_rows()  # FUKIKAE_RESULTS from the autouse fixture
+    assert [(x.test_set, x.tag) for x in rows] == [("kaze", "t1"), ("kaze", "t1")]
+
+
+def test_identity_cli_ledger_failure_warns_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fukikae.eval.identity import cli as mod
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    root = tmp_path / "aib"
+    root.mkdir()
+    monkeypatch.setattr(mod, "run_identity", lambda *_a, **_k: fake_run(root))
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    r = CliRunner().invoke(
+        app,
+        [
+            "eval",
+            "identity",
+            str(root),
+            "--tune",
+            "S01E01,S01E02",
+            "--ledger",
+            str(blocker / "r.jsonl"),
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    assert "fraction: 0.75" in r.stdout
+    assert "warning: ledger not written:" in r.stderr

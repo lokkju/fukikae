@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from importlib import resources
@@ -14,6 +15,10 @@ _RESERVED = ("backend", "lang", "pair")
 # before profiles existed (embed was ECAPA, now WeSpeaker): a workspace table that sets
 # options must name its backend, or the options would silently move to another model.
 _WORKSPACE_NEEDS_BACKEND = frozenset({"embed"})
+# External ids `[series]` accepts now and nothing reads yet; the character-cards plan uses them.
+SERIES_ID_KEYS = ("tmdb", "tvdb", "anidb")
+_SERIES_KEYS = ("title", "genre", *SERIES_ID_KEYS)
+_GENRE = re.compile(r"[a-z0-9-]+")
 
 
 class ConfigError(Exception):
@@ -34,6 +39,15 @@ class RegistrySettings:
 
 
 @dataclass(frozen=True)
+class SeriesInfo:
+    """The workspace's `[series]` table: the title and genre the results ledger records."""
+
+    title: str
+    genre: str
+    ids: dict[str, str | int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Config:
     target_language: str = "en"
     source_language: str | None = None
@@ -43,6 +57,7 @@ class Config:
     raw: dict[str, Any] = field(default_factory=dict)
     profile: str = "default"
     profile_raw: dict[str, Any] = field(default_factory=dict)
+    series: SeriesInfo = field(default_factory=lambda: SeriesInfo("", "default", {}))
 
     def resolve(
         self,
@@ -137,6 +152,41 @@ def _read(path: Path) -> dict[str, Any]:
         raise ConfigError(f"{path}: {e}") from e
 
 
+def _series(raw: Any, workspace: Path, profile: str) -> SeriesInfo:
+    """`[series]`: title defaults to the workspace directory's name, genre to the profile's."""
+    if raw is None:
+        raw = {}
+    elif isinstance(raw, str):
+        # The older top-level `series = "Name"`, which also keys the registry's LDA
+        # projections (registry.projection.series_of), reads as the title.
+        raw = {"title": raw}
+    if not isinstance(raw, dict):
+        raise ConfigError(f'[series] must be a table (or the older series = "Name"), not {raw!r}')
+    unknown = sorted(set(raw) - set(_SERIES_KEYS))
+    if unknown:
+        raise ConfigError(
+            f"[series] has unknown key(s) {', '.join(unknown)}; allowed: {', '.join(_SERIES_KEYS)}"
+        )
+    title = raw.get("title", workspace.resolve().name)
+    if not isinstance(title, str):
+        raise ConfigError(f"[series] title must be a string, not {title!r}")
+    genre = raw.get("genre", profile)
+    if not isinstance(genre, str) or not _GENRE.fullmatch(genre):
+        raise ConfigError(
+            f"[series] genre {genre!r} must be lowercase letters, digits and dashes "
+            '(e.g. "live-action")'
+        )
+    ids: dict[str, str | int] = {}
+    for key in SERIES_ID_KEYS:
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, str | int):
+            raise ConfigError(f"[series] {key} must be a string or an integer, not {value!r}")
+        ids[key] = value
+    return SeriesInfo(title, genre, ids)
+
+
 def load_config(
     workspace: Path, user_config: Path | None | object = _DEFAULT_USER_CONFIG
 ) -> Config:
@@ -168,4 +218,5 @@ def load_config(
         raw=raw,
         profile=profile,
         profile_raw=profile_raw,
+        series=_series(raw.get("series"), workspace, profile),
     )

@@ -1,6 +1,7 @@
 """`fukikae eval` commands."""
 
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -13,13 +14,34 @@ def asr(
     episode: str = typer.Argument(..., help="Episode file path or SxxEyy code."),
     subtitle_track: int = typer.Option(..., "--subtitle-track", help="Absolute stream index."),
     backend: list[str] = typer.Option(None, "--backend", help="ASR backend; repeat for several."),
+    split: str = typer.Option(
+        "tune", "--split", help="Ledger split of this episode: tune or holdout."
+    ),
+    test_set: str = typer.Option(
+        None, "--set", help="Ledger test-set name (default: the workspace directory's name)."
+    ),
+    tag: str = typer.Option(None, "--tag", help="Free-form ledger tag for this run."),
+    no_ledger: bool = typer.Option(
+        False, "--no-ledger", help="Do not append rows to the results ledger."
+    ),
+    ledger: Path = typer.Option(
+        None,
+        "--ledger",
+        help="Results ledger (default: $FUKIKAE_RESULTS, else "
+        "$XDG_DATA_HOME/fukikae/results.jsonl).",
+    ),
 ) -> None:
     """Score ASR backends by character error rate against a subtitle track."""
     from fukikae.backends.loader import names
     from fukikae.errors import user_errors
     from fukikae.eval import asr as eval_asr
+    from fukikae.eval.identity.cli import write_ledger
+    from fukikae.eval.ledger import SPLITS
     from fukikae.workspace import Workspace
 
+    if split not in SPLITS:
+        typer.echo(f"error: --split {split!r}: use one of {', '.join(SPLITS)}", err=True)
+        raise typer.Exit(2)
     ws = Workspace(workspace)
     try:
         cfg = ws.config
@@ -34,6 +56,118 @@ def asr(
     for s in scores:
         runtime = "cached" if s.runtime_s is None else f"{s.runtime_s:.0f}s"
         typer.echo(f"{s.backend:<20}{s.cer:>8.4f}{runtime:>10}")
+    if not no_ledger:
+        name = test_set or ws.root.resolve().name
+        write_ledger(
+            lambda: _asr_rows(scores, cfg, language, ep.id, name, split, tag, ws.root), ledger
+        )
+
+
+def _asr_rows(
+    scores: list[Any],
+    cfg: Any,
+    language: str,
+    episode_id: str,
+    test_set: str,
+    split: str,
+    tag: str | None,
+    root: Path,
+) -> list[Any]:
+    """One `asr` ledger row per backend. Model, revision and options come from the
+    workspace's resolved ASR config when it names the same backend; another backend ran with
+    its defaults, so it records none."""
+    from fukikae.config import BackendConfig, ConfigError
+    from fukikae.eval.ledger import make_row, model_identity
+
+    try:
+        resolved: BackendConfig | None = cfg.resolve("asr", language)
+    except ConfigError:
+        resolved = None
+    rows = []
+    for s in scores:
+        same = resolved is not None and resolved.backend == s.backend
+        options = dict(resolved.options) if same and resolved is not None else {}
+        model, revision = (
+            model_identity("asr", resolved) if same and resolved is not None else (None, None)
+        )
+        metrics: dict[str, float | int | str] = {"cer": s.cer}
+        if s.runtime_s is not None:
+            metrics["runtime_s"] = s.runtime_s
+        rows.append(
+            make_row(
+                stage="asr",
+                backend=s.backend,
+                model=model,
+                revision=revision,
+                options=options,
+                language=language,
+                genre=cfg.series.genre,
+                series=cfg.series.title,
+                test_set=test_set,
+                split=split,
+                episodes=[episode_id],
+                metrics=metrics,
+                workspace=str(root),
+                tag=tag,
+            )
+        )
+    return rows
+
+
+@eval_app.command("report")
+def report_cmd(
+    ledger: Path = typer.Option(
+        None,
+        "--ledger",
+        help="Results ledger (default: $FUKIKAE_RESULTS, else "
+        "$XDG_DATA_HOME/fukikae/results.jsonl).",
+    ),
+    stage: list[str] = typer.Option(None, "--stage", help="Only this stage; repeat."),
+    backend: list[str] = typer.Option(None, "--backend", help="Only this backend; repeat."),
+    test_set: list[str] = typer.Option(None, "--set", help="Only this test set; repeat."),
+    split: list[str] = typer.Option(None, "--split", help="Only this split; repeat."),
+    tag: list[str] = typer.Option(None, "--tag", help="Only this tag; repeat."),
+    metric: str = typer.Option(
+        None,
+        "--metric",
+        help="Metric shown in each cell (default: asr cer, identity fraction with clean and "
+        "merge counts, embedder nc_overall, tts speaker_similarity).",
+    ),
+    fmt: str = typer.Option("text", "--format", help="text or md."),
+    export: Path = typer.Option(
+        None, "--export", help="Also write the filtered rows to this file as JSONL."
+    ),
+) -> None:
+    """Render the results ledger as a matrix: configurations by language and genre."""
+    from fukikae.eval.ledger import read_rows, row_json
+    from fukikae.eval.report import build_matrix, filter_rows, render
+
+    if fmt not in ("text", "md"):
+        typer.echo(f"error: --format {fmt!r}: use text or md", err=True)
+        raise typer.Exit(2)
+    try:
+        rows, warnings = read_rows(ledger)
+    except OSError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    for w in warnings:
+        typer.echo(f"warning: {w}", err=True)
+    rows = filter_rows(
+        rows,
+        stages=stage or (),
+        backends=backend or (),
+        sets=test_set or (),
+        splits=split or (),
+        tags=tag or (),
+    )
+    if export is not None:
+        export.parent.mkdir(parents=True, exist_ok=True)
+        export.write_text("".join(row_json(r) + "\n" for r in rows), encoding="utf-8")
+        typer.echo(f"exported {len(rows)} rows to {export}", err=True)
+    if not rows:
+        typer.echo("no ledger rows match")
+        return
+    typer.echo(render(build_matrix(rows, metric), "md" if fmt == "md" else "text"))
 
 
 @eval_app.command("sample")
