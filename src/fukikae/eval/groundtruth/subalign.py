@@ -31,6 +31,9 @@ MIN_ANCHORS = 20
 MIN_INLIER_SHARE = 0.6
 MAX_RMS_S = 0.3
 RANSAC_DRAWS = 2000
+STEP_BAND_S = 4 * INLIER_TOL_S  # anchors this close to the fit count for the step and max checks
+STEP_MIN_SIDE = 8  # anchors needed on each side of a candidate step
+MAX_STEP_S = INLIER_TOL_S / 2
 RANSAC_MIN_SPAN_S = 60.0
 SPEECH_SCALES = (1.0, 1000 / 1001, 1001 / 1000, 25 / 23.976, 23.976 / 25, 24 / 23.976, 23.976 / 24)
 SPEECH_MAX_OFFSET_S = 300.0
@@ -53,11 +56,29 @@ class TimeMap:
 
 
 @dataclass(frozen=True)
+class Step:
+    """The best single change point in a text fit: the same scale with one offset before
+    `at_s` (labelled-file time of the first anchor after it) and another from there on."""
+
+    at_s: float
+    offset_before: float
+    offset_after: float
+    before: int
+    after: int
+
+    @property
+    def size_s(self) -> float:
+        return self.offset_after - self.offset_before
+
+
+@dataclass(frozen=True)
 class FitReport:
     """`anchors`: text-matched cue pairs (text) or cues scored (speech); `inliers`: anchors
     within INLIER_TOL_S of the fit (text) or cues at least half over speech (speech); `rms_s`:
     the inliers' residual (text; NaN in speech mode); `share`: the share of cue time over
-    speech at the fit (speech; None in text mode)."""
+    speech at the fit (speech; None in text mode). Text mode also gives `max_resid_s`, the
+    largest residual among anchors within STEP_BAND_S of the fit, and `step`, the best single
+    change point among them (None with too few anchors for one)."""
 
     tmap: TimeMap
     mode: Literal["text", "speech"]
@@ -65,6 +86,8 @@ class FitReport:
     inliers: int
     rms_s: float
     share: float | None
+    max_resid_s: float = float("nan")
+    step: Step | None = None
 
 
 # ---- text mode ----
@@ -169,7 +192,34 @@ def fit_to_reference(labelled: list[Cue], reference: list[Cue], language: str) -
         mask = np.abs(s * t + o - r) <= INLIER_TOL_S
     res = (s * t + o - r)[mask]
     rms = float(np.sqrt(np.mean(res**2))) if len(res) else float("inf")
-    return FitReport(TimeMap(s, o), "text", len(pairs), int(mask.sum()), rms, None)
+    band = np.abs(s * t + o - r) <= STEP_BAND_S
+    max_resid = float(np.abs(s * t + o - r)[band].max()) if band.any() else float("inf")
+    step = _best_step(t[band], r[band])
+    return FitReport(TimeMap(s, o), "text", len(pairs), int(mask.sum()), rms, None, max_resid, step)
+
+
+def _best_step(t: np.ndarray, r: np.ndarray) -> Step | None:
+    """The change point that best explains the anchors as one scale with two offsets
+    (least squares over every split leaving STEP_MIN_SIDE anchors a side). A residual series
+    can't show a step on its own: the single-line fit tilts to absorb most of it."""
+    order = np.argsort(t)
+    t, r = t[order], r[order]
+    n = len(t)
+    if n < 2 * STEP_MIN_SIDE:
+        return None
+    best: tuple[float, int, np.ndarray] | None = None
+    for k in range(STEP_MIN_SIDE, n - STEP_MIN_SIDE + 1):
+        if t[k] == t[k - 1]:
+            continue
+        a = np.column_stack([t, np.ones(n), (np.arange(n) >= k).astype(float)])
+        coef, *_ = np.linalg.lstsq(a, r, rcond=None)
+        sse = float(((a @ coef - r) ** 2).sum())
+        if best is None or sse < best[0]:
+            best = (sse, k, coef)
+    if best is None:
+        return None
+    _, k, coef = best
+    return Step(float(t[k]), float(coef[1]), float(coef[1] + coef[2]), k, n - k)
 
 
 # ---- speech mode ----
@@ -236,6 +286,19 @@ def check_fit(rep: FitReport, force: bool = False) -> None:
             )
         if not rep.rms_s <= MAX_RMS_S:
             problems.append(f"inlier rms {rep.rms_s:.3f} s is above {MAX_RMS_S:g} s")
+        if rep.max_resid_s > INLIER_TOL_S:
+            problems.append(
+                f"max residual {rep.max_resid_s:.3f} s is above {INLIER_TOL_S:g} s "
+                f"(anchors within {STEP_BAND_S:g} s of the fit)"
+            )
+        st = rep.step
+        if st is not None and abs(st.size_s) > MAX_STEP_S:
+            problems.append(
+                f"a {st.size_s:+.2f} s step at {st.at_s:.1f} s in the labelled file: offset "
+                f"{st.offset_before:+.2f} s before ({st.before} anchors), "
+                f"{st.offset_after:+.2f} s after ({st.after}); a cut or a jump between "
+                "the captures"
+            )
     else:
         sh = rep.share or 0.0
         if sh < MIN_SHARE:
@@ -341,12 +404,25 @@ def _retime_text(lines: list[str], tmap: TimeMap) -> tuple[list[str], int, int]:
     return out, done, clamped
 
 
+def _decode(raw: bytes) -> tuple[str, str, bytes]:
+    """(text, codec, BOM) for UTF-16 by its BOM, else UTF-8 with undecodable bytes kept."""
+    for bom, codec in ((b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be")):
+        if raw.startswith(bom):
+            return raw[len(bom) :].decode(codec, errors="surrogatepass"), codec, bom
+    return raw.decode("utf-8", errors="surrogateescape"), "utf-8", b""
+
+
+def _encode(text: str, codec: str, bom: bytes) -> bytes:
+    errors = "surrogateescape" if codec == "utf-8" else "surrogatepass"
+    return bom + text.encode(codec, errors=errors)
+
+
 def retime_file(src: Path, dst: Path, tmap: TimeMap) -> tuple[int, int]:
     """Write `src` to `dst` with every cue time mapped through `tmap` (ASS/SSA `Dialogue` Start
     and End, SRT and WebVTT `-->` lines); every other byte is kept. Times that map below zero
-    become zero. Returns (cues rewritten, cues clamped at 0)."""
-    raw = Path(src).read_bytes()
-    text = raw.decode("utf-8", errors="surrogateescape")
+    become zero. A UTF-16 file (by its BOM) is written back in the same encoding. Returns
+    (cues rewritten, cues clamped at 0)."""
+    text, codec, bom = _decode(Path(src).read_bytes())
     lines = text.splitlines(keepends=True)
     head = text.lstrip("﻿ \t\r\n")[:200].casefold()
     suffix = Path(src).suffix.casefold()
@@ -359,7 +435,7 @@ def retime_file(src: Path, dst: Path, tmap: TimeMap) -> tuple[int, int]:
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(dst) as tmp:
-        tmp.write_bytes("".join(out).encode("utf-8", errors="surrogateescape"))
+        tmp.write_bytes(_encode("".join(out), codec, bom))
     return done, clamped
 
 

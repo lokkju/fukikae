@@ -350,7 +350,7 @@ def subalign_cmd(
         if rep.mode == "text":
             share = rep.inliers / rep.anchors if rep.anchors else 0.0
             line += f"anchors {rep.anchors}  inliers {rep.inliers} ({share:.0%})  "
-            line += f"rms {rep.rms_s:.3f} s"
+            line += f"rms {rep.rms_s:.3f} s  max residual {rep.max_resid_s:.3f} s"
         else:
             line += f"cues {rep.anchors}  over speech {rep.inliers}  share {rep.share or 0:.0%}"
         typer.echo(line)
