@@ -72,7 +72,10 @@ class Embedder(Backend, Protocol):
 
 class Synthesizer(Backend, Protocol):
     """A TTS backend. A card's [voice] table is honored exactly or refused at load
-    (``fukikae.cards.card.validate_for_backend``), never approximated."""
+    (``fukikae.cards.card.validate_for_backend``), never approximated.
+
+    A backend class must subclass ``Synthesizer`` explicitly (Kokoro in Task 6 included) to
+    inherit the protocol's method defaults; structural typing alone does not provide them."""
 
     sources: ClassVar[frozenset[str]]  # subset of cards.card.CARD_SOURCES
     voice_keys: ClassVar[frozenset[str]]  # [voice] keys it honors beyond the source's own field
@@ -81,8 +84,9 @@ class Synthesizer(Backend, Protocol):
     model_revision: str
 
     @classmethod
-    def validate_options(cls, options: dict[str, Any]) -> None:
-        """Raise ``CardError`` naming any ``[voice.options]`` key or value it can't honor."""
+    def validate_options(cls, options: dict[str, Any], source: str | None = None) -> None:
+        """Raise ``CardError`` naming any ``[voice.options]`` key or value it can't honor,
+        for a card of voice ``source`` when given."""
         ...
 
     def synthesize(

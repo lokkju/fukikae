@@ -6,6 +6,16 @@ dict, without ``[meta]`` and ``[voice.fingerprint]``, serialized with
 their default are left out of that dict (and out of the TOML), so spelling a default
 explicitly never changes the id. Sidecar files are referenced as ``sha256:<hex>`` of their
 bytes, so their hashes are part of the canonical form already.
+
+Defaults are frozen forever (ruling CD1). Because a field at its default is not in the
+canonical form, changing a default would silently change what every existing card id means.
+A new behaviour gets a new field name with a default that reproduces the old behaviour;
+adding such a field leaves every existing id unchanged. Never change a default's value.
+
+Before hashing and storing, every text field is NFC-normalized, typed float fields are floats,
+and integral floats in free-form tables (``[voice.options]``, reference ``origin``) become
+ints, so ``1`` and ``1.0`` give one id. NaN and infinity are refused everywhere. An empty
+``[style]`` is the same card as no ``[style]``.
 """
 
 from __future__ import annotations
@@ -13,8 +23,10 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import math
 import re
 import tomllib
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -42,7 +54,9 @@ _SHA_REF = re.compile(r"sha256:[0-9a-f]{64}")
 _CARD_ID = re.compile(r"[0-9a-f]{16}")
 
 _TOP_KEYS = frozenset({"target_language", "meta", "voice", "style"})
-_META_KEYS = frozenset({"title", "author", "created", "derived_from", "notes"})
+# Known [meta] keys are type-checked; unknown ones are kept and written back, since [meta] is
+# outside the id and a newer fukikae may add keys an older one must not reject.
+_META_STR_KEYS = frozenset({"title", "author", "derived_from", "notes"})
 _VOICE_REQUIRED = ("backend", "model_revision", "source")
 _VOICE_KEYS = frozenset(
     {
@@ -140,6 +154,7 @@ class Card:
 
 
 _VOICE_DEFAULTS = Voice(backend="", model_revision="", source="")
+_FLOAT_VOICE_KEYS = ("temperature", "top_p", "rate", "pitch_semitones", "emotion_strength")
 
 
 # --- parsing -------------------------------------------------------------------------------
@@ -157,16 +172,53 @@ def _table(value: Any, where: str) -> dict[str, Any]:
     return value
 
 
+def _nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
+
+
 def _str(value: Any, key: str, where: str) -> str:
     if not isinstance(value, str):
         raise CardError(f"{where} {key} must be a string, got {type(value).__name__}")
-    return value
+    return _nfc(value)
 
 
-def _float(value: Any, key: str, where: str) -> float:
+def _float(
+    value: Any,
+    key: str,
+    where: str,
+    *,
+    lo: float | None = None,
+    hi: float | None = None,
+    lo_open: bool = False,
+) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise CardError(f"{where} {key} must be a number, got {type(value).__name__}")
-    return float(value)
+    f = float(value)
+    if not math.isfinite(f):
+        raise CardError(f"{where} {key} must be finite, got {value}")
+    if lo is not None and (f <= lo if lo_open else f < lo):
+        raise CardError(f"{where} {key} must be {'>' if lo_open else '>='} {lo:g}, got {value}")
+    if hi is not None and f > hi:
+        raise CardError(f"{where} {key} must be <= {hi:g}, got {value}")
+    return f
+
+
+def _norm_free(value: Any, where: str) -> Any:
+    """Normalize a free-form value for storage and hashing: NFC text, integral floats as
+    ints, finite numbers only, recursively through tables and arrays."""
+    if isinstance(value, str):
+        return _nfc(value)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise CardError(f"{where} must hold finite numbers, got {value}")
+        return int(value) if value.is_integer() else value
+    if isinstance(value, dict):
+        return {_nfc(k): _norm_free(v, f"{where}.{k}") for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_norm_free(v, where) for v in value]
+    return value
 
 
 def _int(value: Any, key: str, where: str) -> int:
@@ -194,7 +246,7 @@ def _parse_reference(raw: Any) -> Reference:
     _check_keys(t, _REFERENCE_KEYS, where)
     origin = t.get("origin")
     if origin is not None:
-        origin = dict(_table(origin, f"{where} origin"))
+        origin = _norm_free(dict(_table(origin, f"{where} origin")), f"{where} origin")
     return Reference(
         clip=_sha_ref(_require(t, "clip", where), "clip", where),
         transcript=_str(_require(t, "transcript", where), "transcript", where),
@@ -209,7 +261,7 @@ def _parse_blend_voice(raw: Any) -> tuple[str, float]:
     _check_keys(t, _BLEND_VOICE_KEYS, where)
     return (
         _str(_require(t, "id", where), "id", where),
-        _float(_require(t, "weight", where), "weight", where),
+        _float(_require(t, "weight", where), "weight", where, lo=0.0),
     )
 
 
@@ -219,7 +271,7 @@ def _parse_blend(raw: Any) -> dict[str, Any]:
     _check_keys(t, _BLEND_KEYS, where)
     return {
         "with": _str(_require(t, "with", where), "with", where),
-        "weight": _float(_require(t, "weight", where), "weight", where),
+        "weight": _float(_require(t, "weight", where), "weight", where, lo=0.0),
     }
 
 
@@ -259,11 +311,18 @@ def _parse_voice(raw: Any) -> Voice:
     kw: dict[str, Any] = {k: t[k] for k in _VOICE_REQUIRED}
     if "seed" in t:
         kw["seed"] = _int(t["seed"], "seed", where)
-    for key in ("temperature", "top_p", "rate", "pitch_semitones", "emotion_strength"):
+        if kw["seed"] < 0:
+            raise CardError(f"[voice] seed must be >= 0, got {kw['seed']}")
+    ranges: dict[str, dict[str, Any]] = {
+        "temperature": {"lo": 0.0, "lo_open": True},
+        "top_p": {"lo": 0.0, "lo_open": True, "hi": 1.0},
+        "rate": {"lo": 0.0, "lo_open": True},
+        "pitch_semitones": {},
+        "emotion_strength": {"lo": 0.0, "hi": 1.0},
+    }
+    for key, bounds in ranges.items():
         if key in t:
-            kw[key] = _float(t[key], key, where)
-    if not 0.0 <= kw.get("emotion_strength", 0.8) <= 1.0:
-        raise CardError(f"[voice] emotion_strength must be in [0, 1], got {t['emotion_strength']}")
+            kw[key] = _float(t[key], key, where, **bounds)
     for key in ("voice", "description"):
         if key in t:
             kw[key] = _str(t[key], key, where)
@@ -280,7 +339,7 @@ def _parse_voice(raw: Any) -> Voice:
     if "blend" in t:
         kw["blend"] = _parse_blend(t["blend"])
     if "options" in t:
-        kw["options"] = dict(_table(t["options"], "[voice.options]"))
+        kw["options"] = _norm_free(dict(_table(t["options"], "[voice.options]")), "[voice.options]")
     if "post" in t:
         kw["post"] = _parse_post(t["post"])
     if "fingerprint" in t:
@@ -326,11 +385,17 @@ def parse_card(text: str) -> Card:
     if not target:
         raise CardError("target_language must not be empty")
     voice = _parse_voice(_require(raw, "voice", "the card ([voice])"))
-    style = _parse_style(raw["style"]) if "style" in raw else None
+    style = (_parse_style(raw["style"]) if "style" in raw else None) or None
     meta: dict[str, Any] = {}
     if "meta" in raw:
         meta = dict(_table(raw["meta"], "[meta]"))
-        _check_keys(meta, _META_KEYS, "[meta]")
+        for key in _META_STR_KEYS & set(meta):
+            meta[key] = _str(meta[key], key, "[meta]")
+        created = meta.get("created")
+        if created is not None and not isinstance(created, str | dt.date):
+            raise CardError(
+                f"[meta] created must be a date or a string, got {type(created).__name__}"
+            )
     return Card(target_language=target, voice=voice, style=style, meta=meta)
 
 
@@ -338,55 +403,61 @@ def parse_card(text: str) -> Card:
 
 
 def _voice_dict(v: Voice, *, fingerprint: bool) -> dict[str, Any]:
+    """Every Voice field is handled here (tests/cards/test_card.py checks it), each left out
+    while it equals its frozen default (CD1)."""
     d: dict[str, Any] = {
-        "backend": v.backend,
-        "model_revision": v.model_revision,
+        "backend": _nfc(v.backend),
+        "model_revision": _nfc(v.model_revision),
         "source": v.source,
     }
-    for key in (
-        "seed",
-        "temperature",
-        "top_p",
-        "rate",
-        "pitch_semitones",
-        "emotion_strength",
-        "voice",
-        "latent",
-        "description",
-        "blend",
-        "options",
-        "post",
-    ):
+    for key in ("seed", "voice", "latent", "description"):
         value = getattr(v, key)
         if value != getattr(_VOICE_DEFAULTS, key):
-            d[key] = value
+            d[key] = _nfc(value) if isinstance(value, str) else value
+    for key in _FLOAT_VOICE_KEYS:
+        value = getattr(v, key)
+        if value != getattr(_VOICE_DEFAULTS, key):
+            d[key] = float(value)
+    for key in ("blend", "options", "post"):
+        value = getattr(v, key)
+        if value != getattr(_VOICE_DEFAULTS, key):
+            d[key] = _norm_free(value, f"[voice.{key}]")
+    if "blend" in d:
+        d["blend"]["weight"] = float(d["blend"]["weight"])
+    if "post" in d and "gain_db" in d["post"]:
+        d["post"]["gain_db"] = float(d["post"]["gain_db"])
     if v.voices:
-        d["voices"] = [{"id": i, "weight": w} for i, w in v.voices]
+        d["voices"] = [{"id": _nfc(i), "weight": float(w)} for i, w in v.voices]
     if v.references:
-        refs = []
-        for r in v.references:
-            rd: dict[str, Any] = {
-                "clip": r.clip,
-                "transcript": r.transcript,
-                "language": r.language,
-            }
-            if r.origin is not None:
-                rd["origin"] = r.origin
-            refs.append(rd)
-        d["references"] = refs
+        d["references"] = [_reference_dict(r) for r in v.references]
     if fingerprint and v.fingerprint is not None:
-        f = v.fingerprint
-        d["fingerprint"] = {"embedder": f.embedder, "vector": f.vector, "threshold": f.threshold}
+        d["fingerprint"] = _fingerprint_dict(v.fingerprint)
     return d
 
 
+def _reference_dict(r: Reference) -> dict[str, Any]:
+    rd: dict[str, Any] = {
+        "clip": r.clip,
+        "transcript": _nfc(r.transcript),
+        "language": _nfc(r.language),
+    }
+    if r.origin is not None:
+        rd["origin"] = _norm_free(r.origin, "[[voice.references]] origin")
+    return rd
+
+
+def _fingerprint_dict(f: Fingerprint) -> dict[str, Any]:
+    return {"embedder": _nfc(f.embedder), "vector": f.vector, "threshold": float(f.threshold)}
+
+
 def _card_dict(card: Card, *, identity: bool) -> dict[str, Any]:
-    d: dict[str, Any] = {"target_language": card.target_language}
+    """Every Card field is handled here; an empty style is no style."""
+    d: dict[str, Any] = {"target_language": _nfc(card.target_language)}
     if card.meta and not identity:
         d["meta"] = card.meta
     d["voice"] = _voice_dict(card.voice, fingerprint=not identity)
-    if card.style is not None:
-        d["style"] = card.style
+    if card.style:
+        d["style"] = _norm_free(card.style, "[style]")
     return d
 
 
@@ -448,6 +519,11 @@ def validate_for_backend(
     """
     name = getattr(cls, "name", cls.__name__)
     v = card.voice
+    if v.backend != name:
+        raise CardError(
+            f"card is for backend {v.backend!r}, not {name!r}; "
+            "a card renders only on its own backend"
+        )
     if v.source not in cls.sources:
         raise CardError(f"{name} does not support source {v.source!r}")
     own = SOURCE_FIELDS[v.source]
@@ -456,11 +532,12 @@ def validate_for_backend(
             continue
         if getattr(v, key) != getattr(_VOICE_DEFAULTS, key):
             raise CardError(f"{name} does not support [voice] key {key!r}")
-    cls.validate_options(dict(v.options))
+    cls.validate_options(dict(v.options), source=v.source)
     eq = v.post.get("eq", "none")
     if eq not in EQ_PRESETS:
         raise CardError(
-            f"[voice.post] eq = {eq!r} is not a known preset; use one of {', '.join(EQ_PRESETS)}"
+            f"[voice.post] eq = {eq!r} is not a known preset; "
+            f"use one of {', '.join(sorted(EQ_PRESETS))}"
         )
     if v.blend is not None:
         other = v.blend["with"]

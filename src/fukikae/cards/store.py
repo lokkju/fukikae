@@ -37,12 +37,15 @@ def _atomic_write(dest: Path, data: bytes | Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".tmp")
     try:
+        os.fchmod(fd, 0o644)
         with os.fdopen(fd, "wb") as f:
             if isinstance(data, bytes):
                 f.write(data)
             else:
                 with data.open("rb") as src:
                     shutil.copyfileobj(src, f)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, dest)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -62,7 +65,9 @@ class CardStore:
         """Write the card under its id. Idempotent; overwrites, so a recorded fingerprint
         (which doesn't change the id) lands in the stored file."""
         cid = compute_card_id(card)
-        _atomic_write(self.card_path(cid), dump_card(card).encode("utf-8"))
+        text = dump_card(card)
+        parse_card(text)  # a card built in code gets the same checks as one read from disk
+        _atomic_write(self.card_path(cid), text.encode("utf-8"))
         return cid
 
     def has(self, card_id: str) -> bool:
@@ -104,11 +109,18 @@ class CardStore:
         return None
 
     def sidecar_path(self, ref: str) -> Path:
+        """The sidecar's path, after re-checking that its bytes still hash to ``ref``."""
         found = self._find(ref)
         if found is None:
             raise CardError(
                 f"sidecar {ref} not found in {self.root} "
                 f"({', '.join(d + '/' for d in SIDECAR_DIRS.values())})"
+            )
+        actual = _sha256_file(found)
+        if f"sha256:{actual}" != ref:
+            raise CardError(
+                f"sidecar {ref} at {found} is corrupted: its bytes hash to sha256:{actual}; "
+                "restore the file (re-import the pack or re-add the clip)"
             )
         return found
 

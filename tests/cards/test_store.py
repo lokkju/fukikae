@@ -95,3 +95,31 @@ def test_recording_fingerprint_keeps_id_and_overwrites(tmp_path: Path):
     got = store.get(cid).voice.fingerprint
     assert got is not None and got.threshold == 0.9
     assert list(store.root.glob("*.tmp")) == []
+
+
+def test_corrupted_sidecar_is_refused_on_use(tmp_path: Path):
+    store = CardStore(tmp_path)
+    wav = tmp_path / "ref.wav"
+    wav.write_bytes(b"RIFF" + b"x" * 100)
+    ref = store.add_sidecar(wav, "clip")
+    stored = store.root / "clips" / f"{ref.removeprefix('sha256:')}.wav"
+    stored.write_bytes(stored.read_bytes()[:50])
+    with pytest.raises(CardError, match=r"corrupted"):
+        store.sidecar_path(ref)
+
+
+def test_files_are_group_readable(tmp_path: Path):
+    store = CardStore(tmp_path)
+    cid = store.put(parse_card(STOCK_CARD))
+    assert store.card_path(cid).stat().st_mode & 0o777 == 0o644
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"x")
+    ref = store.add_sidecar(wav, "clip")
+    assert store.sidecar_path(ref).stat().st_mode & 0o777 == 0o644
+
+
+def test_put_refuses_an_invalid_card_built_in_code(tmp_path: Path):
+    card = parse_card(STOCK_CARD)
+    bad = replace(card, voice=replace(card.voice, rate=-1.0))
+    with pytest.raises(CardError, match="rate"):
+        CardStore(tmp_path).put(bad)
