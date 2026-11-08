@@ -467,6 +467,126 @@ def colour_map_cmd(
         raise typer.Exit(1) from e
 
 
+@eval_app.command("embedders")
+def embedders(
+    clipset: Path = typer.Argument(..., help="Clip set: one folder per character."),
+    embedder: list[str] = typer.Option(
+        ..., "--embedder", help="Embed backend to score; repeat for several."
+    ),
+    language: str = typer.Option(..., "--language", help="Language of the clips (ledger column)."),
+    genre: str = typer.Option("live-action", "--genre", help="Ledger genre."),
+    test_set: str = typer.Option(
+        None, "--set", help="Ledger test-set name (default: the clip set directory's name)."
+    ),
+    exclude: list[str] = typer.Option(
+        None, "--exclude", help="Character folder to leave out; repeat for several."
+    ),
+    episode_pattern: str = typer.Option(
+        None,
+        "--episode-pattern",
+        help="Regex whose first group is the episode number in a file name.",
+    ),
+    tag: str = typer.Option(None, "--tag", help="Free-form ledger tag for this run."),
+    no_ledger: bool = typer.Option(
+        False, "--no-ledger", help="Do not append rows to the results ledger."
+    ),
+    ledger: Path = typer.Option(
+        None,
+        "--ledger",
+        help="Results ledger (default: $FUKIKAE_RESULTS, else "
+        "$XDG_DATA_HOME/fukikae/results.jsonl).",
+    ),
+    no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
+) -> None:
+    """Score embedders by nearest-centroid accuracy on a folder-per-character clip set."""
+    from fukikae import runctx
+    from fukikae.backends.loader import names
+    from fukikae.config import BackendConfig, Config
+    from fukikae.errors import user_errors
+    from fukikae.eval import clipset as cs
+    from fukikae.eval.identity.cache import ResidentEmbedder
+    from fukikae.eval.identity.cli import write_ledger
+    from fukikae.eval.identity.metrics import OVERALL
+    from fukikae.eval.ledger import make_row, model_identity
+
+    runctx.vram_timeout_s = 0 if no_wait else None
+    root = clipset.expanduser()
+    try:
+        known = names("embed")
+        for name in embedder:
+            if name not in known:
+                raise ValueError(f"unknown embedder {name!r}; use one of {', '.join(known)}")
+        if not root.is_dir():
+            raise FileNotFoundError(f"clip set {root} is not a directory")
+        clips = cs.scan_clipset(
+            root, episode_pattern or cs.DEFAULT_EPISODE_PATTERN, exclude=exclude or ()
+        )
+        train, test, rule, skipped = cs.split_clips(clips)
+        if not train or not test:
+            raise ValueError(f"{root}: no character has clips on both sides of the split")
+        cache = root / cs.CACHE_DIR
+        audio = cs.prepare_audio(train + test, cache)
+        name = test_set or root.resolve().name
+        results: list[tuple[Any, dict[str, float]]] = []
+        with ResidentEmbedder(Config(gpu_device=0)) as resident:
+            for emb_name in embedder:
+                cfg = BackendConfig(emb_name, {})
+                tr = cs.embed_clips(train, audio, cfg, resident, cache)
+                te = cs.embed_clips(test, audio, cfg, resident, cache)
+                results.append((cfg, cs.clipset_accuracy(train, test, tr, te, audio=audio)))
+    except user_errors() as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    scored = sorted({c.character for c in test} - set(skipped))
+    typer.echo(f"{'embedder':<16}{'accuracy':>9}{'chars':>7}{'train':>7}{'test':>6}  split")
+    for cfg, acc in results:
+        typer.echo(
+            f"{cfg.backend:<16}{acc.get(OVERALL, 0.0):>9.3f}{len(acc) - 1 if acc else 0:>7}"
+            f"{len(train):>7}{len(test):>6}  {rule}"
+        )
+    if skipped:
+        typer.echo(f"not scored (no clip on one side): {', '.join(skipped)}", err=True)
+    if not no_ledger:
+
+        def rows() -> list[Any]:
+            out = []
+            for cfg, acc in results:
+                model, revision = model_identity("embed", cfg)
+                per_char = {k: round(v, 6) for k, v in acc.items() if k != OVERALL}
+                out.append(
+                    make_row(
+                        stage="embedder",
+                        backend=cfg.backend,
+                        model=model,
+                        revision=revision,
+                        options={**cfg.options, "split_rule": rule},
+                        language=language,
+                        genre=genre,
+                        series=name,
+                        test_set=name,
+                        split="tune",
+                        episodes=[],
+                        metrics={
+                            "nc_overall": acc.get(OVERALL, 0.0),
+                            "characters": len(per_char),
+                            "train_clips": len(train),
+                            "test_clips": len(test),
+                        },
+                        detail={
+                            "per_character": per_char,
+                            "not_scored": skipped,
+                            "excluded": list(exclude or []),
+                            "characters": scored,
+                        },
+                        workspace=str(root.resolve()),
+                        tag=tag,
+                    )
+                )
+            return out
+
+        write_ledger(rows, ledger)
+
+
 def _register_identity() -> None:
     from fukikae.eval.identity.cli import identity_cmd
 
