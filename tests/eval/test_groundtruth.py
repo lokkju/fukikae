@@ -523,3 +523,33 @@ def test_ass_override_blocks_split_parentheses(tmp_path: Path) -> None:
 def test_existing_pair_rule_still_rejects_korean_and_chinese_pairs() -> None:
     assert extract_tag("(새하와 새벽) text") is None
     assert extract_tag("(张三和李四) text") is None
+
+
+@pytest.mark.parametrize(("a", "joiner", "b"), [("始", "と", "薫"), ("王", "和", "李")])
+def test_pair_of_known_one_character_names_is_two_speakers(
+    tmp_path: Path, a: str, joiner: str, b: str
+) -> None:
+    lines = _ja(tmp_path, f"（{a}）one", f"（{b}）two", f"（{a}{joiner}{b}）together")
+    assert _speakers(lines) == [a, b]
+
+
+@pytest.mark.parametrize(("a", "joiner", "b"), [("始", "と", "薫"), ("王", "和", "李")])
+def test_pair_of_unknown_one_character_names_stays_whole(
+    tmp_path: Path, a: str, joiner: str, b: str
+) -> None:
+    lines = _ja(tmp_path, f"（{a}）one", f"（{a}{joiner}{b}）together")
+    assert _speakers(lines) == [a, f"{a}{joiner}{b}"]
+
+
+def test_chinese_pair_with_long_names_still_splits(tmp_path: Path) -> None:
+    assert _ja(tmp_path, "（张三和李四）together") == []
+
+
+def test_ruby_with_ideographic_space_between_names(tmp_path: Path) -> None:
+    lines = _ja(tmp_path, "（有栖（ありす）　始（はじめ）） hi", "（始）yo")
+    assert _speakers(lines) == ["始", "始"]
+
+
+def test_hangul_two_word_tag_maps_to_given_name(tmp_path: Path) -> None:
+    lines = _ja(tmp_path, "(김 철수) 안녕", "(철수) 응")
+    assert _speakers(lines) == ["철수", "철수"]

@@ -102,7 +102,8 @@ def strip_ruby(text: str) -> str:
 
 def ja_short_names(names: Iterable[str]) -> dict[str, str]:
     """A two-word CJK tag (`有栖 始`, family and given name) maps to its last word when that word
-    is also a tag on its own in the same file."""
+    is also a tag on its own in the same file. Hangul tags too (`김 철수` -> `철수`): Korean SDH
+    uses given names as well."""
     pool = set(names)
     out: dict[str, str] = {}
     for name in pool:
@@ -112,10 +113,20 @@ def ja_short_names(names: Iterable[str]) -> dict[str, str]:
     return out
 
 
+def joins_known_tags(name: str, pool: set[str]) -> bool:
+    """`始と薫`: a joiner with a tag of the same file on each side. Single-character names escape
+    the 2+ characters rule of `_PAIR`, so the file's own tags tell a pair from a compound name."""
+    for m in re.finditer(r"[と和与跟]", name):
+        a, b = name[: m.start()], name[m.end() :]
+        if a in pool and b in pool:
+            return True
+    return False
+
+
 def extract_tag(line: str, sounds: frozenset[str] = DEFAULT_SOUNDS) -> tuple[str, str] | None:
     """(name, rest of the line) when `line` starts with a speaker tag, after markup and a
     leading dash are removed."""
-    text = _DASH.sub("", strip_ruby(strip_markup(line))).strip()
+    text = _DASH.sub("", strip_ruby(strip_markup(line)).replace("\u3000", " ")).strip()
     m = _BRACKET.match(text)
     if m and valid_name(m.group(1), sounds):
         return m.group(1).strip(), m.group(2).strip()
@@ -160,13 +171,16 @@ def read_sdh(
 ) -> list[GroundTruthLine]:
     out: list[GroundTruthLine] = []
     per_cue = [cue_segments(cue.text, sounds) for cue in cues]
-    short = ja_short_names(s.name for segs in per_cue for s in segs if s.name)
+    pool = {s.name for segs in per_cue for s in segs if s.name}
+    short = ja_short_names(pool)
     for cue, segs in zip(cues, per_cue, strict=True):
         spans = split_times(
             cue.start, cue.end, [max(1, len(re.sub(r"\s", "", s.text))) for s in segs]
         )
         for seg, (a, b) in zip(segs, spans, strict=True):
             name = namer(short.get(seg.name, seg.name)) if seg.name else None
+            if seg.name and joins_known_tags(seg.name, pool):
+                name = None  # several speakers
             if name:
                 out.append(GroundTruthLine(a, b, name))
     return out
