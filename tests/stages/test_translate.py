@@ -22,7 +22,13 @@ from fukikae.models import (
 from fukikae.registry.store import Registry
 from fukikae.stages import translate
 from fukikae.stages.translate import TranslateStage
-from fukikae.translation import Rendering, TranslateFormatError, TranslateRequest
+from fukikae.translation import (
+    PromptTooLargeError,
+    Rendering,
+    TranslateBackendError,
+    TranslateFormatError,
+    TranslateRequest,
+)
 from fukikae.workspace import Episode, Workspace
 
 CARD = """\
@@ -85,6 +91,7 @@ def fake(monkeypatch):
     monkeypatch.setattr(
         translate, "identity_key", lambda _k, _bc: {"model": "fake-model", "revision": None}
     )
+    monkeypatch.setattr(translate, "device_string", lambda _cfg: "cpu")
 
 
 def _words(start: float, text: str) -> list[Word]:
@@ -209,7 +216,15 @@ def test_still_over_budget_keeps_a_rendering(ep):
 
     FakeTranslator.SCRIPT = [long, long]
     TranslateStage().run(ep, CFG)
-    assert all(c.text == "z" * 80 and c.error is None for c in _out(ep).cues)
+    out = _out(ep).cues
+    assert all(c.text == "z" * 80 and c.error is None for c in out)
+    assert all(c.over_budget and c.overrun == 80 - c.budget for c in out)
+
+
+@pytest.mark.usefixtures("fake")
+def test_within_budget_cues_are_not_flagged(ep):
+    TranslateStage().run(ep, CFG)
+    assert all(not c.over_budget and c.overrun == 0 for c in _out(ep).cues)
 
 
 @pytest.mark.usefixtures("fake")
@@ -285,3 +300,146 @@ def test_inputs_without_assignments_do_not_crash(tmp_path: Path):
     ep = Episode(source=tmp_path / "s.mkv", id="e1", work=tmp_path / "w", workspace_root=tmp_path)
     paths = TranslateStage(target_language="en", tags=False).inputs(ep)
     assert paths[0].name == "transcript.json"
+
+
+def _three_windows(ep: Episode) -> None:
+    """Rewrite the transcript so the cues fall in three windows (gaps over 2 s)."""
+    segs = [
+        Segment(start=0.0, end=1.0, text="妖精の尻尾だ", words=_words(0.0, "妖精の尻尾だ")),
+        Segment(start=3.0, end=4.0, text="はい", words=_words(3.0, "はい")),
+        Segment(start=8.0, end=9.0, text="いいえ", words=_words(8.0, "いいえ")),
+        Segment(start=14.0, end=15.0, text="そうか", words=_words(14.0, "そうか")),
+    ]
+    write_json(
+        ep.work / "03-asr" / "transcript.json",
+        Transcript(language="ja", backend="fake", word_timing=True, segments=segs),
+    )
+    asg = read_json(ep.work / "05-characters" / "assignments.json", Assignments)
+    asg.turns = [Turn(start=0.0, end=2.5, speaker="S0"), Turn(start=2.5, end=20.0, speaker="S1")]
+    write_json(ep.work / "05-characters" / "assignments.json", asg)
+
+
+def backend_down(_req: TranslateRequest) -> dict[str, Rendering]:
+    raise TranslateBackendError("http://127.0.0.1:1/v1: HTTP 500 from chat/completions")
+
+
+@pytest.mark.usefixtures("fake")
+def test_previous_window_and_glossary_filter(ep):
+    _three_windows(ep)
+    (ep.workspace_root / "glossary.toml").write_text(
+        '[terms]\n"妖精の尻尾" = "Fairy Tail"\n"魔導士" = "wizard"\n', encoding="utf-8"
+    )
+    TranslateStage().run(ep, CFG)
+    first, second, third = FakeTranslator.REQUESTS
+    assert first.glossary == {"妖精の尻尾": "Fairy Tail"}  # only terms the window uses
+    assert second.glossary == {} and first.previous == []
+    assert [c.id for c in first.cues] == ["c0001", "c0002"]
+    assert second.previous == [("妖精の尻尾だ", "ok c0001"), ("はい", "ok c0002")]
+    assert third.previous == [("いいえ", "ok c0003")]
+
+
+@pytest.mark.usefixtures("fake")
+def test_backend_error_retries_then_marks_the_window_and_goes_on(ep):
+    _three_windows(ep)
+    FakeTranslator.SCRIPT = [backend_down, backend_down]  # window 1 fails twice
+    TranslateStage().run(ep, CFG)
+    out = {c.id: c for c in _out(ep).cues}
+    assert out["c0001"].text is None
+    assert (out["c0001"].error or "").startswith("translate: backend:")
+    assert out["c0002"].error is not None
+    assert out["c0003"].text == "ok c0003" and out["c0004"].text == "ok c0004"
+    assert third_previous_is_clean(FakeTranslator.REQUESTS)
+
+    FakeTranslator.REQUESTS.clear()
+    FakeTranslator.SCRIPT = [backend_down]  # one failure, the retry works
+    TranslateStage().run(ep, CFG)
+    assert all(c.error is None for c in _out(ep).cues)
+
+
+def third_previous_is_clean(requests: list[TranslateRequest]) -> bool:
+    # after a failed window the next one gets no previous lines
+    return requests[2].previous == []
+
+
+@pytest.mark.usefixtures("fake")
+def test_every_window_failing_on_the_backend_aborts(ep):
+    _three_windows(ep)
+    FakeTranslator.SCRIPT = [backend_down] * 6
+    with pytest.raises(TranslateBackendError, match="3 windows in a row"):
+        TranslateStage().run(ep, CFG)
+    assert FakeTranslator.LOG == ["load", "unload"]
+
+
+@pytest.mark.usefixtures("fake")
+def test_too_large_prompt_drops_context_then_splits(ep):
+    _three_windows(ep)
+
+    def picky(req):
+        if req.previous or len(req.cues) > 1:
+            raise PromptTooLargeError("prompt of about 9000 tokens exceeds 4096")
+        c = req.cues[0]
+        return {c.id: Rendering(literal=None, text=f"ok {c.id}", direction=None)}
+
+    FakeTranslator.SCRIPT = [picky] * 20
+    TranslateStage().run(ep, CFG)
+    assert all(c.text == f"ok {c.id}" for c in _out(ep).cues)
+    sent = [r for r in FakeTranslator.REQUESTS if len(r.cues) == 1 and not r.previous]
+    assert sorted(r.cues[0].id for r in sent) == ["c0001", "c0002", "c0003", "c0004"]
+
+
+@pytest.mark.usefixtures("fake")
+def test_one_cue_too_large_is_marked(ep):
+    def never(_req):
+        raise PromptTooLargeError("prompt too large")
+
+    FakeTranslator.SCRIPT = [never] * 10
+    TranslateStage().run(ep, CFG)
+    assert all(c.error == "translate: prompt too large" for c in _out(ep).cues)
+
+
+@pytest.mark.usefixtures("fake")
+def test_empty_catchphrase_targets_are_not_sent(ep):
+    card = CARD.replace('target = "I\'m all fired up!"', 'target = ""').format(voice="x")
+    cid = CardStore(ep.workspace_root).put(parse_card(card))
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.assign_card(1, "en", cid, "assign", False)
+    TranslateStage().run(ep, CFG)
+    assert FakeTranslator.REQUESTS[0].styles["Natsu"].catchphrases == []
+
+
+@pytest.mark.usefixtures("fake")
+def test_leftover_llama_server_on_the_gpu_is_named(ep, monkeypatch):
+    monkeypatch.setattr(translate, "device_string", lambda _cfg: "cuda:0")
+    monkeypatch.setattr(translate, "gpu_processes", lambda _dev: [(4242, "llama-server")])
+    with pytest.raises(RuntimeError, match="4242.*llama-server"):
+        TranslateStage().run(ep, CFG)
+    assert FakeTranslator.LOG == []  # never loaded
+
+
+FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "fake_llama_server.py"
+
+
+@pytest.mark.parametrize("failure", ["400", "500", "sleep"])
+def test_real_backend_errors_mark_the_window(ep, tmp_path, monkeypatch, failure):
+    import sys
+
+    from fukikae.backends.translate.llama_server import LlamaServer
+    from fukikae.backends.translate.openai_compat import OpenAICompatTranslator
+
+    wrapper = tmp_path / "llama-server"
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FIXTURE}" "$@"\n')
+    wrapper.chmod(0o755)
+    plan = tmp_path / "plan.txt"
+    plan.write_text(f"{failure}\n{failure}\n")
+    monkeypatch.setenv("FAKE_LLAMA_FAIL", str(plan))
+    monkeypatch.setattr(translate, "identity_key", lambda _k, _bc: {"model": "m", "revision": None})
+    monkeypatch.setattr(translate, "device_string", lambda _cfg: "cpu")
+    with LlamaServer(str(wrapper), tmp_path / "m.gguf", 0) as server:
+        opts = {"mode": "external", "base_url": server.base_url + "/v1", "timeout_s": 1}
+        monkeypatch.setattr(
+            translate, "create", lambda _k, _bc, dev: OpenAICompatTranslator(dict(opts), dev)
+        )
+        cfg = Config(source_language="ja", raw={"translate": {"backend": "openai_compat"}})
+        TranslateStage().run(ep, cfg)
+    out = _out(ep).cues
+    assert all(c.text is None and (c.error or "").startswith("translate: backend:") for c in out)

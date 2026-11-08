@@ -25,10 +25,13 @@ from huggingface_hub import hf_hub_download
 from fukikae.backends.translate.llama_server import LlamaServer
 from fukikae.config import ConfigError
 from fukikae.translation import (
+    PromptTooLargeError,
     Rendering,
+    TranslateBackendError,
     TranslateFormatError,
     TranslateRequest,
     build_messages,
+    estimate_tokens,
     parse_response,
     response_schema,
 )
@@ -42,10 +45,6 @@ OPTIONS = frozenset(
     }
 )  # fmt: skip
 DEFAULT_VRAM_MB = 10000
-
-
-class TranslateBackendError(RuntimeError):
-    """The endpoint could not be reached or answered with an HTTP error."""
 
 
 class OpenAICompatTranslator:
@@ -104,6 +103,7 @@ class OpenAICompatTranslator:
         server.__enter__()
         self._server = server
         self._base_url = server.base_url + "/v1"
+        self._key = server.api_key
 
     def unload(self) -> None:
         server, self._server = self._server, None
@@ -131,13 +131,21 @@ class OpenAICompatTranslator:
             raise TranslateBackendError(
                 f"{self._base_url}: HTTP {e.code} from chat/completions: {detail}"
             ) from None
-        except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        except (OSError, ValueError) as e:  # URLError, a timeout, a reset, a bad body
             raise TranslateBackendError(f"{self._base_url}: {type(e).__name__}: {e}") from None
 
     def translate(self, req: TranslateRequest) -> dict[str, Rendering]:
+        messages = build_messages(req)
+        room = self.ctx - self.max_tokens
+        need = estimate_tokens(messages)
+        if need > room:
+            raise PromptTooLargeError(
+                f"prompt of about {need} tokens exceeds the {room} the context leaves "
+                f"(ctx {self.ctx} - max_tokens {self.max_tokens})"
+            )
         body = {
             "model": self.model or "default",
-            "messages": build_messages(req),
+            "messages": messages,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "response_format": {

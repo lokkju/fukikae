@@ -10,7 +10,11 @@ Cues go to the translator in scene windows with the previous window's lines, the
 asked once more; a second failure leaves its cues with ``error`` and no ``text`` (tts skips
 them, and the mix keeps the original vocals there). Cues that come back longer than their
 budget are asked once more, together, with 85% of the budget; the shorter of the two
-renderings is kept, and anything still long is left to time fitting, never cut.
+renderings is kept, and one still long is flagged (``over_budget``, ``overrun``) and left to
+time fitting, never cut. A backend error (HTTP error, timeout) is retried once, then marks
+only that window (``error = "translate: backend: ..."``), and the stage goes on; three such
+windows in a row stop it. A prompt too large for the context is sent again without the
+previous lines, then in halves.
 
 ``[translate] source``: ``auto`` and ``asr`` build cues from the transcript; ``subs`` is the
 subtitle-first path, not built yet. Stage settings (``max_speed``, ``source``,
@@ -34,14 +38,16 @@ from fukikae.backends.loader import create
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.cues import build_asr_cues, is_marked, windows
-from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpu import device_string, free_mb, gpu_processes, wait_for_vram
 from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript
 from fukikae.registry.store import Registry
 from fukikae.stages.language import LanguageResult
 from fukikae.translation import (
+    PromptTooLargeError,
     Rendering,
     RequestCue,
     StyleNote,
+    TranslateBackendError,
     TranslateFormatError,
     TranslateRequest,
 )
@@ -54,8 +60,11 @@ STAGE_KEYS = ("max_speed", "source", "subs_condense")
 SOURCES = ("auto", "asr", "subs")
 DEFAULT_MAX_SPEED = 1.25
 RETRY_BUDGET = 0.85
+# Windows in a row that fail on the backend (HTTP error, timeout) before the stage gives up:
+# one bad window is marked and skipped, but a dead endpoint shouldn't mark a whole episode.
+MAX_BACKEND_FAILURES = 3
 # Bump when the prompt or the cue rules change what the stage writes for the same inputs.
-PROMPT_VERSION = 2
+PROMPT_VERSION = 3
 
 
 class TranslateStage:
@@ -199,7 +208,12 @@ class TranslateStage:
                 address=style.get("address", ""),
                 tics=style.get("tics", ""),
                 notes=style.get("notes", ""),
-                catchphrases=[(p["source"], p["target"]) for p in style.get("catchphrases", [])],
+                # a derived card's catchphrase has an empty target: no fixed rendering
+                catchphrases=[
+                    (p["source"], p["target"])
+                    for p in style.get("catchphrases", [])
+                    if p["source"].strip() and p["target"].strip()
+                ],
             )
             log.debug("style for %s from card %s", names.get(cid, cid), card_id)
         return out
@@ -243,6 +257,16 @@ class TranslateStage:
             backend = create("translate", BackendConfig(bc.backend, options), device)
             # Only a managed server takes GPU memory here; an external endpoint takes none.
             managed = getattr(backend, "mode", "managed") == "managed"
+            if device.startswith("cuda") and managed:
+                leftover = [
+                    (pid, name) for pid, name in gpu_processes(cfg.gpu_device) if "llama" in name
+                ]
+                if leftover:
+                    listed = ", ".join(f"pid {pid} ({name})" for pid, name in leftover)
+                    raise RuntimeError(
+                        f"GPU {cfg.gpu_device} already runs {listed}, probably left over from an "
+                        "earlier run; stop it (`kill <pid>`) and run again"
+                    )
             if device.startswith("cuda") and managed and backend.vram_mb > 0:
                 wait_for_vram(
                     cfg.gpu_device,
@@ -263,7 +287,11 @@ class TranslateStage:
                 )
             finally:
                 backend.unload()
-        over = sum(1 for c in todo if c.text is not None and len(c.text) > c.budget)
+        for c in todo:
+            if c.text is not None:
+                c.overrun = max(0, len(c.text) - c.budget)
+                c.over_budget = c.overrun > 0
+        over = sum(1 for c in todo if c.over_budget)
         failed = sum(1 for c in todo if c.error is not None)
         log.info(
             "translate %s: %d cue(s), %d skipped, %d over budget, %d failed, %.0f s",
@@ -314,12 +342,66 @@ class TranslateStage:
 
     @staticmethod
     def _ask(backend: Translator, req: TranslateRequest) -> dict[str, Rendering]:
-        """One retry on a format error; the second error propagates."""
+        """One retry on a format or backend error; the second error propagates."""
         try:
             return backend.translate(req)
-        except TranslateFormatError as e:
+        except (TranslateFormatError, TranslateBackendError) as e:
             log.warning("translate: %s; asking once more", e)
             return backend.translate(req)
+
+    def _render(
+        self,
+        backend: Translator,
+        cues: list[DubCue],
+        previous: list[tuple[str, str]],
+        styles: dict[int, StyleNote],
+        glossary: dict[str, str],
+        src: str,
+        target: str,
+    ) -> None:
+        """Translate ``cues``, or mark them with ``error``. A prompt too large for the context
+        is sent again without the previous lines, then split in halves, down to one cue."""
+        req = self._request(cues, styles, glossary, previous, src, target)
+        try:
+            got = self._ask(backend, req)
+        except PromptTooLargeError as e:
+            if previous:
+                self._render(backend, cues, [], styles, glossary, src, target)
+            elif len(cues) > 1:
+                half = len(cues) // 2
+                for part in (cues[:half], cues[half:]):
+                    self._render(backend, part, [], styles, glossary, src, target)
+            else:
+                cues[0].error = f"translate: {e}"
+            return
+        except TranslateFormatError as e:
+            for c in cues:
+                c.error = f"translate: {e}"
+            return
+        except TranslateBackendError as e:
+            for c in cues:
+                c.error = f"translate: backend: {e}"
+            return
+        for c in cues:
+            r = got[c.id]
+            c.literal, c.text = r.literal, r.text
+            c.delivery.direction = r.direction
+        long = [c for c in cues if len(cast(str, c.text)) > c.budget]
+        if not long:
+            return
+        tight = {c.id: math.floor(c.budget * RETRY_BUDGET) for c in long}
+        retry = self._request(long, styles, glossary, previous, src, target, tight)
+        try:
+            again = backend.translate(retry)
+        except (TranslateFormatError, TranslateBackendError, PromptTooLargeError) as e:
+            log.warning("translate: over-budget retry failed (%s); keeping the first", e)
+            again = {}
+        for c in long:
+            r = again.get(c.id)
+            # keep the shorter rendering; anything still long is left to time fitting
+            if r is not None and len(r.text) < len(cast(str, c.text)):
+                c.literal, c.text = r.literal, r.text
+                c.delivery.direction = r.direction or c.delivery.direction
 
     def _translate_all(
         self,
@@ -331,31 +413,21 @@ class TranslateStage:
         target: str,
     ) -> None:
         previous: list[tuple[str, str]] = []
+        in_a_row = 0
         for window in windows(todo):
-            req = self._request(window, styles, glossary, previous, src, target)
-            try:
-                got = self._ask(backend, req)
-            except TranslateFormatError as e:
-                for c in window:
-                    c.error = f"translate: {e}"
-                previous = []
-                continue
-            for c in window:
-                r = got[c.id]
-                c.literal, c.text = r.literal, r.text
-                c.delivery.direction = r.direction
-            long = [c for c in window if len(cast(str, c.text)) > c.budget]
-            if long:
-                tight = {c.id: math.floor(c.budget * RETRY_BUDGET) for c in long}
-                retry = self._request(long, styles, glossary, previous, src, target, tight)
-                try:
-                    again = backend.translate(retry)
-                except TranslateFormatError as e:
-                    log.warning("translate: over-budget retry failed (%s); keeping the first", e)
-                    again = {}
-                for c in long:
-                    r = again.get(c.id)
-                    if r is not None and len(r.text) < len(cast(str, c.text)):
-                        c.literal, c.text = r.literal, r.text
-                        c.delivery.direction = r.direction or c.delivery.direction
-            previous = [(c.source_text, cast(str, c.text)) for c in window]
+            self._render(backend, window, previous, styles, glossary, src, target)
+            if all((c.error or "").startswith("translate: backend:") for c in window):
+                in_a_row += 1
+                if in_a_row >= MAX_BACKEND_FAILURES:
+                    raise TranslateBackendError(
+                        f"{in_a_row} windows in a row failed on the backend; giving up "
+                        f"(last: {window[-1].error})"
+                    )
+            else:
+                in_a_row = 0
+            done = [c for c in window if c.text is not None]
+            previous = (
+                [(c.source_text, cast(str, c.text)) for c in done]
+                if len(done) == len(window)
+                else []
+            )

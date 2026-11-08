@@ -103,7 +103,8 @@ class Delivery(BaseModel):
 
 class DubCue(BaseModel):
     """One line to dub. ``speaker`` is the registry name, ``char<id>`` or ``extra:<cluster>``;
-    ``budget`` is the most characters the slot can speak at ``max_speed``. ``text`` is None
+    ``budget`` is the most characters the slot can speak at ``max_speed``; ``over_budget`` and
+    ``overrun`` flag a rendering left longer than that for time fitting. ``text`` is None
     when the cue is skipped (``skip`` names why) or failed (``error`` says how)."""
 
     id: str
@@ -119,6 +120,9 @@ class DubCue(BaseModel):
     delivery: Delivery
     skip: str | None = None
     error: str | None = None
+    # Set when ``text`` is still longer than ``budget`` after the retry: by how many characters.
+    over_budget: bool = False
+    overrun: int = 0
 
 
 class DubCues(BaseModel):
