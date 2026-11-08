@@ -312,7 +312,14 @@ def parse_ttml_cues(text: str) -> list[Cue]:
 
 
 def read_text(path: Path) -> str:
-    return Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    """UTF-16 by its BOM, else UTF-8 (a UTF-8 BOM dropped); newlines translated to `\\n` as
+    `Path.read_text` does."""
+    raw = Path(path).read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = raw.decode("utf-16", errors="replace")
+    else:
+        text = raw.decode("utf-8-sig", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def read_cues(path: Path) -> list[Cue]:

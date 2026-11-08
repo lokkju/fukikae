@@ -158,8 +158,58 @@ def test_high_residual_refuses() -> None:
         for i, c in enumerate(lab)
     ]
     rep = fit_to_reference(lab, ref, "en")
-    with pytest.raises(AlignmentError, match="rms"):
+    with pytest.raises(AlignmentError, match="rms") as err:
         check_fit(rep)
+    assert "step" not in str(err.value)
+    assert rep.max_resid_s == pytest.approx(0.4, abs=0.02)
+
+
+def _stepped(step: float) -> tuple[list[Cue], list[Cue]]:
+    lab = _labelled()
+    ref = _mapped(lab, 1.0, 12.5)
+    ref = [Cue(c.start + step, c.end + step, c.text) if c.start > 440.0 else c for c in ref]
+    return lab, ref
+
+
+@pytest.mark.parametrize("step", [0.5, 0.8, 1.0])
+def test_small_step_refuses_and_names_it(step: float) -> None:
+    lab, ref = _stepped(step)
+    rep = fit_to_reference(lab, ref, "en")
+    assert rep.step is not None
+    assert rep.step.size_s == pytest.approx(step, abs=0.05)
+    assert 400.0 < rep.step.at_s < 450.0
+    with pytest.raises(AlignmentError, match="step") as err:
+        check_fit(rep)
+    assert "+12.50" in str(err.value) and f"{12.5 + step:+.2f}" in str(err.value)
+    check_fit(rep, force=True)
+
+
+def test_clean_fit_has_no_step() -> None:
+    lab = _labelled()
+    rep = fit_to_reference(lab, _mapped(lab, 1.001, 12.5), "en")
+    assert rep.step is None or abs(rep.step.size_s) < 0.01
+    assert rep.max_resid_s < 0.01
+
+
+def test_far_anchor_refuses_on_max_residual() -> None:
+    lab = _labelled()
+    ref = _mapped(lab, 1.0, 12.5)
+    ref[30] = Cue(ref[30].start + 0.9, ref[30].end, ref[30].text)
+    rep = fit_to_reference(lab, ref, "en")
+    with pytest.raises(AlignmentError, match="max residual"):
+        check_fit(rep)
+
+
+def test_utf16_subtitles_read_and_retime(tmp_path: Path) -> None:
+    text = "1\r\n00:00:02,000 --> 00:00:04,500\r\nこんにちは\r\n"
+    for codec, bom in (("utf-16-le", b"\xff\xfe"), ("utf-16-be", b"\xfe\xff")):
+        src = tmp_path / f"{codec}.srt"
+        src.write_bytes(bom + text.encode(codec))
+        assert read_cues(src) == [Cue(2.0, 4.5, "こんにちは")]
+        dst = tmp_path / f"{codec}-out.srt"
+        assert retime_file(src, dst, TimeMap(1.0, 1.0)) == (1, 0)
+        want = text.replace("00:00:02,000 --> 00:00:04,500", "00:00:03,000 --> 00:00:05,500")
+        assert dst.read_bytes() == bom + want.encode(codec)
 
 
 def test_speech_fit_recovers_frame_rate_drift() -> None:
@@ -257,6 +307,7 @@ def test_cli_writes_retimed_file_and_refuses_bad_fit(tmp_path: Path) -> None:
     )
     assert r.exit_code == 0, r.output
     assert "text" in r.output and "1.0010" in r.output and "+12.50" in r.output
+    assert "max residual" in r.output
     got = read_cues(out)
     assert got[0].start == pytest.approx(1.001 * lab[0].start + 12.5, abs=0.002)
     assert got[0].text == lab[0].text
