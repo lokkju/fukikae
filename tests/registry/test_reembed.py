@@ -142,10 +142,8 @@ def make_registry(tmp_path, monkeypatch, spans=100, embedder=Q) -> tuple[Workspa
     _resolve(ws, "S01E01,S01E02")
     with Registry(ws.registry_path) as reg:
         assert set(reg.episode_counts(ana)) == {"S01E01", "S01E02"}  # added after the lock
-    con = sqlite3.connect(ws.registry_path)
-    con.execute("UPDATE characters SET voice = ? WHERE id = ?", ('{"voice": "v1"}', cid))
-    con.commit()
-    con.close()
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", "0" * 16, by="assign", locked=True)
     FakeEmbedder.calls.clear()
     return ws, ana
 
@@ -161,10 +159,11 @@ def curation(ws: Workspace):
     with Registry(ws.registry_path) as reg:
         actors = [(a.id, a.name, a.external_id, a.locked) for a in reg.actors()]
         chars = reg.characters()
+        cards = [(c.id, reg.card_history(c.id, "en")) for c in chars]
     con = sqlite3.connect(ws.registry_path)
     hw = con.execute("SELECT tbl, last FROM id_high_water ORDER BY tbl").fetchall()
     con.close()
-    return actors, chars, hw
+    return actors, chars, cards, hw
 
 
 def snapshot(ws: Workspace):
