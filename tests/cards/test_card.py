@@ -1,5 +1,6 @@
+import json
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -9,7 +10,14 @@ from fukikae.cards.card import (
     CARD_SOURCES,
     Card,
     CardError,
+    Fingerprint,
+    Reference,
     Voice,
+    _card_dict,
+    _fingerprint_dict,
+    _reference_dict,
+    _voice_dict,
+    canonical_form,
     card_id,
     dump_card,
     parse_card,
@@ -220,9 +228,9 @@ class Fake:
         pass
 
     @classmethod
-    def validate_options(cls, options: dict[str, Any]) -> None:
+    def validate_options(cls, options: dict[str, Any], source: str | None = None) -> None:
         if "steps" in options:
-            raise CardError("fake: unknown option 'steps'")
+            raise CardError(f"fake: unknown option 'steps' (source {source})")
 
     def synthesize(
         self,
@@ -256,7 +264,8 @@ def test_validate_for_backend_accepts_supported_card():
 
 def test_validate_for_backend_rejects_unsupported_source_and_key():
     with pytest.raises(CardError, match="fake does not support source 'clone'"):
-        validate_for_backend(parse_card(SPEC_CARD), Fake)
+        spec = parse_card(SPEC_CARD)
+        validate_for_backend(replace(spec, voice=replace(spec.voice, backend="fake")), Fake)
     with pytest.raises(CardError, match="temperature"):
         validate_for_backend(_stock(temperature=0.7), Fake)
     with pytest.raises(CardError, match="steps"):
@@ -293,3 +302,178 @@ def test_backend_kinds_and_synthesizer_protocol():
     assert {"tag", "translate", "tts"} <= set(KINDS)
     for attr in ("sources", "voice_keys", "capabilities", "sample_rate", "synthesize"):
         assert attr in Synthesizer.__dict__ or attr in Synthesizer.__annotations__
+
+
+def test_validate_for_backend_refuses_a_card_of_another_backend():
+    kokoro = _stock(backend="kokoro")
+    with pytest.raises(CardError, match=r"'kokoro'.*'fake'"):
+        validate_for_backend(kokoro, Fake)
+
+
+def test_eq_error_lists_presets_sorted():
+    with pytest.raises(CardError, match=r"use one of none$"):
+        validate_for_backend(_stock(post={"eq": "bright"}), Fake)
+
+
+# --- CD1: every field of an id-bearing dataclass reaches the canonical dict ----------------
+
+FULL_REFERENCE = Reference(
+    clip=CLIP, transcript="t", language="ja", origin={"episode": "S01E11", "start": 1.5}
+)
+FULL_FINGERPRINT = Fingerprint(embedder="wespeaker:resnet34", vector=VECTOR, threshold=0.85)
+FULL_VOICE = Voice(
+    backend="b",
+    model_revision="r",
+    source="clone",
+    seed=7,
+    temperature=0.5,
+    top_p=0.5,
+    rate=1.5,
+    pitch_semitones=1.0,
+    emotion_strength=0.5,
+    voice="v",
+    voices=(("v", 1.0),),
+    references=(FULL_REFERENCE,),
+    latent="sha256:" + "b" * 64,
+    description="d",
+    blend={"with": "v", "weight": 0.5},
+    options={"steps": 3},
+    post={"gain_db": 1.0},
+    fingerprint=FULL_FINGERPRINT,
+)
+
+
+def test_every_voice_field_is_in_the_canonical_dict():
+    """Set every field off its default; each must appear. A new Voice field fails here until
+    _voice_dict handles it (and this test sets it), so it can't drop out of the id and file."""
+    for f in fields(Voice):
+        assert getattr(FULL_VOICE, f.name) != getattr(Voice("", "", ""), f.name), f.name
+    assert set(_voice_dict(FULL_VOICE, fingerprint=True)) == {f.name for f in fields(Voice)}
+    assert set(_voice_dict(FULL_VOICE, fingerprint=False)) == {f.name for f in fields(Voice)} - {
+        "fingerprint"
+    }
+
+
+def test_every_reference_fingerprint_and_card_field_is_dumped():
+    assert set(_reference_dict(FULL_REFERENCE)) == {f.name for f in fields(Reference)}
+    assert set(_fingerprint_dict(FULL_FINGERPRINT)) == {f.name for f in fields(Fingerprint)}
+    card = Card(target_language="en", voice=FULL_VOICE, style={"notes": "n"}, meta={"title": "x"})
+    assert set(_card_dict(card, identity=False)) == {f.name for f in fields(Card)}
+    assert set(_card_dict(card, identity=True)) == {f.name for f in fields(Card)} - {"meta"}
+
+
+def test_adding_a_defaulted_field_would_not_change_existing_ids():
+    # Fields at their default are left out, so the canonical form of a minimal card names
+    # only what it sets.
+    assert set(json.loads(canonical_form(parse_card(STOCK_CARD)))["voice"]) == {
+        "backend",
+        "model_revision",
+        "source",
+        "voice",
+    }
+
+
+# --- normalization -------------------------------------------------------------------------
+
+
+def test_empty_style_is_no_style():
+    plain = parse_card(STOCK_CARD)
+    empty = parse_card(STOCK_CARD + "\n[style]\n")
+    assert empty.style is None
+    assert card_id(empty) == card_id(plain)
+    assert card_id(replace(plain, style={})) == card_id(plain)
+
+
+def test_option_numbers_are_normalized():
+    a = parse_card(STOCK_CARD + "\n[voice.options]\nsteps = 3\n")
+    b = parse_card(STOCK_CARD + "\n[voice.options]\nsteps = 3.0\n")
+    assert a == b and card_id(a) == card_id(b)
+    code_built = _stock(options={"steps": 3.0})
+    assert card_id(code_built) == card_id(a)
+    assert card_id(_stock(rate=2)) == card_id(_stock(rate=2.0))
+
+
+def test_text_is_nfc_normalized():
+    composed = "\u30ac"  # ガ
+    decomposed = "\u30ab\u3099"  # カ + combining voiced mark
+    a = parse_card(SPEC_CARD.replace("なんだよ", composed))
+    b = parse_card(SPEC_CARD.replace("なんだよ", decomposed))
+    assert a.voice.references[0].transcript.startswith(composed)
+    assert card_id(a) == card_id(b)
+    sa = parse_card(SPEC_CARD.replace("燃えてきたぞ", composed))
+    sb = parse_card(SPEC_CARD.replace("燃えてきたぞ", decomposed))
+    assert card_id(sa) == card_id(sb)
+    da = _stock(description="caf\u00e9")
+    db = _stock(description="cafe\u0301")
+    assert card_id(da) == card_id(db)
+
+
+# --- ranges --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "key"),
+    [
+        ("rate = 0", "rate"),
+        ("rate = -1.0", "rate"),
+        ("temperature = 0.0", "temperature"),
+        ("top_p = 0.0", "top_p"),
+        ("top_p = 1.5", "top_p"),
+        ("seed = -1", "seed"),
+        ("emotion_strength = -0.1", "emotion_strength"),
+        ("emotion_strength = 1.5", "emotion_strength"),
+        ("rate = nan", "rate"),
+        ("pitch_semitones = inf", "pitch_semitones"),
+        ("temperature = -inf", "temperature"),
+    ],
+)
+def test_voice_numbers_out_of_range_are_refused(line: str, key: str):
+    with pytest.raises(CardError, match=key):
+        parse_card(STOCK_CARD + line + "\n")
+
+
+def test_top_p_one_and_emotion_bounds_are_accepted():
+    parse_card(STOCK_CARD + "top_p = 1.0\nemotion_strength = 0.0\nseed = 0\n")
+
+
+@pytest.mark.parametrize(
+    ("extra", "key"),
+    [
+        ('\n[voice.blend]\nwith = "af_bella"\nweight = -0.1\n', "weight"),
+        ('\n[voice.blend]\nwith = "af_bella"\nweight = nan\n', "weight"),
+        ("\n[voice.post]\ngain_db = inf\n", "gain_db"),
+        ("\n[voice.options]\nsteps = nan\n", "options"),
+    ],
+)
+def test_table_numbers_out_of_range_are_refused(extra: str, key: str):
+    with pytest.raises(CardError, match=key):
+        parse_card(STOCK_CARD + extra)
+
+
+def test_blend_voice_weights_must_be_finite_and_non_negative():
+    base = STOCK_CARD.replace('source = "stock"', 'source = "blend"')
+    for w in ("-0.5", "inf"):
+        with pytest.raises(CardError, match="weight"):
+            parse_card(
+                base.replace('voice = "af_heart"', f'voices = [{{ id = "a", weight = {w} }}]')
+            )
+    with pytest.raises(CardError, match="threshold"):
+        parse_card(SPEC_CARD.replace("threshold = 0.85", "threshold = nan"))
+
+
+# --- meta ----------------------------------------------------------------------------------
+
+
+def test_unknown_meta_keys_are_kept_and_outside_the_id():
+    c = parse_card(SPEC_CARD.replace('author = "lokkju"', 'author = "lokkju"\nrating = 5'))
+    assert c.meta["rating"] == 5
+    assert "rating = 5" in dump_card(c)
+    assert parse_card(dump_card(c)) == c
+    assert card_id(c) == card_id(parse_card(SPEC_CARD))
+
+
+def test_known_meta_keys_are_type_checked():
+    with pytest.raises(CardError, match="title"):
+        parse_card(SPEC_CARD.replace('title = "Natsu', 'title = 3\nx = "Natsu'))
+    with pytest.raises(CardError, match="created"):
+        parse_card(SPEC_CARD.replace("created = 2026-11-08", "created = 3"))
