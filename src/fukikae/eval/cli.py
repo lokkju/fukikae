@@ -411,6 +411,46 @@ def transcript_align_cmd(
         typer.echo(f"{ref}: cues {res.cue_share:.0%}, words {res.word_share:.0%}; {who}")
 
 
+@eval_app.command("bazinga-labels")
+def bazinga_labels_cmd(
+    annotations: list[Path] = typer.Argument(..., help="Bazinga annotation .txt files."),
+    out: Path = typer.Option(..., "--out", help="Output directory for <SxxEyy>.ass."),
+    min_confidence: float = typer.Option(
+        0.9, "--min-confidence", help="Words below this confidence never set a turn's span."
+    ),
+    time_scale: float = typer.Option(
+        1.0, "--time-scale", help="Multiply every time (1.04271 for audio slowed to film speed)."
+    ),
+) -> None:
+    """Named-ASS ground truth from Bazinga's word-level speaker annotations."""
+    from fukikae.eval.groundtruth.bazinga import episode_code, read_words, words_to_turns
+    from fukikae.eval.groundtruth.transcript import write_named_ass
+
+    try:
+        done: dict[str, tuple[Path, Any, Any]] = {}
+        for path in annotations:
+            words = read_words(path)
+            if not words:
+                raise ValueError(f"{path}: no annotation lines")
+            ref = episode_code(words[0].episode)
+            if ref in done:
+                raise ValueError(f"{path} and {done[ref][0]} are both {ref}")
+            lines, stats = words_to_turns(words, min_confidence, time_scale)
+            done[ref] = (path, lines, stats)
+        out.mkdir(parents=True, exist_ok=True)
+        for ref, (_, lines, _) in done.items():
+            write_named_ass(out / f"{ref}.ass", lines)
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    for ref, (_, _, s) in sorted(done.items()):
+        why = ", ".join(f"{k} {v}" for k, v in sorted(s.dropped.items())) or "none"
+        typer.echo(
+            f"{ref}: words kept {s.kept}, dropped {why}; turns {s.turns} "
+            f"({s.turns_dropped} with no confident word dropped); speakers {len(s.speakers)}"
+        )
+
+
 @eval_app.command("colour-map")
 def colour_map_cmd(
     workspace: Path = typer.Argument(..., help="Workspace directory."),
