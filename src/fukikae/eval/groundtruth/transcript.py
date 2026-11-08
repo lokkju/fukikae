@@ -23,6 +23,7 @@ MIN_MAJORITY = 0.6
 TRANSCRIPT_SKIP = {"scene", "credits sequence", "teleplay", "story", "written by"}
 GROUP_SPEAKERS = {"all", "both", "everyone", "together"}
 
+_WORDS = re.compile(r"\w+")
 _LINE = re.compile(r"^([^:]{1,40}):\s*(.+)$")
 _PAREN = re.compile(r"\([^)]*\)")
 _WHOLLY_PAREN = re.compile(r"^\(.*\)[\W_]*$")
@@ -107,6 +108,11 @@ def read_transcript(path: Path) -> list[TranscriptLine]:
     return out
 
 
+def _is_group(speaker: str) -> bool:
+    """Several speakers: any word of the name is a group word (`All together`, `Everyone`)."""
+    return any(w in GROUP_SPEAKERS for w in _WORDS.findall(speaker.casefold()))
+
+
 def _tokens(text: str, language: str) -> list[str]:
     norm = normalize(text, language)
     return list(norm) if language.split("-")[0] in _CJK_LANGUAGES else norm.split()
@@ -119,7 +125,7 @@ def align_transcript(
     ref: list[str] = []
     ref_speaker: list[str | None] = []
     for ln in lines:
-        name = None if ln.speaker.casefold() in GROUP_SPEAKERS else namer(ln.speaker)
+        name = None if _is_group(ln.speaker) else namer(ln.speaker)
         toks = _tokens(ln.text, language)
         ref += toks
         ref_speaker += [name] * len(toks)

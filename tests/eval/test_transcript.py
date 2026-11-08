@@ -130,6 +130,23 @@ def test_group_speakers_are_dropped() -> None:
     assert align_transcript(lines, cues, Namer()).named == []
 
 
+@pytest.mark.parametrize(
+    ("speaker", "kept"),
+    [
+        ("All together", False),
+        ("Everyone", False),
+        ("Both", False),
+        ("Leonard, Sheldon and Howard together", False),
+        ("Leonard", True),
+        ("Mrs Cooper", True),
+    ],
+)
+def test_group_speaker_words_anywhere_in_the_name(speaker: str, kept: bool) -> None:
+    lines = _tl((speaker, "Hello Penny, welcome to the neighborhood!"))
+    cues = [Cue(0, 2, "Hello Penny, welcome to the neighborhood!")]
+    assert bool(align_transcript(lines, cues, Namer()).named) is kept
+
+
 def test_aliases_apply() -> None:
     lines = _tl(("Dr. Cooper", "Bazinga, that was a good joke indeed"))
     cues = [Cue(0, 2, "Bazinga, that was a good joke indeed")]
