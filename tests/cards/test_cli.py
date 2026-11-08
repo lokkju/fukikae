@@ -233,3 +233,30 @@ def test_tomllib_reads_show_output_card(tmp_path: Path):
     r = invoke("show", str(ws.root), "Natsu")
     toml_part = r.output.split("\n\n", 1)[1]
     assert tomllib.loads(toml_part)["voice"]["voice"] == "af_heart"
+
+
+def test_revert_refuses_a_card_missing_from_the_store(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    a = store.put(parse_card(STOCK_CARD))
+    b = store.put(parse_card(STOCK_CARD.replace("af_heart", "am_adam")))
+    assert invoke("assign", str(ws.root), "Natsu", a).exit_code == 0
+    assert invoke("assign", str(ws.root), "Natsu", b).exit_code == 0
+    store.card_path(a).unlink()
+    for args in ([], ["--to", "1"]):
+        r = invoke("revert", str(ws.root), "Natsu", *args)
+        assert r.exit_code == 1 and a in r.output and "not in the card store" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert _cur(reg, cid, "en").card_id == b and len(reg.card_history(cid, "en")) == 2
+    r = invoke("assign", str(ws.root), "Natsu", a)
+    assert r.exit_code == 1 and "not in the card store" in r.output
+
+
+def test_registry_merge_reports_the_card_that_lost(tmp_path: Path):
+    ws, c1, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        a2, c2 = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))
+        reg.assign_card(c1, "en", "a" * 16, by="assign", locked=True)
+        reg.assign_card(c2, "en", "b" * 16, by="assign", locked=True)
+    r = runner.invoke(app, ["registry", "merge", str(ws.root), "1", str(a2)])
+    assert r.exit_code == 0, r.output
+    assert "a" * 16 in r.output and "b" * 16 in r.output and "stays in history" in r.output

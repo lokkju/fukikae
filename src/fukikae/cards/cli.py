@@ -126,6 +126,8 @@ def assign(
                 f"{ref}: stock voices are not available yet (they arrive with the tts stage); "
                 "assign a card id from the store"
             )
+        if not store.has(ref):
+            raise _fail(f"card {ref} is not in the card store ({store.root}); nothing was assigned")
         card = store.get(ref)
         if card.target_language != language:
             raise _fail(
@@ -166,9 +168,16 @@ def revert(
     lang: str | None = _LANG,
 ) -> None:
     """Assign an earlier card again (locked), as a new history row."""
-    with _session(workspace, lang) as (reg, _, language):
+    with _session(workspace, lang) as (reg, store, language):
         char = reg.character_by_ref(character)
-        a = reg.revert_card(char.id, language, to)
+        with reg.transaction():  # a card missing from the store rolls the revert back
+            a = reg.revert_card(char.id, language, to)
+            assert a.card_id is not None
+            if not store.has(a.card_id):
+                raise ValueError(
+                    f"card {a.card_id} is not in the card store ({store.root}); nothing was "
+                    "reverted. Restore the card file or pick another history row with --to"
+                )
         typer.echo(f"{_label(char)} {language}: card {a.card_id} (history row {a.n})")
 
 
