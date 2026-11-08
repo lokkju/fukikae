@@ -235,3 +235,25 @@ def test_cli_rejects_unknown_embedder(tmp_path, monkeypatch):
         ],
     )
     assert res.exit_code != 0
+
+
+def test_folder_split_keeps_whole_folders_on_one_side():
+    clips = [
+        Clip("a", Path(f"/x/a/{emo}/{i}.wav"), None)
+        for emo, n in (("angry", 2), ("happy", 3), ("sad", 3))
+        for i in range(n)
+    ]
+    train, test, rule, skipped = split_clips(clips)
+    assert rule == "folder"
+    assert skipped == []
+    assert {c.path.parent.name for c in train} == {"angry", "happy"}
+    assert {c.path.parent.name for c in test} == {"sad"}
+
+
+def test_sherpa_ledger_row_records_the_onnx_file():
+    from fukikae.eval.ledger import model_identity
+
+    model, _ = model_identity("embed", BackendConfig("campplus", {}))
+    assert model == "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+    model, _ = model_identity("embed", BackendConfig("titanet", {"path": "/m/custom.onnx"}))
+    assert model == "custom.onnx"

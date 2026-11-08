@@ -7,7 +7,10 @@ involved, so the number isolates how well an embedder separates the characters.
 Split rule (the plan's "Clip-set split"): when every clip's file name carries an episode
 number, each character trains on the smallest prefix of its episodes holding at least half
 its clips and tests on the rest, so no episode sits on both sides. Otherwise the first half
-of each character's clips in sorted path order trains. A character with no clip on one side
+of each character's clips trains: by whole folders (a character's clips under two or more
+folders, e.g. emotions, train on the smallest prefix of its sorted folders holding at least
+half its clips, so no folder is on both sides and one take cannot leak across), else in sorted
+path order. A character with no clip on one side
 is not scored and is listed.
 """
 
@@ -70,11 +73,13 @@ def scan_clipset(
 
 
 def split_clips(clips: list[Clip]) -> tuple[list[Clip], list[Clip], str, list[str]]:
-    """(train, test, rule, characters not scorable); rule is "episode" or "half"."""
+    """(train, test, rule, characters not scorable); rule is "episode", "folder" (whole
+    folders), "half" (sorted path order) or "folder+half" (per character, both)."""
     by_char: dict[str, list[Clip]] = defaultdict(list)
     for c in clips:
         by_char[c.character].append(c)
     rule = "episode" if clips and all(c.episode is not None for c in clips) else "half"
+    used_folder = used_half = False
     train: list[Clip] = []
     test: list[Clip] = []
     skipped: list[str] = []
@@ -95,14 +100,39 @@ def split_clips(clips: list[Clip]) -> tuple[list[Clip], list[Clip], str, list[st
             side_train = [c for c in mine if c.episode in taken]
             side_test = [c for c in mine if c.episode not in taken]
         else:
-            ordered = sorted(mine, key=lambda c: str(c.path))
-            cut = (len(ordered) + 1) // 2
-            side_train, side_test = ordered[:cut], ordered[cut:]
+            folders: dict[Path, int] = defaultdict(int)
+            for c in mine:
+                folders[c.path.parent] += 1
+            if len(folders) >= 2:
+                used_folder = True
+                need = len(mine) / 2
+                taken_dirs: set[Path] = set()
+                total = 0
+                for d in sorted(folders):
+                    if total >= need:
+                        break
+                    taken_dirs.add(d)
+                    total += folders[d]
+                side_train = [c for c in mine if c.path.parent in taken_dirs]
+                side_test = [c for c in mine if c.path.parent not in taken_dirs]
+            else:
+                used_half = True
+                ordered = sorted(mine, key=lambda c: str(c.path))
+                cut = (len(ordered) + 1) // 2
+                side_train, side_test = ordered[:cut], ordered[cut:]
         if not side_train or not side_test:
             skipped.append(name)
             continue
         train += side_train
         test += side_test
+    if rule == "half":
+        rule = (
+            "folder"
+            if used_folder and not used_half
+            else "half"
+            if used_half and not used_folder
+            else "folder+half"
+        )
     return train, test, rule, skipped
 
 
