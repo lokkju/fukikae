@@ -86,6 +86,12 @@ _BLEND_KEYS = frozenset({"with", "weight"})
 _POST_KEYS = frozenset({"gain_db", "eq"})
 _FINGERPRINT_KEYS = frozenset({"embedder", "vector", "threshold"})
 _CATCHPHRASE_KEYS = frozenset({"source", "target"})
+# [style] size caps, checked at load so no card or pack carries more into a prompt. They
+# refuse, never truncate, so a card within them keeps its id (CD1).
+STYLE_TEXT_CAP = 300  # register, address, tics and any other free-text key
+STYLE_CAPS = {"notes": 1000}
+CATCHPHRASES_CAP = 20
+CATCHPHRASE_SIDE_CAP = 80
 
 # [voice] keys a backend must list in ``voice_keys`` to accept a non-default value. The
 # source's own field is covered by ``sources``; options are the backend's validate_options;
@@ -354,6 +360,12 @@ def _parse_voice(raw: Any) -> Voice:
     return Voice(**kw)
 
 
+def _capped(text: str, cap: int, what: str) -> str:
+    if len(text) > cap:
+        raise CardError(f"{what} is {len(text)} characters; the most a card may carry is {cap}")
+    return text
+
+
 def _parse_style(raw: Any) -> dict[str, Any]:
     where = "[style]"
     t = _table(raw, where)
@@ -362,19 +374,28 @@ def _parse_style(raw: Any) -> dict[str, Any]:
         if key == "catchphrases":
             if not isinstance(value, list):
                 raise CardError("[style] catchphrases must be an array of { source, target }")
+            if len(value) > CATCHPHRASES_CAP:
+                raise CardError(
+                    f"[style] catchphrases has {len(value)} entries; the most is {CATCHPHRASES_CAP}"
+                )
             phrases = []
             for entry in value:
                 e = _table(entry, "[style] catchphrases entry")
                 _check_keys(e, _CATCHPHRASE_KEYS, "[style] catchphrases entry")
                 phrases.append(
                     {
-                        k: _str(_require(e, k, "[style] catchphrases entry"), k, where)
+                        k: _capped(
+                            _str(_require(e, k, "[style] catchphrases entry"), k, where),
+                            CATCHPHRASE_SIDE_CAP,
+                            f"[style] catchphrases {k}",
+                        )
                         for k in ("source", "target")
                     }
                 )
             style[key] = phrases
         else:
-            style[key] = _str(value, key, where)
+            cap = STYLE_CAPS.get(key, STYLE_TEXT_CAP)
+            style[key] = _capped(_str(value, key, where), cap, f"[style] {key}")
     return style
 
 

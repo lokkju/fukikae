@@ -526,3 +526,47 @@ def test_origin_keeps_its_authored_type_and_shares_an_id():
     assert type(b.voice.references[0].origin["start"]) is int  # type: ignore[index]
     assert "start = 512.0" in dump_card(a)
     assert card_id(a) == card_id(b)
+
+
+def _styled(style: str) -> str:
+    return STOCK_CARD + "\n[style]\n" + style
+
+
+@pytest.mark.parametrize(
+    ("style", "message"),
+    [
+        (f'register = "{"r" * 301}"\n', "register.*300"),
+        (f'address = "{"a" * 301}"\n', "address.*300"),
+        (f'tics = "{"t" * 301}"\n', "tics.*300"),
+        (f'notes = "{"n" * 1001}"\n', "notes.*1000"),
+        (f'mood = "{"m" * 301}"\n', "mood.*300"),
+        (
+            "catchphrases = ["
+            + ", ".join(f'{{ source = "s{i}", target = "t{i}" }}' for i in range(21))
+            + "]\n",
+            "20",
+        ),
+        (f'catchphrases = [ {{ source = "{"s" * 81}", target = "t" }} ]\n', "source.*80"),
+        (f'catchphrases = [ {{ source = "s", target = "{"t" * 81}" }} ]\n', "target.*80"),
+    ],
+)
+def test_style_fields_are_capped_at_load(style, message):
+    with pytest.raises(CardError, match=message):
+        parse_card(_styled(style))
+
+
+def test_style_at_the_caps_loads_and_keeps_its_id():
+    text = _styled(
+        f'register = "{"r" * 300}"\nnotes = "{"n" * 1000}"\ncatchphrases = ['
+        + ", ".join(f'{{ source = "{"s" * 80}", target = "{i}" }}' for i in range(20))
+        + "]\n"
+    )
+    card = parse_card(text)
+    assert card_id(parse_card(dump_card(card))) == card_id(card)
+
+
+def test_caps_leave_existing_card_ids_alone():
+    # ids computed before the style caps existed (CD1): a card within the caps keeps its id
+    assert card_id(parse_card(SPEC_CARD)) == "31a12ee8813d8ba9"
+    styled = _styled('register = "rough"\ncatchphrases = [ { source = "a", target = "" } ]\n')
+    assert card_id(parse_card(styled)) == "6f04a42dacae1eca"
