@@ -1,10 +1,12 @@
 """Tag stage (optional): sound events and per-turn emotion from the vocals.
 
 Reads ``01-separate/vocals_16k.wav`` and ``04-diarize/turns.json``; writes
-``04b-tag/tags.json`` (a ``Tags``). Off unless ``[tag] enabled = true`` (the anime and
-live-action profiles turn it on); the workspace's table wins over the profile's. Runs on the
-CPU unless ``[tag] device = "cuda"``. ``enabled`` is not a backend option, so it stays out of
-the cache key.
+``04b-tag/tags.json`` (a ``Tags``). ``[tag] backend`` makes the events (and the emotions, unless
+``emotion_backend`` names a second backend, with its options in ``[tag.emotion]``: then that
+backend's scored emotions replace the first's, which is handed no turns). Off unless
+``[tag] enabled = true`` (the anime and live-action profiles turn it on); the workspace's table
+wins over the profile's. Runs on the CPU unless ``[tag] device = "cuda"``. ``enabled`` is not a
+backend option, so it stays out of the cache key.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
 from fukikae.config import BackendConfig, Config
 from fukikae.gpu import device_string, free_mb, wait_for_vram
-from fukikae.models import Diarization
+from fukikae.models import Diarization, Tags, Turn
 from fukikae.workspace import Episode
 
 _sleep = time.sleep
@@ -46,26 +48,35 @@ class TagStage:
         return [ep.work / "04b-tag" / "tags.json"]
 
     @staticmethod
-    def _backend_cfg(cfg: Config) -> tuple[BackendConfig, str]:
+    def _backend_cfg(cfg: Config) -> tuple[BackendConfig, BackendConfig | None, str]:
+        """(events backend, emotion backend or None, device); `device` serves both."""
         bc = cfg.resolve("tag")
-        options = {k: v for k, v in bc.options.items() if k not in ("enabled", "device")}
-        return BackendConfig(bc.backend, options), str(bc.options.get("device", "cpu"))
+        skip = ("enabled", "device", "emotion_backend", "emotion")
+        options = {k: v for k, v in bc.options.items() if k not in skip}
+        device = str(bc.options.get("device", "cpu"))
+        name = bc.options.get("emotion_backend")
+        emotion = None
+        if name:
+            sub = bc.options.get("emotion")
+            emotion = BackendConfig(str(name), dict(sub) if isinstance(sub, dict) else {})
+        return BackendConfig(bc.backend, options), emotion, device
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
-        bc, device = self._backend_cfg(cfg)
+        bc, ebc, device = self._backend_cfg(cfg)
         return {
             "backend": bc.backend,
             "options": bc.options,
             "device": device,
             "identity": identity_key("tag", bc),
+            "emotion_backend": ebc.backend if ebc else None,
+            "emotion_options": ebc.options if ebc else None,
+            "emotion_identity": identity_key("tag", ebc) if ebc else None,
         }
 
-    def run(self, ep: Episode, cfg: Config) -> None:
-        audio, turns_path = self.inputs(ep)
-        (out,) = self.outputs(ep)
-        bc, want = self._backend_cfg(cfg)
-        device = device_string(cfg) if want == "cuda" else "cpu"
-        turns = read_json(turns_path, Diarization).turns
+    @staticmethod
+    def _run_one(
+        bc: BackendConfig, device: str, cfg: Config, audio: Path, turns: list[Turn]
+    ) -> Tags:
         backend = create("tag", bc, device)
         if device.startswith("cuda"):
             wait_for_vram(
@@ -73,8 +84,22 @@ class TagStage:
             )
         try:
             backend.load()
-            tags = cast(Tagger, backend).tag(audio, turns)
+            return cast(Tagger, backend).tag(audio, turns)
         finally:
             backend.unload()
+
+    def run(self, ep: Episode, cfg: Config) -> None:
+        audio, turns_path = self.inputs(ep)
+        (out,) = self.outputs(ep)
+        bc, ebc, want = self._backend_cfg(cfg)
+        device = device_string(cfg) if want == "cuda" else "cpu"
+        turns = read_json(turns_path, Diarization).turns
+        # With a separate emotion backend the events backend decodes no turns.
+        tags = self._run_one(bc, device, cfg, audio, [] if ebc else turns)
+        if ebc:
+            scored = self._run_one(ebc, device, cfg, audio, turns)
+            tags = tags.model_copy(
+                update={"emotions": scored.emotions, "emotion_backend": scored.backend}
+            )
         out.parent.mkdir(parents=True, exist_ok=True)
         write_json(out, tags)

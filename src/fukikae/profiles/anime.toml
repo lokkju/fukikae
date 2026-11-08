@@ -19,8 +19,10 @@ backend = "pyannote"
 [embed]
 backend = "wespeaker"
 
-[tag]   # character-cards Task 3: event spans and per-turn emotion, SenseVoiceSmall on the CPU
+[tag]   # character-cards Tasks 3 and 3b, both on the CPU: SenseVoiceSmall for sound events, emotion2vec+ large for
+# the scored per-turn emotion (SenseVoice labels about 9% of turns and gives no score)
 backend = "sensevoice"
+emotion_backend = "emotion2vec"
 enabled = true
 
 [characters]

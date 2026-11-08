@@ -121,3 +121,92 @@ def test_shipped_profiles_enable_tag(tmp_path, profile):
 def test_default_profile_leaves_tag_off(tmp_path):
     (tmp_path / "fukikae.toml").write_text("")
     assert not tag_enabled(load_config(tmp_path, user_config=None))
+
+
+class FakeEmotion(FakeTagger):
+    name: ClassVar[str] = "fake-emotion"
+
+    def __init__(self, options: dict[str, Any], device: str) -> None:
+        LOG.append(("init-emotion", dict(options), device))
+
+    def tag(self, audio: Path, turns: list[Turn]) -> Tags:
+        LOG.append(("tag-emotion", audio.name, len(turns)))
+        return Tags(
+            backend="fake-emotion",
+            events=[],
+            emotions=[
+                TagSpan(start=t.start, end=t.end, label="angry", confidence=0.9) for t in turns
+            ],
+        )
+
+
+EMO_CFG = Config(
+    raw={
+        "tag": {
+            "backend": "fake",
+            "enabled": True,
+            "emotion_backend": "fake-emotion",
+            "emotion": {"revision": "abc"},
+        }
+    }
+)
+
+
+@pytest.fixture
+def fake2(monkeypatch):
+    LOG.clear()
+
+    def create(_kind, bc, dev):
+        return (FakeEmotion if bc.backend == "fake-emotion" else FakeTagger)(bc.options, dev)
+
+    monkeypatch.setattr(tag, "create", create)
+
+
+@pytest.mark.usefixtures("fake2")
+def test_emotion_backend_supplies_emotions_and_events_backend_the_events(ep):
+    TagStage().run(ep, EMO_CFG)
+    (out,) = TagStage().outputs(ep)
+    tags = read_json(out, Tags)
+    assert tags.backend == "fake"
+    assert tags.emotion_backend == "fake-emotion"
+    assert tags.events == [TagSpan(start=0.0, end=7.5, label="bgm")]
+    assert [(s.label, s.confidence) for s in tags.emotions] == [("angry", 0.9)] * 2
+    # the events backend is handed no turns, so it decodes no emotion; options are split
+    assert ("init", {}, "cpu") in LOG
+    assert ("init-emotion", {"revision": "abc"}, "cpu") in LOG
+    assert ("tag", "vocals_16k.wav", 0) in LOG
+    assert ("tag-emotion", "vocals_16k.wav", 2) in LOG
+    assert LOG.count("unload") == 2
+
+
+def test_config_key_includes_both_identities(monkeypatch, ep):
+    from fukikae.backends import identity
+
+    seen = {}
+
+    def mi(_k, bc):
+        return (f"m-{bc.backend}-{seen.get('v')}", None)
+
+    monkeypatch.setattr(identity, "model_identity", mi)
+    seen["v"] = 1
+    a = TagStage().config_key(EMO_CFG, ep)
+    seen["v"] = 2
+    b = TagStage().config_key(EMO_CFG, ep)
+    assert a["identity"]["model"] == "m-fake-1"
+    assert a["emotion_identity"]["model"] == "m-fake-emotion-1"
+    assert a != b
+    assert a["emotion_backend"] == "fake-emotion" and a["emotion_options"] == {"revision": "abc"}
+    assert "emotion_backend" not in a["options"] and "emotion" not in a["options"]
+
+
+def test_no_emotion_backend_keeps_the_single_backend_key(ep):
+    key = TagStage().config_key(CFG, ep)
+    assert key["emotion_backend"] is None and key["emotion_identity"] is None
+
+
+@pytest.mark.parametrize("profile", ["anime", "live-action"])
+def test_shipped_profiles_take_emotion_from_emotion2vec(tmp_path, profile):
+    (tmp_path / "fukikae.toml").write_text(f'profile = "{profile}"\n')
+    cfg = load_config(tmp_path, user_config=None)
+    assert cfg.resolve("tag").options["emotion_backend"] == "emotion2vec"
+    assert cfg.resolve("tag").backend == "sensevoice"
