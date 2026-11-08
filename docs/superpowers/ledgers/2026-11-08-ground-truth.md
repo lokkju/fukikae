@@ -78,3 +78,62 @@ Labelled speech per character in the tuning episodes (E01, E02; live-action rows
 Raj recurs nowhere because he has under 5 s in E01 on every track. Ledger option hashes: bbt live-action `ad0ed977`, bbt default `fbfe504c`, aib live-action `c442755e`, aib default `1f881519`. The genre column reads `live-action` in all rows, the default copies included, through `[series] genre`.
 
 On BBT en, live-action and default give identical assignments. On the German and Spanish dubs, both profiles put Leonard and Sheldon (and in es, Howard too) on one id, while nearest-centroid accuracy on the same speech is 96-99%. The embeddings separate the voices; clustering at 0.6 merges them.
+
+## Task 7c: Bazinga English sets and the transcript-aligner check (D18)
+
+Run 2026-11-08 at b323629 (`feat(eval): bazinga-labels`). Data: `bazinga/bazinga` at revision 96db30ff, TBBT and The Office S01E01-E05 under `~/fukikae-ws/bazinga/data/`; nothing from it is in git.
+
+### Labels
+
+`fukikae eval bazinga-labels` at `--min-confidence 0.9`, scale 1.0 (`-pal`) and 1.04271 (`-film`), into `~/fukikae-ws/subs/bazinga/<show>-<condition>/S01E<NN>.ass`. Both conditions keep the same words and turns:
+
+| Episode | TBBT kept / low-conf / pseudo, turns (dropped), speakers | Office kept / low-conf / pseudo, turns (dropped), speakers |
+|---|---|---|
+| S01E01 | 3282 / 593 / 0, 345 (2), 7 | 3052 / 669 / 0, 295 (5), 14 |
+| S01E02 | 2705 / 727 / 0, 272 (2), 5 | 3216 / 593 / 0, 277 (1), 12 |
+| S01E03 | 2898 / 731 / 0, 292 (2), 9 | 3128 / 610 / 0, 313 (0), 12 |
+| S01E05 | 2546 / 551 / 7, 255 (0), 6 | 2595 / 960 / 4, 280 (3), 15 |
+
+S01E04 was converted too and is unused.
+
+### Media and workspaces
+
+Each wav is remuxed into an audio-only .mkv (`~/fukikae-ws/media/bazinga-<show>-<condition>/<Show> - S01E<NN>.mkv`, language eng), because episode lookup by code only finds video suffixes. The film copies go through `asetrate=16000*0.95904,aresample=16000`; ffmpeg rounds the rate to 15345 Hz, so the real stretch is 1.042685 against the labels' 1.04271, a 2.4e-5 mismatch (0.03 s at the end of an episode). Workspaces `bazinga-{tbbt,office}-{pal,film}` (profile live-action, `[series] genre = "live-action"`), diarized on S01E01-E03 and S01E05 at about 4 minutes an episode; `/` went from 125 GB to 116 GB free.
+
+### Film-speed check
+
+VAD (webrtcvad, mode 3) onsets against label turn starts on S01E01 (`~/fukikae-ws/bazinga/tools/vadcheck.py`):
+
+| Condition | Median abs(onset - start) | Within 0.2 s (random times) | Global lag | Drift (robust fit) |
+|---|---|---|---|---|
+| tbbt-pal | 0.070 s | 79% (50%) | +0.02 s | +8e-6 s/s |
+| tbbt-film | 0.070 s | 79% (51%) | +0.01 s | -2.4e-5 s/s |
+| office-pal | 0.080 s | 76% (49%) | -0.01 s | -1.3e-5 s/s |
+| office-film | 0.080 s | 74% (48%) | -0.02 s | -6.3e-5 s/s |
+
+On TBBT, 8-9 of the 2-minute windows lock onto a spurious +1.1 to +1.5 s lag in both conditions alike; the robust fit drops windows more than 0.3 s from the median. `eval subalign --speech` of each condition's S01E01 labels against its own workspace: scale 1.000000 everywhere, offset +0.02 s (tbbt-pal), +0.00 s (tbbt-film, office-pal, office-film), labels over speech 95%, 94%, 85%, 85%.
+
+### Baselines on tuning episodes (tag `t7c-baseline-pal` / `t7c-baseline-film`)
+
+Ledger sets `bazinga-tbbt` and `bazinga-office`; the condition is the tag's suffix, since a shared tag would put both conditions in one matrix cell. Procedure as Task 7 (live-action: `registry resolve` then `eval identity --from-assignments`; default: `cp -al` copy, profile line removed, characters stage per episode). Option hashes are Task 7's: live-action `ad0ed977`, default `fbfe504c`. JSON results in `~/fukikae-ws/t7c/`.
+
+| Set | Condition | Profile | Recurring | Clean | Merges | Fraction | Coverage | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| bazinga-tbbt | pal | live-action | 4 | 4 | 0 | 1.00 | 55% | pass |
+| bazinga-tbbt | pal | default | 4 | 4 | 0 | 1.00 | 55% | pass |
+| bazinga-tbbt | film | live-action | 4 | 4 | 0 | 1.00 | 58% | pass |
+| bazinga-tbbt | film | default | 4 | 4 | 0 | 1.00 | 58% | pass |
+| bazinga-office | pal | live-action | 3 | 3 | 0 | 1.00 | 40% | pass |
+| bazinga-office | pal | default | 3 | 2 | 0 | 0.67 | 40% | fail |
+| bazinga-office | film | live-action | 4 | 3 | 0 | 0.75 | 41% | fail |
+| bazinga-office | film | default | 4 | 3 | 0 | 0.75 | 41% | fail |
+
+TBBT recurring: Leonard, Sheldon, Penny, Howard (Raj has 2 s of labelled speech in E01). Office recurring: Michael, Dwight, Jim, plus Pam on film only: her E02 labelled speech over diarized segments is 4.3 s on PAL and 6.1 s on film, so the 5 s bar itself moves with the condition. Every Office failure is Dwight's S01E01 on a different id from his E02/E03 id (share 0.73, 0.79, 0.63), never a merge. Nearest-centroid accuracy is 97-100% in every run. PAL against film changes no TBBT number; on The Office the one real difference is live-action's Dwight, kept on PAL and split on film.
+
+### Transcript-aligner check (TBBT S01E01-E03)
+
+Bazinga's film-scaled labels retimed onto bbt-en with `subalign --speech`: S01E01 scale 1.000000, offset +0.76 s, 94% over speech; S01E02 0.999001, +0.90 s, 93%; S01E03 0.999001, +0.86 s, 91%. The text route against `release-en` agreed on scale (0.9999, 0.9992, 0.9989) but refused on residuals (1.5-1.7 s max), because word-turn onsets and subtitle cue onsets differ by more than its 0.5 s bound. After the retime the speaker-agnostic lag between the two label sets is +0.04, +0.10 and -0.02 s.
+
+Agreement over frames where both name exactly one speaker (`~/fukikae-ws/bazinga/tools/agree.py`): S01E01 97.7% of 715 s, S01E02 98.4% of 580 s, S01E03 98.5% of 663 s; **98.17% over 1958 s**. Line level (each of our lines against the gold speaker holding most of its time): 1039 of 1058 (98.2%). Name map: leonard_hofstadter Leonard, sheldon_cooper Sheldon, penny Penny, howard_wolowitz Howard, raj_koothrappali Raj, leslie_winkle Lesley, althea Receptionist, kurt Enormous man, instructor Class instructor, doug Doug, waitress Waitress.
+
+The 19 disagreeing lines: one-word cues in fast exchanges whose subtitle display lags the speech into the next speaker's turn ("Done." / "Got it."); runs of repeated short tokens ("Hi." four times) where difflib pairs a cue with the wrong transcript instance; Bazinga's own errors, a speaker boundary one word late ("Exactly half." is Sheldon's, gold gives it to Leonard) and words missing from gold ("Okay.", "Six-thirty."); and Kurt, called "Enormous man" once and "Man" once by the transcript, which is an alias gap, not an alignment error.
