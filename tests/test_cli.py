@@ -17,6 +17,28 @@ def test_doctor_runs():
     assert "huggingface" in r.stdout.lower()
 
 
+def test_doctor_reports_llama_server_and_its_version(tmp_path, monkeypatch):
+    from fukikae import doctor
+
+    fake = tmp_path / "llama-server"
+    fake.write_text("#!/bin/sh\necho 'version: 0.9.0-dev (build 12201, commit a2b3)' >&2\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    rows = {label: (ok, detail) for label, ok, detail in doctor.doctor()}
+    ok, detail = rows["llama-server"]
+    assert ok and str(fake) in detail and "build 12201" in detail
+    monkeypatch.setenv("PATH", "/nonexistent")
+    rows = {label: (ok, detail) for label, ok, detail in doctor.doctor()}
+    assert rows["llama-server"][0] is False
+
+
+def test_translate_is_the_last_stage_without_tag():
+    from fukikae.cli import pipeline_stages
+    from fukikae.config import Config
+
+    assert [s.name for s in pipeline_stages(Config())][-2:] == ["characters", "translate"]
+
+
 @pytest.mark.ffmpeg
 def test_run_command_extracts(tmp_path, readonly_copy):
     ws = tmp_path / "ws"

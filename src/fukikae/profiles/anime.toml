@@ -30,3 +30,13 @@ matcher = "centroid"   # the per-episode stage; joint runs through [resolve]
 matcher = "joint"
 threshold = 0.6
 episode_cannot_link = true
+
+[translate]   # character-cards Task 4: a managed llama-server on gpu_device with Qwen3-8B Q6_K
+backend = "openai_compat"
+mode = "managed"
+model = "Qwen/Qwen3-8B-GGUF"
+file = "Qwen3-8B-Q6_K.gguf"
+revision = "7c41481f57cb95916b40956ab2f0b139b296d974"
+max_speed = 1.25
+source = "auto"
+subs_condense = true

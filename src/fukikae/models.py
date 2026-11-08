@@ -87,3 +87,45 @@ class Assignments(BaseModel):
     # The turns the cluster labels refer to; the next run pins against them. Written with
     # the assignments so the two can never disagree. Absent in older files.
     turns: list[Turn] | None = None
+
+
+class Delivery(BaseModel):
+    """How a cue was spoken, for the tts stage: ``reference`` is the cue's span on the
+    separated vocals (the emotion reference audio), ``emotion`` comes from the tag stage when
+    it ran, and ``direction`` is the translator's short free-text tag for marked delivery."""
+
+    reference: tuple[float, float]
+    emotion: str | None = None
+    emotion_confidence: float | None = None
+    direction: str | None = None
+
+
+class DubCue(BaseModel):
+    """One line to dub. ``speaker`` is the registry name, ``char<id>`` or ``extra:<cluster>``;
+    ``budget`` is the most characters the slot can speak at ``max_speed``. ``text`` is None
+    when the cue is skipped (``skip`` names why) or failed (``error`` says how)."""
+
+    id: str
+    start: float
+    end: float
+    character_id: int | None
+    extra: str | None
+    speaker: str
+    source_text: str
+    literal: str | None = None
+    text: str | None = None
+    budget: int
+    delivery: Delivery
+    skip: str | None = None
+    error: str | None = None
+
+
+class DubCues(BaseModel):
+    """The translate stage's artifact, ``06-translate/cues.<target>.json``."""
+
+    schema_version: int = 1
+    episode: str
+    source_language: str
+    target_language: str
+    path: Literal["asr", "subs"]
+    cues: list[DubCue]

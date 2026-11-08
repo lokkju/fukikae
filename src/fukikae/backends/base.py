@@ -12,6 +12,7 @@ from fukikae.models import Diarization, Separation, Tags, Transcript, Turn
 
 if TYPE_CHECKING:
     from fukikae.cards.card import Voice
+    from fukikae.translation import Rendering, TranslateRequest
 
 KINDS = ("separation", "asr", "align", "diarize", "embed", "lid", "tag", "translate", "tts")
 
@@ -73,6 +74,13 @@ class Embedder(Backend, Protocol):
 class Tagger(Backend, Protocol):
     def tag(self, audio: Path, turns: list[Turn]) -> Tags:
         """Sound-event spans over `audio` and one emotion span per turn."""
+        ...
+
+
+class Translator(Backend, Protocol):
+    def translate(self, req: TranslateRequest) -> dict[str, Rendering]:
+        """One rendering per cue id of ``req``; ``TranslateFormatError`` when the model's
+        answer is not the requested JSON."""
         ...
 
 
