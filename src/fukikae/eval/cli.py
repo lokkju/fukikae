@@ -255,6 +255,12 @@ def auto_label_cmd(
     force: bool = typer.Option(
         False, "--force", help="Score even when the subtitles do not line up with the speech."
     ),
+    colour_anonymous: str = typer.Option(
+        None,
+        "--colour-anonymous",
+        help="With --source colour and a labels-colours.yaml: drop (default), series "
+        "(colour:<name>) or episode (<name>@<episode>) for colours the map lacks.",
+    ),
 ) -> None:
     """Label every clean span from the speaker names, tags or colours in the episodes' subtitles."""
     from fukikae.eval import autolabel
@@ -270,7 +276,7 @@ def auto_label_cmd(
             aliases[src.strip()] = dst.strip()
         result = autolabel.auto_label(
             workspace, refs, out, subtitle_track, min_overlap, aliases,
-            source=source, gt_file=gt_file, force=force,
+            source=source, gt_file=gt_file, force=force, colour_anonymous=colour_anonymous,
         )  # fmt: skip
     except (FileNotFoundError, ValueError, MediaError) as e:
         typer.echo(f"error: {e}", err=True)
@@ -403,6 +409,62 @@ def transcript_align_cmd(
     for ref, res in results:
         who = ", ".join(f"{n} {c}" for n, c in sorted(res.speakers.items(), key=lambda x: -x[1]))
         typer.echo(f"{ref}: cues {res.cue_share:.0%}, words {res.word_share:.0%}; {who}")
+
+
+@eval_app.command("colour-map")
+def colour_map_cmd(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    episodes: str = typer.Option(..., "--episodes", help="Comma-separated, e.g. S01E01,S01E02."),
+    gt_file: Path = typer.Option(
+        ..., "--gt-file", help="Colour-caption file, or a directory matched by SxxEyy."
+    ),
+    alias: list[str] = typer.Option(
+        None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
+    ),
+    write: bool = typer.Option(False, "--write", help="Write WORKSPACE/labels-colours.yaml."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing labels-colours.yaml."),
+) -> None:
+    """Map each caption colour to a character from the named lines of all the episodes."""
+    from fukikae.eval.autolabel import gt_path_for
+    from fukikae.eval.groundtruth.base import Namer, load_alias_file, read_cues
+    from fukikae.eval.groundtruth.colour import (
+        COLOUR_MAP_FILE,
+        colour_counts,
+        propose_colour_map,
+        write_colour_map,
+    )
+
+    refs = [e.strip().upper() for e in episodes.split(",") if e.strip()]
+    target = workspace / COLOUR_MAP_FILE
+    try:
+        aliases = load_alias_file(workspace / "labels-aliases.yaml")
+        for item in alias or []:
+            src, sep, dst = item.partition("=")
+            if not sep or not src.strip() or not dst.strip():
+                raise ValueError(f"--alias {item!r}: expected FROM=TO")
+            aliases[src.strip()] = dst.strip()
+        if write and target.exists() and not force:
+            raise ValueError(f"{target} exists; --force overwrites it")
+        cues = {ref: read_cues(gt_path_for(gt_file, ref, len(refs))) for ref in refs}
+        counts = colour_counts(cues, Namer(aliases))
+        mapping, conflicts = propose_colour_map(counts)
+        colours = sorted({c for per in counts.values() for c in per})
+        for col in colours:
+            cells = []
+            for ref in refs:
+                c = counts[ref].get(col)
+                if c:
+                    cells.append(f"{ref} " + ", ".join(f"{n} {k}" for n, k in c.most_common()))
+            typer.echo(f"{col}: " + ("; ".join(cells) if cells else "no tagged lines"))
+        typer.echo("map: " + (", ".join(f"{c} -> {n}" for c, n in mapping.items()) or "(empty)"))
+        for line in conflicts:
+            typer.echo(f"conflict: {line}")
+        if write:
+            write_colour_map(target, mapping)
+            typer.echo(f"wrote {target}")
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
 
 
 def _register_identity() -> None:

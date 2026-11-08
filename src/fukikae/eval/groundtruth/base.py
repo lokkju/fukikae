@@ -112,6 +112,7 @@ class Cue:
     start: float
     end: float
     text: str
+    style: str = ""  # the ASS event's style name; empty for other formats
 
 
 COLOURS: dict[str, tuple[int, int, int]] = {
@@ -223,8 +224,9 @@ def _ass_text(raw: str) -> str:
 
     def override(m: re.Match[str]) -> str:
         out = ""
-        for c in re.finditer(r"\\1?c&H([0-9A-Fa-f]{1,6})&?", m.group(0)):
-            v = c.group(1).rjust(6, "0")
+        for c in re.finditer(r"\\1?c&H([0-9A-Fa-f]{1,8})&?", m.group(0)):
+            v = c.group(1)
+            v = v[-6:] if len(v) > 6 else v.rjust(6, "0")  # AABBGGRR: drop the alpha byte
             b, g, r = int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)
             out = f"<c.{colour_from_rgb(r, g, b)}>"
         if "\\r" in m.group(0) and not out:
@@ -255,7 +257,7 @@ def parse_ass_cues(text: str) -> list[Cue]:
                 start, end = _stamp(d["start"]), _stamp(d["end"])
             except (KeyError, ValueError):
                 continue
-            cues.append(Cue(start, end, _ass_text(d.get("text", ""))))
+            cues.append(Cue(start, end, _ass_text(d.get("text", "")), d.get("style", "")))
     return cues
 
 

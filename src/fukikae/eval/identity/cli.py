@@ -136,9 +136,12 @@ def _ground_truth(
     n_episodes: int,
     subtitle_track: int | None,
     aliases: dict[str, str],
+    colour_names: dict[str, str] | None = None,
+    colour_anonymous: str | None = None,
 ) -> tuple[Path, list[GroundTruthLine]]:
     from fukikae.eval import autolabel
     from fukikae.eval.groundtruth import Kind, read_ground_truth
+    from fukikae.eval.groundtruth.colour import Anonymous
     from fukikae.media import probe
 
     if gt_file is not None:
@@ -153,7 +156,15 @@ def _ground_truth(
             _, path = autolabel.choose_text_track(
                 ep.source, pr, scratch, kind, ws.config.source_language, subtitle_track
             )
-    return path, read_ground_truth(path, cast(Kind, kind), aliases, episode=eid)
+    lines = read_ground_truth(
+        path,
+        cast(Kind, kind),
+        aliases,
+        episode=eid,
+        colour_names=colour_names,
+        anonymous=cast(Anonymous, colour_anonymous or "drop") if colour_names else None,
+    )
+    return path, lines
 
 
 def _pooled(
@@ -206,6 +217,7 @@ def run_identity(
     aliases: dict[str, str] | None = None,
     force: bool = False,
     from_assignments: bool = False,
+    colour_anonymous: str | None = None,
 ) -> IdentityRun:
     import numpy as np
 
@@ -213,6 +225,7 @@ def run_identity(
     from fukikae.eval.groundtruth import KINDS as GT_KINDS
     from fukikae.eval.groundtruth import check_alignment
     from fukikae.eval.groundtruth.base import load_alias_file
+    from fukikae.eval.groundtruth.colour import workspace_colour_map
     from fukikae.eval.identity.cache import EmbeddingCache, ResidentEmbedder, cache_root
     from fukikae.eval.identity.metrics import MIN_SPEECH_S, nearest_centroid_accuracy, score
     from fukikae.eval.identity.segments import KINDS as SEG_KINDS
@@ -272,6 +285,7 @@ def run_identity(
         except TypeError as e:
             raise ValueError(f"matcher {matcher}: {e}") from e
     merged_aliases = {**load_alias_file(ws.root / "labels-aliases.yaml"), **(aliases or {})}
+    colour_map = workspace_colour_map(ws.root, gt_kind, colour_anonymous)
 
     refs = list(tune) + ([holdout] if holdout else [])
     order = ids + ([hold_id] if hold_id else [])
@@ -293,8 +307,9 @@ def run_identity(
             if not (work / "04-diarize").is_dir():
                 raise FileNotFoundError(f"{eid}: no diarization under {work / '04-diarize'}")
             path, lines = _ground_truth(
-                ws, ref, eid, gt_kind, gt_file, len(refs), subtitle_track, merged_aliases
-            )
+                ws, ref, eid, gt_kind, gt_file, len(refs), subtitle_track, merged_aliases,
+                colour_map, colour_anonymous,
+            )  # fmt: skip
             lines, rep, applied = check_alignment(
                 lines,
                 speech_turns(work),
@@ -389,6 +404,9 @@ def run_identity(
         "min_speech": floor,
         "profile": cfg.profile,
     }
+    if colour_map:
+        settings["colour_map"] = colour_map
+        settings["colour_anonymous"] = colour_anonymous or "drop"
     if segmentation == "asr":
         settings["segment_embedder"] = {
             "backend": seg_emb_cfg.backend,
@@ -636,6 +654,13 @@ def identity_cmd(
     alias: list[str] = typer.Option(
         None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
     ),
+    colour_anonymous: str = typer.Option(
+        None,
+        "--colour-anonymous",
+        help="With --gt colour and a labels-colours.yaml: what to do with colours the map "
+        "lacks. drop (default) excludes them; series keeps them as colour:<name>; episode as "
+        "<name>@<episode>.",
+    ),
     segmentation: str = typer.Option(
         "diarization",
         "--segmentation",
@@ -728,6 +753,7 @@ def identity_cmd(
             gt_file=gt_file,
             subtitle_track=subtitle_track,
             aliases=parse_aliases(alias),
+            colour_anonymous=colour_anonymous,
             force=force,
             from_assignments=from_assignments,
         )
