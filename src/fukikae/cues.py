@@ -36,7 +36,8 @@ MIN_BUDGET = 4
 
 # Languages written without spaces between words.
 _NO_SPACE = frozenset({"ja", "zh", "yue", "th", "lo", "km", "my"})
-_FINAL = frozenset("。！？!?…‥.")
+_FINAL = frozenset("。．！？!?…‥.")  # sentence ends; the ideographic comma 、 is not one
+_INTERJECTION = frozenset("！？!?〜～")  # marks of a spoken interjection
 _MANNER = re.compile(r"[(（][^()（）]{1,40}[)）]")
 # A word under no turn takes the nearest turn this close, else it is an unknown extra.
 NEAREST_TURN_S = 1.0
@@ -44,8 +45,8 @@ NEAREST_TURN_S = 1.0
 # next word starts, for at most WORD_SOUND_S from its start.
 POINT_STAMP_S = 0.1
 WORD_SOUND_S = 0.3
-# A cue of at most this many characters (punctuation aside), shorter than FRAGMENT_S and
-# touching a neighbour of the same ASR segment within FRAGMENT_GAP_S, is a piece of that
+# A cue of at most this many characters (punctuation aside) that touches a neighbour of the
+# same ASR segment within FRAGMENT_GAP_S may be a piece of that neighbour (see _join_fragments)
 # neighbour cut off by a turn boundary falling inside a word.
 FRAGMENT_CHARS = 2
 FRAGMENT_S = 0.35
@@ -132,30 +133,55 @@ def _near(out: list[_Group], i: int, j: int) -> bool:
     return gap <= FRAGMENT_GAP_S and seg in {p[0] for p in pairs}
 
 
+def _text(group: _Group) -> str:
+    return "".join(w.text for _, w in group[1]).strip()
+
+
+def _can_fold(out: list[_Group], i: int, j: int) -> bool:
+    """Whether fragment i may fold into neighbour j.
+
+    Only a fragment under FRAGMENT_S, and never back into a sentence the neighbour has
+    closed. Then either (a) a mid-word sliver: no punctuation on either side of the junction
+    and no interjection mark in the fragment, which may end a sentence (it began in the cue
+    before); or (b) a piece with no sentence-end or interjection mark at all. A lone "え？"
+    between another speaker's lines is neither.
+    """
+    if not _near(out, i, j):
+        return False
+    frag, other = _text(out[i]), _text(out[j])
+    if not frag or not other:
+        return False
+    junction = (other[-1], frag[0]) if j < i else (frag[-1], other[0])
+    marked = any(ch in _FINAL or ch in _INTERJECTION for ch in frag)
+    sliver = not any(_is_punct(ch) for ch in junction) and not any(
+        ch in _INTERJECTION for ch in frag
+    )
+    ws = [w for _, w in out[i][1]]
+    if ws[-1].end - ws[0].start >= FRAGMENT_S:
+        return False  # a piece that long was spoken as its own line
+    if j < i and other[-1] in _FINAL:
+        return False  # never into a sentence the neighbour has closed
+    return sliver or not marked
+
+
 def _join_fragments(groups: list[_Group]) -> list[_Group]:
-    """Fold turn-boundary fragments into a neighbour: one that ends a sentence into the cue
-    before it, any other into the cue after it, when that neighbour is in the same segment."""
+    """Fold turn-boundary fragments into a neighbour of the same segment (see _can_fold): one
+    that ends a sentence only into the cue before it, any other forward first."""
     out = list(groups)
     i = 0
     while i < len(out):
-        _, pairs = out[i]
-        ws = [w for _, w in pairs]
-        text = "".join(
-            ch for ch in "".join(w.text for w in ws) if not _is_punct(ch) and not ch.isspace()
-        )
-        if len(text) > FRAGMENT_CHARS or ws[-1].end - ws[0].start >= FRAGMENT_S:
+        frag = _text(out[i])
+        bare = "".join(ch for ch in frag if not _is_punct(ch) and not ch.isspace())
+        if len(bare) > FRAGMENT_CHARS:
             i += 1
             continue
-
-        ends_sentence = _is_punct(ws[-1].text.strip()[-1:])
-        prev_closed = i > 0 and out[i - 1][1][-1][1].text.strip()[-1:] in _FINAL
-        # a sentence end goes back; anything else goes forward, or back into an open sentence
-        order = [i - 1] if ends_sentence else [i + 1] + ([] if prev_closed else [i - 1])
-        j = next((j for j in order if _near(out, i, j)), None)
+        order = [i - 1] if frag[-1:] in _FINAL else [i + 1, i - 1]
+        j = next((j for j in order if _can_fold(out, i, j)), None)
         if j is None:
             i += 1
             continue
         key, other = out[j]
+        pairs = out[i][1]
         merged = other + pairs if j < i else pairs + other
         out[min(i, j)] = (key, merged)
         del out[max(i, j)]

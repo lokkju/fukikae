@@ -17,8 +17,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-# Longest delivery direction kept; a longer one is dropped as not a short tag.
+# A delivery direction reaches TTS backends that take instructions, so only a short plain tag
+# is kept: at most 60 characters and four words of letters, spaces and . , ' - (any script's
+# letters); anything else is dropped.
 MAX_DIRECTION_CHARS = 60
+MAX_DIRECTION_WORDS = 4
+_DIRECTION_CHARS = re.compile(r"[^\W\d_]+(?:[ ,.'-]+[^\W\d_]+)*[.]?")
+# Bytes of UTF-8 per token assumed when sizing a prompt without the model's tokenizer: low
+# on purpose (Japanese runs about 3 bytes a token, English about 4), so the estimate is high.
+BYTES_PER_TOKEN = 2.5
 
 LANGUAGE_NAMES = {
     "en": "English",
@@ -71,6 +78,28 @@ class Rendering(BaseModel):
 
 class TranslateFormatError(ValueError):
     """The response is not the JSON the request's schema asks for."""
+
+
+class TranslateBackendError(RuntimeError):
+    """The endpoint could not be reached, timed out, or answered with an HTTP error."""
+
+
+class PromptTooLargeError(ValueError):
+    """The request would not fit the model's context with room left for the answer."""
+
+
+def estimate_tokens(messages: list[dict[str, str]]) -> int:
+    """A deliberately high token count for chat messages (see BYTES_PER_TOKEN)."""
+    size = sum(len(m["content"].encode("utf-8")) for m in messages)
+    return int(size / BYTES_PER_TOKEN) + 16 * len(messages)
+
+
+def _direction(value: str | None) -> str | None:
+    if value is None or len(value) > MAX_DIRECTION_CHARS:
+        return None
+    if not _DIRECTION_CHARS.fullmatch(value) or len(value.split()) > MAX_DIRECTION_WORDS:
+        return None
+    return value
 
 
 def _lang(code: str) -> str:
@@ -149,6 +178,7 @@ def build_messages(req: TranslateRequest) -> list[dict[str, str]]:
         {"speaker": name, "source": s, "target": t}
         for name, note in sorted(req.styles.items())
         for s, t in note.catchphrases
+        if s.strip() and t.strip()  # a derived card's empty target is no rendering
     ]
     styles = {
         name: {k: v for k, v in dataclasses.asdict(note).items() if v and k != "catchphrases"}
@@ -219,8 +249,7 @@ def parse_response(req: TranslateRequest, content: str) -> dict[str, Rendering]:
         if line is None:
             raise TranslateFormatError(f"cue {cid}: text is empty")
         direction = _opt_str(value.get("direction"), cid, "direction") if cid in marked else None
-        if direction is not None and len(direction) > MAX_DIRECTION_CHARS:
-            direction = None
+        direction = _direction(direction)
         out[cid] = Rendering(
             literal=_opt_str(value.get("literal"), cid, "literal"), text=line, direction=direction
         )

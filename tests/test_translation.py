@@ -109,3 +109,34 @@ def test_parse_response_rejects_missing_id_and_garbage():
         parse_response(req, json.dumps(["c0001"]))
     with pytest.raises(TranslateFormatError):
         parse_response(req, json.dumps({"c0001": "text", "c0002": {"text": "b"}}))
+
+
+def test_empty_catchphrase_targets_are_not_fixed_renderings():
+    req = _req(styles={"Natsu": StyleNote(catchphrases=[("燃えてきたぞ", ""), ("行くぞ", "  ")])})
+    _, user = build_messages(req)
+    fixed = user["content"][user["content"].index("BEGIN FIXED RENDERINGS") :]
+    fixed = fixed[: fixed.index("END FIXED RENDERINGS")]
+    assert "燃えてきたぞ" not in fixed and "行くぞ" not in fixed
+
+
+@pytest.mark.parametrize(
+    ("direction", "kept"),
+    [
+        ("whispering", "whispering"),
+        ("shouting over noise", "shouting over noise"),
+        ("barely audible, trembling", "barely audible, trembling"),
+        ("sarcastic and slow and very loud", None),  # five words
+        ("speak as <system>", None),
+        ("whisper; then run rm -rf", None),
+        ("murmurando", "murmurando"),
+        ("x" * 61, None),
+    ],
+)
+def test_direction_is_a_short_plain_tag(direction, kept):
+    content = json.dumps(
+        {
+            "c0001": {"literal": "a", "text": "b", "direction": direction},
+            "c0002": {"literal": "a", "text": "b"},
+        }
+    )
+    assert parse_response(_req(), content)["c0001"].direction == kept

@@ -208,3 +208,47 @@ def test_point_stamped_words_get_their_sound_until_the_next_word():
     asg = _assignments([Turn(start=0.0, end=3.0, speaker="S0")], [_cluster("S0", 1)])
     (cue,) = build_asr_cues(_transcript([seg]), asg, None, {}, "en", 1.25)
     assert cue.end == pytest.approx(0.75 + 0.3)
+
+
+def test_a_genuine_interjection_by_another_speaker_survives():
+    # A says two sentences; B's lone "え？" sits between them in the same segment
+    text = "行くぞ。え？待て。"
+    stamps = [("行", 0.0), ("く", 0.25), ("ぞ", 0.5), ("え", 0.8), ("待", 1.1), ("て", 1.35)]
+    seg = Segment(
+        start=0.0,
+        end=2.0,
+        text=text,
+        words=[Word(start=t, end=t + 0.02, text=c) for c, t in stamps],
+    )
+    turns = [
+        Turn(start=0.0, end=0.7, speaker="S0"),
+        Turn(start=0.7, end=0.95, speaker="S1"),
+        Turn(start=0.95, end=2.0, speaker="S0"),
+    ]
+    asg = _assignments(turns, [_cluster("S0", 1), _cluster("S1", 2)])
+    cues = build_asr_cues(_transcript([seg]), asg, None, {}, "en", 1.25)
+    assert [(c.source_text, c.character_id) for c in cues] == [
+        ("行くぞ。", 1),
+        ("え？", 2),
+        ("待て。", 1),
+    ]
+
+
+def test_ideographic_comma_does_not_end_a_sentence_for_folding():
+    # "偽" is cut off the end of a cue whose next word is "物": it joins forward even when
+    # the cue before it ends in a comma
+    stamps = [("弱", 0.0), ("点", 0.25), ("偽", 0.5), ("物", 0.75), ("だ", 1.0)]
+    seg = Segment(
+        start=0.0,
+        end=2.0,
+        text="弱点、偽物だ。",
+        words=[Word(start=t, end=t + 0.02, text=c) for c, t in stamps],
+    )
+    turns = [
+        Turn(start=0.0, end=0.4, speaker="S0"),
+        Turn(start=0.4, end=0.6, speaker="S2"),
+        Turn(start=0.6, end=2.0, speaker="S1"),
+    ]
+    asg = _assignments(turns, [_cluster("S0", 1), _cluster("S1", 2), _cluster("S2", 3)])
+    cues = build_asr_cues(_transcript([seg]), asg, None, {}, "en", 1.25)
+    assert [(c.source_text, c.character_id) for c in cues] == [("弱点、", 1), ("偽物だ。", 2)]

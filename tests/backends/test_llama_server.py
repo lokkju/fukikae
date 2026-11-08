@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -75,10 +76,11 @@ def test_gpu_index_reaches_cuda_visible_devices(fake, gguf, tmp_path, monkeypatc
         port = s.base_url.rsplit(":", 1)[1]
     seen = json.loads(out.read_text())
     assert seen["CUDA_VISIBLE_DEVICES"] == "1"
-    assert seen["argv"] == [
+    assert seen["argv"][:-2] == [
         "-m", str(gguf), "--host", "127.0.0.1", "--port", port,
         "-c", "4096", "-ngl", "999", "--jinja",
     ]  # fmt: skip
+    assert seen["argv"][-2] == "--api-key-file"  # a per-run key; never on the command line
 
 
 def test_missing_binary_is_named(gguf):
@@ -87,3 +89,30 @@ def test_missing_binary_is_named(gguf):
         LlamaServer("no-such-llama", gguf, 0),
     ):
         pass
+
+
+def test_a_server_that_is_not_ours_is_refused(fake, gguf, monkeypatch):
+    # /health answers, but /props names another model: not the process fukikae started
+    monkeypatch.setenv("FAKE_LLAMA_PROPS_MODEL", "/elsewhere/other.gguf")
+    server = LlamaServer(fake, gguf, 0)
+    with pytest.raises(LlamaServerError, match="other.gguf"), server:
+        pass
+    assert not _alive(server.pid)
+
+
+def test_api_key_is_required_by_our_server(fake, gguf):
+    with LlamaServer(fake, gguf, 0) as s:
+        assert s.api_key and len(s.api_key) >= 32
+        req = urllib.request.Request(s.base_url + "/props")  # noqa: S310
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req, timeout=5)  # noqa: S310
+        assert e.value.code == 401
+
+
+def test_port_taken_before_bind_is_retried_once(fake, gguf, tmp_path, monkeypatch):
+    marker = tmp_path / "bound-once"
+    monkeypatch.setenv("FAKE_LLAMA_MODE", "bindfail-once")
+    monkeypatch.setenv("FAKE_LLAMA_MARKER", str(marker))
+    with LlamaServer(fake, gguf, 0) as s:
+        assert s.base_url.startswith("http://127.0.0.1:")
+    assert marker.exists()

@@ -27,6 +27,30 @@ def free_mb(device: int) -> int:
         pynvml.nvmlShutdown()
 
 
+def gpu_processes(device: int) -> list[tuple[int, str]]:
+    """(pid, process name) of the compute processes on an NVIDIA device, as nvidia-smi lists
+    them; a name this host can't read is "?". Empty when NVML is unavailable."""
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+            pids = [int(p.pid) for p in pynvml.nvmlDeviceGetComputeRunningProcesses(handle)]
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception:
+        return []
+    out: list[tuple[int, str]] = []
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/comm", encoding="utf-8") as f:
+                out.append((pid, f.read().strip()))
+        except OSError:
+            out.append((pid, "?"))
+    return out
+
+
 def _stderr_log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 

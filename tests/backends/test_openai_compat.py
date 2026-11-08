@@ -134,3 +134,62 @@ def test_managed_mode_downloads_and_runs_the_server(monkeypatch, fake, tmp_path)
 
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [("400", "HTTP 400"), ("500", "HTTP 500"), ("sleep", "timed out|Timeout")],
+)
+def test_http_errors_and_timeouts_are_backend_errors(monkeypatch, fake, tmp_path, failure, message):
+    from fukikae.translation import TranslateBackendError
+
+    plan = tmp_path / "plan.txt"
+    plan.write_text(failure + "\n")
+    monkeypatch.setenv("FAKE_LLAMA_FAIL", str(plan))
+    with LlamaServer(fake, tmp_path / "m.gguf", 0) as server:
+        t = OpenAICompatTranslator(
+            {"mode": "external", "base_url": server.base_url + "/v1", "timeout_s": 1}, "cpu"
+        )
+        t.load()
+        with pytest.raises(TranslateBackendError, match=message):
+            t.translate(_req())
+        assert t.translate(_req())["c0001"].text == "line c0001"  # the next request works
+
+
+def test_prompt_over_the_context_is_refused_before_sending(monkeypatch, fake, tmp_path):
+    from fukikae.translation import PromptTooLargeError
+
+    record = tmp_path / "requests.jsonl"
+    monkeypatch.setenv("FAKE_LLAMA_RECORD", str(record))
+    with LlamaServer(fake, tmp_path / "m.gguf", 0) as server:
+        t = OpenAICompatTranslator(
+            {
+                "mode": "external",
+                "base_url": server.base_url + "/v1",
+                "ctx": 1024,
+                "max_tokens": 900,
+            },
+            "cpu",
+        )
+        t.load()
+        with pytest.raises(PromptTooLargeError, match="124"):
+            t.translate(_req())
+    assert not record.exists()
+
+
+def test_managed_mode_sends_the_servers_key(monkeypatch, fake, tmp_path):
+    gguf = tmp_path / "x.gguf"
+    gguf.write_bytes(b"GGUF")
+    record = tmp_path / "requests.jsonl"
+    monkeypatch.setenv("FAKE_LLAMA_RECORD", str(record))
+    monkeypatch.setattr(openai_compat, "hf_hub_download", lambda *_a, **_k: str(gguf))
+    t = OpenAICompatTranslator({"model": "r/m", "file": "x.gguf", "binary": fake}, "cuda:0")
+    t.load()
+    try:
+        assert t._server is not None
+        key = t._server.api_key
+        t.translate(_req())
+    finally:
+        t.unload()
+    headers = json.loads(record.read_text().splitlines()[0])["headers"]
+    assert headers["Authorization"] == f"Bearer {key}"
