@@ -8,16 +8,23 @@ stage with ``[characters] matcher = "lda"`` matches in that space (`projected_to
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from fukikae.registry.matching import ClusterEvidence, mean_embedding
 
+if TYPE_CHECKING:
+    from fukikae.registry.store import Registry, StoredProjection
+
 KIND_LDA = "lda"
+DEFAULT_SERIES = "default"
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -69,12 +76,45 @@ def fit_lda(x: np.ndarray, labels: Sequence[str], dims: int | None = None) -> Pr
 
 
 def series_of(cfg: Any) -> str:
-    """The series a workspace's projections are stored under: a top-level
-    ``series = "Name"`` in fukikae.toml, else "default" (a workspace has one registry, so
-    one series). A ``[series]`` table (the results ledger's title and genre) does not change
-    it, so adding one never orphans a stored projection."""
+    """The series a workspace's projections are stored under: ``[series] title`` when the
+    workspace sets one explicitly, else the older top-level ``series = "Name"``, else
+    "default" (a workspace has one registry, so one series). The title's own default (the
+    workspace directory's name) does not count: only a title written in fukikae.toml keys
+    projections. A projection stored under "default" before the title was set is still found
+    by `load_series_projection`."""
     value = cfg.raw.get("series")
-    return value if isinstance(value, str) and value else "default"
+    if isinstance(value, dict):
+        title = value.get("title")
+        if isinstance(title, str) and title:
+            return title
+    elif isinstance(value, str) and value:
+        return value
+    return DEFAULT_SERIES
+
+
+def load_series_projection(
+    reg: Registry, cfg: Any, kind: str, *, warn: bool = True
+) -> tuple[StoredProjection | None, list[str]]:
+    """The workspace's stored projection of `kind` and the series keys tried, in order:
+    `series_of(cfg)`, then "default" when that differs and missed (a projection fit before
+    ``[series] title`` was set). Using the fallback logs a warning naming both keys unless
+    `warn` is False."""
+    series = series_of(cfg)
+    tried = [series]
+    stored = reg.load_projection(series, kind)
+    if stored is None and series != DEFAULT_SERIES:
+        tried.append(DEFAULT_SERIES)
+        stored = reg.load_projection(DEFAULT_SERIES, kind)
+        if stored is not None and warn:
+            log.warning(
+                "no %s projection stored for series %r; using the one stored under %r. "
+                "Run `fukikae registry adapt` to fit one under %r.",
+                kind,
+                series,
+                DEFAULT_SERIES,
+                series,
+            )
+    return stored, tried
 
 
 def projected_tops(

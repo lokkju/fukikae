@@ -84,6 +84,20 @@ def adapt(ws: Workspace, episodes: str, *extra: str):
     )
 
 
+def test_adapt_saves_under_the_series_table_title(tmp_path):
+    ws = make_ws(tmp_path, ["S01E12", "S01E13"])
+    (ws.root / "fukikae.toml").write_text(
+        'source_language = "ja"\n[series]\ntitle = "Grid"\ngenre = "live-action"\n',
+        encoding="utf-8",
+    )
+    r = adapt(ws, "S01E12,S01E13")
+    assert r.exit_code == 0, r.output
+    assert "'Grid'" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.load_projection("Grid", "lda") is not None
+        assert reg.load_projection("default", "lda") is None
+
+
 def test_adapt_writes_one_projection_per_series(tmp_path):
     ws = make_ws(tmp_path, ["S01E12", "S01E13"])
     r = adapt(ws, "S01E12,S01E13")

@@ -103,15 +103,59 @@ def test_read_skips_truncated_and_future_rows(tmp_path):
     assert warnings == ["results.jsonl:2: not JSON, skipped", "results.jsonl:3: schema 2, skipped"]
 
 
-def test_read_skips_rows_with_missing_or_unknown_fields(tmp_path):
+def test_read_skips_rows_that_are_not_ledger_rows(tmp_path):
     p = tmp_path / "results.jsonl"
     d = json.loads(json.dumps(row().__dict__))
     missing = {k: v for k, v in d.items() if k != "metrics"}
-    p.write_text("\n".join(json.dumps(x) for x in (missing, {**d, "extra": 1}, [1, 2])) + "\n")
+    bad = (missing, [1, 2], {**d, "schema": 0}, {**d, "schema": "1"}, {**d, "schema": True})
+    p.write_text("\n".join(json.dumps(x) for x in bad) + "\n")
     rows, warnings = read_rows(p)
     assert rows == []
-    assert [w.split(":")[1] for w in warnings] == ["1", "2", "3"]
+    assert [w.split(":")[1] for w in warnings] == ["1", "2", "3", "4", "5"]
     assert all(w.endswith("skipped") for w in warnings)
+
+
+def test_read_ignores_unknown_fields(tmp_path):
+    """Ruling GT2: an additive field (a later tts row's, say) never costs the row."""
+    p = tmp_path / "results.jsonl"
+    r = row()
+    p.write_text(json.dumps({**json.loads(json.dumps(r.__dict__)), "voice": "v1"}) + "\n")
+    rows, warnings = read_rows(p)
+    assert rows == [r] and warnings == []
+
+
+def test_read_keeps_rows_with_unicode_line_separators(tmp_path):
+    """Rows are written with ensure_ascii=False; U+2028, U+0085, \\x0b and \\x0c stay raw
+    and must not split a line."""
+    p = tmp_path / "results.jsonl"
+    odd = row(tag="a\u2028b\u0085c\x0bd\x0ce")
+    plain = row()
+    append_rows([odd, plain], p)
+    assert "\u2028" in p.read_text(encoding="utf-8")
+    with p.open("a", encoding="utf-8") as f:
+        f.write("not json\n")
+    rows, warnings = read_rows(p)
+    assert rows == [odd, plain]
+    assert warnings == ["results.jsonl:3: not JSON, skipped"]
+
+
+def _append_worker(args: tuple[str, int, int]) -> None:
+    path, worker, m = args
+    for k in range(m):
+        append_rows([row(tag=f"w{worker}-{k}", detail={"pad": "x" * 5000})], Path(path))
+
+
+def test_concurrent_appends_never_interleave(tmp_path):
+    from concurrent.futures import ProcessPoolExecutor
+
+    p = tmp_path / "results.jsonl"
+    n, m = 6, 25
+    with ProcessPoolExecutor(max_workers=n) as pool:
+        list(pool.map(_append_worker, [(str(p), w, m) for w in range(n)]))
+    rows, warnings = read_rows(p)
+    assert warnings == []
+    assert len(rows) == n * m
+    assert {r.tag for r in rows} == {f"w{w}-{k}" for w in range(n) for k in range(m)}
 
 
 def test_read_missing_ledger_is_empty(tmp_path):
@@ -134,6 +178,8 @@ def test_git_commit_in_a_checkout(monkeypatch, tmp_path):
     monkeypatch.setattr(ledger, "_PACKAGE_DIR", tmp_path)
     clean = git_commit()
     assert len(clean) == 12 and "dirty" not in clean
+    (tmp_path / "untracked").write_text("z")
+    assert git_commit() == clean  # untracked files don't mark a row dirty
     (tmp_path / "f").write_text("y")
     assert git_commit() == clean + "-dirty"
 

@@ -1,8 +1,9 @@
 """`fukikae eval report`: the results ledger as a matrix.
 
-A matrix row is one configuration on one test set and split: (stage, test set, split,
-backend, model, options hash, tag). A column is ``language/genre``. A cell is the headline
-metric (or ``--metric``) of the latest row with that key in that column.
+A matrix row is one configuration on one test set and split: (stage, series, test set,
+split, backend, model, options hash, tag). Two series that share a test-set name stay apart,
+and their labels then name the series (``set [series]``). A column is ``language/genre``. A
+cell is the headline metric (or ``--metric``) of the latest row with that key in that column.
 """
 
 from __future__ import annotations
@@ -52,14 +53,24 @@ def filter_rows(
     ]
 
 
-def _key(r: LedgerRow) -> tuple[str, str, str, str, str, str, str]:
-    return (r.stage, r.test_set, r.split, r.backend, r.model or "", r.options_hash, r.tag or "")
+def _key(r: LedgerRow) -> tuple[str, ...]:
+    return (
+        r.stage,
+        r.series,
+        r.test_set,
+        r.split,
+        r.backend,
+        r.model or "",
+        r.options_hash,
+        r.tag or "",
+    )
 
 
-def _label(r: LedgerRow) -> str:
+def _label(r: LedgerRow, with_series: bool = False) -> str:
     who = f"{r.backend} {r.model}" if r.model else r.backend
+    test_set = f"{r.test_set} [{r.series}]" if with_series else r.test_set
     return " | ".join(
-        (r.stage, r.test_set, r.split, who, f"opts:{r.options_hash[:8]}", r.tag or MISSING)
+        (r.stage, test_set, r.split, who, f"opts:{r.options_hash[:8]}", r.tag or MISSING)
     )
 
 
@@ -89,15 +100,20 @@ def build_matrix(rows: Sequence[LedgerRow], metric: str | None = None) -> Matrix
     """Group rows by key and ``language/genre``; the latest row (by date, then by ledger
     order) fills each cell."""
     latest: dict[tuple[tuple[str, ...], str], tuple[str, int, LedgerRow]] = {}
-    labels: dict[tuple[str, ...], str] = {}
+    first: dict[tuple[str, ...], LedgerRow] = {}
     columns: set[str] = set()
     for i, r in enumerate(rows):
         key, col = _key(r), f"{r.language}/{r.genre}"
         columns.add(col)
-        labels.setdefault(key, _label(r))
+        first.setdefault(key, r)
         prev = latest.get((key, col))
         if prev is None or (r.date, i) >= (prev[0], prev[1]):
             latest[(key, col)] = (r.date, i, r)
+    # A test-set name used by more than one series gets the series in its labels.
+    series_of_set: dict[str, set[str]] = {}
+    for r in first.values():
+        series_of_set.setdefault(r.test_set, set()).add(r.series)
+    labels = {key: _label(r, len(series_of_set[r.test_set]) > 1) for key, r in first.items()}
     cols = sorted(columns)
     keys = sorted(labels, key=lambda k: (_stage_order(k[0]), labels[k]))
     out = []

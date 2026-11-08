@@ -5,6 +5,13 @@ appends one row per run and split; ``eval report`` reads them back. The file is 
 (``$XDG_DATA_HOME/fukikae/results.jsonl``), overridden by ``FUKIKAE_RESULTS`` and by a
 command's ``--ledger``. A row from a newer schema, or a line cut short by a killed process,
 is skipped with a warning on read, never fatal.
+
+Compatibility (controller ruling GT2): a new optional field is additive and does not bump
+`SCHEMA`; readers ignore fields they don't know instead of rejecting the row (so an export
+through this version drops them). `SCHEMA` goes up only for a breaking change, and readers
+keep reading every older schema, upgrading old rows in `_parse`. Lines are split on "\n"
+alone: rows are written with ``ensure_ascii=False``, so U+2028 and its kin can appear raw
+inside a row.
 """
 
 from __future__ import annotations
@@ -99,7 +106,7 @@ def git_commit() -> str:
     when the package is not in a git checkout."""
     try:
         commit = _git("rev-parse", "--short=12", "HEAD").strip()
-        dirty = bool(_git("status", "--porcelain").strip())
+        dirty = bool(_git("status", "--porcelain", "-uno").strip())
     except (OSError, subprocess.SubprocessError):
         return "unknown"
     if not commit:
@@ -228,20 +235,19 @@ def _parse(obj: Any) -> LedgerRow | str:
     """A row, or why the line is not one."""
     if not isinstance(obj, dict):
         return "not a ledger row"
-    if obj.get("schema") != SCHEMA:
-        return f"schema {obj.get('schema')}"
+    schema = obj.get("schema")
+    if isinstance(schema, bool) or not isinstance(schema, int) or schema < 1:
+        return f"not a ledger row (schema {schema!r})"
+    if schema > SCHEMA:
+        return f"schema {schema}"
+    # Schema 1 is the only one so far; an older schema's upgrade goes here.
     missing = [k for k in _REQUIRED if k not in obj]
-    unknown = sorted(set(obj) - set(_FIELDS))
-    if missing or unknown:
-        why = []
-        if missing:
-            why.append(f"missing {', '.join(missing)}")
-        if unknown:
-            why.append(f"unknown {', '.join(unknown)}")
-        return f"not a ledger row ({'; '.join(why)})"
+    if missing:
+        return f"not a ledger row (missing {', '.join(missing)})"
     if not isinstance(obj["metrics"], dict) or not isinstance(obj["episodes"], list):
         return "not a ledger row (bad metrics or episodes)"
-    return LedgerRow(**obj)
+    known = {k: v for k, v in obj.items() if k in _FIELDS}
+    return LedgerRow(**{**known, "schema": SCHEMA})
 
 
 def read_rows(path: Path | None = None) -> tuple[list[LedgerRow], list[str]]:
@@ -254,7 +260,7 @@ def read_rows(path: Path | None = None) -> tuple[list[LedgerRow], list[str]]:
         text = target.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return rows, warnings
-    for n, line in enumerate(text.splitlines(), start=1):
+    for n, line in enumerate(text.split("\n"), start=1):
         if not line.strip():
             continue
         try:

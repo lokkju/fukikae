@@ -424,6 +424,51 @@ def test_lda_without_a_projection_falls_back_to_centroid_with_a_warning(tmp_path
     assert "no lda projection" in caplog.text and "registry adapt" in caplog.text
 
 
+TITLED = {**LDA, "series": {"title": "Grid"}}
+
+
+def test_lda_falls_back_to_the_default_series_with_a_warning(tmp_path, caplog):
+    import logging
+
+    ep1, ep2 = lda_setup(tmp_path)  # stored under "default" only
+    cfg = with_raw(TITLED)
+    with registry(ep1) as reg:
+        created = reg.load_projection("default", "lda").created  # pyright: ignore[reportOptionalMemberAccess]
+    with caplog.at_level(logging.WARNING):
+        CharactersStage().run(ep2, cfg)
+    c = assignments(ep2).clusters[0]
+    assert c.status == "matched" and c.score == pytest.approx(1.0)
+    assert "'Grid'" in caplog.text and "'default'" in caplog.text
+    # The manifest key names the projection that was applied.
+    assert CharactersStage().config_key(cfg, ep2)["matcher"]["projection"] == created
+
+
+def test_lda_uses_the_titled_series_without_fallback(tmp_path, caplog):
+    import logging
+
+    ep1, ep2 = lda_setup(tmp_path, project=False)
+    with registry(ep1) as reg:
+        reg.save_projection("Grid", "lda", ONTO_E0, np.zeros(3))
+        reg.save_projection("default", "lda", np.array([[0.0], [0.0], [1.0]]), np.zeros(3))
+        created = reg.load_projection("Grid", "lda").created  # pyright: ignore[reportOptionalMemberAccess]
+    cfg = with_raw(TITLED)
+    with caplog.at_level(logging.WARNING):
+        CharactersStage().run(ep2, cfg)
+    assert assignments(ep2).clusters[0].score == pytest.approx(1.0)  # Grid's, not default's
+    assert "default" not in caplog.text
+    assert CharactersStage().config_key(cfg, ep2)["matcher"]["projection"] == created
+
+
+def test_lda_missing_under_both_keys_names_them(tmp_path, caplog):
+    import logging
+
+    _, ep2 = lda_setup(tmp_path, project=False)
+    with caplog.at_level(logging.WARNING):
+        CharactersStage().run(ep2, with_raw(TITLED))
+    assert assignments(ep2).clusters[0].status == "new"
+    assert "'Grid' or 'default'" in caplog.text
+
+
 def test_lda_projection_of_another_dimension_is_an_error(tmp_path):
     from fukikae.config import ConfigError
 
