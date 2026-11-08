@@ -47,6 +47,23 @@ class Diarization(BaseModel):
     turns: list[Turn]
 
 
+class TagSpan(BaseModel):
+    start: float
+    end: float
+    label: str
+    confidence: float | None = None
+
+
+class Tags(BaseModel):
+    """The tag stage's artifact: sound-event spans over the vocals and one emotion span per
+    diarize turn (a turn over 30 s is split)."""
+
+    schema_version: int = 1
+    backend: str
+    events: list[TagSpan]
+    emotions: list[TagSpan]
+
+
 class Separation(BaseModel):
     vocals: Path
     background: Path

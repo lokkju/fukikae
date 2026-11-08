@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 import numpy as np
 
-from fukikae.models import Diarization, Separation, Transcript
+from fukikae.models import Diarization, Separation, Tags, Transcript, Turn
 
 if TYPE_CHECKING:
     from fukikae.cards.card import Voice
@@ -67,6 +67,12 @@ class Embedder(Backend, Protocol):
 
     def embed(self, audio: Path, spans: list[tuple[float, float]]) -> np.ndarray:
         """Shape ``(len(spans), dim)``, rows L2-normalized."""
+        ...
+
+
+class Tagger(Backend, Protocol):
+    def tag(self, audio: Path, turns: list[Turn]) -> Tags:
+        """Sound-event spans over `audio` and one emotion span per turn."""
         ...
 
 

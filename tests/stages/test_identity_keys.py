@@ -87,3 +87,18 @@ def test_unknown_identity_is_distinct_stable_and_warned(monkeypatch, caplog):
     assert first["model"] == "unresolved:embed:no-such-backend"
     assert "no-such-backend" in caplog.text
     assert first != identity_key("embed", BackendConfig("other", {}))
+
+
+def test_identity_uses_the_backend_instances_pinned_revision(monkeypatch):
+    class Pinned:
+        model = "org/m"
+        revision = "abc123"
+
+        def __init__(self, options, device):
+            pass
+
+    from fukikae.backends import loader
+
+    monkeypatch.setattr(loader, "backend_class", lambda _k, _n: Pinned)
+    got = identity_key("tag", BackendConfig("x", {}))
+    assert got == {"model": "org/m", "revision": "abc123"}
