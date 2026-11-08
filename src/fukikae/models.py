@@ -62,6 +62,7 @@ class Tags(BaseModel):
     backend: str
     events: list[TagSpan]
     emotions: list[TagSpan]
+    emotion_backend: str | None = None  # set when a second backend scored the emotions
 
 
 class Separation(BaseModel):

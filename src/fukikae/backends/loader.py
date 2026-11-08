@@ -26,6 +26,7 @@ EXTRAS: dict[str, str] = {
     "titanet": "sherpa",
     "fusion": "pyannote",
     "sensevoice": "sensevoice",
+    "emotion2vec": "sensevoice",
 }
 
 
