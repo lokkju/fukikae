@@ -522,6 +522,13 @@ def embedders(
             root, episode_pattern or cs.DEFAULT_EPISODE_PATTERN, exclude=exclude or ()
         )
         train, test, rule, skipped = cs.split_clips(clips)
+        missing = sum(c.episode is None for c in clips)
+        if missing and rule != "episode":
+            typer.echo(
+                f"warning: {missing} of {len(clips)} clips carry no episode number; the whole "
+                f"set uses the {rule!r} split instead of the episode split",
+                err=True,
+            )
         if not train or not test:
             raise ValueError(f"{root}: no character has clips on both sides of the split")
         cache = root / cs.CACHE_DIR
@@ -543,6 +550,12 @@ def embedders(
         typer.echo(
             f"{cfg.backend:<16}{acc.get(OVERALL, 0.0):>9.3f}{len(acc) - 1 if acc else 0:>7}"
             f"{len(train):>7}{len(test):>6}  {rule}"
+        )
+    if rule != "episode":
+        typer.echo(
+            "note: folder/half splits cut across a character's folders (e.g. emotions), so "
+            "they also measure robustness to them; check class balance before reading accuracy.",
+            err=True,
         )
     if skipped:
         typer.echo(f"not scored (no clip on one side): {', '.join(skipped)}", err=True)
