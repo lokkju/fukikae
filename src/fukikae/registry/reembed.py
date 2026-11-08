@@ -133,7 +133,8 @@ def plan(ws: Workspace) -> ReembedPlan:
         actors = reg.actors()
         p.centroid_dims = Counter(len(a.centroid) for a in actors if a.centroid is not None)
         p.projection_dims = [(s.series, s.kind, int(s.matrix.shape[0])) for s in reg.projections()]
-        named_chars = {c.actor_id for c in reg.characters() if c.name or c.voice}
+        curated = reg.curated_characters()
+        named_chars = {c.actor_id for c in reg.characters() if c.id in curated}
     p.exemplar_dims = Counter(len(e.embedding) for e in exemplars)
     p.old = {e.id: e.embedding for e in exemplars}
     holders = {e.actor_id for e in exemplars}
@@ -144,7 +145,7 @@ def plan(ws: Workspace) -> ReembedPlan:
         if a.name:
             tags.append(f"named {a.name}")
         elif a.id in named_chars:
-            tags.append("named or voiced character")
+            tags.append("curated character")
         p.fixed[a.id] = (", ".join(tags), len(a.centroid))
         p.centroids[a.id] = a.centroid
     by_ep: dict[str, dict[str | None, list[Exemplar]]] = {}

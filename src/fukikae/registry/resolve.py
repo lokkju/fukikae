@@ -10,7 +10,7 @@ seeded one group per diarization cluster. Against an existing registry:
   against its own earlier result, and are deleted at the end unless a cluster claimed them.
 - Every other actor is an *anchor*: one more group, seeded with its remaining exemplar rows
   (from episodes outside the list), or with its stored centroid when it has none left or is
-  locked. A curated orphan (locked, named, or with a named or voiced character) is kept and
+  locked. A curated orphan (locked, named, or with a curated character) is kept and
   anchored by its centroid. Anchors never share a group, whatever `episode_cannot_link` says:
   merging two existing actors is `registry merge`'s decision, not this command's.
 - A final group holding an anchor maps to that actor (status ``matched``, the actor's

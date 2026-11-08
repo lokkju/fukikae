@@ -53,8 +53,8 @@ def test_claimed_actor_sends_cluster_to_review():
 def test_matched_uses_first_character():
     a = actor(1, [1, 0, 0])
     chars = [
-        Character(id=9, actor_id=1, name=None, voice=None, locked=False),
-        Character(id=4, actor_id=1, name=None, voice=None, locked=False),
+        Character(id=9, actor_id=1, name=None, external_id=None, locked=False),
+        Character(id=4, actor_id=1, name=None, external_id=None, locked=False),
     ]
     got = match([ClusterEvidence("S0", unit([1, 0, 0]), 30.0)], [a], 0.8, 20.0, characters=chars)
     assert got[0].character_id == 4

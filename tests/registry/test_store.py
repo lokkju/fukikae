@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fukikae.registry.store import Registry
+from fukikae.registry.store import CardAssignment, Registry
 
 
 def unit(*xs: float) -> np.ndarray:
@@ -31,7 +31,7 @@ def test_create_actor_with_character(reg: Registry):
     assert a.id == aid and ch.id == cid and ch.actor_id == aid
     assert a.centroid is not None and np.allclose(a.centroid, c)
     assert a.centroid.dtype == np.float32
-    assert not a.locked and ch.voice is None
+    assert not a.locked and ch.external_id is None
 
 
 def test_centroid_none_without_exemplars(reg: Registry):
@@ -148,10 +148,8 @@ def test_foreign_keys_on(reg: Registry):
 
 
 def _set_voice(path: Path, character_id: int) -> None:
-    con = sqlite3.connect(path)
-    con.execute("UPDATE characters SET voice = ? WHERE id = ?", ('{"v": 1}', character_id))
-    con.commit()
-    con.close()
+    with Registry(path) as reg:
+        reg.assign_card(character_id, "en", "0" * 16, by="assign", locked=True)
 
 
 def test_delete_episode_returns_orphans_and_prune_spares_protected(tmp_path: Path):
@@ -217,3 +215,231 @@ def test_exemplar_rows_of_mixed_dimensions_point_to_reembed(tmp_path):
     with pytest.raises(ValueError, match=r"actor 1 .*3, 4.*registry reembed"):
         reg.exemplar_rows()
     reg.close()
+
+
+# --- schema 2: per-language card assignments and history ----------------------------------
+
+A16, B16, C16 = "a" * 16, "b" * 16, "c" * 16
+
+_V1_SCHEMA = """
+CREATE TABLE schema_version (version INTEGER NOT NULL);
+CREATE TABLE actors (id INTEGER PRIMARY KEY, name TEXT, external_id TEXT, centroid BLOB,
+    locked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE characters (id INTEGER PRIMARY KEY, actor_id INTEGER NOT NULL REFERENCES actors(id),
+    name TEXT, voice TEXT, locked INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE exemplars (id INTEGER PRIMARY KEY, actor_id INTEGER NOT NULL REFERENCES actors(id),
+    episode TEXT NOT NULL, cluster TEXT, embedding BLOB NOT NULL, seconds REAL);
+CREATE TABLE id_high_water (tbl TEXT PRIMARY KEY, last INTEGER NOT NULL);
+CREATE TABLE projections (series TEXT NOT NULL, kind TEXT NOT NULL, matrix BLOB NOT NULL,
+    mean BLOB NOT NULL, created TEXT NOT NULL, PRIMARY KEY (series, kind));
+INSERT INTO schema_version(version) VALUES (1);
+INSERT INTO actors(id, name) VALUES (1, NULL), (2, NULL);
+INSERT INTO characters(id, actor_id, name, voice) VALUES
+    (1, 1, NULL, '{"backend":"kokoro","voice":"af_heart"}'), (2, 2, 'Lucy', NULL);
+INSERT INTO id_high_water(tbl, last) VALUES ('characters', 2), ('actors', 2);
+"""
+
+
+def _v1_file(path: Path) -> Path:
+    con = sqlite3.connect(path)
+    con.executescript(_V1_SCHEMA)
+    con.commit()
+    con.close()
+    return path
+
+
+def test_v1_registry_migrates_voice_into_history(tmp_path: Path):
+    p = _v1_file(tmp_path / "r.sqlite")
+    with Registry(p) as reg:
+        (h,) = reg.card_history(1, "en")
+        assert h.n == 1 and h.by == "migrated" and h.card_id is None and not h.locked
+        assert h.note is not None and "af_heart" in h.note
+        assert reg.card_for(1, "en") is None
+        assert reg.card_history(2, "en") == []
+        assert [(c.id, c.name, c.external_id) for c in reg.characters()] == [
+            (1, None, None),
+            (2, "Lucy", None),
+        ]
+        # a migrated voice keeps the character curated, as a v1 voice did
+        assert reg.protected_actors() == {1, 2}
+    con = sqlite3.connect(p)
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(2,)]
+    assert con.execute("SELECT voice FROM characters").fetchall() == [(None,), (None,)]
+    con.close()
+    with Registry(p) as reg:  # reopening migrates nothing twice
+        assert len(reg.card_history(1, "en")) == 1
+
+
+def test_failed_migration_leaves_the_v1_file_untouched(tmp_path: Path, monkeypatch):
+    import fukikae.registry.store as store
+
+    p = _v1_file(tmp_path / "r.sqlite")
+
+    def boom(_self, con):  # noqa: ANN001, ANN202
+        con.execute("ALTER TABLE characters ADD COLUMN external_id TEXT")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(store.Registry, "_migrate_1_to_2", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        Registry(p)
+    con = sqlite3.connect(p)
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(1,)]
+    cols = [r[1] for r in con.execute("PRAGMA table_info(characters)")]
+    assert "external_id" not in cols
+    assert con.execute("SELECT voice FROM characters WHERE id = 1").fetchone()[0] is not None
+    con.close()
+
+
+def test_fresh_registry_is_schema_2(tmp_path: Path):
+    p = tmp_path / "r.sqlite"
+    Registry(p).close()
+    con = sqlite3.connect(p)
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(2,)]
+    con.close()
+
+
+def _cur(reg: Registry, cid: int, lang: str) -> CardAssignment:
+    a = reg.card_for(cid, lang)
+    assert a is not None
+    return a
+
+
+def _char(reg: Registry) -> int:
+    return reg.create_actor_with_character(unit(1, 0))[1]
+
+
+def test_assign_history_and_revert(reg: Registry):
+    cid = _char(reg)
+    first = reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    assert (first.n, first.card_id, first.by, first.locked) == (1, A16, "auto", False)
+    reg.assign_card(cid, "en", B16, by="assign", locked=True)
+    cur = reg.card_for(cid, "en")
+    assert cur is not None and cur.card_id == B16 and cur.locked and cur.n == 2
+    back = reg.revert_card(cid, "en", None)
+    assert back.card_id == A16 and back.by == "revert" and back.n == 3
+    assert [h.n for h in reg.card_history(cid, "en")] == [1, 2, 3]
+    assert reg.card_for(cid, "en") == back
+    again = reg.revert_card(cid, "en", None)  # toggles back, like `cd -`
+    assert again.card_id == B16
+    to1 = reg.revert_card(cid, "en", 1)
+    assert to1.card_id == A16 and to1.n == 5
+
+
+def test_revert_errors(reg: Registry, tmp_path: Path):
+    cid = _char(reg)
+    with pytest.raises(ValueError, match="no card"):
+        reg.revert_card(cid, "en", None)
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    with pytest.raises(ValueError, match="no earlier"):
+        reg.revert_card(cid, "en", None)
+    with pytest.raises(ValueError, match="no history row 7"):
+        reg.revert_card(cid, "en", 7)
+    p = _v1_file(tmp_path / "v1.sqlite")
+    with Registry(p) as r1:
+        r1.assign_card(1, "en", A16, by="assign", locked=True)
+        with pytest.raises(ValueError, match="row 1 has no card"):
+            r1.revert_card(1, "en", 1)
+
+
+def test_assign_validates_inputs(reg: Registry):
+    cid = _char(reg)
+    with pytest.raises(ValueError, match="card id"):
+        reg.assign_card(cid, "en", "nothex", by="assign", locked=True)
+    with pytest.raises(ValueError, match="by"):
+        reg.assign_card(cid, "en", A16, by="whim", locked=True)
+    with pytest.raises(KeyError):
+        reg.assign_card(999, "en", A16, by="assign", locked=True)
+    reg.assign_card(cid, "en", A16, by="import:Fairy Tail EN", locked=False)
+    assert _cur(reg, cid, "en").by == "import:Fairy Tail EN"
+
+
+def test_languages_never_replace_each_other(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="assign", locked=True)
+    reg.assign_card(cid, "es", C16, by="derive", locked=False)
+    assert _cur(reg, cid, "en").card_id == A16
+    assert _cur(reg, cid, "es").card_id == C16
+    assert [h.n for h in reg.card_history(cid, "es")] == [1]
+    reg.revert_card(cid, "en", 1)
+    assert _cur(reg, cid, "es").card_id == C16
+
+
+def test_lock_and_unlock_are_history_rows(reg: Registry):
+    cid = _char(reg)
+    with pytest.raises(ValueError, match="no card"):
+        reg.lock_card(cid, "en", True)
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    reg.lock_card(cid, "en", True)
+    cur = _cur(reg, cid, "en")
+    assert cur.locked and cur.card_id == A16 and cur.by == "lock"
+    reg.lock_card(cid, "en", False)
+    assert not _cur(reg, cid, "en").locked
+    assert [h.by for h in reg.card_history(cid, "en")] == ["auto", "lock", "unlock"]
+
+
+def test_auto_only_character_is_prunable_and_its_rows_go(reg: Registry):
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    assert aid not in reg.protected_actors()
+    assert reg.prune_actors([aid]) == [aid]
+    assert reg.card_history(cid, "en") == [] and reg.card_for(cid, "en") is None
+
+
+@pytest.mark.parametrize(
+    ("how", "by", "locked"),
+    [("assigned", "assign", True), ("locked auto", "auto", True), ("unlocked edit", "edit", False)],
+)
+def test_hand_assigned_character_is_protected_from_prune(reg: Registry, how, by, locked):
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.assign_card(cid, "en", A16, by=by, locked=locked)
+    assert aid in reg.protected_actors(), how
+    assert reg.prune_actors([aid]) == [], how
+
+
+def test_external_id_protects_and_round_trips(reg: Registry):
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.set_character_external_id(cid, "anidb:c123")
+    assert reg.characters()[0].external_id == "anidb:c123"
+    assert aid in reg.protected_actors() and reg.prune_actors([aid]) == []
+    reg.set_character_external_id(cid, None)
+    assert reg.characters()[0].external_id is None
+    with pytest.raises(KeyError):
+        reg.set_character_external_id(999, "x")
+
+
+def test_merge_carries_card_rows_to_the_kept_character(reg: Registry):
+    a1, c1 = reg.create_actor_with_character(unit(1, 0))
+    a2, c2 = reg.create_actor_with_character(unit(0, 1))
+    reg.assign_card(c1, "en", A16, by="auto", locked=False)
+    reg.assign_card(c2, "en", B16, by="assign", locked=True)  # curated beats auto
+    reg.assign_card(c2, "es", C16, by="derive", locked=False)  # keep has no es card
+    assert reg.merge_actors(a1, a2) == {c2: c1}
+    assert _cur(reg, c1, "en").card_id == B16
+    assert _cur(reg, c1, "es").card_id == C16
+    assert {h.card_id for h in reg.card_history(c1, "en")} == {A16, B16}
+    assert reg.card_history(c2, "en") == []
+
+
+def test_merge_keeps_the_kept_characters_curated_card(reg: Registry):
+    a1, c1 = reg.create_actor_with_character(unit(1, 0))
+    a2, c2 = reg.create_actor_with_character(unit(0, 1))
+    reg.assign_card(c1, "en", A16, by="assign", locked=True)
+    reg.assign_card(c2, "en", B16, by="assign", locked=True)
+    reg.merge_actors(a1, a2)
+    assert _cur(reg, c1, "en").card_id == A16
+
+
+def test_character_by_ref_width_insensitive(reg: Registry):
+    cid = _char(reg)
+    reg.rename_character(cid, "Natsu")
+    other = _char(reg)
+    assert reg.character_by_ref("ＮＡＴＳＵ").id == cid
+    assert reg.character_by_ref("natsu").id == cid
+    assert reg.character_by_ref(str(other)).id == other
+    assert reg.character_by_ref("２").id == other == 2
+    with pytest.raises(ValueError, match="no character"):
+        reg.character_by_ref("Gray")
+    dup = _char(reg)
+    reg.rename_character(dup, "NATSU")
+    with pytest.raises(ValueError, match=rf"{cid}.*{dup}"):
+        reg.character_by_ref("Natsu")
