@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Postinstall for github:ggml-org/llama.cpp: the CUDA build loads libcudart, libcublas and
+# libcublasLt from its own directory (RUNPATH $ORIGIN), and the release ships them as a
+# separate asset. Fetch that asset for the same build, check its sha256, and unpack the three
+# libraries next to llama-server. Run by mise with MISE_TOOL_INSTALL_PATH set.
+set -euo pipefail
+build="${1:?build tag, e.g. b12201}"
+cuda="${2:?cuda version, e.g. 12.8}"
+want="${3:?sha256 of the cudart asset}"
+dest="${MISE_TOOL_INSTALL_PATH:?not run by mise}"
+name="cudart-llama-${build}-bin-ubuntu-cuda-${cuda}-x64"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL -o "$tmp/$name.tar.gz" \
+  "https://github.com/ggml-org/llama.cpp/releases/download/${build}/${name}.tar.gz"
+echo "$want  $tmp/$name.tar.gz" | sha256sum -c --quiet -
+tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
+cp "$tmp/$name"/lib*.so.* "$dest"/
