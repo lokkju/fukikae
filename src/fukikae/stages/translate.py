@@ -558,17 +558,20 @@ class TranslateStage:
     @staticmethod
     def _keep_subtitle_lines(condensed: list[DubCue]) -> None:
         """A condensed cue that failed, or came back no shorter than the subtitle, speaks the
-        subtitle line instead: a human line left long for time fitting beats a lost one."""
+        subtitle line instead (a human line left long for time fitting beats a lost one), and
+        ``note`` says why."""
         kept = 0
         for c in condensed:
-            if c.text is None or c.error is not None or len(c.text) >= len(c.source_text):
-                if c.error is not None:
-                    log.warning(
-                        "translate: condensing %s failed (%s); speaking the subtitle line",
-                        c.id,
-                        c.error,
-                    )
-                c.text, c.literal, c.error = c.source_text, None, None
-                kept += 1
+            if c.text is None or c.error is not None:
+                reason = (c.error or "no rendering").removeprefix("translate: ")
+                log.warning("translate: condensing %s failed (%s); speaking the subtitle line",
+                            c.id, reason)  # fmt: skip
+                c.note = f"condense failed: {reason}"
+            elif len(c.text) >= len(c.source_text):
+                c.note = "condense not shorter"
+            else:
+                continue
+            c.text, c.literal, c.error = c.source_text, None, None
+            kept += 1
         if kept:
             log.info("translate: %d over-budget subtitle line(s) kept as written", kept)
