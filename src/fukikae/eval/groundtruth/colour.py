@@ -22,6 +22,7 @@ from fukikae.eval.groundtruth.base import (
     strip_markup,
 )
 from fukikae.eval.groundtruth.sdh_prefix import DEFAULT_SOUNDS, cue_segments
+from fukikae.eval.speakers import label_key
 
 MIN_TAGGED_LINES = 3
 COLOUR_MAP_FILE = "labels-colours.yaml"
@@ -74,7 +75,7 @@ def has_colour(cues: list[Cue]) -> int:
 def _pieces(cues: list[Cue], sounds: frozenset[str]) -> list[_Piece]:
     pieces: list[_Piece] = []
     for cue in cues:
-        if RUBY_STYLE.search(cue.style):
+        if cue.ruby or RUBY_STYLE.search(cue.style):
             continue  # ARIB converters emit furigana as events of their own
         groups: list[tuple[str | None, list[str]]] = []
         for col, markup in line_colours(cue.text):
@@ -194,7 +195,10 @@ def workspace_colour_map(root: Path, kind: str, anonymous: str | None) -> dict[s
     mapping = load_colour_map(root / COLOUR_MAP_FILE)
     if not mapping:
         if anonymous is not None:
-            raise ValueError(f"--colour-anonymous needs a colour map ({COLOUR_MAP_FILE})")
+            raise ValueError(
+                f"--colour-anonymous needs a colour map ({COLOUR_MAP_FILE}); "
+                "run `fukikae eval colour-map --write` first"
+            )
         return None
     return mapping
 
@@ -211,13 +215,17 @@ def read_colour(
     """Speaker lines from colours. With no `colour_names` each colour is named by the tags that
     co-occur with it in this episode (else `<colour>@<episode>`). With a map, a mapped colour
     takes the map's name and an unmapped one is dropped (`anonymous` None or "drop"), kept as
-    `colour:<name>` ("series") or `<colour>@<episode>` ("episode"). Tagged lines keep their tag."""
+    `colour:<name>` ("series") or `<colour>@<episode>` ("episode"). A tag keeps its line, except
+    on a mapped colour whose name it contradicts: that line is dropped (GT4)."""
     if anonymous is not None and anonymous not in ANONYMOUS_MODES:
         raise ValueError(
             f"unknown colour-anonymous mode {anonymous!r}; use {', '.join(ANONYMOUS_MODES)}"
         )
     if colour_names is None and anonymous is not None:
-        raise ValueError("--colour-anonymous needs a colour map (labels-colours.yaml)")
+        raise ValueError(
+            "--colour-anonymous needs a colour map (labels-colours.yaml); "
+            "run `fukikae eval colour-map --write` first"
+        )
     pieces = _pieces(cues, sounds)
     local: dict[str, str] = {}
     if colour_names is None:
@@ -229,6 +237,10 @@ def read_colour(
     out: list[GroundTruthLine] = []
     for p in pieces:
         if p.name:
+            if colour_names is not None and p.colour is not None and p.colour in colour_names:
+                tagged, mapped = namer.peek(p.name), namer.peek(colour_names[p.colour])
+                if tagged and mapped and label_key(tagged) != label_key(mapped):
+                    continue  # the tag and the colour map disagree: drop the line (GT4)
             speaker = namer(p.name)
         elif not p.colour:
             speaker = None

@@ -113,6 +113,7 @@ class Cue:
     end: float
     text: str
     style: str = ""  # the ASS event's style name; empty for other formats
+    ruby: bool = False  # an ASS furigana event (a `\\fscy` under 70 in its overrides)
 
 
 COLOURS: dict[str, tuple[int, int, int]] = {
@@ -236,6 +237,16 @@ def _ass_text(raw: str) -> str:
     return re.sub(r"\{[^}]*\}", override, raw)
 
 
+_FSCY = re.compile(r"\\fscy(\d+(?:\.\d+)?)")
+
+
+def _is_ruby(raw: str) -> bool:
+    """Furigana events are small (`\\fscy50`); tagged parentheses shrink with `\\fscx` only."""
+    return any(
+        float(m.group(1)) < 70 for b in re.findall(r"\{[^}]*\}", raw) for m in _FSCY.finditer(b)
+    )
+
+
 def parse_ass_cues(text: str) -> list[Cue]:
     fields = [f.strip().casefold() for f in _ASS_FORMAT.split(",")]
     cues: list[Cue] = []
@@ -257,7 +268,10 @@ def parse_ass_cues(text: str) -> list[Cue]:
                 start, end = _stamp(d["start"]), _stamp(d["end"])
             except (KeyError, ValueError):
                 continue
-            cues.append(Cue(start, end, _ass_text(d.get("text", "")), d.get("style", "")))
+            raw_text = d.get("text", "")
+            cues.append(
+                Cue(start, end, _ass_text(raw_text), d.get("style", ""), _is_ruby(raw_text))
+            )
     return cues
 
 

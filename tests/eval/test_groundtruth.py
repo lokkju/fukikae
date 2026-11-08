@@ -664,7 +664,44 @@ def test_map_overrides_per_episode_cooccurrence(tmp_path: Path) -> None:
     cues = _colour_cues(text, tmp_path)
     assert read_colour(cues, "S01E03", Namer())[-1].speaker == "直美"
     got = read_colour(cues, "S01E03", Namer(), colour_names={"yellow": "りん"})
-    assert [ln.speaker for ln in got] == ["直美", "直美", "直美", "りん"]
+    assert [ln.speaker for ln in got] == ["りん"]  # the three 直美 tags disagree with the map
+
+
+def test_colour_tag_disagreeing_with_map_is_dropped(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.base import Namer
+    from fukikae.eval.groundtruth.colour import read_colour
+
+    text = _ass_ep(
+        _tagged(1, YELLOW, "直美"),
+        _tagged(3, YELLOW, "りん"),
+        _tagged(5, "", "安"),
+        (7, YELLOW, "はい"),
+    )
+    cues = _colour_cues(text, tmp_path)
+    got = read_colour(cues, "S01E01", Namer(), colour_names={"yellow": "りん"})
+    assert [(ln.start, ln.speaker) for ln in got] == [(3.0, "りん"), (5.0, "安"), (7.0, "りん")]
+    aliased = read_colour(cues, "S01E01", Namer({"直美": "りん"}), colour_names={"yellow": "りん"})
+    assert [(ln.start, ln.speaker) for ln in aliased] == [
+        (1.0, "りん"),
+        (3.0, "りん"),
+        (5.0, "安"),
+        (7.0, "りん"),
+    ]
+
+
+def test_fscy_events_are_ruby_and_fscx_tagged_events_are_kept(tmp_path: Path) -> None:
+    from fukikae.eval.groundtruth.base import Namer
+    from fukikae.eval.groundtruth.colour import read_colour
+
+    text = _ass_ep(
+        (1, YELLOW, "本文"),
+        (1, YELLOW + "\\fscx50\\fscy50", "ほんぶん"),
+        _tagged(3, YELLOW, "りん"),
+    )
+    cues = _colour_cues(text, tmp_path)
+    assert [c.ruby for c in cues] == [False, True, False]
+    got = read_colour(cues, "S01E01", Namer(), colour_names={"yellow": "りん"})
+    assert [(ln.start, ln.end) for ln in got] == [(1.0, 2.0), (3.0, 4.0)]
 
 
 def test_fscx_blocks_and_colour_in_one_override(tmp_path: Path) -> None:
