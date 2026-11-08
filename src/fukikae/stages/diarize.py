@@ -30,6 +30,7 @@ import numpy as np
 from fukikae import runctx
 from fukikae.artifacts import atomic_path, write_json
 from fukikae.backends.base import Diarizer, Embedder
+from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
 from fukikae.config import BackendConfig, Config
 from fukikae.gpu import device_string, free_mb, wait_for_vram
@@ -78,8 +79,16 @@ class DiarizeStage:
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
         diar, emb = self._cfgs(cfg)
         return {
-            "diarize": {"backend": diar.backend, "options": diar.options},
-            "embed": {"backend": emb.backend, "options": emb.options},
+            "diarize": {
+                "backend": diar.backend,
+                "options": diar.options,
+                "identity": identity_key("diarize", diar),
+            },
+            "embed": {
+                "backend": emb.backend,
+                "options": emb.options,
+                "identity": identity_key("embed", emb),
+            },
         }
 
     @staticmethod

@@ -21,12 +21,13 @@ import numpy as np
 from fukikae import runctx
 from fukikae.artifacts import atomic_path
 from fukikae.backends.base import Backend, Embedder
+from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
 from fukikae.config import BackendConfig, Config
 from fukikae.eval.identity.segments import Segment
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 
-KEY_VERSION = 1
+KEY_VERSION = 2
 
 EmbedFn = Callable[[BackendConfig, Path, list[tuple[float, float]]], np.ndarray]
 
@@ -58,7 +59,11 @@ class EmbeddingCache:
         payload = {
             "version": KEY_VERSION,
             "segments": [[round(a, 6), round(b, 6)] for a, b in _spans(segs)],
-            "embedder": {"backend": embedder_cfg.backend, "options": embedder_cfg.options},
+            "embedder": {
+                "backend": embedder_cfg.backend,
+                "options": embedder_cfg.options,
+                "identity": identity_key("embed", embedder_cfg),
+            },
             "audio": audio_hash(audio),
         }
         blob = json.dumps(payload, sort_keys=True, default=str).encode()
