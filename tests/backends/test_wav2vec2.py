@@ -9,11 +9,26 @@ from fukikae.models import Transcript
 def test_declaration_and_registration():
     c = Wav2Vec2Aligner
     assert (c.name, c.kind) == ("wav2vec2", "align")
-    assert c.languages == frozenset({"ko", "ja", "zh", "en"})
+    assert c.languages == frozenset({"ko", "ja", "zh", "en", "de", "es"})
     assert MODELS["ko"] == "kresnik/wav2vec2-large-xlsr-korean"
     assert MODELS["ja"] == "jonatasgrosman/wav2vec2-large-xlsr-53-japanese"
     assert MODELS["zh"] == "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
+    assert MODELS["de"] == "jonatasgrosman/wav2vec2-large-xlsr-53-german"
+    assert MODELS["es"] == "jonatasgrosman/wav2vec2-large-xlsr-53-spanish"
     assert "wav2vec2" in loader.names("align")
+
+
+def test_token_id_folds_case_to_the_vocabulary():
+    # the de/es checkpoints have lowercase vocabularies; transcripts keep their capitals
+    a = Wav2Vec2Aligner({}, "cpu")
+    a._vocab, a._blank = {"<pad>": 0, "a": 1, "ä": 2, "ñ": 3}, 0
+    assert a._token_id("Ä", "de") == 2
+    assert a._token_id("A", "es") == 1
+    assert a._token_id("Ñ", "es") == 3
+    assert a._token_id("ß", "de") is None
+    # the English bundle is uppercase
+    a._vocab, a._blank = {"-": 0, "A": 1}, 0
+    assert a._token_id("a", "en") == 1
 
 
 def test_split_words():
