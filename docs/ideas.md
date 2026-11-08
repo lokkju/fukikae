@@ -25,3 +25,8 @@ What: `eval speakers --from-subtitles` turns ASS Name/Actor fields, or SDH/CC sp
 Why: it removes hand labeling for those releases and gives ground truth for scoring diarization. Fairy Tail: 100 Years Quest S01E11 and Quality Assurance in Another World S01E01 in the library have fully named ASS lines.
 
 Rough shape: parse the subtitle track, map each cue's speaker to the diarized turn with the greatest time overlap, and write the result in the same format hand labels use.
+
+## Ground truth for face and active-speaker work (found 2026-11-08)
+
+- `wangyueqian/friends_mmc` (Hugging Face, open): Friends episodes with the speaker and named face boxes per turn, frame-numbered relative to the episode, raw video plus face-track audio. A ready test set for the face/active-speaker plan.
+- NHK asadora broadcast captions (kitsunekko mirror, `drama_tv`, `[字]` .ass files) colour the main cast per line, which also labels on-screen speakers for face work once aligned.
