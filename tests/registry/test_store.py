@@ -560,3 +560,37 @@ def test_split_gives_a_new_character_no_cards(reg: Registry):
     _, new_cid = reg.split_cluster(aid, "e2", "S0")
     assert reg.card_languages(new_cid) == [] and reg.card_history(new_cid, "en") == []
     assert _cur(reg, cid, "en").card_id == A16
+
+
+# --- ruling CD3: imported cards are operator acts ----------------------------------------
+
+
+def test_auto_refuses_to_replace_an_imported_card(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="import:Pack", locked=False)
+    with pytest.raises(ProtectedAssignmentError, match="import:Pack"):
+        reg.assign_card(cid, "en", B16, by="auto", locked=False)
+    assert _cur(reg, cid, "en").card_id == A16
+    assert reg.assign_card(cid, "en", B16, by="auto", locked=False, override=True).card_id == B16
+
+
+def test_import_replaces_an_unlocked_import(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="import:One", locked=False)
+    done = reg.assign_card(cid, "en", B16, by="import:Two", locked=False)
+    assert done.card_id == B16 and done.chosen_by == "import:Two"
+
+
+def test_import_refuses_a_locked_import_without_override(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="import:One", locked=True)
+    with pytest.raises(ProtectedAssignmentError, match="locked"):
+        reg.assign_card(cid, "en", B16, by="import:Two", locked=False)
+    assert reg.assign_card(cid, "en", B16, by="import:Two", locked=False, override=True)
+
+
+def test_import_refuses_an_operator_card_without_override(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="assign", locked=False)
+    with pytest.raises(ProtectedAssignmentError, match="operator-chosen"):
+        reg.assign_card(cid, "en", B16, by="import:Two", locked=False)
