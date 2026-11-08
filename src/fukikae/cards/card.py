@@ -12,9 +12,11 @@ canonical form, changing a default would silently change what every existing car
 A new behaviour gets a new field name with a default that reproduces the old behaviour;
 adding such a field leaves every existing id unchanged. Never change a default's value.
 
-Before hashing and storing, every text field is NFC-normalized, typed float fields are floats,
-and integral floats in free-form tables (``[voice.options]``, reference ``origin``) become
-ints, so ``1`` and ``1.0`` give one id. NaN and infinity are refused everywhere. An empty
+Every text field is NFC-normalized at parse and typed float fields are floats. Values in
+free-form tables (``[voice.options]``, reference ``origin``) are kept exactly as authored, type
+included, in the loaded card, the dumped file and what a backend receives; only the canonical
+form used for the id writes whole floats as ints, at any depth, so ``1`` and ``1.0`` give one
+id. NaN and infinity are refused everywhere. An empty
 ``[style]`` is the same card as no ``[style]``.
 """
 
@@ -203,9 +205,10 @@ def _float(
     return f
 
 
-def _norm_free(value: Any, where: str) -> Any:
-    """Normalize a free-form value for storage and hashing: NFC text, integral floats as
-    ints, finite numbers only, recursively through tables and arrays."""
+def _norm_free(value: Any, where: str, *, identity: bool = False) -> Any:
+    """A free-form value with NFC text and finite numbers, recursively through tables and
+    arrays. Numbers keep their authored type unless ``identity``: the canonical form for the
+    id writes whole floats as ints, so ``1`` and ``1.0`` hash the same."""
     if isinstance(value, str):
         return _nfc(value)
     if isinstance(value, bool):
@@ -213,11 +216,11 @@ def _norm_free(value: Any, where: str) -> Any:
     if isinstance(value, float):
         if not math.isfinite(value):
             raise CardError(f"{where} must hold finite numbers, got {value}")
-        return int(value) if value.is_integer() else value
+        return int(value) if identity and value.is_integer() else value
     if isinstance(value, dict):
-        return {_nfc(k): _norm_free(v, f"{where}.{k}") for k, v in value.items()}
+        return {_nfc(k): _norm_free(v, f"{where}.{k}", identity=identity) for k, v in value.items()}
     if isinstance(value, list | tuple):
-        return [_norm_free(v, where) for v in value]
+        return [_norm_free(v, where, identity=identity) for v in value]
     return value
 
 
@@ -402,7 +405,7 @@ def parse_card(text: str) -> Card:
 # --- serialization -------------------------------------------------------------------------
 
 
-def _voice_dict(v: Voice, *, fingerprint: bool) -> dict[str, Any]:
+def _voice_dict(v: Voice, *, fingerprint: bool, identity: bool = False) -> dict[str, Any]:
     """Every Voice field is handled here (tests/cards/test_card.py checks it), each left out
     while it equals its frozen default (CD1)."""
     d: dict[str, Any] = {
@@ -421,7 +424,7 @@ def _voice_dict(v: Voice, *, fingerprint: bool) -> dict[str, Any]:
     for key in ("blend", "options", "post"):
         value = getattr(v, key)
         if value != getattr(_VOICE_DEFAULTS, key):
-            d[key] = _norm_free(value, f"[voice.{key}]")
+            d[key] = _norm_free(value, f"[voice.{key}]", identity=identity)
     if "blend" in d:
         d["blend"]["weight"] = float(d["blend"]["weight"])
     if "post" in d and "gain_db" in d["post"]:
@@ -429,20 +432,20 @@ def _voice_dict(v: Voice, *, fingerprint: bool) -> dict[str, Any]:
     if v.voices:
         d["voices"] = [{"id": _nfc(i), "weight": float(w)} for i, w in v.voices]
     if v.references:
-        d["references"] = [_reference_dict(r) for r in v.references]
+        d["references"] = [_reference_dict(r, identity=identity) for r in v.references]
     if fingerprint and v.fingerprint is not None:
         d["fingerprint"] = _fingerprint_dict(v.fingerprint)
     return d
 
 
-def _reference_dict(r: Reference) -> dict[str, Any]:
+def _reference_dict(r: Reference, *, identity: bool = False) -> dict[str, Any]:
     rd: dict[str, Any] = {
         "clip": r.clip,
         "transcript": _nfc(r.transcript),
         "language": _nfc(r.language),
     }
     if r.origin is not None:
-        rd["origin"] = _norm_free(r.origin, "[[voice.references]] origin")
+        rd["origin"] = _norm_free(r.origin, "[[voice.references]] origin", identity=identity)
     return rd
 
 
@@ -455,7 +458,7 @@ def _card_dict(card: Card, *, identity: bool) -> dict[str, Any]:
     d: dict[str, Any] = {"target_language": _nfc(card.target_language)}
     if card.meta and not identity:
         d["meta"] = card.meta
-    d["voice"] = _voice_dict(card.voice, fingerprint=not identity)
+    d["voice"] = _voice_dict(card.voice, fingerprint=not identity, identity=identity)
     if card.style:
         d["style"] = _norm_free(card.style, "[style]")
     return d
