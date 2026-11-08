@@ -158,8 +158,12 @@ _TAG = re.compile(r"<[^>]*>|\{[^}]*\}")
 _STAMP = re.compile(r"(?:(\d+):)?(\d+):(\d+)(?:[.,](\d+))?")
 
 
+# Invisible directional marks (Netflix starts every cue with U+202A) hide a tag at the line start.
+_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
 def strip_markup(text: str) -> str:
-    return html.unescape(_TAG.sub("", text)).replace(" ", " ").replace("‎", "")
+    return _INVISIBLE.sub("", html.unescape(_TAG.sub("", text)).replace("\xa0", " "))
 
 
 def _stamp(s: str) -> float:
