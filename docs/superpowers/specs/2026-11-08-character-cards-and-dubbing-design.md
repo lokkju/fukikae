@@ -1,6 +1,6 @@
 # fukikae: character cards, translation and speech synthesis
 
-_Status: draft for review, 2026-11-08. Builds on `2026-11-04-doppio-design.md` (the foundation spec) and amends its voice assignment and TTS sections; where this document is silent, the foundation spec stands. Operator rulings: D11 (voice cards ahead of face detection), D12 (clone by default), D13 (speech style on the same card, simple for now)._
+_Status: draft for review, 2026-11-08. Builds on `2026-11-04-doppio-design.md` (the foundation spec) and amends its voice assignment and TTS sections; where this document is silent, the foundation spec stands. Operator rulings: D11 (voice cards ahead of face detection), D12 (clone by default), D13 (speech style on the same card, simple for now), D15 (the operator picks the cloning backend by listening at a checkpoint; stock is the interim default if no candidate passes)._
 
 ## Intent
 
@@ -166,7 +166,7 @@ These follow the foundation spec, with what this plan adds:
 
 - **05-translate**: as specified, plus `[style]` in the prompt and the delivery record per cue. Default backend `openai_compat` in `managed` mode (a small GGUF on llama.cpp), per the foundation spec.
 - **04b-tag** (optional, foundation milestone 7): SenseVoice-Small on CPU over the vocals, writing event spans (BGM, singing, laughter, crying) and per-turn emotion labels. Default on in the anime and live-action profiles once built (my call), since reference selection and the mix use it.
-- **06-tts**: one wav per cue from the character's card. Backends: Kokoro (stock, blend) and one cloning backend with emotion separate from timbre. IndexTTS2 is the leading candidate (timbre and emotion references are separate inputs, and it offers duration control); CosyVoice 3 and Qwen3-TTS are the alternates. The builder picks after a listening test and `eval tts` on Fairy Tail E11-E14 (ja to en) and The Big Bang Theory S01's German and Spanish dub tracks (de and es to en) once they land. BBT's original English track is a free reference there: `eval tts` compares the dubbed English line's duration and delivery with what the real English line did (my call).
+- **06-tts**: one wav per cue from the character's card. Backends: Kokoro (stock, blend) and one cloning backend with emotion separate from timbre. IndexTTS2 is the leading candidate (timbre and emotion references are separate inputs, and it offers duration control); CosyVoice 3 and Qwen3-TTS are the alternates. The operator picks (D15): the plan builds the Kokoro path end to end first, then the candidate backends with `eval tts`, then stops at a checkpoint where the operator listens to a short A/B per candidate with the numbers alongside. If no candidate clones ja to en acceptably, stock voices become the interim default for new characters (D12 resumes once one passes), and the choice is recorded in the ledger. The evaluation runs on Fairy Tail E11-E14 (ja to en) and The Big Bang Theory S01's German and Spanish dub tracks (de and es to en) once they land. BBT's original English track is a free reference there: `eval tts` compares the dubbed English line's duration and delivery with what the real English line did (my call).
 - **07-timefit**: as specified. When the backend offers duration control, the target duration goes to the TTS call first, ahead of time-stretch in the foundation spec's order.
 - **08-mix**: as specified (background bed, original vocals kept outside dub cues, laughter and songs untouched, EBU R128, mux with an ASS track naming speakers).
 
@@ -194,10 +194,14 @@ Rows go to the results ledger keyed by backend, model revision, language pair an
 - Fingerprints use WeSpeaker, the identity embedder, for one embedding space across the project.
 - Verification reports but never blocks.
 - The translator's delivery `direction` is requested only for marked delivery, to keep prompts short on a small model.
+- The fingerprint is excluded from the card id, so recording one never re-renders anything.
+- This plan builds the `tag` stage (on by default in the anime and live-action profiles) and the subtitle-first path, ASR plus translation first.
+- Series ids and genre are set by hand in `[series]`; pack import refuses only on conflicting ids and otherwise matches by title with a warning.
+- BBT's German and Spanish dubs are the second TTS evaluation set, with the original English track as the reference for duration and delivery.
 
 ## Left to the builder
 
 - Exact artifact schemas, the canonical serialization for card ids, the test sentences for verification, and the gender-matched stock pools.
-- The listening-test protocol (a handful of cues per character, A/B between candidate backends) and how its result is recorded.
+- The listening-test materials: a handful of cues per character rendered by each candidate, laid out for the operator's A/B (a static page or a folder with an index), and how the verdict is recorded.
 - Whether `blend` across different backends is refused or approximated (my lean: refused).
 - Pack compression and size limits for clips.
