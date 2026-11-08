@@ -82,6 +82,59 @@ def test_tag_before_load_raises(tmp_path: Path):
         Emotion2vecTagger({}, "cpu").tag(tmp_path / "x.wav", [])
 
 
+class FakeHub:
+    """A hub with a cache: a download fills it, local_files_only reads only it."""
+
+    def __init__(self) -> None:
+        self.cached = False
+        self.calls: list[bool] = []
+
+    def snapshot_download(self, repo, revision=None, local_files_only=False, **_kw):
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        self.calls.append(local_files_only)
+        if local_files_only:
+            if not self.cached:
+                raise LocalEntryNotFoundError("not cached")
+        else:
+            self.cached = True
+        return f"/cache/{repo}/{revision}"
+
+
+@pytest.fixture
+def hub(monkeypatch):
+    import sys
+    import types
+
+    import huggingface_hub
+
+    h = FakeHub()
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", h.snapshot_download)
+    fake = types.ModuleType("funasr")
+    fake.AutoModel = lambda **kw: kw  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "funasr", fake)
+    return h
+
+
+def test_second_load_makes_no_network_call(hub):
+    Emotion2vecTagger({}, "cpu").load()
+    assert hub.calls == [True, False]  # cache miss, then the one download
+    hub.calls.clear()
+    t = Emotion2vecTagger({}, "cpu")
+    t.load()
+    assert hub.calls == [True]
+    assert t._model["model"] == f"/cache/{DEFAULT_MODEL}/{DEFAULT_REVISION}"
+
+
+def test_offline_never_downloads(hub, monkeypatch):
+    from huggingface_hub import constants
+
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
+    with pytest.raises(Exception, match="not cached"):
+        Emotion2vecTagger({}, "cpu").load()
+    assert hub.calls == [True]
+
+
 @pytest.mark.slow
 @pytest.mark.media
 def test_emotion2vec_on_fixture_clip(tmp_path: Path):
@@ -103,6 +156,11 @@ def test_emotion2vec_on_fixture_clip(tmp_path: Path):
         o.writeframes(raw)
     t = Emotion2vecTagger({}, "cpu")
     t.load()
+    from huggingface_hub import snapshot_download
+
+    pinned = snapshot_download(DEFAULT_MODEL, revision=DEFAULT_REVISION, local_files_only=True)
+    assert Path(t._model.kwargs["model_path"]) == Path(pinned)
+    assert Path(pinned).name == DEFAULT_REVISION
     try:
         tags = t.tag(short, [Turn(start=19.07, end=22.75, speaker="S0")])
     finally:

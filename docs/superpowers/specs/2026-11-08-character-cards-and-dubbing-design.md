@@ -123,7 +123,7 @@ The series' `target_language` (foundation spec config) picks which assignment th
 
 When the characters stage creates a character, or when a character first needs TTS, fukikae builds a clone card:
 
-- References come from the character's exemplars on the separated vocals: turns with no overlap, a high speech-to-noise ratio, between 3 and 12 s each, and, best effort, not a non-neutral emotion: the filter drops a turn only when a scored emotion source (emotion2vec, in the anime and live-action profiles) labels it non-neutral with confidence at least 0.5; an unlabeled, unscored or low-confidence turn stays, ranked by signal-to-noise and overlap alone (SenseVoice's labels carry no score, so they exclude nothing), up to the backend's preferred total (my call: 3 references totalling 10-20 s, the builder tunes this). Their transcripts come from the ASR artifact.
+- References come from the character's exemplars on the separated vocals: turns with no overlap, a high speech-to-noise ratio, between 3 and 12 s each, and, as a ranking rule, not a non-neutral emotion: a turn that a scored emotion source (emotion2vec, in the anime and live-action profiles) labels non-neutral with confidence at least 0.5 ranks after every other eligible turn, so it is used only when needed to reach the minimum total; an unlabeled, unscored or low-confidence turn is ranked by signal-to-noise and overlap alone (SenseVoice's labels carry no score, so they demote nothing). Whenever a chosen reference is scored non-neutral, the card report and the `voices` output say "references may carry emotion: <labels>", up to the backend's preferred total (my call: 3 references totalling 10-20 s, the builder tunes this). Their transcripts come from the ASR artifact.
 - A character with too little clean speech for that (my call: under 6 s total) gets a stock voice from a gender-matched pool instead, as the foundation spec described, and the report says so. The operator can still clone from a clip by hand (`voices clone <character> --clip <file>`).
 - Auto cards are unlocked; `voices assign` and `voices lock` lock them.
 
@@ -195,7 +195,7 @@ Rows go to the results ledger keyed by backend, model revision, language pair an
 ## Calls I made (for the operator to check)
 
 - Card ids are content hashes, so an edited card is a new card, and history points at immutable cards.
-- Reference selection defaults: 3 clips, 10-20 s total, 3-12 s each, best-effort emotion filter on scored labels; under 6 s of clean speech falls back to stock.
+- Reference selection defaults: 3 clips, 10-20 s total, 3-12 s each, scored non-neutral turns rank last and are reported when used; under 6 s of clean speech falls back to stock.
 - Packs carry no registry ids; matching is by external character id, then name.
 - Fingerprints use WeSpeaker, the identity embedder, for one embedding space across the project.
 - Verification reports but never blocks.
