@@ -477,3 +477,52 @@ def test_known_meta_keys_are_type_checked():
         parse_card(SPEC_CARD.replace('title = "Natsu', 'title = 3\nx = "Natsu'))
     with pytest.raises(CardError, match="created"):
         parse_card(SPEC_CARD.replace("created = 2026-11-08", "created = 3"))
+
+
+# --- authored option values are kept exactly; only the id form unifies 1 and 1.0 -----------
+
+_OPTS_FLOAT = "\n[voice.options]\ncfg = 1.0\nlist = [1.0, 2]\n[voice.options.inner]\nk = 1.0\n"
+_OPTS_INT = "\n[voice.options]\ncfg = 1\nlist = [1, 2.0]\n[voice.options.inner]\nk = 1\n"
+
+
+class Recorder(Fake):
+    seen: ClassVar[list[dict[str, Any]]] = []
+
+    @classmethod
+    def validate_options(cls, options: dict[str, Any], source: str | None = None) -> None:
+        cls.seen.append({**options, "__source__": source} if source is None else options)
+
+
+def _types(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _types(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_types(v) for v in value]
+    return type(value)
+
+
+def test_option_values_keep_their_authored_type():
+    f = parse_card(STOCK_CARD + _OPTS_FLOAT)
+    i = parse_card(STOCK_CARD + _OPTS_INT)
+    assert _types(f.voice.options) == {"cfg": float, "list": [float, int], "inner": {"k": float}}
+    assert _types(i.voice.options) == {"cfg": int, "list": [int, float], "inner": {"k": int}}
+    assert "cfg = 1.0" in dump_card(f) and "cfg = 1\n" in dump_card(i)
+    assert parse_card(dump_card(f)) == f and _types(parse_card(dump_card(f)).voice.options) == (
+        _types(f.voice.options)
+    )
+    assert _types(parse_card(dump_card(i)).voice.options) == _types(i.voice.options)
+    Recorder.seen.clear()
+    validate_for_backend(f, Recorder)
+    validate_for_backend(i, Recorder)
+    assert _types(Recorder.seen[0]) == _types(f.voice.options)
+    assert _types(Recorder.seen[1]) == _types(i.voice.options)
+    assert card_id(f) == card_id(i)
+
+
+def test_origin_keeps_its_authored_type_and_shares_an_id():
+    a = parse_card(SPEC_CARD.replace("start = 512.40", "start = 512.0"))
+    b = parse_card(SPEC_CARD.replace("start = 512.40", "start = 512"))
+    assert type(a.voice.references[0].origin["start"]) is float  # type: ignore[index]
+    assert type(b.voice.references[0].origin["start"]) is int  # type: ignore[index]
+    assert "start = 512.0" in dump_card(a)
+    assert card_id(a) == card_id(b)
