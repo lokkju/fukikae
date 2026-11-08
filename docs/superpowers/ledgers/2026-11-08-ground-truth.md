@@ -77,7 +77,7 @@ Labelled speech per character in the tuning episodes (E01, E02; live-action rows
 
 Raj recurs nowhere because he has under 5 s in E01 on every track. Ledger option hashes: bbt live-action `ad0ed977`, bbt default `fbfe504c`, aib live-action `c442755e`, aib default `1f881519`. The genre column reads `live-action` in all rows, the default copies included, through `[series] genre`.
 
-On BBT en, live-action and default give identical assignments. On the German and Spanish dubs, both profiles put Leonard and Sheldon (and in es, Howard too) on one id, while nearest-centroid accuracy on the same speech is 96-99%. The embeddings separate the voices; clustering at 0.6 merges them.
+On BBT en, live-action and default give identical assignments. On the German and Spanish dubs, both profiles put Leonard and Sheldon (and in es, Howard too) on one id, while nearest-centroid accuracy on the same speech is 96-99%. Correction (Task 7 review): the merge happens in diarization, not at the 0.6 matcher threshold. One pyannote speaker holds 93-97% of both Leonard's and Sheldon's labelled speech in de and es (en splits them, 78% and 82% on two speakers), so the matcher only ever sees one cluster and the two profiles' rows are identical. The 96-99% nearest-centroid accuracy is measured on the labelled spans, not the diarized clusters. Ruling GT9 adds pyannote's clustering threshold to Task 8's sweep.
 
 ## Task 7c: Bazinga English sets and the transcript-aligner check (D18)
 
