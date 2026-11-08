@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 import numpy as np
 
 from fukikae.models import Diarization, Separation, Transcript
 
-KINDS = ("separation", "asr", "align", "diarize", "embed", "lid")
+if TYPE_CHECKING:
+    from fukikae.cards.card import Voice
+
+KINDS = ("separation", "asr", "align", "diarize", "embed", "lid", "tag", "translate", "tts")
+
+# Delivery inputs a Synthesizer may accept beyond the speaker voice.
+TTS_CAPABILITIES = frozenset({"emotion_audio", "emotion_vector", "instruction", "duration"})
 
 
 class Backend(Protocol):
@@ -60,4 +67,38 @@ class Embedder(Backend, Protocol):
 
     def embed(self, audio: Path, spans: list[tuple[float, float]]) -> np.ndarray:
         """Shape ``(len(spans), dim)``, rows L2-normalized."""
+        ...
+
+
+class Synthesizer(Backend, Protocol):
+    """A TTS backend. A card's [voice] table is honored exactly or refused at load
+    (``fukikae.cards.card.validate_for_backend``), never approximated."""
+
+    sources: ClassVar[frozenset[str]]  # subset of cards.card.CARD_SOURCES
+    voice_keys: ClassVar[frozenset[str]]  # [voice] keys it honors beyond the source's own field
+    capabilities: ClassVar[frozenset[str]]  # subset of TTS_CAPABILITIES
+    sample_rate: ClassVar[int]
+    model_revision: str
+
+    @classmethod
+    def validate_options(cls, options: dict[str, Any]) -> None:
+        """Raise ``CardError`` naming any ``[voice.options]`` key or value it can't honor."""
+        ...
+
+    def synthesize(
+        self,
+        text: str,
+        voice: Voice,
+        language: str,
+        out: Path,
+        *,
+        resolve: Callable[[str], Path],
+        emotion_audio: Path | None = None,
+        emotion_vector: dict[str, float] | None = None,
+        instruction: str | None = None,
+        emotion_strength: float = 1.0,
+        target_seconds: float | None = None,
+    ) -> float:
+        """Write a mono wav at ``sample_rate`` to ``out`` and return its length in seconds.
+        ``resolve`` maps a ``sha256:`` ref to its sidecar path."""
         ...
