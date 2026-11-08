@@ -154,10 +154,13 @@ SIDECAR_SUFFIXES = (".ass", ".ssa", ".srt", ".vtt")
 
 
 def extract_subtitle(source: Path, track: SubTrack, out: Path) -> Path:
-    """The subtitle stream at ``track`` written next to ``out`` (its suffix replaced): ``.ass``
-    for an ASS/SSA track, copied as is, else ``.srt``. Returns the written path."""
+    """The subtitle stream at ``track`` written to ``out`` plus ``.ass`` for an ASS/SSA track,
+    copied as is, else ``.srt`` (a subtitle suffix already on ``out`` is replaced, any other
+    dot in the name kept: ``subs.en`` -> ``subs.en.ass``). Returns the written path."""
     ass = track.codec in ("ass", "ssa")
-    dest = Path(out).with_suffix(".ass" if ass else ".srt")
+    out = Path(out)
+    stem = out.with_suffix("") if out.suffix.casefold() in SIDECAR_SUFFIXES else out
+    dest = stem.with_name(stem.name + (".ass" if ass else ".srt"))
     dest.parent.mkdir(parents=True, exist_ok=True)
     run_ffmpeg(
         [

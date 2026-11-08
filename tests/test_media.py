@@ -154,4 +154,5 @@ def test_extract_subtitle_round_trip(tmp_path):
     p = probe(mkv)
     (track,) = p.subtitles
     out = extract_subtitle(mkv, track, tmp_path / "out" / "subs.en")
-    assert out.suffix == ".ass" and "Hello." in out.read_text(encoding="utf-8")
+    assert out.name == "subs.en.ass" and "Hello." in out.read_text(encoding="utf-8")
+    assert extract_subtitle(mkv, track, tmp_path / "x.srt").name == "x.ass"
