@@ -67,6 +67,15 @@ def test_rows_split_by_key_and_missing_cells():
     assert any(label.endswith("| pick") for label, _ in m.rows)
 
 
+def test_series_sharing_a_test_set_name_stay_apart():
+    m = build_matrix([row("en", series="Grid"), row("en", series="Fairy Tail")])
+    assert len(m.rows) == 2
+    labels = sorted(label for label, _ in m.rows)
+    assert " | bbt [Fairy Tail] | " in labels[0] and " | bbt [Grid] | " in labels[1]
+    # One series alone keeps the plain label.
+    assert " | bbt | " in build_matrix([row("en", series="Grid")]).rows[0][0]
+
+
 def test_rows_grouped_by_stage():
     m = build_matrix([
         row(stage="identity"),
