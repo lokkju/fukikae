@@ -335,11 +335,14 @@ def merge(
     """Merge actor DROP into actor KEEP; DROP's characters fold into KEEP's first one."""
     ws = Workspace(workspace)
     with _open(workspace) as reg:
+        notes: list[str] = []
         try:
             affected = list(reg.episode_counts(drop))
-            chars = reg.merge_actors(keep, drop)
+            chars = reg.merge_actors(keep, drop, report=notes)
         except (KeyError, ValueError) as e:
             raise _fail(f"cannot merge {drop} into {keep}: {e!r}") from e
+    for line in notes:
+        typer.echo(line)
     for eid in affected:
         _remap_assignments(ws, eid, {drop: keep}, character_map=chars)
     _stale(ws, affected)

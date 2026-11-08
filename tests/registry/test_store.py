@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fukikae.registry.store import CardAssignment, Registry
+from fukikae.registry.store import CardAssignment, ProtectedAssignmentError, Registry
 
 
 def unit(*xs: float) -> np.ndarray:
@@ -443,3 +443,120 @@ def test_character_by_ref_width_insensitive(reg: Registry):
     reg.rename_character(dup, "NATSU")
     with pytest.raises(ValueError, match=rf"{cid}.*{dup}"):
         reg.character_by_ref("Natsu")
+
+
+# --- ruling CD2: automatic assignments never replace curated cards ------------------------
+
+
+def test_auto_refuses_to_replace_a_locked_card(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    reg.lock_card(cid, "en", True)
+    with pytest.raises(ProtectedAssignmentError, match="locked"):
+        reg.assign_card(cid, "en", B16, by="auto", locked=False)
+    assert _cur(reg, cid, "en").card_id == A16
+
+
+def test_auto_and_import_refuse_to_replace_an_operator_card(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="assign", locked=False)
+    with pytest.raises(ProtectedAssignmentError, match="operator-chosen"):
+        reg.assign_card(cid, "en", B16, by="auto", locked=False)
+    with pytest.raises(ProtectedAssignmentError):
+        reg.assign_card(cid, "en", B16, by="import:Pack", locked=False)
+    assert len(reg.card_history(cid, "en")) == 1
+    done = reg.assign_card(cid, "en", B16, by="import:Pack", locked=False, override=True)
+    assert done.card_id == B16 and done.chosen_by == "import:Pack"
+
+
+def test_auto_replaces_an_auto_card_and_operators_replace_anything(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    assert reg.assign_card(cid, "en", B16, by="auto", locked=False).card_id == B16
+    reg.lock_card(cid, "en", True)
+    assert reg.assign_card(cid, "en", C16, by="assign", locked=True).card_id == C16
+
+
+def test_auto_refuses_after_a_lock_then_unlock_of_an_operator_card(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="edit", locked=True)
+    reg.lock_card(cid, "en", False)
+    assert _cur(reg, cid, "en").chosen_by == "edit"
+    with pytest.raises(ProtectedAssignmentError):
+        reg.assign_card(cid, "en", B16, by="auto", locked=False)
+
+
+def test_unlock_of_a_never_locked_auto_card_is_a_no_op(reg: Registry):
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    reg.lock_card(cid, "en", False)
+    assert [h.by for h in reg.card_history(cid, "en")] == ["auto"]
+    assert aid not in reg.protected_actors()
+    assert reg.prune_actors([aid]) == [aid]
+
+
+def test_lock_twice_writes_one_row(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    reg.lock_card(cid, "en", True)
+    reg.lock_card(cid, "en", True)
+    assert [h.by for h in reg.card_history(cid, "en")] == ["auto", "lock"]
+
+
+def test_lock_then_unlock_of_an_auto_card_leaves_it_uncurated(reg: Registry):
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    reg.lock_card(cid, "en", True)
+    assert aid in reg.protected_actors()
+    reg.lock_card(cid, "en", False)
+    assert cid not in reg.curated_characters() and aid not in reg.protected_actors()
+    assert reg.prune_actors([aid]) == [aid]
+
+
+def test_unlocked_operator_card_stays_curated(reg: Registry):
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.assign_card(cid, "en", A16, by="assign", locked=False)
+    reg.lock_card(cid, "en", True)
+    reg.lock_card(cid, "en", False)
+    assert cid in reg.curated_characters()
+    assert reg.prune_actors([aid]) == []
+
+
+def test_merged_history_is_in_time_order(reg: Registry, monkeypatch):
+    import fukikae.registry.store as store
+
+    times = iter(["2026-11-08T10:00:03.000000+00:00", "2026-11-08T10:00:01.000000+00:00"])
+    monkeypatch.setattr(store, "_now", lambda: next(times))
+    a1, c1 = reg.create_actor_with_character(unit(1, 0))
+    a2, c2 = reg.create_actor_with_character(unit(0, 1))
+    reg.assign_card(c1, "en", A16, by="assign", locked=True)  # later, lower row id
+    reg.assign_card(c2, "en", B16, by="assign", locked=True)  # earlier, higher row id
+    notes: list[str] = []
+    reg.merge_actors(a1, a2, report=notes)
+    assert [h.card_id for h in reg.card_history(c1, "en")] == [B16, A16]
+    assert _cur(reg, c1, "en").card_id == A16 and _cur(reg, c1, "en").n == 2
+    assert any(A16 in n and B16 in n and "stays in history" in n for n in notes)
+
+
+def test_merge_external_ids(reg: Registry):
+    a1, c1 = reg.create_actor_with_character(unit(1, 0))
+    a2, c2 = reg.create_actor_with_character(unit(0, 1))
+    reg.set_character_external_id(c2, "anidb:2")
+    reg.merge_actors(a1, a2)
+    assert reg.characters()[0].external_id == "anidb:2"  # keep had none: takes drop's
+    a3, c3 = reg.create_actor_with_character(unit(1, 1))
+    reg.set_character_external_id(c3, "anidb:3")
+    notes: list[str] = []
+    reg.merge_actors(a1, a3, report=notes)
+    assert reg.characters()[0].external_id == "anidb:2"  # both set: keep's wins
+    assert any("anidb:2" in n and "anidb:3" in n for n in notes)
+
+
+def test_split_gives_a_new_character_no_cards(reg: Registry):
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.add_exemplars(aid, "e1", "S0", np.stack([unit(1, 0)]), 3.0)
+    reg.add_exemplars(aid, "e2", "S0", np.stack([unit(1, 0.1)]), 3.0)
+    reg.assign_card(cid, "en", A16, by="assign", locked=True)
+    _, new_cid = reg.split_cluster(aid, "e2", "S0")
+    assert reg.card_languages(new_cid) == [] and reg.card_history(new_cid, "en") == []
+    assert _cur(reg, cid, "en").card_id == A16
