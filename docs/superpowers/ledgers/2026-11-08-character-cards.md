@@ -19,9 +19,11 @@ The workspace copy's separate, asr and diarize keys were stale against today's c
 |---|---|---|---|---|---|---|
 | 1 (b1238c5) | 536 | 536 | 0 | 161 | 70.0% | 482 s |
 | 2 (818bfc1) | 393 | 393 | 0 | 23 | 94.1% | 315 s |
+| 3 (967d815, fix round 1) | 393 | 393 | 0 | 22 | 94.4% | 310 s |
 
 Run 1 showed 105 cues of at most two characters: Qwen3's aligner stamps each character with about 20 ms, and a diarization turn boundary falling inside a word cut off one character as its own cue ("ロ" | "ックと..."). The same 20 ms stamps made every slot end too early, so budgets were short. 818bfc1 folds such fragments into the neighbour of the same ASR segment and lets a point-stamped word sound until the next word, at most 0.3 s. Run 2's 23 overruns are a median of 3 characters over (13 of them 3 or fewer), the largest 12.
 
 - 34 cues carried a delivery direction, which is all 34 cues with a non-neutral emotion tag.
 - No cue was skipped as song: SenseVoice found no `singing` span on this episode's vocals (events: bgm, crying, laughter only), so the opening theme's lyrics were translated as dialogue.
 - `nvidia-smi --id=0` showed no process after each run. An accidental `timeout 170` kill of the CLI mid-run also left no llama-server behind.
+- Run 3 (after fix round 1): no window was marked. There were no format or backend retries, and no prompt had to shrink. The 22 overruns are a median of 4 characters and at most 16, each flagged per cue (`over_budget`, `overrun`). The 34 directions all pass the four-word plain-tag rule. Lone interjections stay as their own cues ("え？" c0068, c0296). llama-server was ready 3.3 s after starting (GGUF cached), and no key file or process was left after the run.
