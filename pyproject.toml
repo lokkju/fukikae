@@ -46,6 +46,9 @@ wavlm = [
 dialogue = [
     "dbs",
 ]
+sensevoice = [
+    "funasr>=1.2",
+]
 
 [project.entry-points."fukikae.backends.asr"]
 faster_whisper = "fukikae.backends.asr.faster_whisper:FasterWhisperTranscriber"
@@ -70,6 +73,9 @@ campplus = "fukikae.backends.embed.sherpa:CampplusEmbedder"
 eres2netv2 = "fukikae.backends.embed.sherpa:Eres2netv2Embedder"
 titanet = "fukikae.backends.embed.sherpa:TitanetEmbedder"
 fusion = "fukikae.backends.embed.fusion:FusionEmbedder"
+
+[project.entry-points."fukikae.backends.tag"]
+sensevoice = "fukikae.backends.tag.sensevoice:SenseVoiceTagger"
 
 [project.entry-points."fukikae.backends.separation"]
 demucs = "fukikae.backends.separation.demucs:DemucsSeparator"

@@ -20,6 +20,10 @@ backend = "pyannote"
 [embed]
 backend = "wespeaker"
 
+[tag]   # character-cards Task 3: event spans and per-turn emotion, SenseVoiceSmall on the CPU
+backend = "sensevoice"
+enabled = true
+
 [characters]
 matcher = "centroid"   # the per-episode stage; joint runs through [resolve]
 

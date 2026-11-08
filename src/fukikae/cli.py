@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
@@ -9,6 +10,10 @@ from fukikae import __version__
 from fukikae.cards.cli import voices_app
 from fukikae.eval.cli import eval_app
 from fukikae.registry.cli import registry_app
+
+if TYPE_CHECKING:
+    from fukikae.config import Config
+    from fukikae.job import Stage
 
 # torch must number cards the way nvidia-smi and NVML do (gpu_device is an NVML index).
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -63,6 +68,29 @@ def doctor() -> None:
         typer.echo(f"{'ok  ' if ok else 'MISS'} {label}: {detail}")
 
 
+def pipeline_stages(cfg: "Config") -> "list[Stage]":
+    """The stages `fukikae run` goes through, in order; `tag` only when `[tag] enabled`."""
+    from fukikae.stages.asr import AsrStage
+    from fukikae.stages.characters import CharactersStage
+    from fukikae.stages.diarize import DiarizeStage
+    from fukikae.stages.extract import ExtractStage
+    from fukikae.stages.language import LanguageStage
+    from fukikae.stages.separate import SeparateStage
+    from fukikae.stages.tag import TagStage, tag_enabled
+
+    stages: list[Stage] = [
+        ExtractStage(),
+        SeparateStage(),
+        LanguageStage(),
+        AsrStage(),
+        DiarizeStage(),
+        CharactersStage(),
+    ]
+    if tag_enabled(cfg):
+        stages.append(TagStage())
+    return stages
+
+
 @app.command()
 def run(
     workspace: Path = typer.Argument(..., help="Workspace directory."),
@@ -74,26 +102,13 @@ def run(
     """Run the pipeline stages for one episode."""
     from fukikae import job, runctx
     from fukikae.errors import user_errors
-    from fukikae.stages.asr import AsrStage
-    from fukikae.stages.characters import CharactersStage
-    from fukikae.stages.diarize import DiarizeStage
-    from fukikae.stages.extract import ExtractStage
-    from fukikae.stages.language import LanguageStage
-    from fukikae.stages.separate import SeparateStage
     from fukikae.workspace import Workspace
 
     runctx.vram_timeout_s = 0 if no_wait else None
     ws = Workspace(workspace)
     try:
         ep = ws.find_episode(episode)
-        stages = [
-            ExtractStage(),
-            SeparateStage(),
-            LanguageStage(),
-            AsrStage(),
-            DiarizeStage(),
-            CharactersStage(),
-        ]
+        stages = pipeline_stages(ws.config)
         ran = job.run_stages(ep, ws.config, stages, from_stage, to_stage)
     except user_errors() as e:
         typer.echo(f"error: {e}", err=True)

@@ -51,3 +51,15 @@ def test_diarization_and_assignments_roundtrip(tmp_path):
 def test_separation_paths_serialize_as_strings():
     s = Separation(vocals=Path("a.wav"), background=Path("b.wav"), vocals_16k=Path("c.wav"))
     assert s.model_dump(mode="json")["vocals"] == "a.wav"
+
+
+def test_tags_round_trip():
+    from fukikae.models import Tags, TagSpan
+
+    t = Tags(
+        backend="sensevoice",
+        events=[TagSpan(start=0.0, end=7.5, label="bgm")],
+        emotions=[TagSpan(start=1.0, end=2.0, label="happy", confidence=None)],
+    )
+    assert Tags.model_validate_json(t.model_dump_json()) == t
+    assert t.schema_version == 1
