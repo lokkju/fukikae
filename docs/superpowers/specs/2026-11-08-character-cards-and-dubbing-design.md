@@ -1,16 +1,16 @@
 # fukikae: character cards, translation and speech synthesis
 
-_Status: draft for review, 2026-11-08. Builds on `2026-11-04-doppio-design.md` (the foundation spec) and amends its voice assignment and TTS sections; where this document is silent, the foundation spec stands. Operator rulings: D11 (voice cards ahead of face detection), D12 (clone by default), D13 (speech style on the same card, simple for now), D15 (the operator picks the cloning backend by listening at a checkpoint; stock is the interim default if no candidate passes)._
+_Status: approved 2026-11-08 (D17, with cards made per target language). Builds on `2026-11-04-doppio-design.md` (the foundation spec) and amends its voice assignment and TTS sections; where this document is silent, the foundation spec stands. Operator rulings: D11 (voice cards ahead of face detection), D12 (clone by default), D13 (speech style on the same card, simple for now), D15 (the operator picks the cloning backend by listening at a checkpoint; stock is the interim default if no candidate passes)._
 
 ## Intent
 
-Every character gets a card: a small file that reproduces that character's English voice on anyone's machine, and tells the translator how the character talks. Cards are what people improve, swap and share, so a better voice for a character, or a whole season's cast, can travel as a file, and anyone can try a different voice on a character without touching the rest of the dub. How a given line is said (angry, whispered, laughing) is not on the card: it comes from that line of the original, so one voice can shout in one scene and mumble in the next.
+Every character gets a card per target language: a small file that reproduces that character's voice in that language on anyone's machine, and tells the translator how the character talks. Cards are what people improve, swap and share, so a better voice for a character, or a whole season's cast in one language, can travel as a file, and anyone can try a different voice on a character without touching the rest of the dub. How a given line is said (angry, whispered, laughing) is not on the card: it comes from that line of the original, so one voice can shout in one scene and mumble in the next.
 
 This plan also builds the stages the cards feed: the optional `tag` stage (needed for neutral reference clips, per-line emotion and the mix's song and laughter protection), translate (including the foundation spec's subtitle-first path with condense mode), tts, timefit and mix, which together produce the first complete dubbed episode. ASR plus translation is built first, being the general case; the subtitle-first path follows in the same plan (my call).
 
 ## Goals
 
-1. A character card holds a **voice** section and an optional **speech style** section. The voice section names a TTS backend, a pinned model revision, a voice source and generation parameters, and renders the same voice (perceptually; bit-identical output isn't promised across GPUs) wherever it runs.
+1. A character card is for one target language (fukikae is meant to go from any language to any language; this plan builds and tests English). It holds a **voice** section and an optional **speech style** section. The voice section names a TTS backend, a pinned model revision, a voice source and generation parameters, and renders the same voice (perceptually; bit-identical output isn't promised across GPUs) wherever it runs.
 2. A new character gets a cross-lingual clone of its original actor by default (D12), with the reference clip chosen automatically from the cleanest speech the registry holds. Stock voices, blends and text-designed voices are opt-in per character.
 3. Cards are shareable: exported and imported as packs keyed by the series' external ids and the character's name, so they map onto anyone's registry.
 4. Swapping a character's card re-renders only that character's lines, then the mix. Every assignment is kept in a history and can be reverted.
@@ -52,6 +52,8 @@ title = "Natsu, cloned from the original, a bit brighter"
 author = "lokkju"
 created = 2026-11-08
 derived_from = "3f9a0c1d2e4b5a69"   # the card this one was edited from, if any
+
+target_language = "en"              # part of the card id; a character has at most one assigned card per target language
 
 [voice]
 backend = "indextts2"
@@ -110,8 +112,12 @@ Each TTS backend declares which sources and which `[voice]` keys it supports, an
 
 ## Registry changes
 
-- `characters.voice` (free text today, unused) becomes `characters.card_id`, plus a `card_history` table: character id, card id, assigned when, by what (`auto`, `assign`, `import:<pack>`, `revert`), and whether the operator locked it. The migration moves any non-empty `voice` value into history as a note.
+- `characters.voice` (free text today, unused) is replaced by a `card_assignments` table keyed by character id and target language, plus a `card_history` table: character id, target language, card id, assigned when, by what (`auto`, `assign`, `import:<pack>`, `revert`), and whether the operator locked it. The migration moves any non-empty `voice` value into history as a note.
 - Cards are referenced by id, so editing a card makes a new card. `voices edit <character>` opens a copy, writes the new card with `derived_from`, and assigns it.
+
+## Target languages
+
+The series' `target_language` (foundation spec config) picks which assignment the tts stage reads. A card for another language is usually derived from an existing one: `voices derive <character> --to es` copies the voice section (same references, so the same timbre for a clone) into a new card for the new target language, with `derived_from` set, for the operator to adjust; style catchphrase renderings are per target language and start empty. Cards for different target languages never replace each other.
 
 ## Default assignment (D12)
 
@@ -143,7 +149,7 @@ A pack is a directory (or a `.tar.zst` of one):
 pack.toml        # format version, series title, external ids (tmdb, tvdb, anidb), pack title, author, notes
 cards/<id>.toml  # the cards, with sidecars
 clips/ latents/
-cast.toml        # character key -> card id; key = name plus optional external character id (AniDB character id)
+cast.toml        # (character key, target language) -> card id; key = name plus optional external character id (AniDB character id)
 ```
 
 - `fukikae voices export <series> [--characters ...] [--no-clips] -o <pack>` writes one. `--no-clips` exports only cards that need no audio (stock, blend, design, latent) and lists the ones left out.
