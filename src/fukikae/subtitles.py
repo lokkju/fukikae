@@ -290,7 +290,8 @@ def read_cues(path: Path) -> list[Cue]:
 
 RULES: tuple[str, ...] = ("sdh", "song", "sign")
 SIGN_NAMES = frozenset({"sign", "signs", "title", "caption", "note", "text"})
-SONG_NAMES = frozenset({"song", "op", "ed", "lyrics", "karaoke", "insert"})
+# Name (speaker) values that mean a song. op, ed and insert are style words only: Ed is a name.
+SONG_NAMES = frozenset({"song", "songs", "lyrics", "karaoke"})
 _SIGN_STYLE = re.compile(r"(?:^|[^a-z])(?:signs?|titles?|captions?)(?:[^a-z]|$)")
 _SONG_STYLE = re.compile(
     r"(?:^|[^a-z])(?:songs?|op|ed|karaoke|lyrics|opening|ending|insert)(?:\d|[^a-z]|$)"
@@ -299,7 +300,14 @@ _NOTE = re.compile(r"\[[^\]]*\]|\([^)]*\)|（[^）]*）|【[^】]*】")
 _MUSIC = re.compile("[♪♫♬♩]")
 _DASH = re.compile(r"^\s*[-‐–—]\s*")
 # An SDH speaker prefix: an upper-case name and a colon (`LUCY:`, `- YOUNG MAKAROV:`).
-_PREFIX = re.compile(r"^[A-Z][A-Z0-9 .'’\-]{0,30}(?:\([^)]*\))?\s*:\s+")
+_PREFIX = re.compile(r"^([A-Z][A-Z0-9 .'’\-]{0,30})(?:\([^)]*\))?\s*:\s+")
+# Upper-case words that open a sentence before a colon without naming a speaker.
+NOT_SPEAKERS = frozenset(
+    {"OK", "OKAY", "YES", "NO", "WELL", "WAIT", "NOTE", "HEY", "OH", "SO", "NOW", "LOOK",
+     "LISTEN", "PS", "P.S.", "WARNING", "DANGER", "BUT", "AND", "THEN", "FIRST", "SECOND",
+     "PLUS", "ALSO", "RIGHT", "FINE", "SURE", "GOOD", "HERE", "THERE", "ANSWER", "QUESTION",
+     "Q", "A", "RULE", "STEP", "TIP", "HINT", "BREAKING", "UPDATE", "ATTENTION", "REMEMBER"}
+)  # fmt: skip
 
 
 def _is_speaker(name: str) -> bool:
@@ -307,14 +315,32 @@ def _is_speaker(name: str) -> bool:
     return bool(folded) and folded not in SIGN_NAMES | SONG_NAMES
 
 
+def _lyrics(text: str) -> bool:
+    """A line opens with a music mark, or the text is nothing but marks and punctuation."""
+    lines = [_DASH.sub("", ln).strip() for ln in text.split("\n")]
+    lines = [ln for ln in lines if ln]
+    if any(_MUSIC.match(ln) for ln in lines):
+        return True
+    return bool(_MUSIC.search(text)) and not any(ch.isalnum() for ch in _MUSIC.sub("", text))
+
+
+def _drop_prefix(line: str) -> str:
+    m = _PREFIX.match(line)
+    if m is None or m.group(1).strip() in NOT_SPEAKERS:
+        return line
+    return line[m.end() :]
+
+
 def filter_cue(cue: Cue, rules: Sequence[str] = RULES) -> str | None:
     """The rule that keeps ``cue`` out of synthesis, or None to speak it.
 
-    ``song``: a music mark (``♪``), or an ASS style or Name of song, OP, ED, karaoke or lyrics.
-    ``sign``: an ASS line placed with ``\\pos``/``\\move``, a style of sign or title, a Name of
-    SIGN (Crunchyroll's), or a line raised with ``\\an8`` that names no speaker (a named one is
-    dialogue moved off a sign at the bottom). ``sdh``: the whole text is bracketed notes,
-    ``[door slams]`` or ``(sighs)``.
+    ``song``: a line that opens with a music mark (``♪``) or is nothing but marks, an ASS style
+    of song, OP, ED, insert, karaoke or lyrics, or a Name of song, karaoke or lyrics (never OP,
+    ED or insert as a Name: Ed is a speaker). A trailing mark on spoken text ("Good morning♪")
+    is dropped from the speech, not the line. ``sign``: a style of sign or title, a Name of SIGN
+    (Crunchyroll's), or a line placed with ``\\pos``/``\\move`` or raised with ``\\an8`` that
+    names no speaker (a named one is dialogue moved off a sign). ``sdh``: the whole text is
+    bracketed notes, ``[door slams]`` or ``(sighs)``.
     """
     unknown = sorted(set(rules) - set(RULES))
     if unknown:
@@ -322,13 +348,12 @@ def filter_cue(cue: Cue, rules: Sequence[str] = RULES) -> str | None:
     style = cue.style.casefold()
     name = cue.name.strip().casefold()
     text = strip_markup(cue.text)
-    if "song" in rules and (_MUSIC.search(text) or _SONG_STYLE.search(style) or name in SONG_NAMES):
+    if "song" in rules and (_lyrics(text) or _SONG_STYLE.search(style) or name in SONG_NAMES):
         return "song"
     if "sign" in rules and (
-        cue.placement == "pos"
-        or _SIGN_STYLE.search(style)
+        _SIGN_STYLE.search(style)
         or name in SIGN_NAMES
-        or (cue.placement == "top" and not _is_speaker(cue.name))
+        or (cue.placement in ("pos", "top") and not _is_speaker(cue.name))
     ):
         return "sign"
     if "sdh" in rules:
@@ -344,7 +369,7 @@ def spoken_text(cue: Cue) -> str:
     dashes, bracketed notes and music marks dropped, lines joined with a space."""
     out: list[str] = []
     for ln in strip_markup(cue.text).split("\n"):
-        ln = _PREFIX.sub("", _DASH.sub("", ln.strip()))
+        ln = _drop_prefix(_DASH.sub("", ln.strip()))
         ln = _MUSIC.sub("", _NOTE.sub("", ln))
         ln = re.sub(r"\s+([,.!?…])", r"\1", re.sub(r"\s+", " ", ln)).strip()
         if ln:

@@ -123,6 +123,9 @@ class DubCue(BaseModel):
     # Set when ``text`` is still longer than ``budget`` after the retry: by how many characters.
     over_budget: bool = False
     overrun: int = 0
+    # Why the line is as it is when that isn't the obvious reading, e.g. a subtitle line kept as
+    # written because condensing it failed ("condense failed: ...") or came back no shorter.
+    note: str | None = None
 
 
 class DubCues(BaseModel):

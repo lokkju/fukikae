@@ -385,6 +385,8 @@ def test_failed_condense_keeps_the_subtitle_line(ep):
     out = _out(ep)
     assert out.cues[1].text == out.cues[1].source_text and out.cues[1].error is None
     assert out.cues[1].over_budget
+    assert out.cues[1].note is not None and out.cues[1].note.startswith("condense failed: ")
+    assert out.cues[0].note is None  # spoken as written, never condensed
 
 
 @pytest.mark.usefixtures("fake")
@@ -401,6 +403,7 @@ def test_condensed_line_longer_than_the_subtitle_is_dropped(ep):
     TranslateStage().run(ep, CFG)
     out = _out(ep)
     assert out.cues[1].text == out.cues[1].source_text
+    assert out.cues[1].note == "condense not shorter"
 
 
 @pytest.mark.usefixtures("fake")

@@ -125,3 +125,38 @@ def test_spoken_text_drops_prefix_and_notes():
     assert spoken_text(cue("Wait: what?")) == "Wait: what?"  # not an upper-case name
     assert spoken_text(cue("<c.yellow>Line one\nline two")) == "Line one line two"
     assert spoken_text(cue("[door slams]")) == ""
+
+
+# ---- fix round 1: real dialogue that the filter dropped ----
+
+
+def test_speaker_names_ed_op_insert_are_dialogue():
+    assert filter_cue(cue("Hey!", name="Ed")) is None  # Edward Elric
+    assert filter_cue(cue("Hey!", name="Op")) is None
+    assert filter_cue(cue("Hey!", name="Insert")) is None
+    assert filter_cue(cue("la la", style="ED")) == "song"
+    assert filter_cue(cue("la la", style="OP")) == "song"
+    assert filter_cue(cue("la la", name="Lyrics")) == "song"
+    assert filter_cue(cue("Up here!", name="Ed", placement="top")) is None
+
+
+def test_positioned_line_with_a_speaker_is_dialogue():
+    assert filter_cue(cue("Over here!", name="NATSU", placement="pos")) is None
+    assert filter_cue(cue("Magnolia", placement="pos")) == "sign"
+    assert filter_cue(cue("Magnolia", name="SIGN", placement="pos")) == "sign"
+
+
+def test_music_mark_makes_a_song_only_when_it_leads_or_is_all():
+    assert filter_cue(cue("♪ la la ♪")) == "song"
+    assert filter_cue(cue("♪ Fly away to the sky")) == "song"
+    assert filter_cue(cue("- ♫ la la\nla la ♫")) == "song"
+    assert filter_cue(cue("♪♪♪")) == "song"
+    assert filter_cue(cue("Good morning♪")) is None
+    assert spoken_text(cue("Good morning♪")) == "Good morning"
+
+
+def test_common_words_before_a_colon_are_not_speakers():
+    assert spoken_text(cue("OK: fine.")) == "OK: fine."
+    assert spoken_text(cue("WAIT: what?")) == "WAIT: what?"
+    assert spoken_text(cue("NOTE: this is it.")) == "NOTE: this is it."
+    assert spoken_text(cue("LUCY: Fine.")) == "Fine."
