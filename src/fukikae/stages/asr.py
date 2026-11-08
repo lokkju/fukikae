@@ -9,6 +9,7 @@ from typing import Any, cast
 from fukikae import runctx
 from fukikae.artifacts import read_json, write_json
 from fukikae.backends.base import Aligner, Transcriber
+from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create, supports
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
@@ -77,8 +78,16 @@ class AsrStage:
         align = _resolve(cfg, "align", lang, "wav2vec2")
         return {
             "language": lang,
-            "asr": {"backend": asr.backend, "options": asr.options},
-            "align": {"backend": align.backend, "options": align.options},
+            "asr": {
+                "backend": asr.backend,
+                "options": asr.options,
+                "identity": identity_key("asr", asr),
+            },
+            "align": {
+                "backend": align.backend,
+                "options": align.options,
+                "identity": identity_key("align", align),
+            },
         }
 
     @staticmethod

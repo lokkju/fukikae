@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from fukikae import runctx
 from fukikae.artifacts import write_json
 from fukikae.backends.base import Transcriber
+from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
@@ -51,7 +52,11 @@ class LanguageStage:
         if cfg.source_language:
             return {"source_language": cfg.source_language}
         bc = self._backend_cfg(cfg)
-        return {"backend": bc.backend, "options": bc.options}
+        return {
+            "backend": bc.backend,
+            "options": bc.options,
+            "identity": identity_key("lid", bc),
+        }
 
     def run(self, ep: Episode, cfg: Config) -> None:
         (out,) = self.outputs(ep)
