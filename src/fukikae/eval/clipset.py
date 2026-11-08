@@ -167,13 +167,17 @@ def embed_clips(
     emb_cfg: BackendConfig,
     embed: EmbedFn,
     cache: Path,
+    identity: str = "",
 ) -> np.ndarray:
     """One embedding row per clip over its whole span, cached as ``cache/emb-<sha>.npy`` keyed
-    by the backend, its options and the clips' keys."""
+    by the backend, its options, `identity` (the model file or revision the backend resolves
+    to, which a changed default must miss) and the clips' keys."""
     if not clips:
         return np.zeros((0, 0), dtype=np.float32)
     keys = [audio[c.path][0].stem for c in clips]
-    blob = json.dumps([emb_cfg.backend, emb_cfg.options, keys], sort_keys=True, default=str)
+    blob = json.dumps(
+        [emb_cfg.backend, emb_cfg.options, identity, keys], sort_keys=True, default=str
+    )
     path = Path(cache) / f"emb-{hashlib.sha256(blob.encode('utf-8')).hexdigest()}.npy"
     if path.is_file():
         try:
