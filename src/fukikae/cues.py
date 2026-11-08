@@ -15,6 +15,8 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from collections import defaultdict
+from collections.abc import Sequence
 
 from fukikae.models import (
     Assignments,
@@ -28,6 +30,7 @@ from fukikae.models import (
     Turn,
     Word,
 )
+from fukikae.subtitles import Cue, filter_cue, spoken_text
 
 # Speakable characters per second of the target language at normal speed.
 CPS = {"en": 15.0, "de": 14.0, "es": 15.0, "fr": 15.0, "ja": 8.0, "ko": 8.0, "zh": 6.0}
@@ -272,6 +275,111 @@ def build_asr_cues(
             )
         )
     return cues
+
+
+# On the subtitle path, two speakers that each cover this share of a cue are a tie that the
+# ASR words inside the cue break.
+TIE_SHARE = 0.3
+
+
+def _emotion(tags: Tags | None, start: float, end: float) -> TagSpan | None:
+    emotions = tags.emotions if tags else []
+    best = max(emotions, key=lambda s: _overlap(s, start, end), default=None)
+    return best if best is not None and _overlap(best, start, end) > 0 else None
+
+
+def _subtitle_cluster(cue: Cue, turns: list[Turn], words: list[Word]) -> str | None:
+    """The diarize cluster that speaks ``cue``: largest summed turn overlap; a tie (the top
+    two each cover TIE_SHARE of the cue) goes to the cluster whose turns hold more ASR words
+    inside the cue; no overlap takes the nearest turn within NEAREST_TURN_S."""
+    cover: dict[str, float] = defaultdict(float)
+    for u in turns:
+        ov = min(u.end, cue.end) - max(u.start, cue.start)
+        if ov > 0:
+            cover[u.speaker] += ov
+    if not cover:
+        near = [(max(u.start - cue.end, cue.start - u.end), u) for u in turns]
+        near = [(d, u) for d, u in near if d <= NEAREST_TURN_S]
+        return min(near, key=lambda p: p[0])[1].speaker if near else None
+    ranked = sorted(cover, key=lambda k: -cover[k])
+    dur = max(cue.end - cue.start, 1e-9)
+    if len(ranked) > 1 and words and cover[ranked[1]] / dur >= TIE_SHARE:
+        counts: dict[str, int] = defaultdict(int)
+        for w in words:
+            mid = (w.start + w.end) / 2
+            if not cue.start <= mid <= cue.end:
+                continue
+            for u in turns:
+                if u.start <= mid <= u.end and u.speaker in ranked[:2]:
+                    counts[u.speaker] += 1
+                    break
+        a, b = ranked[0], ranked[1]
+        if counts[b] > counts[a]:
+            return b
+    return ranked[0]
+
+
+def assign_subtitle_speakers(
+    cues: list[Cue],
+    turns: list[Turn],
+    assignments: Assignments,
+    transcript: Transcript | None,
+    tags: Tags | None,
+    names: dict[int, str],
+    target_language: str,
+    max_speed: float,
+    rules: Sequence[str],
+) -> list[DubCue]:
+    """Dub cues from target-language subtitle cues (the subtitle-first path).
+
+    The speaker is the diarize cluster with the largest overlap (see ``_subtitle_cluster``);
+    ``source_text`` and ``text`` are both the cue's spoken text, so a cue is spoken verbatim
+    unless the translate stage condenses it. A cue the filter catches keeps ``skip`` set to its
+    rule; a furigana event is skipped as ``ruby`` and one with nothing left to say as ``empty``,
+    whatever the rules; a cue in a ``singing`` tag span is ``song`` when that rule is on.
+    """
+    by_cluster = {a.cluster: a for a in assignments.clusters}
+    words = [w for seg in transcript.segments for w in (seg.words or [])] if transcript else []
+    singing = [e for e in (tags.events if tags else []) if e.label == "singing"]
+    out: list[DubCue] = []
+    for cue in sorted(cues, key=lambda c: (c.start, c.end)):
+        cluster = _subtitle_cluster(cue, turns, words)
+        if cluster is None:
+            character_id, extra = None, "unknown"
+        else:
+            character_id, extra = _who(Turn(start=0, end=0, speaker=cluster), by_cluster)
+        if character_id is not None:
+            speaker = names.get(character_id) or f"char{character_id}"
+        else:
+            speaker = f"extra:{extra}"
+        text = spoken_text(cue)
+        mid = (cue.start + cue.end) / 2
+        skip = "ruby" if cue.ruby else filter_cue(cue, rules)
+        if skip is None and "song" in rules and any(e.start <= mid <= e.end for e in singing):
+            skip = "song"
+        if skip is None and not text:
+            skip = "empty"
+        emotion = _emotion(tags, cue.start, cue.end)
+        out.append(
+            DubCue(
+                id=f"c{len(out) + 1:04d}",
+                start=cue.start,
+                end=cue.end,
+                character_id=character_id,
+                extra=extra,
+                speaker=speaker,
+                source_text=text,
+                text=None if skip else text,
+                budget=budget_chars(cue.end - cue.start, target_language, max_speed),
+                delivery=Delivery(
+                    reference=(cue.start, cue.end),
+                    emotion=None if emotion is None else emotion.label,
+                    emotion_confidence=None if emotion is None else emotion.confidence,
+                ),
+                skip=skip,
+            )
+        )
+    return out
 
 
 def windows(cues: list[DubCue], *, gap_s: float = 2.0, max_cues: int = 12) -> list[list[DubCue]]:

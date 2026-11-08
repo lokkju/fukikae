@@ -4,6 +4,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 class MediaError(Exception):
@@ -145,3 +146,79 @@ def choose_audio_track(
 
 def run_ffmpeg(args: list[str]) -> None:
     _run(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y", *args])
+
+
+# Subtitle codecs ffmpeg can turn into text; image subtitles (PGS, VobSub, DVB) need OCR.
+TEXT_SUBTITLE_CODECS = frozenset({"ass", "ssa", "subrip", "srt", "webvtt", "mov_text", "text"})
+SIDECAR_SUFFIXES = (".ass", ".ssa", ".srt", ".vtt")
+
+
+def extract_subtitle(source: Path, track: SubTrack, out: Path) -> Path:
+    """The subtitle stream at ``track`` written next to ``out`` (its suffix replaced): ``.ass``
+    for an ASS/SSA track, copied as is, else ``.srt``. Returns the written path."""
+    ass = track.codec in ("ass", "ssa")
+    dest = Path(out).with_suffix(".ass" if ass else ".srt")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    run_ffmpeg(
+        [
+            "-i", str(Path(source).resolve()),
+            "-map", f"0:{track.index}",
+            "-c:s", "copy" if ass else "srt",
+            str(dest),
+        ]
+    )  # fmt: skip
+    return dest
+
+
+def _text_track(track: SubTrack) -> bool:
+    return track.codec in TEXT_SUBTITLE_CODECS
+
+
+def find_target_subtitles(
+    source: Path, probe_result: ProbeResult, language: str, configured: dict[str, Any]
+) -> tuple[Path | None, SubTrack | None]:
+    """Subtitles in ``language`` for the subtitle-first path, as (file, None) or (None, track),
+    or (None, None) when there are none. In order: ``[subs] file`` (``~`` expanded, relative to
+    the source's folder), ``[subs] track`` (a stream index), a sidecar ``<stem>.<lang>.<ext>``
+    (two- or three-letter code; ass, ssa, srt, vtt), then the first non-forced text track of
+    the language whose title doesn't say forced. A configured file or track that isn't there,
+    or names an image track, is a MediaError."""
+    source = Path(source)
+    file = configured.get("file")
+    if file:
+        path = Path(str(file)).expanduser()
+        if not path.is_absolute():
+            path = source.parent / path
+        if not path.is_file():
+            raise MediaError(f"[subs] file {path} not found")
+        return path, None
+    track = configured.get("track")
+    if track is not None:
+        for t in probe_result.subtitles:
+            if t.index == int(track):
+                if not _text_track(t):
+                    raise MediaError(
+                        f"[subs] track {t.index} is an image subtitle ({t.codec}); "
+                        "fukikae reads text subtitles only"
+                    )
+                return None, t
+        raise MediaError(
+            f"[subs] track: no subtitle track {track} in {source.name}; "
+            f"have {[(t.index, t.language, t.codec) for t in probe_result.subtitles]}"
+        )
+    want = _norm_lang(language)
+    codes = [language, *([want] if want and want != language else [])]
+    for code in codes:
+        for suffix in SIDECAR_SUFFIXES:
+            side = source.with_name(f"{source.stem}.{code}{suffix}")
+            if side.is_file():
+                return side, None
+    for t in probe_result.subtitles:
+        if (
+            _norm_lang(t.language) == want
+            and not t.forced
+            and "forced" not in (t.title or "").casefold()
+            and _text_track(t)
+        ):
+            return None, t
+    return None, None

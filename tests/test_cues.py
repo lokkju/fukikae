@@ -1,6 +1,12 @@
 import pytest
 
-from fukikae.cues import budget_chars, build_asr_cues, is_marked, windows
+from fukikae.cues import (
+    assign_subtitle_speakers,
+    budget_chars,
+    build_asr_cues,
+    is_marked,
+    windows,
+)
 from fukikae.models import (
     Assignments,
     ClusterAssignment,
@@ -13,6 +19,7 @@ from fukikae.models import (
     Turn,
     Word,
 )
+from fukikae.subtitles import Cue
 
 
 def _transcript(segments: list[Segment], language: str = "ja") -> Transcript:
@@ -252,3 +259,81 @@ def test_ideographic_comma_does_not_end_a_sentence_for_folding():
     asg = _assignments(turns, [_cluster("S0", 1), _cluster("S1", 2), _cluster("S2", 3)])
     cues = build_asr_cues(_transcript([seg]), asg, None, {}, "en", 1.25)
     assert [(c.source_text, c.character_id) for c in cues] == [("弱点、", 1), ("偽物だ。", 2)]
+
+
+# ---- subtitle-first path ----
+
+
+def _subs(
+    cues, turns, clusters, transcript=None, tags=None, names=None, rules=("sdh", "song", "sign")
+):
+    return assign_subtitle_speakers(
+        cues, turns, _assignments(turns, clusters), transcript, tags, names or {}, "en", 1.25, rules
+    )
+
+
+def test_subtitle_speaker_by_overlap():
+    turns = [Turn(start=0.0, end=1.2, speaker="S0"), Turn(start=1.2, end=4.0, speaker="S1")]
+    cues = [Cue(0.0, 2.0, "LUCY: (sighs) Fine."), Cue(2.0, 3.0, "[door slams]")]
+    got = _subs(cues, turns, [_cluster("S0", 3), _cluster("S1", 5)], names={3: "Lucy"})
+    assert [c.id for c in got] == ["c0001", "c0002"]
+    assert got[0].character_id == 3 and got[0].speaker == "Lucy"  # 1.2 s of S0 against 0.8 s
+    assert got[0].source_text == got[0].text == "Fine."
+    assert got[0].literal is None and got[0].skip is None
+    assert got[0].budget == budget_chars(2.0, "en", 1.25)
+    assert got[0].delivery.reference == (0.0, 2.0)
+    assert got[1].skip == "sdh" and got[1].character_id == 5
+
+
+def test_overlap_sums_a_speakers_turns():
+    turns = [
+        Turn(start=0.0, end=0.5, speaker="S0"),
+        Turn(start=0.5, end=1.1, speaker="S1"),
+        Turn(start=1.1, end=1.6, speaker="S0"),
+    ]
+    got = _subs([Cue(0.0, 1.6, "Hi.")], turns, [_cluster("S0", 3), _cluster("S1", 5)])
+    assert got[0].character_id == 3  # 1.0 s of S0 in two turns against 0.6 s of S1
+
+
+def test_two_speaker_tie_broken_by_asr_words():
+    turns = [Turn(start=0.0, end=1.1, speaker="S0"), Turn(start=1.1, end=2.0, speaker="S1")]
+    clusters = [_cluster("S0", 3), _cluster("S1", 5)]
+    # S1 holds three words, S0 one: S1 speaks the line, though S0's turn covers more of it
+    seg = Segment(
+        start=0.0,
+        end=2.0,
+        text="a b c d",
+        words=[
+            Word(start=0.1, end=0.3, text="a"),
+            Word(start=1.2, end=1.4, text="b"),
+            Word(start=1.5, end=1.7, text="c"),
+            Word(start=1.75, end=1.95, text="d"),
+        ],
+    )
+    cues = [Cue(0.0, 2.0, "Say it.")]
+    assert _subs(cues, turns, clusters)[0].character_id == 3  # no transcript: overlap only
+    got = _subs(cues, turns, clusters, transcript=_transcript([seg]))
+    assert got[0].character_id == 5
+    # under 30% of the cue for the runner-up: overlap stands
+    turns2 = [Turn(start=0.0, end=1.5, speaker="S0"), Turn(start=1.5, end=2.0, speaker="S1")]
+    assert _subs(cues, turns2, clusters, transcript=_transcript([seg]))[0].character_id == 3
+
+
+def test_cue_with_no_turn_is_unknown_extra():
+    turns = [Turn(start=0.0, end=1.0, speaker="S0")]
+    clusters = [_cluster("S0", 3)]
+    got = _subs([Cue(5.0, 6.0, "Who's there?"), Cue(1.5, 2.0, "Near.")], turns, clusters)
+    assert [c.source_text for c in got] == ["Near.", "Who's there?"]  # in time order
+    assert got[0].character_id == 3  # 0.5 s from a turn: the nearest within 1 s
+    assert got[1].character_id is None and got[1].extra == "unknown"
+    assert got[1].speaker == "extra:unknown"
+
+
+def test_subtitle_extra_cluster_and_filtered_cues_keep_rule():
+    turns = [Turn(start=0.0, end=4.0, speaker="S9")]
+    cues = [Cue(0.0, 1.0, "♪ la la ♪"), Cue(1.0, 2.0, "Hello."), Cue(2.0, 3.0, "Ruby", ruby=True)]
+    got = _subs(cues, turns, [_cluster("S9", None, status="extra")])
+    assert [c.skip for c in got] == ["song", None, "ruby"]
+    assert got[1].extra == "S9" and got[1].speaker == "extra:S9"
+    off = _subs(cues, turns, [_cluster("S9", None, status="extra")], rules=())
+    assert [c.skip for c in off] == [None, None, "ruby"]

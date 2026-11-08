@@ -90,7 +90,7 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
     tags = tag_enabled(cfg)
     if tags:
         stages.append(TagStage())
-    stages.append(TranslateStage(cfg.target_language, tags=tags))
+    stages.append(TranslateStage(cfg.target_language, tags=tags, cfg=cfg))
     return stages
 
 

@@ -290,10 +290,153 @@ def test_stage_settings_stay_out_of_backend_options(ep):
     assert "max_speed" not in FakeTranslator.REQUESTS[0].model_dump()
 
 
-def test_subs_source_is_refused_until_built(ep):
+def test_subs_source_without_subtitles_is_refused(ep):
     cfg = Config(source_language="ja", raw={"translate": {"backend": "fake", "source": "subs"}})
-    with pytest.raises(ConfigError, match="subs"):
+    with pytest.raises(ConfigError, match="no en subtitles"):
         TranslateStage().run(ep, cfg)
+
+
+# ---- subtitle-first path ----
+
+SRT = """\
+1
+00:00:00,000 --> 00:00:01,000
+NATSU: I'm all fired up!
+
+2
+00:00:01,000 --> 00:00:02,000
+This line is far too long to say in a single second.
+
+3
+00:00:03,000 --> 00:00:04,000
+[door slams]
+
+4
+00:00:03,000 --> 00:00:04,000
+Yes.
+
+5
+00:00:04,000 --> 00:00:05,000
+And this one is also much too long for its slot.
+"""
+
+
+def _sidecar(ep: Episode) -> Path:
+    path = ep.source.with_name(f"{ep.source.stem}.en.srt")
+    path.write_text(SRT, encoding="utf-8")
+    return path
+
+
+@pytest.mark.usefixtures("fake")
+def test_auto_prefers_subtitles_when_present(ep):
+    sub = _sidecar(ep)
+    stage = TranslateStage()
+    assert sub in stage.inputs(ep)
+    stage.run(ep, CFG)
+    out = _out(ep)
+    assert out.path == "subs" and out.source_language == "ja"
+    assert [c.skip for c in out.cues] == [None, None, "sdh", None, None]
+    assert out.cues[0].text == out.cues[0].source_text == "I'm all fired up!"
+    assert out.cues[0].speaker == "Natsu" and out.cues[3].speaker == "char2"
+    assert out.cues[3].text == "Yes."
+    key = stage.config_key(CFG, ep)
+    assert key["source"] == "auto" and key["path"] == "subs" and key["subs_track"] is None
+    asr = Config(source_language="ja", raw={"translate": {"backend": "fake", "source": "asr"}})
+    assert "path" not in stage.config_key(asr, ep)  # the ASR path's key is unchanged
+
+
+@pytest.mark.usefixtures("fake")
+def test_only_over_budget_cues_are_condensed(ep):
+    _sidecar(ep)
+    _assign(ep, 1, "am_adam")
+    TranslateStage().run(ep, CFG)
+    (req,) = FakeTranslator.REQUESTS
+    assert req.mode == "condense" and req.source_language == "en" == req.target_language
+    assert [c.id for c in req.cues] == ["c0002", "c0005"]
+    assert [c.text for c in req.cues][0].startswith("This line is far too long")
+    assert req.glossary == {}
+    out = _out(ep)
+    assert [c.text for c in out.cues] == [
+        "I'm all fired up!", "ok c0002", None, "Yes.", "ok c0005",
+    ]  # fmt: skip
+    assert out.cues[1].source_text.startswith("This line")  # the subtitle stays the source
+    assert FakeTranslator.LOG == ["load", "unload"]
+
+
+@pytest.mark.usefixtures("fake")
+def test_subs_condense_off_keeps_verbatim(ep):
+    _sidecar(ep)
+    cfg = Config(
+        source_language="ja",
+        raw={"translate": {"backend": "fake", "source": "subs", "subs_condense": False}},
+    )
+    TranslateStage().run(ep, cfg)
+    assert FakeTranslator.REQUESTS == [] and FakeTranslator.LOG == []  # no model loaded
+    out = _out(ep)
+    assert out.cues[1].text == out.cues[1].source_text and out.cues[1].over_budget
+    assert out.cues[1].overrun == len(out.cues[1].source_text) - out.cues[1].budget
+
+
+@pytest.mark.usefixtures("fake")
+def test_failed_condense_keeps_the_subtitle_line(ep):
+    _sidecar(ep)
+    FakeTranslator.SCRIPT = [garbage, garbage]
+    TranslateStage().run(ep, CFG)
+    out = _out(ep)
+    assert out.cues[1].text == out.cues[1].source_text and out.cues[1].error is None
+    assert out.cues[1].over_budget
+
+
+@pytest.mark.usefixtures("fake")
+def test_condensed_line_longer_than_the_subtitle_is_dropped(ep):
+    _sidecar(ep)
+
+    def longer(req):
+        return {
+            c.id: Rendering(literal=None, text=c.text + " and more", direction=None)
+            for c in req.cues
+        }
+
+    FakeTranslator.SCRIPT = [longer, longer]
+    TranslateStage().run(ep, CFG)
+    out = _out(ep)
+    assert out.cues[1].text == out.cues[1].source_text
+
+
+@pytest.mark.usefixtures("fake")
+def test_subs_filter_is_configurable(ep):
+    _sidecar(ep)
+    cfg = Config(
+        source_language="ja",
+        raw={"translate": {"backend": "fake", "source": "subs", "subs_filter": ["song"]}},
+    )
+    TranslateStage().run(ep, cfg)
+    assert _out(ep).cues[2].skip == "empty"  # nothing left to say once the note is dropped
+    bad = Config(
+        source_language="ja",
+        raw={"translate": {"backend": "fake", "source": "subs", "subs_filter": ["lyrics"]}},
+    )
+    with pytest.raises(ConfigError, match="subs_filter"):
+        TranslateStage().run(ep, bad)
+
+
+@pytest.mark.usefixtures("fake")
+def test_configured_subtitle_file_wins_and_joins_the_key(ep, tmp_path):
+    _sidecar(ep)
+    other = tmp_path / "e1-other.srt"
+    other.write_text("1\n00:00:00,000 --> 00:00:01,000\nOther.\n", encoding="utf-8")
+    cfg = Config(
+        source_language="ja",
+        raw={
+            "translate": {"backend": "fake"},
+            "subs": {"file": str(tmp_path / "{episode}-other.srt")},
+        },
+    )
+    stage = TranslateStage(cfg=cfg)
+    assert other in stage.inputs(ep)
+    assert stage.config_key(cfg, ep)["subs_file"] == str(other)
+    stage.run(ep, cfg)
+    assert [c.text for c in _out(ep).cues] == ["Other."]
 
 
 def test_inputs_without_assignments_do_not_crash(tmp_path: Path):
