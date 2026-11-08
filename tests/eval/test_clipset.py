@@ -257,3 +257,19 @@ def test_sherpa_ledger_row_records_the_onnx_file():
     assert model == "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
     model, _ = model_identity("embed", BackendConfig("titanet", {"path": "/m/custom.onnx"}))
     assert model == "custom.onnx"
+
+
+@pytest.mark.ffmpeg
+def test_embedding_cache_misses_when_the_model_identity_changes(tmp_path):
+    write_wav(tmp_path / "a" / "a_0.wav")
+    clips = scan_clipset(tmp_path)
+    cache = tmp_path / ".fukikae-cache"
+    audio = prepare_audio(clips, cache)
+    calls: list = []
+    embed = fake_embed_factory(calls, chars(clips, audio))
+    cfg = BackendConfig("fake", {})
+    embed_clips(clips, audio, cfg, embed, cache, "old.onnx|None")
+    embed_clips(clips, audio, cfg, embed, cache, "old.onnx|None")
+    assert len(calls) == 1
+    embed_clips(clips, audio, cfg, embed, cache, "new.onnx|None")
+    assert len(calls) == 2
