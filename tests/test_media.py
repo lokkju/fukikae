@@ -1,6 +1,16 @@
 import pytest
 
-from fukikae.media import AudioTrack, MediaError, ProbeResult, choose_audio_track, probe, run_ffmpeg
+from fukikae.media import (
+    AudioTrack,
+    MediaError,
+    ProbeResult,
+    SubTrack,
+    choose_audio_track,
+    extract_subtitle,
+    find_target_subtitles,
+    probe,
+    run_ffmpeg,
+)
 
 
 def _probe():
@@ -69,3 +79,79 @@ def test_probe_real(readonly_copy):
 def test_run_ffmpeg_error_has_stderr_tail(tmp_path):
     with pytest.raises(MediaError, match="nope"):
         run_ffmpeg(["-i", str(tmp_path / "nope.mkv"), str(tmp_path / "o.wav")])
+
+
+def _subs_probe() -> ProbeResult:
+    return ProbeResult(
+        audio=[],
+        subtitles=[
+            SubTrack(3, "ass", "eng", "Forced", True),
+            SubTrack(4, "hdmv_pgs_subtitle", "eng", None, False),
+            SubTrack(5, "ass", "eng", None, False),
+            SubTrack(6, "ass", "ger", None, False),
+            SubTrack(7, "subrip", "eng", "Signs & Songs", False),
+        ],
+    )
+
+
+def test_find_target_subtitles_order(tmp_path):
+    src = tmp_path / "show S01E12.mkv"
+    # first non-forced text track of the language
+    assert find_target_subtitles(src, _subs_probe(), "en", {}) == (None, _subs_probe().subtitles[2])
+    assert find_target_subtitles(src, _subs_probe(), "de", {}) == (None, _subs_probe().subtitles[3])
+    assert find_target_subtitles(src, _subs_probe(), "fr", {}) == (None, None)
+    # a sidecar beats an embedded track; either language code
+    side = tmp_path / "show S01E12.eng.ass"
+    side.write_text("x", encoding="utf-8")
+    assert find_target_subtitles(src, _subs_probe(), "en", {}) == (side, None)
+    # a configured track beats the sidecar, a configured file beats both
+    got = find_target_subtitles(src, _subs_probe(), "en", {"track": 7})
+    assert got == (None, _subs_probe().subtitles[4])
+    f = tmp_path / "mine.srt"
+    f.write_text("x", encoding="utf-8")
+    assert find_target_subtitles(src, _subs_probe(), "en", {"file": str(f), "track": 7}) == (
+        f,
+        None,
+    )
+
+
+def test_find_target_subtitles_refuses_bad_configuration(tmp_path):
+    src = tmp_path / "e.mkv"
+    with pytest.raises(MediaError, match="not found"):
+        find_target_subtitles(src, _subs_probe(), "en", {"file": str(tmp_path / "nope.srt")})
+    with pytest.raises(MediaError, match="subtitle track 9"):
+        find_target_subtitles(src, _subs_probe(), "en", {"track": 9})
+    with pytest.raises(MediaError, match="image"):
+        find_target_subtitles(src, _subs_probe(), "en", {"track": 4})
+
+
+@pytest.mark.ffmpeg
+def test_extract_subtitle_round_trip(tmp_path):
+    srt = tmp_path / "in.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:02,000\nHello.\n", encoding="utf-8")
+    mkv = tmp_path / "in.mkv"
+    run_ffmpeg(
+        [
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=d=3",
+            "-i",
+            str(srt),
+            "-map",
+            "0",
+            "-map",
+            "1",
+            "-c:a",
+            "aac",
+            "-c:s",
+            "ass",
+            "-metadata:s:s:0",
+            "language=eng",
+            str(mkv),
+        ]
+    )
+    p = probe(mkv)
+    (track,) = p.subtitles
+    out = extract_subtitle(mkv, track, tmp_path / "out" / "subs.en")
+    assert out.suffix == ".ass" and "Hello." in out.read_text(encoding="utf-8")
