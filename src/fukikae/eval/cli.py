@@ -287,6 +287,124 @@ def auto_label_cmd(
         typer.echo(autolabel.format_report(result))
 
 
+@eval_app.command("subalign")
+def subalign_cmd(
+    labelled: Path = typer.Argument(..., help="Subtitle file to retime (ASS/SSA, SRT, WebVTT)."),
+    out: Path = typer.Option(..., "--out", help="Where to write the retimed file."),
+    reference: Path = typer.Option(
+        None, "--reference", help="Subtitle file already timed to the target capture."
+    ),
+    speech: Path = typer.Option(
+        None, "--speech", help="Workspace whose diarized speech is the target timeline."
+    ),
+    episode: str = typer.Option(None, "--episode", help="SxxEyy, with --speech."),
+    language: str = typer.Option(
+        None,
+        "--language",
+        help="Text language for anchor matching (default: guessed from the labelled file).",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Write the file even when the fit fails its checks."
+    ),
+) -> None:
+    """Find the offset and linear drift from LABELLED to a reference subtitle file (by text) or
+    to a workspace's detected speech, and write LABELLED retimed to OUT."""
+    import re
+
+    from fukikae.eval.autolabel import speech_turns
+    from fukikae.eval.groundtruth.base import read_cues
+    from fukikae.eval.groundtruth.subalign import (
+        check_fit,
+        fit_to_reference,
+        fit_to_speech,
+        guess_language,
+        retime_file,
+    )
+    from fukikae.workspace import Workspace
+
+    if (reference is None) == (speech is None) or (speech is not None and not episode):
+        typer.echo(
+            "error: give either --reference REF or --speech WORKSPACE --episode SxxEyy", err=True
+        )
+        raise typer.Exit(2)
+    try:
+        cues = read_cues(labelled)
+        if reference is not None:
+            rep = fit_to_reference(cues, read_cues(reference), language or guess_language(cues))
+        else:
+            ws = Workspace(speech)
+            m = re.fullmatch(r"[Ss](\d+)[Ee](\d+)", episode.strip())
+            eid = f"S{int(m[1]):02d}E{int(m[2]):02d}" if m else ws.find_episode(episode).id
+            work = ws.work_dir(eid)
+            if not (work / "04-diarize").is_dir():
+                raise FileNotFoundError(f"{eid}: no diarization under {work / '04-diarize'}")
+            rep = fit_to_speech(cues, speech_turns(work))
+        s = rep.tmap
+        line = f"mode {rep.mode}  scale {s.scale:.6f}  offset {s.offset:+.2f} s  "
+        if rep.mode == "text":
+            share = rep.inliers / rep.anchors if rep.anchors else 0.0
+            line += f"anchors {rep.anchors}  inliers {rep.inliers} ({share:.0%})  "
+            line += f"rms {rep.rms_s:.3f} s"
+        else:
+            line += f"cues {rep.anchors}  over speech {rep.inliers}  share {rep.share or 0:.0%}"
+        typer.echo(line)
+        check_fit(rep, force=force)
+        done, clamped = retime_file(labelled, out, rep.tmap)
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"wrote {out}: {done} cues retimed, {clamped} clamped at 0")
+
+
+@eval_app.command("transcript-align")
+def transcript_align_cmd(
+    transcripts: Path = typer.Option(
+        ..., "--transcripts", help="Transcript file or directory (matched by SxxEyy)."
+    ),
+    subtitles: Path = typer.Option(
+        ..., "--subtitles", help="Timed subtitle file or directory (matched by SxxEyy)."
+    ),
+    out: Path = typer.Option(..., "--out", help="Output directory for <SxxEyy>.ass."),
+    episodes: str = typer.Option(..., "--episodes", help="Comma-separated, e.g. S01E01,S01E02."),
+    alias: list[str] = typer.Option(
+        None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
+    ),
+    language: str = typer.Option("en", "--language", help="Language of the subtitle words."),
+) -> None:
+    """Name the cues of timed subtitles from untimed, speaker-named transcripts."""
+    from fukikae.eval.autolabel import gt_path_for
+    from fukikae.eval.groundtruth.base import Namer, load_alias_file, read_cues
+    from fukikae.eval.groundtruth.transcript import (
+        align_transcript,
+        read_transcript,
+        write_named_ass,
+    )
+
+    refs = [e.strip().upper() for e in episodes.split(",") if e.strip()]
+    try:
+        aliases = load_alias_file(out.parent / "labels-aliases.yaml")
+        for item in alias or []:
+            src, sep, dst = item.partition("=")
+            if not sep or not src.strip() or not dst.strip():
+                raise ValueError(f"--alias {item!r}: expected FROM=TO")
+            aliases[src.strip()] = dst.strip()
+        results = []
+        for ref in refs:
+            tr = gt_path_for(transcripts, ref, len(refs))
+            sub = gt_path_for(subtitles, ref, len(refs))
+            res = align_transcript(read_transcript(tr), read_cues(sub), Namer(aliases), language)
+            results.append((ref, res))
+        out.mkdir(parents=True, exist_ok=True)
+        for ref, res in results:
+            write_named_ass(out / f"{ref}.ass", res.named)
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    for ref, res in results:
+        who = ", ".join(f"{n} {c}" for n, c in sorted(res.speakers.items(), key=lambda x: -x[1]))
+        typer.echo(f"{ref}: cues {res.cue_share:.0%}, words {res.word_share:.0%}; {who}")
+
+
 def _register_identity() -> None:
     from fukikae.eval.identity.cli import identity_cmd
 
