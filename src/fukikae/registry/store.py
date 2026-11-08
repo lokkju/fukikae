@@ -25,7 +25,8 @@ SCHEMA_VERSION = 2
 # (the schema-1 voice note) and `lock`/`unlock` rows are written by the registry itself.
 ASSIGNED_BY = frozenset({"auto", "assign", "revert", "edit", "derive"})
 # Operator actions (ruling CD2): a card they chose is never replaced by `auto` or an import
-# unless the caller passes override (an import the operator confirmed with --replace).
+# unless the caller passes override (an import the operator confirmed with --replace). An
+# imported card is never replaced by `auto` without override either (CD3).
 OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive"})
 _LOCK_BY = frozenset({"lock", "unlock"})
 _CARD_ID = re.compile(r"[0-9a-f]{16}")
@@ -662,7 +663,8 @@ class Registry:
         ``by`` is one of auto, assign, revert, edit, derive, or ``import:<pack title>``. Other
         target languages are never touched. Raises KeyError for an unknown character.
         ``auto`` and imports refuse (ProtectedAssignmentError) to replace a card that is
-        locked or was chosen by an operator action, unless ``override`` (ruling CD2).
+        locked or was chosen by an operator action, unless ``override`` (ruling CD2); ``auto``
+        also refuses to replace an imported card, which a later import may replace (CD3).
         """
         if not _CARD_ID.fullmatch(card_id):
             raise ValueError(f"not a card id (16 lowercase hex digits): {card_id!r}")
@@ -677,11 +679,20 @@ class Registry:
             self._require_character(con, character_id)
             if by not in OPERATOR_BY and not override:
                 cur = self._current(con, character_id, target_language)
-                if cur is not None and (cur.locked or cur.chosen_by in OPERATOR_BY):
+                imported = cur is not None and cur.chosen_by.startswith("import:")
+                if cur is not None and (
+                    cur.locked or cur.chosen_by in OPERATOR_BY or (by == "auto" and imported)
+                ):
+                    why = (
+                        "locked"
+                        if cur.locked
+                        else "imported"
+                        if cur.chosen_by not in OPERATOR_BY
+                        else "operator-chosen"
+                    )
                     raise ProtectedAssignmentError(
                         f"character {character_id}'s {target_language!r} card {cur.card_id} is "
-                        f"{'locked' if cur.locked else 'operator-chosen'} ({cur.chosen_by}); "
-                        f"{by} does not replace it without override"
+                        f"{why} ({cur.chosen_by}); {by} does not replace it without override"
                     )
             return self._append(con, character_id, target_language, card_id, by, locked)
 
