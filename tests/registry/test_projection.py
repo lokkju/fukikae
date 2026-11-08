@@ -66,3 +66,5 @@ def test_projection_apply_is_unit_rows_and_checks_dim():
 def test_series_of_reads_the_workspace_setting():
     assert series_of(Config()) == "default"
     assert series_of(Config(raw={"series": "Fairy Tail"})) == "Fairy Tail"
+    # A [series] table (title, genre) leaves the projection key alone.
+    assert series_of(Config(raw={"series": {"title": "Fairy Tail"}})) == "default"

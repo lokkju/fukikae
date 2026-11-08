@@ -69,9 +69,12 @@ def fit_lda(x: np.ndarray, labels: Sequence[str], dims: int | None = None) -> Pr
 
 
 def series_of(cfg: Any) -> str:
-    """The series a workspace's projections are stored under: ``series`` in fukikae.toml,
-    else "default" (a workspace has one registry, so one series)."""
-    return str(cfg.raw.get("series") or "default")
+    """The series a workspace's projections are stored under: a top-level
+    ``series = "Name"`` in fukikae.toml, else "default" (a workspace has one registry, so
+    one series). A ``[series]`` table (the results ledger's title and genre) does not change
+    it, so adding one never orphans a stored projection."""
+    value = cfg.raw.get("series")
+    return value if isinstance(value, str) and value else "default"
 
 
 def projected_tops(

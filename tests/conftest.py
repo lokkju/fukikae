@@ -6,6 +6,12 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolated_ledger(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Every test writes ledger rows to a temp file, never the operator's results.jsonl."""
+    monkeypatch.setenv("FUKIKAE_RESULTS", str(tmp_path_factory.mktemp("ledger") / "results.jsonl"))
+
+
 def pytest_runtest_setup(item: pytest.Item) -> None:
     if item.get_closest_marker("ffmpeg") and not (
         shutil.which("ffmpeg") and shutil.which("ffprobe")
