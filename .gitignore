@@ -85,4 +85,6 @@ Thumbs.db
 
 # fukikae
 .fukikae/
+# per-backend worker environments (fukikae.backends.tts.remote)
+.venvs/
 .superpowers/

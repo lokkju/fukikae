@@ -1,13 +1,35 @@
-"""Choosing a character's voice from the original audio. Task 6 needs only a gender estimate,
-for the stock pools; reference selection and clone cards come with the cloning backends.
+"""Choosing a character's voice from the original audio: a gender estimate for the stock pools,
+and reference clips for clone cards.
+
+Reference selection (``select_references``, ruling CD5): a character's turns that overlap no
+other speaker's turn, last 3 to 12 s and have an ASR transcript are ranked by signal-to-noise
+ratio on the separated vocals (``snr_db``: the RMS of the loudest half of the turn's 20 ms
+frames over the RMS of its quietest tenth) and taken greedily, up to 3 clips and 20 s. A turn
+that a scored emotion source labels non-neutral (``tags.emotion_backend`` set, confidence at
+least 0.5) ranks after every other eligible turn: it is taken only when the rest fall short of
+``min_total`` (6 s), and then only until that is reached. SenseVoice's labels carry no score
+and demote nothing; unlabelled and low-confidence turns rank by SNR alone. Whenever a chosen
+reference is scored non-neutral, ``reference_report`` says "references may carry emotion:
+<labels>", and ``clone_card`` records the labels in ``[meta] reference_emotions`` (outside
+the card id), which ``fukikae voices show`` prints. Under ``min_total`` there is no clone.
 """
 
 from __future__ import annotations
 
+import math
+import tempfile
+from collections.abc import Collection
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from fukikae.backends.base import Synthesizer
+    from fukikae.cards.card import Card
+    from fukikae.cards.store import CardStore
+    from fukikae.models import Tags, Transcript, Turn
 
 FRAME_S = 0.040
 HOP_S = 0.020
@@ -119,3 +141,182 @@ def estimate_gender(
     """``m`` under ``male_below`` (165 Hz) 20th-percentile F0, ``f`` over ``female_above``
     (180 Hz), else (or with too little voiced speech) ``u``."""
     return gender_of(speaker_f0(vocals, spans)[0], male_below, female_above)
+
+
+# -- reference selection (ruling CD5) -------------------------------------------------------
+
+SNR_FRAME_S = 0.020
+SNR_FLOOR = 1e-5  # digital silence on separated vocals; keeps the ratio finite
+SCORED_MIN = 0.5
+CLIP_RATE = 24000
+CLONE_SEED = 1234
+NO_SPACE_LANGUAGES = frozenset({"ja", "zh", "yue", "ko"})
+
+
+@dataclass(frozen=True)
+class RefPick:
+    start: float
+    end: float
+    transcript: str
+    snr_db: float
+    emotion: str | None = None  # the label when a scored source calls the turn non-neutral
+
+    @property
+    def seconds(self) -> float:
+        return self.end - self.start
+
+
+def _samples(data: np.ndarray, rate: int, start: float, end: float) -> np.ndarray:
+    seg = np.asarray(data[max(0, int(start * rate)) : max(0, int(end * rate))])
+    if seg.dtype.kind in "iu":
+        seg = seg.astype(np.float32) / float(np.iinfo(seg.dtype.str).max)
+    if seg.ndim > 1:
+        seg = seg.mean(axis=1)
+    return seg.astype(np.float32)
+
+
+def snr_db(x: np.ndarray, rate: int) -> float:
+    """RMS of the loudest half of 20 ms frames over the RMS of the quietest tenth, in dB."""
+    n = max(1, int(SNR_FRAME_S * rate))
+    frames = len(x) // n
+    if frames < 2:
+        return 0.0
+    rms = np.sort(np.sqrt((x[: frames * n].astype(np.float64).reshape(frames, n) ** 2).mean(1)))
+    loud = math.sqrt(float((rms[frames // 2 :] ** 2).mean()))
+    quiet = math.sqrt(float((rms[: max(1, frames // 10)] ** 2).mean()))
+    return 20 * math.log10(max(loud, SNR_FLOOR) / max(quiet, SNR_FLOOR))
+
+
+def turn_text(transcript: Transcript, start: float, end: float) -> str:
+    """The ASR text inside ``[start, end]``: the words whose midpoint falls in it (segments,
+    when the transcript has no word timing)."""
+    sep = "" if transcript.language in NO_SPACE_LANGUAGES else " "
+    parts: list[str] = []
+    for seg in transcript.segments:
+        if transcript.word_timing and seg.words:
+            parts += [w.text for w in seg.words if start <= (w.start + w.end) / 2 <= end]
+        elif start <= (seg.start + seg.end) / 2 <= end:
+            parts.append(seg.text)
+    return sep.join(p.strip() for p in parts if p.strip()).strip()
+
+
+def _emotion(tags: Tags | None, start: float, end: float) -> str | None:
+    """The label of the emotion span overlapping the turn most, when a scored source calls it
+    non-neutral at ``SCORED_MIN`` or more; else None."""
+    if tags is None or not tags.emotion_backend:
+        return None
+    best, overlap = None, 0.0
+    for e in tags.emotions:
+        o = min(end, e.end) - max(start, e.start)
+        if o > overlap:
+            best, overlap = e, o
+    if best is None or best.confidence is None or best.confidence < SCORED_MIN:
+        return None
+    return None if best.label == "neutral" else best.label
+
+
+def select_references(
+    turns: list[Turn],
+    speaker: str | Collection[str],
+    transcript: Transcript,
+    tags: Tags | None,
+    vocals: Path,
+    *,
+    count: int = 3,
+    total: tuple[float, float] = (10.0, 20.0),
+    each: tuple[float, float] = (3.0, 12.0),
+    min_total: float = 6.0,
+) -> list[RefPick] | None:
+    """Reference clips for the speaker (one diarize label, or several of one character), in
+    the order taken; None when they add up to less than ``min_total`` seconds. ``total[0]``
+    is the preferred minimum (the spec's 10 to 20 s); the greedy fill stops at ``total[1]``."""
+    from scipy.io import wavfile
+
+    mine = {speaker} if isinstance(speaker, str) else set(speaker)
+    others = [t for t in turns if t.speaker not in mine]
+    rate, data = wavfile.read(vocals, mmap=True)
+    rate = int(rate)
+    eligible: list[RefPick] = []
+    for t in sorted((t for t in turns if t.speaker in mine), key=lambda t: (t.start, t.end)):
+        start, end = round(t.start, 3), round(t.end, 3)
+        if not each[0] <= end - start <= each[1]:
+            continue
+        if any(o.start < end and start < o.end for o in others):
+            continue
+        text = turn_text(transcript, start, end)
+        if not text:
+            continue
+        snr = snr_db(_samples(data, rate, start, end), rate)
+        eligible.append(RefPick(start, end, text, round(snr, 2), _emotion(tags, start, end)))
+    ranked = sorted(eligible, key=lambda p: (p.emotion is not None, -p.snr_db, p.start))
+    picks: list[RefPick] = []
+    used = 0.0
+    for p in ranked:
+        if len(picks) >= count:
+            break
+        if p.emotion is not None and used >= min_total:
+            break  # scored non-neutral turns only make up a shortfall
+        if used + p.seconds <= total[1]:
+            picks.append(p)
+            used += p.seconds
+    return picks if used >= min_total else None
+
+
+def reference_report(picks: list[RefPick]) -> list[str]:
+    """The CD5 warning for chosen references a scored source calls non-neutral, if any."""
+    labels = sorted({p.emotion for p in picks if p.emotion})
+    return [f"references may carry emotion: {', '.join(labels)}"] if labels else []
+
+
+def cut_clip(vocals: Path, start: float, end: float, dest: Path, rate: int = CLIP_RATE) -> Path:
+    """``[start, end]`` of the vocals as a mono 16-bit wav at ``rate``, reproducibly."""
+    from scipy.io import wavfile
+    from scipy.signal import resample_poly
+
+    src_rate, data = wavfile.read(vocals, mmap=True)
+    x = _samples(data, int(src_rate), start, end).astype(np.float64)
+    if int(src_rate) != rate:
+        g = math.gcd(int(src_rate), rate)
+        x = resample_poly(x, rate // g, int(src_rate) // g)
+    wavfile.write(dest, rate, (np.clip(x, -1.0, 1.0) * 32767).round().astype("<i2"))
+    return dest
+
+
+def clone_card(
+    backend: type[Synthesizer],
+    picks: list[RefPick],
+    store: CardStore,
+    vocals: Path,
+    source_language: str,
+    target_language: str,
+    episode: str,
+) -> Card:
+    """A clone card of ``backend`` from the picks: each cut to a 24 kHz mono wav sidecar,
+    with its transcript and ``origin = {episode, start, end}``; ``seed = 1234``, the default
+    ``emotion_strength`` (0.8), the backend's ``model_revision``. Not put in the store."""
+    from fukikae.cards.card import Card, Reference, Voice
+
+    refs: list[Reference] = []
+    with tempfile.TemporaryDirectory(prefix="fukikae-clip-") as tmp:
+        for i, p in enumerate(picks):
+            clip = cut_clip(vocals, p.start, p.end, Path(tmp) / f"{i}.wav")
+            refs.append(
+                Reference(
+                    clip=store.add_sidecar(clip, "clip"),
+                    transcript=p.transcript,
+                    language=source_language,
+                    origin={"episode": episode, "start": p.start, "end": p.end},
+                )
+            )
+    labels = sorted({p.emotion for p in picks if p.emotion})
+    return Card(
+        target_language=target_language,
+        voice=Voice(
+            backend=backend.name,
+            model_revision=backend.model_revision,
+            source="clone",
+            seed=CLONE_SEED,
+            references=tuple(refs),
+        ),
+        meta={"reference_emotions": labels} if labels else {},
+    )

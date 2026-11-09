@@ -32,6 +32,27 @@ def test_doctor_reports_llama_server_and_its_version(tmp_path, monkeypatch):
     assert rows["llama-server"][0] is False
 
 
+def test_doctor_reports_each_tts_worker_environment(tmp_path, monkeypatch):
+    from fukikae import doctor
+    from fukikae.backends import loader
+    from fukikae.backends.tts.remote import WorkerSynthesizer
+
+    class W(WorkerSynthesizer):
+        name = "wfake"
+        extra = "wfake"
+
+    monkeypatch.setattr(loader, "available", lambda kind: {"wfake": W} if kind == "tts" else {})
+    monkeypatch.setenv("FUKIKAE_WORKER_CHECKOUT", str(tmp_path))
+    rows = {label: (ok, detail) for label, ok, detail in doctor.doctor()}
+    ok, detail = rows["tts worker: wfake"]
+    assert not ok and "uv sync" in detail and ".venvs/wfake" in detail
+    py = tmp_path / ".venvs" / "wfake" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text("")
+    rows = {label: (ok, detail) for label, ok, detail in doctor.doctor()}
+    assert rows["tts worker: wfake"] == (True, str(tmp_path / ".venvs" / "wfake"))
+
+
 def test_tts_timefit_and_mix_follow_translate_without_tag():
     from fukikae.cli import pipeline_stages
     from fukikae.config import Config

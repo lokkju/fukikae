@@ -108,8 +108,12 @@ def show(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
         typer.echo(f"{language}: card {a.card_id} ({a.by}, {_state(a)}, history row {a.n})")
         if a.note:
             typer.echo(f"note: {a.note}")
+        card = store.get(a.card_id)
+        emotions = card.meta.get("reference_emotions")
+        if emotions:  # ruling CD5
+            typer.echo(f"references may carry emotion: {', '.join(map(str, emotions))}")
         typer.echo("")
-        typer.echo(dump_card(store.get(a.card_id)), nl=False)
+        typer.echo(dump_card(card), nl=False)
 
 
 @voices_app.command("assign")
