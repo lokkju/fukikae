@@ -44,7 +44,7 @@ class Impl:
         if text == "lie":
             _tone(req["out"], 0.5, RATE)
             return 9.0
-        if text == "echo":
+        if text.startswith("echo"):
             # the request as the impl saw it, for the test to read back
             import json
 
