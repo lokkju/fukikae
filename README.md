@@ -38,6 +38,14 @@ fukikae backends setup indextts2
 
 That runs `uv sync --locked` into `.venvs/indextts2`, records the lock's sha256 there (a worker whose environment came from another lock refuses to start and names this command), then downloads the model and its four auxiliary models at their pinned revisions into the Hugging Face cache. It is the only step that downloads: the worker runs offline, with an allowlisted environment that carries none of the secrets in fukikae's own. The environment takes about 8 GB, the models about 7 GB. IndexTTS2 clones from a card's reference clips and takes the source line's audio as a separate emotion reference, scaled by the card's `emotion_strength`; it has no duration control.
 
+CosyVoice 3 (`cosyvoice3`, Fun-CosyVoice3-0.5B) needs Python 3.10:
+
+```bash
+fukikae backends setup cosyvoice3
+```
+
+CosyVoice and its Matcha-TTS submodule ship no package, so the setup step also downloads each one's code at a pinned commit into `.venvs/cosyvoice3/fukikae-code`, keeps only the package directory and refuses it unless its files hash to the pinned digest; the worker checks that digest again every time it loads. The environment takes about 5.5 GB, the model about 5 GB, and a run about 4 GB of VRAM. It clones from a card's reference clips: `[tts.cosyvoice3] mode = "auto"` (the default) gives the model the clips' transcripts when they are in the target language (`zero_shot`) and only their sound when they aren't (`cross_lingual`, CosyVoice's own advice for a foreign-language prompt); `mode` can force either. A cue with a delivery direction is rendered in CosyVoice's instruct mode with that direction, and the card's `rate` is CosyVoice's speed. It takes no emotion audio, emotion vector or duration target, and `emotion_strength` only switches the direction off at 0. It runs without a text normalizer: CosyVoice's wetext fetches its grammars unpinned at every start, so it isn't installed, and CosyVoice still spells out English numbers.
+
 Each TTS backend takes its options and its device from its own table, `[tts.<backend>]` (for example `[tts.indextts2] fp16 = true`). Kokoro runs on the CPU and the cloning backends on the GPU unless that table's `device` says otherwise; the old stage-wide `[tts] device` applies only to a backend that declares no default. IndexTTS2 refuses the CPU (fp32, about 9 GB of RAM, minutes per line) unless `force_cpu = true` is in `[tts.indextts2]`.
 
 ## Profiles

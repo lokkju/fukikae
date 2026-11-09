@@ -88,6 +88,8 @@ emotion2vec = "fukikae.backends.tag.emotion2vec:Emotion2vecTagger"
 kokoro = "fukikae.backends.tts.kokoro:KokoroSynthesizer"
 # runs in its own environment, workers/indextts2 (README, "Cloning backends")
 indextts2 = "fukikae.backends.tts.indextts2:IndexTts2Synthesizer"
+# runs in its own environment, workers/cosyvoice3 (README, "Cloning backends")
+cosyvoice3 = "fukikae.backends.tts.cosyvoice3:CosyVoice3Synthesizer"
 
 [project.entry-points."fukikae.backends.translate"]
 openai_compat = "fukikae.backends.translate.openai_compat:OpenAICompatTranslator"
