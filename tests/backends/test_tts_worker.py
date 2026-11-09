@@ -19,6 +19,8 @@ from fukikae.backends.tts.remote import BackendError, WorkerSynthesizer
 from fukikae.cards.card import Reference, Voice
 
 ROOT = Path(__file__).resolve().parents[2]
+# the allowlist as fukikae ships it, before the fixture below extends it with the test hook
+PRODUCTION_ALLOW = remote.ENV_ALLOW
 
 
 class FakeWorker(WorkerSynthesizer):
@@ -44,6 +46,8 @@ class FakeWorker(WorkerSynthesizer):
 @pytest.fixture(autouse=True)
 def fake_impl(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("FUKIKAE_TTS_FAKE_IMPL", "tests.fixtures.fake_tts_impl")
+    # the test hook reaches the worker only because the tests extend the allowlist
+    monkeypatch.setattr(remote, "ENV_ALLOW", remote.ENV_ALLOW | {"FUKIKAE_TTS_FAKE_IMPL"})
     monkeypatch.setenv("PYTHONPATH", str(ROOT))
     monkeypatch.setattr(gpulock, "leftover_jobs", lambda _gpu: [])
     # a checkout whose worker env was set up from its lock (the hash recorded at sync)
@@ -341,6 +345,46 @@ def test_setup_syncs_locked_records_the_lock_and_fetches_online(fake_impl, monke
     assert hash_file.read_text().strip() == remote.lock_digest(
         fake_impl / "workers" / "faketts" / "uv.lock"
     )
+
+
+def test_the_fake_impl_hook_is_not_in_the_production_allowlist(monkeypatch):
+    """A production worker never takes FUKIKAE_TTS_FAKE_IMPL from fukikae's environment, so
+    nothing outside the tests can swap the impl module a worker imports."""
+    assert "FUKIKAE_TTS_FAKE_IMPL" not in PRODUCTION_ALLOW
+    monkeypatch.setattr(remote, "ENV_ALLOW", PRODUCTION_ALLOW)
+    assert "FUKIKAE_TTS_FAKE_IMPL" not in FakeWorker({}, "cpu").worker_env()
+
+
+def test_setup_hands_uv_sync_only_the_allowlist(fake_impl, monkeypatch):
+    """uv sync builds sdists, and their build scripts run with its environment: they get the
+    worker allowlist plus what uv needs (its cache, Python installs, index and proxy
+    settings), never fukikae's secrets."""
+    secrets = {
+        "CLOUDFLARE_API_TOKEN": "x", "AWS_SECRET_ACCESS_KEY": "x", "GITHUB_TOKEN": "x",
+        "HF_TOKEN": "hf_x", "PULUMI_CONFIG_PASSPHRASE": "x", "UV_PUBLISH_TOKEN": "x",
+    }  # fmt: skip
+    needed = {
+        "UV_CACHE_DIR": "/c", "UV_PYTHON_INSTALL_DIR": "/p", "UV_INDEX_URL": "https://i",
+        "HTTPS_PROXY": "http://proxy:3128", "no_proxy": "localhost", "SSL_CERT_FILE": "/ca",
+        "XDG_DATA_HOME": "/d",
+    }  # fmt: skip
+    for k, v in {**secrets, **needed, "VIRTUAL_ENV": "/fukikae/.venv", "UV_FROZEN": "1"}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(remote, "ENV_ALLOW", PRODUCTION_ALLOW)
+    ran: list[dict[str, str]] = []
+
+    def run(cmd, **kw):
+        ran.append(dict(kw["env"]))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    FakeWorker.setup(fetch=False, run=run)
+    (env,) = ran
+    assert not set(secrets) & set(env)
+    assert {k: env.get(k) for k in needed} == needed
+    assert "VIRTUAL_ENV" not in env and "UV_FROZEN" not in env
+    assert "FUKIKAE_TTS_FAKE_IMPL" not in env and "PYTHONPATH" not in env
+    assert env["PATH"] == os.environ["PATH"] and env["HOME"] == os.environ["HOME"]
+    assert env["UV_PROJECT_ENVIRONMENT"] == str(fake_impl / ".venvs" / "faketts")
 
 
 # ---- the worker side --------------------------------------------------------------------

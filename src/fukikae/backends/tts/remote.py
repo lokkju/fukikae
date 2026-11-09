@@ -13,6 +13,8 @@ environment whose recorded hash doesn't match ``workers/<extra>/uv.lock``.
 The worker's environment is an allowlist (``worker_env``: PATH, HOME, locale, temp, the Hugging
 Face and torch caches, ``CUDA_*``), never fukikae's whole environment, which holds the secrets
 mise decrypts; at runtime it also sets ``HF_HUB_OFFLINE=1`` and ``TRANSFORMERS_OFFLINE=1``.
+``uv sync`` in the setup step gets the same allowlist plus uv's own settings (``sync_env``).
+The tests' fake impl hook (``FUKIKAE_TTS_FAKE_IMPL``) is not on it; the tests extend it.
 
 ``<checkout>`` is the repository this module was loaded from, or ``FUKIKAE_WORKER_CHECKOUT``.
 
@@ -84,10 +86,26 @@ ENV_ALLOW = frozenset(
         "PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "TERM",
         "HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "XDG_CACHE_HOME", "TORCH_HOME",
         "LD_LIBRARY_PATH", "PYTHONPATH",
-        "FUKIKAE_TTS_FAKE_IMPL",  # tests only: the worker's fake impl
     }
 )  # fmt: skip
 ENV_ALLOW_PREFIXES = ("LC_", "CUDA_")
+# What `uv sync` gets beyond ENV_ALLOW (outside PYTHONPATH): uv's cache, config, Python
+# installs, index and network settings. Its sdist builds run build scripts with this
+# environment, so it holds no credential uv doesn't need (an index URL may carry one).
+SYNC_ALLOW = frozenset(
+    {
+        "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+        "UV_CACHE_DIR", "UV_NO_CACHE", "UV_CONFIG_FILE", "UV_NO_CONFIG",
+        "UV_PYTHON_INSTALL_DIR", "UV_PYTHON_DOWNLOADS", "UV_PYTHON_PREFERENCE",
+        "UV_INDEX", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL",
+        "UV_INDEX_STRATEGY", "UV_KEYRING_PROVIDER", "UV_INSECURE_HOST", "UV_NATIVE_TLS",
+        "UV_OFFLINE", "UV_HTTP_TIMEOUT", "UV_LINK_MODE", "UV_CONCURRENT_DOWNLOADS",
+        "UV_CONCURRENT_BUILDS", "UV_CONCURRENT_INSTALLS",
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+    }
+)  # fmt: skip
 
 
 def lock_digest(lock: Path) -> str:
@@ -269,13 +287,25 @@ class WorkerSynthesizer(Synthesizer):
             env["TRANSFORMERS_OFFLINE"] = "1"
         return env
 
+    @staticmethod
+    def sync_env() -> dict[str, str]:
+        """The environment ``uv sync`` runs with: the worker allowlist (outside PYTHONPATH)
+        and ``SYNC_ALLOW``. fukikae's own venv (VIRTUAL_ENV) and its frozen-sync setting
+        (UV_FROZEN) are not the worker's, and fukikae's secrets reach no sdist build script."""
+        return {
+            k: v
+            for k, v in os.environ.items()
+            if (k in ENV_ALLOW and k != "PYTHONPATH")
+            or k in SYNC_ALLOW
+            or k.startswith(ENV_ALLOW_PREFIXES)
+        }
+
     @classmethod
     def setup(cls, *, fetch: bool = True, run: Callable[..., Any] = subprocess.run) -> None:
         """Set the worker environment up: ``uv sync --locked`` into ``.venvs/<extra>``, record
         the lock's hash, then (``fetch``) run the worker's ``--fetch`` step online."""
         inst = cls({}, "cpu")
-        # fukikae's own venv and its frozen-sync setting are not the worker's
-        env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_FROZEN")}
+        env = cls.sync_env()
         env["UV_PROJECT_ENVIRONMENT"] = str(inst.venv())
         log.info("syncing %s from %s", inst.venv(), inst.project_dir() / "uv.lock")
         run(["uv", "sync", "--locked", "--directory", str(inst.project_dir())], env=env, check=True)
