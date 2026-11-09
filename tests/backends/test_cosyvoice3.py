@@ -30,11 +30,11 @@ def test_cosyvoice3_declares_what_the_released_model_supports():
     assert loader.backend_class("tts", "cosyvoice3") is cls
     assert (cls.name, cls.extra) == ("cosyvoice3", "cosyvoice3")
     assert cls.sources == frozenset({"clone"})
-    # instruct mode takes the delivery direction; no emotion audio, vector or duration target
-    assert cls.capabilities == frozenset({"instruction"})
-    assert cls.capabilities_for("clone") == frozenset({"instruction"})
-    # rate is CosyVoice's speed; emotion_strength only gates the instruction (0: none)
-    assert cls.voice_keys == frozenset({"seed", "rate", "emotion_strength"})
+    # ruling CD20: no delivery capability without A/B evidence; instruct mode is withdrawn
+    assert cls.capabilities == frozenset()
+    assert cls.capabilities_for("clone") == frozenset()
+    # rate is CosyVoice's speed
+    assert cls.voice_keys == frozenset({"seed", "rate"})
     assert cls.sample_rate == 24000
     assert "en" in cls.languages and "ja" not in cls.languages
     assert cls.default_device == "cuda"
@@ -73,10 +73,62 @@ def test_the_prompt_takes_whole_clips_up_to_the_limit():
     assert impl.prompt_plan([("long.wav", 40.0, "x")]) == (["long.wav"], "x")
 
 
-def test_the_instruction_carries_the_direction_inside_the_system_prompt():
-    p = impl.instruction_prompt("  excited,  repeated. ")
-    assert p.startswith(impl.SYSTEM) and p.endswith(impl.END)
-    assert "excited, repeated." in p and p.count(impl.END) == 1
+def test_cosyvoice_bracket_tags_are_stripped_by_the_worker():
+    """Ruling CD20: CosyVoice's own control tokens ([laughter], [breath], <strong>, the
+    phoneme tags) never reach the model from the text or a transcript."""
+    from fukikae.backends.tts import worker
+
+    markup = impl.CONTROL_MARKUP
+    text = "Well [laughter] that's <strong>it</strong>[breath] [AA1]ok [ǜ] <laughter>ha</laughter>"
+    assert worker.strip_control_markup(text, markup) == "Well that's it ok ha"
+    # bracketed words that are not tokens stay
+    assert worker.strip_control_markup("[sic] and [Natsu]", markup) == "[sic] and [Natsu]"
+    req = {
+        "op": "synthesize", "text": "Hi [cough] there", "instruction": None,
+        "voice": {"references": [{"clip": "/x.wav", "transcript": "やあ[sigh]"}]},
+    }  # fmt: skip
+    clean = worker.sanitize_request(req, markup)
+    assert clean["text"] == "Hi there"
+    assert clean["voice"]["references"][0]["transcript"] == "やあ"
+
+
+def test_control_markup_covers_every_special_token_of_the_pinned_tokenizer():
+    """Each additional special token of the pinned CosyVoice3Tokenizer that isn't <|...|>
+    syntax is in CONTROL_MARKUP (needs the fetched code in .venvs/cosyvoice3)."""
+    import ast
+
+    from fukikae.backends.tts import worker
+    from fukikae.backends.tts.cosyvoice3 import CosyVoice3Synthesizer
+
+    venv = CosyVoice3Synthesizer({}, "cpu").venv()
+    src = Path(impl.code_root("CosyVoice", str(venv))) / "cosyvoice" / "tokenizer" / "tokenizer.py"
+    if not src.is_file():
+        pytest.skip("the pinned CosyVoice code is not fetched here")
+    tree = ast.parse(src.read_text())
+    cls = next(
+        n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "CosyVoice3Tokenizer"
+    )
+    tokens = [
+        c.value
+        for node in ast.walk(cls)
+        if isinstance(node, ast.List)
+        for c in node.elts
+        if isinstance(c, ast.Constant) and isinstance(c.value, str)
+    ]
+    assert len(tokens) > 100
+    for tok in tokens:
+        assert worker.strip_control_markup(f"a{tok}b", impl.CONTROL_MARKUP) in ("a b", "ab"), tok
+
+
+def test_fetch_drops_bytecode_and_the_digest_counts_it(tmp_path):
+    (tmp_path / "pkg" / "__pycache__").mkdir(parents=True)
+    (tmp_path / "pkg" / "a.py").write_text("a = 1\n")
+    (tmp_path / "pkg" / "__pycache__" / "a.cpython-310.pyc").write_bytes(b"cache")
+    with_cache = impl.tree_digest(str(tmp_path / "pkg"))
+    impl.drop_bytecode(str(tmp_path / "pkg"))
+    assert not (tmp_path / "pkg" / "__pycache__").exists()
+    # unchecked bytecode changes the digest, so load refuses a tree that holds any
+    assert impl.tree_digest(str(tmp_path / "pkg")) != with_cache
 
 
 def _archive(members: Sequence[tuple[str, bytes | None, str]]) -> bytes:
@@ -120,11 +172,9 @@ def test_extract_keeps_only_the_package_and_refuses_escapes(tmp_path):
 
 
 def test_tree_digest_tracks_content_and_refuses_links(tmp_path):
-    (tmp_path / "pkg" / "__pycache__").mkdir(parents=True)
+    (tmp_path / "pkg").mkdir(parents=True)
     (tmp_path / "pkg" / "a.py").write_text("a = 1\n")
     first = impl.tree_digest(str(tmp_path / "pkg"))
-    (tmp_path / "pkg" / "__pycache__" / "a.cpython-310.pyc").write_bytes(b"cache")
-    assert impl.tree_digest(str(tmp_path / "pkg")) == first  # bytecode is not the code
     (tmp_path / "pkg" / "a.py").write_text("a = 2\n")
     assert impl.tree_digest(str(tmp_path / "pkg")) != first
     os.symlink("/etc/passwd", tmp_path / "pkg" / "b.py")
@@ -172,12 +222,11 @@ def _cue(direction: str | None) -> DubCue:
     )  # fmt: skip
 
 
-def test_delivery_passes_the_direction_as_the_instruction_and_nothing_else():
+def test_delivery_passes_nothing():
+    """No direction, emotion audio or vector reaches CosyVoice 3: every line is neutral."""
     cls = _cls()
     passed = tts.delivery_passed(_cue("sarcastic"), _clone_card(), cls, 2.0)
-    assert passed == {"instruction": "sarcastic", "emotion_strength": 0.8}
-    assert tts.delivery_passed(_cue(None), _clone_card(), cls, 2.0) == {}
-    assert tts.delivery_passed(_cue("sarcastic"), _clone_card(0.0), cls, 2.0) == {}
+    assert passed == {} and tts.neutral_only(passed)
 
 
 @pytest.mark.gpu
@@ -200,10 +249,5 @@ def test_real_cosyvoice3_renders_a_clone_line(tmp_path, monkeypatch):
             "Hello there, this is a test.", card.voice, "en", out, resolve=lambda _r: ref
         )
         assert 0.5 < seconds < 10.0
-        directed = tmp_path / "d.wav"
-        assert synth.synthesize(
-            "Hello there.", card.voice, "en", directed, resolve=lambda _r: ref,
-            instruction="whispering",
-        ) > 0.2  # fmt: skip
     finally:
         synth.unload()
