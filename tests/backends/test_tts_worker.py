@@ -310,6 +310,22 @@ def test_the_worker_env_is_an_allowlist_and_offline(monkeypatch, tmp_path):
     assert env["HF_HUB_OFFLINE"] == "1" and env["TRANSFORMERS_OFFLINE"] == "1"
 
 
+def test_the_worker_writes_no_bytecode_and_fetches_through_the_proxy(monkeypatch):
+    """PYTHONDONTWRITEBYTECODE always (no unchecked .pyc next to pinned code); the online
+    fetch step gets the proxy and CA settings, the offline worker doesn't need them."""
+    net = {"HTTPS_PROXY": "http://p:3128", "http_proxy": "http://p:3128", "NO_PROXY": "lan",
+           "SSL_CERT_FILE": "/ca.pem", "REQUESTS_CA_BUNDLE": "/ca.pem"}  # fmt: skip
+    for k, v in net.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "x")
+    w = FakeWorker({}, "cpu")
+    online, offline = w.worker_env(online=True), w.worker_env()
+    assert online["PYTHONDONTWRITEBYTECODE"] == offline["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert {k: online.get(k) for k in net} == net
+    assert not set(net) & set(offline)
+    assert "CLOUDFLARE_API_TOKEN" not in online
+
+
 def test_a_worker_env_synced_from_another_lock_is_refused(fake_impl):
     (fake_impl / "workers" / "faketts" / "uv.lock").write_text("version = 2\n")
     w = FakeWorker({}, "cpu")

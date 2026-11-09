@@ -89,6 +89,14 @@ ENV_ALLOW = frozenset(
     }
 )  # fmt: skip
 ENV_ALLOW_PREFIXES = ("LC_", "CUDA_")
+# Network settings the online fetch step gets (never the offline worker).
+FETCH_NET = frozenset(
+    {
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+    }
+)  # fmt: skip
 # What `uv sync` gets beyond ENV_ALLOW (outside PYTHONPATH): uv's cache, config, Python
 # installs, index and network settings. Its sdist builds run build scripts with this
 # environment, so it holds no credential uv doesn't need (an index URL may carry one).
@@ -279,9 +287,13 @@ class WorkerSynthesizer(Synthesizer):
         env["PYTHONPATH"] = os.pathsep.join(p for p in (src, env.get("PYTHONPATH")) if p)
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONNOUSERSITE"] = "1"
+        # no .pyc beside pinned code: bytecode nobody checked must never be imported
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         if online:
             if os.environ.get("HF_TOKEN"):
                 env["HF_TOKEN"] = os.environ["HF_TOKEN"]
+            # the fetch step's downloads go through the proxy and CA the operator set
+            env.update({k: v for k, v in os.environ.items() if k in FETCH_NET})
         else:
             env["HF_HUB_OFFLINE"] = "1"
             env["TRANSFORMERS_OFFLINE"] = "1"
