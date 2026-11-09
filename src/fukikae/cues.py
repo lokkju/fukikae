@@ -56,9 +56,11 @@ FRAGMENT_S = 0.35
 FRAGMENT_GAP_S = 0.3
 
 
-def budget_chars(seconds: float, language: str, max_speed: float) -> int:
-    """``floor(seconds * CPS * max_speed)``, at least 4."""
-    cps = CPS.get(language, DEFAULT_CPS)
+def budget_chars(seconds: float, language: str, max_speed: float, cps: float | None = None) -> int:
+    """``floor(seconds * cps * max_speed)``, at least 4. ``cps`` is the target TTS backend's
+    speech rate (``speech_cps``); without it, the language's typical rate from ``CPS``."""
+    if cps is None:
+        cps = CPS.get(language, DEFAULT_CPS)
     return max(MIN_BUDGET, math.floor(seconds * cps * max_speed))
 
 
@@ -204,6 +206,7 @@ def build_asr_cues(
     target_language: str,
     max_speed: float,
     *,
+    cps: float | None = None,
     gap_s: float = 0.6,
     max_cue_s: float = 8.0,
 ) -> list[DubCue]:
@@ -265,7 +268,7 @@ def build_asr_cues(
                 extra=extra,
                 speaker=speaker,
                 source_text=_join(ws, transcript.language),
-                budget=budget_chars(end - start, target_language, max_speed),
+                budget=budget_chars(end - start, target_language, max_speed, cps),
                 delivery=Delivery(
                     reference=(start, end),
                     emotion=None if emotion is None else emotion.label,
@@ -329,6 +332,7 @@ def assign_subtitle_speakers(
     target_language: str,
     max_speed: float,
     rules: Sequence[str],
+    cps: float | None = None,
 ) -> list[DubCue]:
     """Dub cues from target-language subtitle cues (the subtitle-first path).
 
@@ -370,7 +374,7 @@ def assign_subtitle_speakers(
                 speaker=speaker,
                 source_text=text,
                 text=None if skip else text,
-                budget=budget_chars(cue.end - cue.start, target_language, max_speed),
+                budget=budget_chars(cue.end - cue.start, target_language, max_speed, cps),
                 delivery=Delivery(
                     reference=(cue.start, cue.end),
                     emotion=None if emotion is None else emotion.label,

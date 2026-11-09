@@ -95,6 +95,9 @@ class Synthesizer(Backend, Protocol):
     voice_keys: ClassVar[frozenset[str]]  # [voice] keys it honors beyond the source's own field
     capabilities: ClassVar[frozenset[str]]  # subset of TTS_CAPABILITIES
     sample_rate: ClassVar[int]
+    # Characters of text per second the backend speaks at rate 1.0, per target language,
+    # measured on its renders; translate sizes each cue's budget with it (ruling CD7).
+    speech_cps: ClassVar[dict[str, float]]
     model_revision: str
 
     @classmethod

@@ -59,6 +59,7 @@ def _cue(i: int, start: float, end: float, **kw) -> DubCue:
 def test_budget_chars():
     assert budget_chars(2.0, "en", 1.25) == 37 and budget_chars(0.1, "en", 1.25) == 4
     assert budget_chars(2.0, "xx", 1.0) == 28  # unknown language: 14 cps
+    assert budget_chars(2.0, "en", 1.25, cps=10.0) == 25  # the TTS backend's speech rate
 
 
 def test_asr_cues_split_on_speaker_change_and_gap():

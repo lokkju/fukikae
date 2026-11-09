@@ -32,6 +32,11 @@ REVISION = "f3ff3571791e39611d31c381e3a41a3af07b4987"
 MODEL_FILE = "kokoro-v1_0.pth"
 SAMPLE_RATE = 24000
 
+# Characters per second at speed 1.0 after silence trimming: the median per-line rate over
+# Fairy Tail E11's 393 translated cues in 12 stock voices (pooled 16.1, quartiles 11.1 and
+# 18.6; per voice 10.1 bm_daniel to 18.6 am_fenrir). Character-cards Task 6 fix round 1.
+SPEECH_CPS = {"en": 15.5}
+
 # fukikae target language -> Kokoro's lang_code (American English for "en").
 LANG_CODES = {
     "en": "a",
@@ -128,6 +133,7 @@ class KokoroSynthesizer(Synthesizer):
     capabilities: ClassVar[frozenset[str]] = frozenset()
     sample_rate: ClassVar[int] = SAMPLE_RATE
     stock_voices: ClassVar[frozenset[str]] = STOCK_VOICES
+    speech_cps: ClassVar[dict[str, float]] = SPEECH_CPS
     model: ClassVar[str] = REPO
     revision: ClassVar[str] = REVISION
     model_revision: str = REVISION

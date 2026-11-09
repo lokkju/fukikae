@@ -27,6 +27,7 @@ def test_kokoro_declares_stock_and_blend():
     assert REPO == "hexgrad/Kokoro-82M" and len(REVISION) == 40
     assert k.model_revision == REVISION
     assert LANG_CODES["en"] == "a"
+    assert 6.0 < k.speech_cps["en"] < 18.0  # measured on Fairy Tail E11 renders (CD7)
     assert EXTRAS["kokoro"] == "kokoro"
 
 
