@@ -27,7 +27,11 @@ ASSIGNED_BY = frozenset({"auto", "assign", "revert", "edit", "derive", "restock"
 # Operator actions (ruling CD2): a card they chose is never replaced by `auto` or an import
 # unless the caller passes override (an import the operator confirmed with --replace). An
 # imported card is never replaced by `auto` without override either (CD3).
-OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive", "restock"})
+OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive"})
+# Automatic sources (ruling CD9): `restock` re-pins an automatic stock card to a new model
+# revision. It is no operator choice, so a restocked card stays uncurated, and it is refused
+# over a locked, operator-chosen or imported card exactly as `auto` is.
+AUTOMATIC_BY = frozenset({"auto", "restock"})
 _LOCK_BY = frozenset({"lock", "unlock"})
 _CARD_ID = re.compile(r"[0-9a-f]{16}")
 
@@ -188,8 +192,9 @@ def _normalized(v: np.ndarray) -> np.ndarray:
 
 
 def _curated_card(a: CardAssignment | None) -> bool:
-    """A current assignment someone has curated: locked, or its card not chosen by ``auto``."""
-    return a is not None and (a.locked or a.chosen_by != "auto")
+    """A current assignment someone has curated: locked, or its card not chosen automatically
+    (``auto`` or ``restock``, ruling CD9)."""
+    return a is not None and (a.locked or a.chosen_by not in AUTOMATIC_BY)
 
 
 class Registry:
@@ -661,11 +666,12 @@ class Registry:
     ) -> CardAssignment:
         """Make ``card_id`` the character's card for ``target_language``, recorded in history.
 
-        ``by`` is one of auto, assign, revert, edit, derive, restock, or ``import:<pack title>``.
-        Other target languages are never touched. Raises KeyError for an unknown character.
-        ``auto`` and imports refuse (ProtectedAssignmentError) to replace a card that is
-        locked or was chosen by an operator action, unless ``override`` (ruling CD2); ``auto``
-        also refuses to replace an imported card, which a later import may replace (CD3).
+        ``by`` is one of auto, assign, revert, edit, derive, restock, or
+        ``import:<pack title>``. Other target languages are never touched. Raises KeyError for
+        an unknown character. ``auto``, ``restock`` and imports refuse
+        (ProtectedAssignmentError) to replace a card that is locked or was chosen by an
+        operator action, unless ``override`` (ruling CD2); ``auto`` and ``restock`` (CD9) also
+        refuse to replace an imported card, which a later import may replace (CD3).
         """
         if not _CARD_ID.fullmatch(card_id):
             raise ValueError(f"not a card id (16 lowercase hex digits): {card_id!r}")
@@ -682,7 +688,7 @@ class Registry:
                 cur = self._current(con, character_id, target_language)
                 imported = cur is not None and cur.chosen_by.startswith("import:")
                 if cur is not None and (
-                    cur.locked or cur.chosen_by in OPERATOR_BY or (by == "auto" and imported)
+                    cur.locked or cur.chosen_by in OPERATOR_BY or (by in AUTOMATIC_BY and imported)
                 ):
                     why = (
                         "locked"

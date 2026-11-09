@@ -164,9 +164,10 @@ def restock(
     ),
     lang: str | None = _LANG,
 ) -> None:
-    """Re-pin automatic stock cards to the revision their backend renders with now: same voice,
-    a new card, assigned by `restock` (unlocked). A curated card (locked, or chosen by an
-    operator or an import) is never touched."""
+    """Re-pin automatic (or earlier restocked) stock cards to the revision their backend renders
+    with now: same voice, a new card, assigned by `restock` (unlocked, still uncurated, so the
+    next revision bump restocks it again). A curated card (locked, or chosen by an operator or
+    an import) is never touched."""
     from fukikae.backends.loader import BackendUnavailable
     from fukikae.cards.stock import revision, stock_card
     from fukikae.config import ConfigError
@@ -175,7 +176,8 @@ def restock(
         changed = 0
         for char in reg.characters():
             a = reg.card_for(char.id, language)
-            if a is None or a.card_id is None or a.locked or a.chosen_by != "auto":
+            # CD9: automatic and restocked cards only; never a locked or curated one
+            if a is None or a.card_id is None or a.locked or a.chosen_by not in ("auto", "restock"):
                 continue
             if not store.has(a.card_id):
                 continue

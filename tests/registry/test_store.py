@@ -594,3 +594,30 @@ def test_import_refuses_an_operator_card_without_override(reg: Registry):
     reg.assign_card(cid, "en", A16, by="assign", locked=False)
     with pytest.raises(ProtectedAssignmentError, match="operator-chosen"):
         reg.assign_card(cid, "en", B16, by="import:Two", locked=False)
+
+
+def test_restock_is_not_curation_and_is_guarded_like_auto(reg: Registry):
+    """Ruling CD9: a restocked card is not curated (restock is no operator act), restock never
+    replaces a locked, operator-chosen or imported card without override, and auto may replace
+    a restocked card exactly where it may replace an auto card: when unlocked."""
+    a, b, c, d = "a" * 16, "b" * 16, "c" * 16, "d" * 16
+    x = _char(reg)
+    reg.assign_card(x, "en", a, by="auto", locked=False)
+    cur = reg.assign_card(x, "en", b, by="restock", locked=False)
+    assert cur.chosen_by == "restock" and x not in reg.curated_characters()
+    assert reg.assign_card(x, "en", c, by="auto", locked=False).card_id == c
+    reg.assign_card(x, "en", b, by="restock", locked=False)
+    reg.lock_card(x, "en", True)
+    for by in ("auto", "restock"):
+        with pytest.raises(ProtectedAssignmentError, match="locked"):
+            reg.assign_card(x, "en", d, by=by, locked=False)
+
+    y = _char(reg)
+    reg.assign_card(y, "en", a, by="assign", locked=False)
+    with pytest.raises(ProtectedAssignmentError, match="operator-chosen"):
+        reg.assign_card(y, "en", d, by="restock", locked=False)
+    z = _char(reg)
+    reg.assign_card(z, "en", a, by="import:pack", locked=False)
+    with pytest.raises(ProtectedAssignmentError, match="imported"):
+        reg.assign_card(z, "en", d, by="restock", locked=False)
+    assert reg.assign_card(z, "en", d, by="restock", locked=False, override=True).card_id == d
