@@ -68,6 +68,20 @@ def doctor() -> None:
         typer.echo(f"{'ok  ' if ok else 'MISS'} {label}: {detail}")
 
 
+def configure_logging() -> None:
+    """Send fukikae's INFO lines (stage summaries) to stderr, once, unless something already
+    configured the root logger (some model libraries do on import)."""
+    import logging
+
+    logger = logging.getLogger("fukikae")
+    if logger.handlers or logging.getLogger().handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+
 def pipeline_stages(cfg: "Config") -> "list[Stage]":
     """The stages `fukikae run` goes through, in order; `tag` only when `[tag] enabled`."""
     from fukikae.stages.asr import AsrStage
@@ -114,6 +128,7 @@ def run(
     from fukikae.workspace import Workspace
 
     runctx.vram_timeout_s = 0 if no_wait else None
+    configure_logging()
     ws = Workspace(workspace)
     try:
         ep = ws.find_episode(episode)

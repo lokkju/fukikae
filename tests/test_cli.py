@@ -146,3 +146,18 @@ def test_eval_asr_appends_ledger_rows(tmp_path, monkeypatch):
     assert len(read_rows()[0]) == 2
     r = CliRunner().invoke(app, [*args, "--backend", "faster_whisper", "--split", "dev"])
     assert r.exit_code != 0
+
+
+def test_run_logs_fukikae_info_lines_once(monkeypatch):
+    """Stage summaries (the mix's song candidates and drops) reach the run log even when no
+    library configured logging as a side effect."""
+    import logging
+
+    from fukikae.cli import configure_logging
+
+    logger = logging.getLogger("fukikae")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    configure_logging()
+    configure_logging()
+    assert len(logger.handlers) == 1 and logger.getEffectiveLevel() == logging.INFO
