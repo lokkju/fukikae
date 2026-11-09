@@ -158,3 +158,16 @@ def test_timefit_key_follows_settings_and_audio(ep):
 
 def test_timefit_outputs(ep):
     assert TimefitStage(CFG).outputs(ep) == [ep.work / "08-timefit" / "report.json"]
+
+
+@pytest.mark.ffmpeg
+def test_timefit_outputs_name_the_fitted_wavs_so_a_deleted_one_is_stale(ep):
+    from fukikae.job import run_stages
+
+    stage = TimefitStage(CFG)
+    assert run_stages(ep, CFG, [stage]) == ["timefit"]
+    outs = [p.name for p in stage.outputs(ep)]
+    assert outs == ["report.json", "c0001.wav", "c0002.wav", "c0003.wav", "c0004.wav", "c0006.wav"]
+    assert run_stages(ep, CFG, [stage]) == []
+    (ep.work / "08-timefit" / "c0002.wav").unlink()
+    assert run_stages(ep, CFG, [stage]) == ["timefit"]

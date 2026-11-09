@@ -24,6 +24,7 @@ episode, in the report), and the mix's integrated loudness to the original mix's
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
@@ -41,14 +42,16 @@ from fukikae.mix import (
     mux,
     normalize,
     removal_windows,
+    subtract,
     union,
     write_ass,
 )
 from fukikae.models import DubCue, DubCues, FitReport, MixReport, ProtectedSpan, Tags
 from fukikae.workspace import Episode, Workspace
 
-MIX_VERSION = 1
-MIX_KEYS = tuple(f.name for f in fields(MixSettings))
+log = logging.getLogger(__name__)
+MIX_VERSION = 2  # 2: undubbed cues keep their voice; ASS on the played span
+MIX_KEYS = tuple(f.name for f in fields(MixSettings) if f.name != "songs")
 
 
 def mix_settings(cfg: Config) -> MixSettings:
@@ -59,6 +62,12 @@ def mix_settings(cfg: Config) -> MixSettings:
         table = source.get("mix")
         if isinstance(table, dict):
             merged.update(table)
+    song_table: dict[str, Any] = {}
+    for source in (cfg.profile_raw, cfg.raw):
+        table = source.get("mix")
+        if isinstance(table, dict) and isinstance(table.get("songs"), dict):
+            song_table.update(table["songs"])
+    merged.pop("songs", None)
     unknown = sorted(set(merged) - set(MIX_KEYS))
     if unknown:
         raise ConfigError(
@@ -73,8 +82,20 @@ def mix_settings(cfg: Config) -> MixSettings:
             raise ConfigError(f"[mix] {key} must be a number, not {value!r}")
     if "fade_ms" in merged:
         merged["fade_ms"] = round(merged["fade_ms"])
+    bad = sorted(set(song_table) - set(songs.SONG_KEYS))
+    if bad:
+        raise ConfigError(
+            f"[mix.songs] has unknown keys {', '.join(bad)}; known: {', '.join(songs.SONG_KEYS)}"
+        )
+    for key, value in song_table.items():
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ConfigError(f"[mix.songs] {key} must be a number, not {value!r}")
     try:
-        return MixSettings(**merged)
+        song_settings = songs.SongSettings(**song_table)
+    except (ValueError, TypeError) as e:
+        raise ConfigError(f"[mix.songs] {e}") from e
+    try:
+        return MixSettings(**merged, songs=song_settings)
     except ValueError as e:
         raise ConfigError(f"[mix] {e}") from e
 
@@ -121,6 +142,7 @@ class MixStage:
             self._cues_path(ep, cfg),
             sep / "background.wav",
             sep / "vocals.wav",
+            sep / "vocals_16k.wav",
             ep.work / "00-extract" / "audio.wav",
             *([self._tags_path(ep)] if self.tags else []),
             *wavs,
@@ -140,7 +162,7 @@ class MixStage:
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
         return {
             "settings": asdict(mix_settings(cfg)),
-            "songs": songs.detector_constants(),
+            "songs": songs.detector_constants(mix_settings(cfg).songs),
             "target_language": cfg.target_language,
             "bitrate": DUB_BITRATE,
             "limiter_ceiling_db": TRUE_PEAK_DB,
@@ -151,8 +173,8 @@ class MixStage:
     # -- run ---------------------------------------------------------------------------------
 
     def _song_spans(
-        self, s: MixSettings, doc: DubCues, tags: Tags | None, background: Path, vocals: Path
-    ) -> list[ProtectedSpan]:
+        self, s: MixSettings, doc: DubCues, tags: Tags | None, sep: Path
+    ) -> tuple[list[ProtectedSpan], list[songs.Candidate]]:
         found: list[ProtectedSpan] = []
         cue_source = "subs" if doc.path == "subs" else "tag"
         for c in doc.cues:
@@ -161,12 +183,16 @@ class MixStage:
         for e in tags.events if tags else []:
             if e.label == "singing" or (s.protect_bgm and e.label == "bgm"):
                 found.append(ProtectedSpan(start=e.start, end=e.end, source=f"tag:{e.label}"))
+        candidates: list[songs.Candidate] = []
         if s.detect_songs:
-            for sp in songs.detect_theme_songs(background, vocals):
+            spans, candidates = songs.detect_theme_songs(
+                sep / "background.wav", sep / "vocals.wav", sep / "vocals_16k.wav", s.songs
+            )
+            for sp in spans:
                 found.append(
                     ProtectedSpan(start=sp.start, end=sp.end, source=sp.source, score=sp.score)
                 )
-        return found
+        return found, candidates
 
     def run(self, ep: Episode, cfg: Config) -> None:
         from scipy.io import wavfile
@@ -181,7 +207,13 @@ class MixStage:
         sep = ep.work / "01-separate"
         background, vocals = sep / "background.wav", sep / "vocals.wav"
 
-        song_spans = self._song_spans(s, doc, tags, background, vocals)
+        song_spans, candidates = self._song_spans(s, doc, tags, sep)
+        for c in candidates:
+            log.info(
+                "mix %s: song candidate %s %.0f-%.0f s, score %.3f, voiced %s: %s",
+                ep.id, c.region, c.start, c.end, c.score,
+                "-" if c.voiced is None else f"{c.voiced:.3f}", c.reason,
+            )  # fmt: skip
         laughter = [
             ProtectedSpan(start=e.start, end=e.end, source="tag:laughter")
             for e in (tags.events if tags else [])
@@ -189,7 +221,8 @@ class MixStage:
         ]
         by_id = {c.id: c for c in doc.cues}
         placed: list[tuple[Path, float]] = []
-        dub_spans: list[Span] = []
+        played: list[Span] = []
+        slots: list[Span] = []
         spoken: list[DubCue] = []
         dropped: dict[str, str] = {}
         for fc in fit.cues:
@@ -197,10 +230,26 @@ class MixStage:
             if hit is not None:
                 dropped[fc.cue_id] = hit.source
                 continue
+            end = fc.start + fc.seconds
             placed.append((ep.work / "08-timefit" / f"{fc.cue_id}.wav", fc.start))
-            dub_spans += [(fc.slot_start, fc.slot_end), (fc.start, fc.start + fc.seconds)]
+            played.append((fc.start, end))
+            slots.append((fc.slot_start, fc.slot_end))
             if fc.cue_id in by_id:
-                spoken.append(by_id[fc.cue_id])
+                # The event follows the audio as it plays.
+                spoken.append(by_id[fc.cue_id].model_copy(update={"start": fc.start, "end": end}))
+        dropped_by_source: dict[str, int] = {}
+        for source in dropped.values():
+            dropped_by_source[source] = dropped_by_source.get(source, 0) + 1
+        log.info(
+            "mix %s: %d cues placed, %d dropped as song %s",
+            ep.id, len(placed), len(dropped), dropped_by_source,
+        )  # fmt: skip
+        # A dubbed slot clears the original voice over the whole slot (ruling CD11), except
+        # where a cue that is not dubbed (errored, untranslated, skipped) keeps its own voice:
+        # there only the dub's played span is cleared.
+        dubbed = {fc.cue_id for fc in fit.cues if fc.cue_id not in dropped}
+        undubbed = [(c.start, c.end) for c in doc.cues if c.id not in dubbed]
+        dub_spans = union([*played, *subtract(slots, undubbed)])
 
         keep = [(p.start, p.end) for p in song_spans]
         if s.keep_original_vocals:
@@ -231,6 +280,8 @@ class MixStage:
                 songs=sorted(song_spans, key=lambda p: (p.start, p.end, p.source)),
                 laughter=laughter,
                 dropped=dropped,
+                dropped_by_source=dropped_by_source,
+                song_candidates=[asdict(c) for c in candidates],
                 placed=len(placed),
                 removed_seconds=round(sum(b - a for a, b in union(windows)), 3),
                 dub_gain_db=None if stats.dub_gain_db is None else round(stats.dub_gain_db, 2),

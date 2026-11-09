@@ -89,3 +89,57 @@ def test_frame_features_from_stems(tmp_path):
 
 def test_song_span_is_a_value():
     assert SongSpan(1.0, 2.0, "subs") == SongSpan(1.0, 2.0, "subs", None)
+
+
+# -- candidates, voicing and settings (Task 7 fix round 1) ---------------------------------
+
+from fukikae.songs import SongSettings, find_candidates, voiced_share  # noqa: E402
+
+
+def test_candidates_report_every_window_score_accepted_or_not():
+    cands = find_candidates(*_episode([(70, 160)]), SongSettings())
+    assert [c.region for c in cands] == ["head", "tail"]
+    head, tail = cands
+    assert head.accepted and head.score > 0.9 and head.reason == "accepted"
+    assert not tail.accepted and tail.score < 0.1 and tail.reason == "score"
+
+
+def test_shouting_over_music_is_refused_by_the_voicing_check():
+    """A battle (loud music, vocals on all the time, but rough and unpitched) scores like a
+    song on energy alone (Fairy Tail E13 at 611 s scored 0.86); singing is periodic."""
+    feats = _episode([(70, 160)])
+    cands = find_candidates(*feats, SongSettings(), voiced=lambda *_: 0.53)
+    assert not cands[0].accepted and cands[0].reason == "voiced"
+    assert cands[0].voiced == pytest.approx(0.53)
+    sung = find_candidates(*feats, SongSettings(), voiced=lambda *_: 0.87)
+    assert sung[0].accepted
+    assert theme_songs(*feats, voiced=lambda *_: 0.53) == []
+
+
+def test_settings_change_the_detector():
+    feats = _episode([(500, 590)])
+    assert theme_songs(*feats) == []
+    (span,) = theme_songs(*feats, settings=SongSettings(head_s=700))
+    assert span.start == pytest.approx(499, abs=1)
+    with pytest.raises(ValueError, match="min_score"):
+        SongSettings(min_score=1.5)
+
+
+def _mono16(path: Path, x: np.ndarray) -> Path:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
+    return path
+
+
+def test_voiced_share_tells_pitched_from_noisy(tmp_path):
+    t = np.arange(4 * 16000) / 16000
+    sung = 0.2 * sum(np.sin(2 * np.pi * 220 * k * t) / k for k in range(1, 5))
+    noisy = 0.2 * np.random.default_rng(0).standard_normal(len(t)).clip(-3, 3) / 3
+    x = np.concatenate([sung, noisy, np.zeros(len(t))])
+    p = _mono16(tmp_path / "v16.wav", x)
+    assert voiced_share(p, 0.0, 4.0) > 0.9
+    assert voiced_share(p, 4.0, 8.0) < 0.1
+    assert voiced_share(p, 8.0, 12.0) == 0.0  # silence: nothing active

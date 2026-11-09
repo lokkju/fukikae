@@ -96,6 +96,7 @@ def ep(tmp_path: Path) -> Episode:
         _cue(3, 9.0, 11.0, None, skip="song"),
         _cue(4, 9.5, 10.5, "Lyrics as a line."),
         _cue(5, 3.6, 4.4, "Sung words."),
+        _cue(6, 2.8, 3.5, None, error="translate: dropped"),  # overlaps c0001's slot
     ]
     write_json(
         work / "06-translate" / "cues.en.json",
@@ -151,6 +152,8 @@ def test_mix_protects_songs_and_laughter_and_muxes(ep):
     assert (9.0, 11.0, "subs") in songs and (3.5, 4.5, "tag:singing") in songs
     assert [(s.start, s.end, s.source) for s in report.laughter] == [(6.0, 6.5, "tag:laughter")]
     assert report.placed == 2
+    assert report.dropped_by_source == {"subs": 1, "tag:singing": 1}
+    assert report.song_candidates == []  # 12 s: shorter than the detector's window
 
     rate, y = wavfile.read(out / "dub.en.wav")
     assert rate == RATE
@@ -161,8 +164,10 @@ def test_mix_protects_songs_and_laughter_and_muxes(ep):
 
     # Dub window: the dub plays and the original voice is gone.
     assert _band(seg(1.1, 2.4), rate, DUB_HZ) > 0.5 and _band(seg(1.1, 2.4), rate, VOICE_HZ) < 0.02
-    # The rest of the original line's slot stays clear after a short dub ends.
-    assert _band(seg(2.6, 2.95), rate, VOICE_HZ) < 0.02
+    # The rest of the original line's slot stays clear after a short dub ends...
+    assert _band(seg(2.55, 2.75), rate, VOICE_HZ) < 0.02
+    # ...except where an untranslated (errored) cue overlaps it: its voice is kept.
+    assert _band(seg(2.85, 2.98), rate, VOICE_HZ) > 0.5
     # Song spans: the original voice untouched, no dub.
     for a, b in ((9.6, 10.4), (3.7, 4.3)):
         assert _band(seg(a, b), rate, VOICE_HZ) > 0.5 and _band(seg(a, b), rate, DUB_HZ) < 0.02
@@ -184,6 +189,8 @@ def test_mix_protects_songs_and_laughter_and_muxes(ep):
     assert (
         len(lines) == 2 and "Natsu: First line." in lines[0] and "Extra: Second line." in lines[1]
     )
+    # Events follow the audio as placed: c0001 plays 1.0 to 2.5 s.
+    assert lines[0].startswith("Dialogue: 0,0:00:01.00,0:00:02.50,")
 
     mkv = ep.work / "out" / "e1.fukikae.mkv"
     streams = json.loads(
@@ -209,6 +216,7 @@ def test_mix_without_tags_still_protects_subtitle_songs(ep):
     MixStage(cfg, tags=False).run(ep, cfg)
     report = read_json(ep.work / "09-mix" / "report.json", MixReport)
     assert report.dropped == {"c0004": "subs"}
+    assert report.dropped_by_source == {"subs": 1}
     assert report.laughter == [] and report.placed == 3
 
 
@@ -239,6 +247,18 @@ def test_mix_key_holds_the_settings(ep):
     assert key["target_language"] == "en" and "ffmpeg" in key and "version" in key
     assert key["limiter_ceiling_db"] == -1.0
     assert "songs" in key  # the detector's constants
+
+
+def test_mix_settings_take_detector_settings():
+    from fukikae.songs import SongSettings
+
+    s = mix_settings(Config(raw={"mix": {"songs": {"min_score": 0.6, "head_s": 420}}}))
+    assert s.songs == SongSettings(min_score=0.6, head_s=420)
+    assert mix_settings(Config()).songs == SongSettings()
+    with pytest.raises(ConfigError, match="min_scor"):
+        mix_settings(Config(raw={"mix": {"songs": {"min_scor": 0.6}}}))
+    with pytest.raises(ConfigError, match="min_score"):
+        mix_settings(Config(raw={"mix": {"songs": {"min_score": 2}}}))
 
 
 def test_mix_settings_read_and_validated():
