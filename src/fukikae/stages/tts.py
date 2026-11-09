@@ -345,6 +345,12 @@ def synth_device(cfg: Config, cls: type[Synthesizer]) -> str:
         raise ConfigError(f'[tts.{cls.name}] device must be "cpu" or "cuda", not {own!r}')
     default = getattr(cls, "default_device", None)
     want = own or default or legacy or ("cuda" if "cuda" in cls.devices else "cpu")
+    if own is None and default and legacy and legacy != default:
+        log.info(
+            '[tts] device = "%s" is stage-wide and does not apply to %s, which runs on its '
+            "default device, %s; set [tts.%s] device to choose one",
+            legacy, cls.name, default, cls.name,
+        )  # fmt: skip
     if want not in cls.devices:
         raise ConfigError(f"[tts] device {want!r}: {cls.name} runs on {sorted(cls.devices)}")
     device = device_string(cfg) if want == "cuda" else "cpu"
