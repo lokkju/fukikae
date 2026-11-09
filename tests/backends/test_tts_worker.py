@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from fukikae import gpulock
 from fukikae.backends import loader
 from fukikae.backends.tts import remote, worker
 from fukikae.backends.tts.remote import BackendError, WorkerSynthesizer
@@ -44,7 +45,7 @@ class FakeWorker(WorkerSynthesizer):
 def fake_impl(monkeypatch):
     monkeypatch.setenv("FUKIKAE_TTS_FAKE_IMPL", "tests.fixtures.fake_tts_impl")
     monkeypatch.setenv("PYTHONPATH", str(ROOT))
-    monkeypatch.setattr(remote, "leftover_workers", lambda _gpu: [])
+    monkeypatch.setattr(gpulock, "leftover_jobs", lambda _gpu: [])
 
 
 def _ref(tmp_path: Path) -> Path:
@@ -214,14 +215,54 @@ def test_missing_worker_env_names_the_setup_command(monkeypatch, tmp_path):
 def test_a_leftover_worker_on_the_gpu_refuses_to_start(monkeypatch):
     monkeypatch.setattr(remote, "nvml_index", lambda _dev: 0)
     monkeypatch.setattr(
-        remote, "leftover_workers", lambda _gpu: [(4242, "python -m fukikae.backends.tts.worker x")]
+        gpulock, "leftover_jobs", lambda _gpu: [(4242, "python -m fukikae.backends.tts.worker x")]
     )
     started: list[Any] = []
     monkeypatch.setattr(remote.subprocess, "Popen", lambda *a, **_k: started.append(a))
     w = FakeWorker({}, "cuda:0")
-    with pytest.raises(BackendError, match="pid 4242"):
+    with pytest.raises(gpulock.GpuBusy, match="pid 4242"):
         w.load()
     assert started == []
+    assert gpulock.held_fds() == ()
+
+
+def _locked_elsewhere(index: int) -> bool:
+    """Whether another process finds GPU ``index``'s lock taken."""
+    code = (
+        "import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT); "
+        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", code, str(gpulock.lock_path(index))], capture_output=True,
+        check=False, timeout=30,
+    )  # fmt: skip
+    return r.returncode != 0
+
+
+def test_a_gpu_worker_holds_the_lock_and_inherits_it(monkeypatch):
+    """Ruling CD15: the lock is held for the worker's life, and the worker has the lock's
+    descriptor, so the lock outlives a fukikae that dies before its worker."""
+    monkeypatch.setattr(remote, "nvml_index", lambda _dev: 0)
+    w = FakeWorker({}, "cuda:0")
+    w.load()
+    try:
+        assert _locked_elsewhere(0)
+        lock = os.path.realpath(gpulock.lock_path(0))
+        fds = os.listdir(f"/proc/{w.pid}/fd")
+        assert any(os.path.realpath(f"/proc/{w.pid}/fd/{fd}") == lock for fd in fds)
+    finally:
+        w.unload()
+    assert not _locked_elsewhere(0)
+    assert gpulock.held_fds() == ()
+
+
+def test_a_cpu_worker_takes_no_gpu_lock():
+    w = FakeWorker({}, "cpu")
+    w.load()
+    try:
+        assert gpulock.held_fds() == ()
+    finally:
+        w.unload()
 
 
 def test_gpu_worker_sees_only_its_card(monkeypatch, tmp_path):
@@ -236,18 +277,6 @@ def test_gpu_worker_sees_only_its_card(monkeypatch, tmp_path):
         assert seen["device"] == "cuda:0"
     finally:
         w.unload()
-
-
-def test_leftover_workers_reads_the_command_line(monkeypatch):
-    monkeypatch.undo()  # the real leftover_workers
-    me = os.getpid()
-    monkeypatch.setattr(remote, "gpu_processes", lambda _gpu: [(me, "python")])
-    monkeypatch.setattr(
-        remote, "_cmdline", lambda _pid: "python -m fukikae.backends.tts.worker indextts2"
-    )
-    assert remote.leftover_workers(0) == [(me, "python -m fukikae.backends.tts.worker indextts2")]
-    monkeypatch.setattr(remote, "_cmdline", lambda _pid: "python -m vllm")
-    assert remote.leftover_workers(0) == []
 
 
 # ---- the worker side --------------------------------------------------------------------

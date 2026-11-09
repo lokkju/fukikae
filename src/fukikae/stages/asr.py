@@ -13,6 +13,7 @@ from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create, supports
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpulock import gpu_job
 from fukikae.models import Transcript
 from fukikae.stages.language import LanguageResult
 from fukikae.workspace import Episode
@@ -98,6 +99,11 @@ class AsrStage:
             )
 
     def run(self, ep: Episode, cfg: Config) -> None:
+        # Ruling CD15: on a GPU the stage holds the card's lock for its whole life.
+        with gpu_job(cfg.gpu_device, device_string(cfg), "asr"):
+            self._run(ep, cfg)
+
+    def _run(self, ep: Episode, cfg: Config) -> None:
         audio = self.inputs(ep)[0]
         lang = self._language(ep) or cfg.source_language
         device = device_string(cfg)

@@ -12,6 +12,12 @@ def _isolated_ledger(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pyte
     monkeypatch.setenv("FUKIKAE_RESULTS", str(tmp_path_factory.mktemp("ledger") / "results.jsonl"))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_gpu_locks(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Every test takes GPU locks in a temp dir, never the operator's runtime dir."""
+    monkeypatch.setenv("FUKIKAE_LOCK_DIR", str(tmp_path_factory.mktemp("gpulocks")))
+
+
 def pytest_runtest_setup(item: pytest.Item) -> None:
     if item.get_closest_marker("ffmpeg") and not (
         shutil.which("ffmpeg") and shutil.which("ffprobe")

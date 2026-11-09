@@ -34,6 +34,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import IO, Any
 
+from fukikae.gpulock import held_fds
+
 log = logging.getLogger(__name__)
 
 POLL_S = 0.25
@@ -176,6 +178,8 @@ class LlamaServer:
                 stdout=self._log,
                 stderr=subprocess.STDOUT,
                 env=env,
+                # the GPU lock (ruling CD15) stays held while the server lives
+                pass_fds=held_fds(),
                 preexec_fn=_die_with_parent if sys.platform.startswith("linux") else None,  # noqa: PLW1509
             )
         except OSError as e:

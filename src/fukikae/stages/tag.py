@@ -22,6 +22,7 @@ from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpulock import gpu_job
 from fukikae.models import Diarization, Tags, Turn
 from fukikae.workspace import Episode
 
@@ -82,15 +83,17 @@ class TagStage:
         bc: BackendConfig, device: str, cfg: Config, audio: Path, turns: list[Turn]
     ) -> Tags:
         backend = create("tag", bc, device)
-        if device.startswith("cuda"):
-            wait_for_vram(
-                cfg.gpu_device, backend.vram_mb, runctx.vram_timeout_s, query=free_mb, sleep=_sleep
-            )
-        try:
-            backend.load()
-            return cast(Tagger, backend).tag(audio, turns)
-        finally:
-            backend.unload()
+        with gpu_job(cfg.gpu_device, device, f"tag {bc.backend}"):  # ruling CD15
+            if device.startswith("cuda"):
+                wait_for_vram(
+                    cfg.gpu_device, backend.vram_mb, runctx.vram_timeout_s, query=free_mb,
+                    sleep=_sleep,
+                )  # fmt: skip
+            try:
+                backend.load()
+                return cast(Tagger, backend).tag(audio, turns)
+            finally:
+                backend.unload()
 
     def run(self, ep: Episode, cfg: Config) -> None:
         audio, turns_path = self.inputs(ep)

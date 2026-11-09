@@ -76,6 +76,7 @@ from fukikae.cards.stock import check_stock_voice, revision, stock_card
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpulock import gpu_job
 from fukikae.models import (
     Assignments,
     Delivery,
@@ -243,26 +244,37 @@ class LazySynth:
     def __init__(self, bc: BackendConfig, device: str, cfg: Config) -> None:
         self.bc, self.device, self.cfg = bc, device, cfg
         self.inst: Synthesizer | None = None
+        self._lock = contextlib.ExitStack()
 
     def get(self) -> Synthesizer:
         if self.inst is None:
             inst = cast(Synthesizer, loader.create("tts", self.bc, self.device))
-            if self.device.startswith("cuda"):
-                wait_for_vram(
-                    self.cfg.gpu_device,
-                    inst.vram_mb,
-                    runctx.vram_timeout_s,
-                    query=free_mb,
-                    sleep=_sleep,
-                )
-            self.inst = inst
-            inst.load()
+            # Ruling CD15: the card's lock from before the VRAM check until close().
+            self._lock.enter_context(gpu_job(self.cfg.gpu_device, self.device, f"tts {inst.name}"))
+            try:
+                if self.device.startswith("cuda"):
+                    wait_for_vram(
+                        self.cfg.gpu_device,
+                        inst.vram_mb,
+                        runctx.vram_timeout_s,
+                        query=free_mb,
+                        sleep=_sleep,
+                    )
+                self.inst = inst
+                inst.load()
+            except BaseException:
+                self.inst = None
+                self._lock.close()
+                raise
         return self.inst
 
     def close(self) -> None:
-        if self.inst is not None:
-            self.inst.unload()
-            self.inst = None
+        try:
+            if self.inst is not None:
+                self.inst.unload()
+                self.inst = None
+        finally:
+            self._lock.close()
 
 
 # -- the render path, shared by the stage and `eval tts` (ruling CD12) -------------------------
