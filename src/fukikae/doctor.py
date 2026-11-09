@@ -20,6 +20,23 @@ def _llama_server() -> tuple[str, bool, str]:
     return ("llama-server", True, f"{found} ({version})")
 
 
+def _tts_workers() -> list[tuple[str, bool, str]]:
+    """Each out-of-process TTS backend's worker environment (``.venvs/<extra>``)."""
+    from fukikae.backends.loader import available
+    from fukikae.backends.tts.remote import WorkerSynthesizer
+
+    rows: list[tuple[str, bool, str]] = []
+    for name, cls in sorted(available("tts").items()):
+        if not (isinstance(cls, type) and issubclass(cls, WorkerSynthesizer)):
+            continue
+        inst = cls({}, "cpu")
+        if inst.interpreter().exists():
+            rows.append((f"tts worker: {name}", True, str(inst.venv())))
+        else:
+            rows.append((f"tts worker: {name}", False, f"not set up: `{inst.setup_hint()}`"))
+    return rows
+
+
 def doctor() -> list[tuple[str, bool, str]]:
     """Return (label, ok, detail) lines. Never prints or returns the HF token."""
     from fukikae.backends.base import KINDS
@@ -45,6 +62,7 @@ def doctor() -> list[tuple[str, bool, str]]:
         has = False
     rows.append(("huggingface token", has, "set" if has else "not set"))
     rows.append(_llama_server())
+    rows += _tts_workers()
 
     for kind in KINDS:
         found = names(kind)

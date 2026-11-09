@@ -373,3 +373,17 @@ def test_restock_never_touches_a_locked_or_operator_assigned_card(tmp_path: Path
     with Registry(ws.registry_path) as reg:
         assert _cur(reg, natsu, "en").card_id == restocked
         assert _cur(reg, lucy, "en").card_id == mine
+
+
+def test_show_warns_when_references_may_carry_emotion(tmp_path: Path):
+    """CD5: the voices output repeats the clone card's reference-emotion warning."""
+    ws, cid, store = setup(tmp_path)
+    card = parse_card(STOCK_CARD)
+    from dataclasses import replace
+
+    card_id = store.put(replace(card, meta={"reference_emotions": ["angry", "sad"]}))
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", card_id, by="assign", locked=True)
+    r = invoke("show", str(ws.root), "Natsu")
+    assert r.exit_code == 0, r.output
+    assert "references may carry emotion: angry, sad" in r.output
