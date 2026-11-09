@@ -197,6 +197,25 @@ def _curated_card(a: CardAssignment | None) -> bool:
     return a is not None and (a.locked or a.chosen_by not in AUTOMATIC_BY)
 
 
+def replace_refusal(cur: CardAssignment | None, by: str) -> str | None:
+    """Why an assignment ``by`` may not replace ``cur`` without override, or None when it may:
+    the one rule (rulings CD2, CD3, CD9) that ``assign_card`` enforces and pack import plans
+    with. Operator actions replace anything; ``auto``, ``restock`` and imports never replace
+    a locked or operator-chosen card; ``auto`` and ``restock`` never replace an imported one."""
+    if cur is None or by in OPERATOR_BY:
+        return None
+    imported = cur.chosen_by.startswith("import:")
+    if cur.locked:
+        why = "locked"
+    elif cur.chosen_by in OPERATOR_BY:
+        why = "operator-chosen"
+    elif by in AUTOMATIC_BY and imported:
+        why = "imported"
+    else:
+        return None
+    return f"card {cur.card_id} is {why} ({cur.chosen_by})"
+
+
 class Registry:
     def __init__(self, path: Path) -> None:
         path = Path(path)
@@ -684,22 +703,12 @@ class Registry:
             raise ValueError("target language must not be empty")
         with self._tx() as con:
             self._require_character(con, character_id)
-            if by not in OPERATOR_BY and not override:
-                cur = self._current(con, character_id, target_language)
-                imported = cur is not None and cur.chosen_by.startswith("import:")
-                if cur is not None and (
-                    cur.locked or cur.chosen_by in OPERATOR_BY or (by in AUTOMATIC_BY and imported)
-                ):
-                    why = (
-                        "locked"
-                        if cur.locked
-                        else "imported"
-                        if cur.chosen_by not in OPERATOR_BY
-                        else "operator-chosen"
-                    )
+            if not override:
+                why = replace_refusal(self._current(con, character_id, target_language), by)
+                if why is not None:
                     raise ProtectedAssignmentError(
-                        f"character {character_id}'s {target_language!r} card {cur.card_id} is "
-                        f"{why} ({cur.chosen_by}); {by} does not replace it without override"
+                        f"character {character_id}'s {target_language!r} {why}; {by} does not "
+                        "replace it without override"
                     )
             return self._append(con, character_id, target_language, card_id, by, locked, note)
 

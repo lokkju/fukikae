@@ -316,7 +316,10 @@ def _parse_fingerprint(raw: Any) -> Fingerprint:
     return Fingerprint(
         embedder=_str(_require(t, "embedder", where), "embedder", where),
         vector=_sha_ref(_require(t, "vector", where), "vector", where),
-        threshold=_float(_require(t, "threshold", where), "threshold", where),
+        # ruling CD23(b): a cosine threshold, in (0, 1]
+        threshold=_float(
+            _require(t, "threshold", where), "threshold", where, lo=0.0, lo_open=True, hi=1.0
+        ),
     )
 
 
@@ -379,6 +382,14 @@ def _parse_voice(raw: Any) -> Voice:
     return Voice(**kw)
 
 
+def _for_translator(text: str) -> str:
+    """Style text reaches the translator's prompt: special-token syntax goes (ruling
+    CD23(c), the worker's CD20 strip); clean text is returned unchanged, so its id holds."""
+    from fukikae.backends.tts.worker import without_special_tokens
+
+    return without_special_tokens(text)
+
+
 def _capped(text: str, cap: int, what: str) -> str:
     if len(text) > cap:
         raise CardError(f"{what} is {len(text)} characters; the most a card may carry is {cap}")
@@ -404,7 +415,9 @@ def _parse_style(raw: Any) -> dict[str, Any]:
                 phrases.append(
                     {
                         k: _capped(
-                            _str(_require(e, k, "[style] catchphrases entry"), k, where),
+                            _for_translator(
+                                _str(_require(e, k, "[style] catchphrases entry"), k, where)
+                            ),
                             CATCHPHRASE_SIDE_CAP,
                             f"[style] catchphrases {k}",
                         )
@@ -414,7 +427,7 @@ def _parse_style(raw: Any) -> dict[str, Any]:
             style[key] = phrases
         else:
             cap = STYLE_CAPS.get(key, STYLE_TEXT_CAP)
-            style[key] = _capped(_str(value, key, where), cap, f"[style] {key}")
+            style[key] = _capped(_for_translator(_str(value, key, where)), cap, f"[style] {key}")
     return style
 
 

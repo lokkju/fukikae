@@ -223,6 +223,15 @@ def strip_control_markup(text: str, extra: tuple[str, ...] | list[str] = ()) -> 
     return _strip(text, extra)[0]
 
 
+def without_special_tokens(text: str) -> str:
+    """``text`` with special-token syntax stripped as ``strip_control_markup`` does, but
+    returned exactly as given when it holds none (spacing included), so clean text that is
+    hashed (a card's id, CD1) never changes. Card text bound for the translator goes through
+    this (ruling CD23(c))."""
+    cleaned, count = _strip(text)
+    return cleaned if count else text
+
+
 def _fields(req: dict[str, Any]) -> list[str]:
     """Every string of a synthesize request that reaches the model as text."""
     voice = req.get("voice") or {}
