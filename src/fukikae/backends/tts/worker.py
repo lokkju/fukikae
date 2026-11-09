@@ -14,7 +14,8 @@ or ``{"ok": false, "error": "..."}``. Requests:
 - ``{"op": "load", "options": {...}, "device": "cuda:0" | "cpu"}`` -> ``{"ok": true}``
 - ``{"op": "synthesize", "text", "voice", "language", "out", "emotion_audio",
   "emotion_vector", "instruction", "emotion_strength", "target_seconds"}`` ->
-  ``{"ok": true, "seconds": <float>}``; the impl writes a mono wav to ``out``
+  ``{"ok": true, "seconds": <float>, "stripped": <int>}``; the impl writes a mono wav to
+  ``out``; ``stripped`` counts the control markup taken out of the request
 - ``{"op": "unload"}`` -> ``{"ok": true}``
 
 ``--fetch`` after the name runs the impl module's ``fetch()`` (the setup step's download of its
@@ -25,11 +26,12 @@ would corrupt the protocol, so file descriptor 1 is pointed at stderr before any
 imported, and answers go to a private duplicate of the original stdout.
 
 Special-token markup (ruling CD20): before a synthesize request reaches the impl, the worker
-strips ``<|...|>`` special-token syntax (and its full-width ``<｜...｜>`` form, and any half of
-either) from the text, the instruction, the reference transcripts and the design description,
-plus whatever the impl module lists in ``CONTROL_MARKUP`` (regular expressions for its own
-control markup). Qwen-family tokenizers, CosyVoice's among them, read those as control tokens.
-A text that is nothing but markup is refused.
+strips ``<|...|>`` special-token syntax (and its full-width ``<｜...｜>`` form) from the text,
+the instruction, the reference transcripts and the design description, plus whatever the impl
+module lists in ``CONTROL_MARKUP`` (regular expressions for its own control markup). Bare
+halves of a token (``<|``, ``|>``, U+FF5C) go only from a field that also held a whole one, so
+a code pipe or a lone full-width bar survives. Qwen-family tokenizers, CosyVoice's among them,
+read those as control tokens. A text that is nothing but markup is refused.
 
 ``FUKIKAE_TTS_FAKE_IMPL`` (tests only) names a module to use instead of ``impl_<name>``.
 """
@@ -184,26 +186,60 @@ def validate_request(req: Any) -> dict[str, Any]:
     return req
 
 
-# Special-token syntax of Qwen-family (and DeepSeek-style full-width) tokenizers: whole tokens
-# first, then any half left behind; applied until nothing changes, so nesting can't rebuild one.
-_SPECIAL = (
+# Special-token syntax of Qwen-family (and DeepSeek-style full-width) tokenizers. Whole tokens
+# go whenever they appear; applied until nothing changes, so nesting can't rebuild one. The
+# bare halves (``<|``, ``|>``, the full-width forms and a lone U+FF5C) go only in a field that
+# also held a whole token: on their own they are text (a code pipe, a full-width bar).
+_WHOLE = (
     re.compile(r"<\|[^<>|\n]{0,128}\|>"),
     re.compile("<\uff5c[^<>\uff5c\n]{0,128}\uff5c>"),
-    re.compile("<\\||\\|>|<\uff5c|\uff5c>|\uff5c"),
 )
+_HALVES = re.compile("<\\||\\|>|<\uff5c|\uff5c>|\uff5c")
 _RUNS = re.compile(r"[ \t]{2,}")
+
+
+def _strip(text: str, extra: tuple[str, ...] | list[str] = ()) -> tuple[str, int]:
+    """``text`` without special-token syntax or the impl's own control markup (``extra``), and
+    how many pieces of markup came out."""
+    patterns = [*_WHOLE, *(re.compile(p) for p in extra)]
+    found = False
+    count = 0
+    while True:
+        before = text
+        for pat in patterns:
+            text, n = pat.subn(" ", text)
+            count += n
+            found = found or bool(n and pat in _WHOLE)
+        if found:
+            text, n = _HALVES.subn(" ", text)
+            count += n
+        if text == before:
+            break
+    return "\n".join(_RUNS.sub(" ", line).strip() for line in text.split("\n")).strip(), count
 
 
 def strip_control_markup(text: str, extra: tuple[str, ...] | list[str] = ()) -> str:
     """``text`` without special-token syntax or the impl's own control markup (``extra``)."""
-    patterns = [*_SPECIAL, *(re.compile(p) for p in extra)]
-    while True:
-        before = text
-        for pat in patterns:
-            text = pat.sub(" ", text)
-        if text == before:
-            break
-    return "\n".join(_RUNS.sub(" ", line).strip() for line in text.split("\n")).strip()
+    return _strip(text, extra)[0]
+
+
+def _fields(req: dict[str, Any]) -> list[str]:
+    """Every string of a synthesize request that reaches the model as text."""
+    voice = req.get("voice") or {}
+    out = [req["text"]]
+    out += [req[k] for k in ("instruction",) if isinstance(req.get(k), str)]
+    out += [
+        r["transcript"] for r in voice.get("references", []) if isinstance(r.get("transcript"), str)
+    ]
+    out += [voice[k] for k in ("description",) if isinstance(voice.get(k), str)]
+    return out
+
+
+def markup_stripped(req: dict[str, Any], extra: tuple[str, ...] | list[str] = ()) -> int:
+    """How many pieces of control markup ``sanitize_request`` takes out of ``req``."""
+    if req.get("op") != "synthesize":
+        return 0
+    return sum(_strip(f, extra)[1] for f in _fields(req))
 
 
 def sanitize_request(
@@ -296,9 +332,11 @@ def main(name: str, fetch: bool = False) -> int:
             else:
                 if impl is None:
                     raise RequestError("synthesize before load")
-                req = sanitize_request(req, tuple(getattr(module, "CONTROL_MARKUP", ())))
+                extra = tuple(getattr(module, "CONTROL_MARKUP", ()))
+                stripped = markup_stripped(req, extra)
+                req = sanitize_request(req, extra)
                 seconds = float(impl.synthesize(req))
-                answer({"ok": True, "seconds": seconds})
+                answer({"ok": True, "seconds": seconds, "stripped": stripped})
         except (RequestError, json.JSONDecodeError, UnicodeDecodeError) as e:
             answer({"ok": False, "error": str(e)[:MAX_ERROR]})
         except Exception as e:  # noqa: BLE001 - reported to the client, which raises

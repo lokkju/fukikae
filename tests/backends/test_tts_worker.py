@@ -479,7 +479,7 @@ def test_special_token_markup_is_stripped_from_text_instruction_and_transcripts(
     assert clean["voice"]["references"][0]["transcript"] == "user\nhi"
     assert clean["voice"]["description"] == "a calm voice"
     # half tokens, full-width bars and nested attempts go too
-    for raw in ("a <|b", "a |> b", "x <｜end｜> y", "<|<|endofprompt|>|>z"):
+    for raw in ("x <｜end｜> y", "<|<|endofprompt|>|>z", "<|a|> then |> and <| and ｜"):
         out = worker.strip_control_markup(raw)
         assert "<|" not in out and "|>" not in out and "｜" not in out, raw
     # an impl's own control markup (impl module CONTROL_MARKUP) is stripped as well
@@ -577,3 +577,35 @@ def test_real_indextts2_renders_a_clone_line(tmp_path, monkeypatch):
         assert 0.5 < seconds < 6
     finally:
         synth.unload()
+
+
+def test_bare_halves_go_only_beside_a_whole_special_token():
+    # no whole token in the field: a code pipe and a lone full-width bar are text
+    assert worker.strip_control_markup("cat x |> sort") == "cat x |> sort"
+    assert worker.strip_control_markup("a <| b") == "a <| b"
+    assert worker.strip_control_markup("左\uff5c右") == "左\uff5c右"
+    # a whole token in the same field takes the leftover halves with it
+    assert worker.strip_control_markup("a <|im_end|> b |> c") == "a b c"
+    assert worker.strip_control_markup("x\uff5cy <|im_end|>") == "x y"
+
+
+def test_sanitize_counts_what_it_stripped_per_request(tmp_path):
+    req = worker.validate_request(_synth_req(tmp_path, text="hi <|im_end|> there <|a|>",
+                                             instruction="a |> b"))  # fmt: skip
+    assert worker.markup_stripped(req) == 2  # two whole tokens; the instruction's pipe stays
+    clean = worker.sanitize_request(req)
+    assert clean["instruction"] == "a |> b"
+    assert worker.markup_stripped(worker.validate_request(_synth_req(tmp_path))) == 0
+
+
+def test_the_answer_reports_the_strip(tmp_path):
+    ref = _ref(tmp_path)
+    w = FakeWorker({}, "cpu")
+    w.load()
+    try:
+        w.synthesize("hi <|im_end|>", _voice(), "en", tmp_path / "o.wav", resolve=lambda _r: ref)
+        assert w.last_stripped == 1
+        w.synthesize("hi", _voice(), "en", tmp_path / "p.wav", resolve=lambda _r: ref)
+        assert w.last_stripped == 0
+    finally:
+        w.unload()

@@ -210,6 +210,7 @@ class WorkerSynthesizer(Synthesizer):
     load_timeout_s: ClassVar[float] = 900.0
     synth_timeout_s: ClassVar[float] = 300.0
     stop_wait_s: ClassVar[float] = 30.0
+    last_stripped: int = 0  # control markup the worker took out of the last request (CD20)
 
     def __init__(self, options: dict[str, Any], device: str) -> None:
         unknown = sorted(set(options) - self.option_keys)
@@ -558,6 +559,8 @@ class WorkerSynthesizer(Synthesizer):
             },
             self.synth_timeout_s,
         )
+        stripped = answer.get("stripped", 0)
+        self.last_stripped = stripped if isinstance(stripped, int) else 0
         seconds = answer.get("seconds")
         if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
             self._fail("answered without seconds (protocol error)")

@@ -806,3 +806,19 @@ def test_indextts2_refuses_the_cpu_unless_forced(monkeypatch):
     monkeypatch.setattr(tts, "device_string", lambda _cfg: "cpu")
     with pytest.raises(ConfigError, match="9 GB"):
         tts.synth_device(Config(raw={"tts": {"backend": "kokoro"}}), IndexTts2Synthesizer)
+
+
+# ---- control markup stripped is recorded (ruling CD20) -----------------------------------------
+
+
+def test_the_plan_records_the_control_markup_the_worker_strips(ep, monkeypatch):
+    _assign(ep, 1, _stock("am_adam"))
+    _assign(ep, 2, _stock("af_heart"))
+    cues = read_json(ep.work / "06-translate" / "cues.en.json", DubCues)
+    cues.cues[0].text = "natsu <|im_end|> one |> two"
+    write_json(ep.work / "06-translate" / "cues.en.json", cues)
+    monkeypatch.setattr(tts, "_control_markup", lambda _cls: ())  # the fake counts as a worker
+    TtsStage(CFG).run(ep, CFG)
+    plan = {c.cue_id: c for c in _plan(ep).cues}
+    assert plan["c0001"].stripped_markup is True and plan["c0001"].stripped_count == 2
+    assert plan["c0002"].stripped_markup is False and plan["c0002"].stripped_count == 0
