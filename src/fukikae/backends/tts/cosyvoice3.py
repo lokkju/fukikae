@@ -29,7 +29,11 @@ class CosyVoice3Synthesizer(WorkerSynthesizer):
     voice_keys: ClassVar[frozenset[str]] = frozenset({"seed", "rate", "emotion_strength"})
     capabilities: ClassVar[frozenset[str]] = frozenset({"instruction"})
     sample_rate: ClassVar[int] = _impl.SAMPLE_RATE
-    speech_cps: ClassVar[dict[str, float]] = {"en": 15.0}
+    # Characters per second after silence trimming (ruling CD7), from Task 9b's eval tts clone
+    # renders (cross-lingual from Japanese clips): median per render 15.0 on Fairy Tail E11 (40
+    # renders, 5 cards) and 16.4 on E12 (72 renders, 9 cards; per card 14.5 to 18.2); 15.9 is
+    # the render-weighted mean of the two. From German clips (BBT de, 24 renders) it was 12.8.
+    speech_cps: ClassVar[dict[str, float]] = {"en": 15.9}
     option_keys: ClassVar[frozenset[str]] = frozenset({"fp16", "mode"})
     model: ClassVar[str] = _impl.REPO
     # The model snapshot and the two code pins (CosyVoice, Matcha-TTS): any can change a voice.
