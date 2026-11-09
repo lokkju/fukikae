@@ -49,9 +49,15 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from math import gcd
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from fukikae.cards.store import CardStore
+    from fukikae.config import Config
+    from fukikae.stages.tts import RenderJob
+    from fukikae.workspace import Workspace
 
 TARGET_LUFS = -23.0
 RATE = 48000
@@ -215,10 +221,11 @@ class CueInfo:
 def select_cues(
     items: Sequence[CueInfo], *, count: int, characters: int, seed: int
 ) -> list[CueInfo]:
-    """About ``count`` cues: first one suspect line per candidate that has any (preferring
-    lines several candidates share, then the most-sampled characters), then one line for each
-    of the ``characters`` most-sampled characters, then more of theirs, alternating emotional
-    and neutral source lines. Ties are broken by ``random.Random(f"ab-select:{seed}")``.
+    """About ``count`` cues: first one suspect line per candidate and kind of flag (the
+    render guard's, any other), preferring lines several candidates share, then the
+    most-sampled characters; then one line for each of the ``characters`` most-sampled
+    characters, then more of theirs, alternating emotional and neutral source lines. Ties
+    are broken by ``random.Random(f"ab-select:{seed}")``.
     Returned in (episode, cue) order."""
     rng = random.Random(f"ab-select:{seed}")  # noqa: S311 - a reproducible pick
     pool = sorted(items, key=lambda i: (i.episode, i.cue_id))
@@ -233,10 +240,15 @@ def select_cues(
         if options:
             chosen.append(options[rng.randrange(len(options))])
 
-    for backend in sorted({b for i in pool for b in i.suspect}):
-        if any(backend in c.suspect for c in chosen):
+    def kinds(i: CueInfo) -> set[tuple[str, str]]:
+        return {
+            (b, "guard" if r.startswith("render guard") else "other") for b, r in i.suspect.items()
+        }
+
+    for kind in sorted({k for i in pool for k in kinds(i)}):
+        if any(kind in kinds(c) for c in chosen):
             continue
-        flagged = [i for i in pool if backend in i.suspect]
+        flagged = [i for i in pool if kind in kinds(i)]
         best = max((len(i.suspect), i.character_id in top) for i in flagged)
         take([i for i in flagged if (len(i.suspect), i.character_id in top) == best])
 
@@ -870,7 +882,7 @@ the clips are cut from the episodes.
 # ---- gathering from a workspace (models; GPU for missing renders) ---------------------------
 
 
-def _with_mode(cfg: Any, cand: Candidate) -> Any:
+def _with_mode(cfg: Config, cand: Candidate) -> Config:
     """``cfg`` with ``[tts.<backend>] mode`` set to the candidate's mode, if any."""
     if cand.mode is None:
         return cfg
@@ -965,7 +977,9 @@ class _Renderer:
     def __init__(self) -> None:
         self.synths: dict[tuple[str, str], Any] = {}
 
-    def render(self, cand: Candidate, job: Any, cfg: Any, ws: Any, store: Any) -> Rendered:
+    def render(
+        self, cand: Candidate, job: RenderJob, cfg: Config, ws: Workspace, store: CardStore
+    ) -> Rendered:
         from fukikae.stages.tts import LazySynth, max_speedup, render_for_slot, synth_device
 
         backend = job.card.voice.backend
@@ -973,7 +987,7 @@ class _Renderer:
         if k not in self.synths:
             # one model at a time: close the others before a new one loads
             self.close()
-            self.synths[k] = LazySynth(job.bc, synth_device(cfg, job.cls), cfg)
+            self.synths[k] = LazySynth(job.backend_cfg, synth_device(cfg, job.cls), cfg)
         cache = ws.root / ".fukikae" / "tts-cache"
         cache.mkdir(parents=True, exist_ok=True)
         ref_dir = ws.root / ".fukikae" / "eval" / "tts-ab" / "ref"
@@ -1184,10 +1198,10 @@ def gather_set(
 
 def _scene(
     spec: SetSpec,
-    ws: Any,
-    cfg: Any,
-    cfgs: Mapping[str, Any],
-    store: Any,
+    ws: Workspace,
+    cfg: Config,
+    cfgs: Mapping[str, Config],
+    store: CardStore,
     cards: Mapping[str, Mapping[int, str]],
     covered: set[int],
     names: Mapping[int, str],
