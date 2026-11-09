@@ -471,3 +471,57 @@ def test_voices_edit_recovers_a_card_with_special_tokens(tmp_path: Path, monkeyp
     new = store.get(cur.card_id)
     assert new.style is not None and "<|" not in new.style["register"]
     assert new.meta["derived_from"] == raw_id
+
+
+def _clip(path: Path, seconds: float = 4.0, rate: int = 16000) -> Path:
+    from scipy.io import wavfile
+
+    t = np.arange(int(seconds * rate)) / rate
+    wavfile.write(path, rate, (0.2 * np.sin(2 * np.pi * 140 * t) * 32767).astype("<i2"))
+    return path
+
+
+def test_voices_clone_requires_backend_when_profile_has_none(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    (ws.root / "fukikae.toml").write_text('[tts]\nclone_backend = ""\n')
+    clip = _clip(tmp_path / "natsu.wav")
+    r = invoke("clone", str(ws.root), "Natsu", "--clip", str(clip), "--transcript", "燃えてきた")
+    assert r.exit_code == 1 and "--backend" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.card_for(cid, "en") is None
+
+
+def test_voices_clone_assigns_locked(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    (ws.root / "fukikae.toml").write_text('source_language = "ja"\n')
+    clip = _clip(tmp_path / "natsu.wav")
+    r = invoke("clone", str(ws.root), "Natsu", "--clip", str(clip), "--transcript", "燃えてきた")
+    assert r.exit_code == 0, r.output
+    with Registry(ws.registry_path) as reg:
+        cur = _cur(reg, cid, "en")
+        assert cur.locked and cur.by == "assign" and cur.card_id is not None
+    card = store.get(cur.card_id)
+    assert card.voice.backend == "indextts2" and card.voice.source == "clone"  # the profile's
+    (ref,) = card.voice.references
+    assert ref.transcript == "燃えてきた" and ref.language == "ja"
+    assert ref.origin == {"file": "natsu.wav"}
+    from scipy.io import wavfile
+
+    rate, data = wavfile.read(store.sidecar_path(ref.clip))
+    assert rate == 24000 and len(data) == 4 * 24000
+
+
+def test_voices_clone_refuses_a_clip_too_short_or_a_stock_backend(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    (ws.root / "fukikae.toml").write_text('source_language = "ja"\n')
+    short = _clip(tmp_path / "short.wav", seconds=1.0)
+    r = invoke("clone", str(ws.root), "Natsu", "--clip", str(short), "--transcript", "あ")
+    assert r.exit_code == 1 and "3" in r.output
+    ok = _clip(tmp_path / "ok.wav")
+    r = invoke(
+        "clone", str(ws.root), "Natsu", "--clip", str(ok), "--transcript", "あ",
+        "--backend", "kokoro",
+    )  # fmt: skip
+    assert r.exit_code == 1 and "clone" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.card_for(cid, "en") is None

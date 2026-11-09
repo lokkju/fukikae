@@ -211,6 +211,93 @@ def assign(
             _verify_after(workspace, store, [(_label(char), ref)])
 
 
+CLIP_SECONDS = (3.0, 30.0)
+
+
+@voices_app.command("clone")
+def clone(
+    workspace: Path = _WS,
+    character: str = _CHAR,
+    clip: Path = typer.Option(
+        ..., "--clip", help="A wav of the character alone, 3 to 30 s (any rate or channels)."
+    ),
+    transcript: str = typer.Option(..., "--transcript", help="What the clip says."),
+    backend: str | None = typer.Option(
+        None, "--backend", help="The cloning backend; default [tts] clone_backend."
+    ),
+    clip_language: str | None = typer.Option(
+        None, "--clip-language", help="The clip's language; default the workspace's source."
+    ),
+    lang: str | None = _LANG,
+) -> None:
+    """Clone a character's voice from a clip by hand, for one the automatic references got
+    wrong (a merged cluster, say): the clip is copied into the card store as a 24 kHz mono
+    reference, and the clone card is assigned locked."""
+    from fukikae.backends import loader
+    from fukikae.cards.auto import clone_backend
+    from fukikae.cards.card import Card, Reference, Voice
+    from fukikae.cards.select import CLONE_SEED, cut_clip
+    from fukikae.config import ConfigError
+    from fukikae.errors import user_errors
+
+    try:
+        cfg = Workspace(workspace).config
+        name = backend or clone_backend(cfg)
+    except user_errors() as e:
+        raise _fail(str(e)) from e
+    if not name:
+        raise _fail("no [tts] clone_backend in the workspace or its profile; pass --backend")
+    try:
+        cls = loader.backend_class("tts", name)
+    except (ConfigError, loader.BackendUnavailable) as e:
+        raise _fail(str(e)) from e
+    if "clone" not in getattr(cls, "sources", ()):
+        raise _fail(f"{name} makes no clone voices; pass a cloning --backend")
+    source = clip_language or cfg.source_language
+    if not source:
+        raise _fail("the workspace sets no source_language; pass --clip-language")
+    if not clip.is_file():
+        raise _fail(f"{clip}: no such file")
+    from scipy.io import wavfile
+
+    try:
+        rate, data = wavfile.read(clip, mmap=True)
+    except (ValueError, OSError) as e:
+        raise _fail(f"{clip}: not a readable wav ({e})") from e
+    seconds = len(data) / float(rate)
+    if not CLIP_SECONDS[0] <= seconds <= CLIP_SECONDS[1]:
+        raise _fail(
+            f"{clip} is {seconds:.1f} s; a reference clip is {CLIP_SECONDS[0]:.0f} to "
+            f"{CLIP_SECONDS[1]:.0f} s"
+        )
+    with _session(workspace, lang) as (reg, store, language):
+        char = reg.character_by_ref(character)
+        with tempfile.TemporaryDirectory(prefix="fukikae-clip-") as tmp:
+            cut = cut_clip(clip, 0.0, seconds, Path(tmp) / "clip.wav")
+            ref = Reference(
+                clip=store.add_sidecar(cut, "clip"),
+                transcript=transcript,
+                language=source,
+                origin={"file": clip.name},
+            )
+        card = Card(
+            target_language=language,
+            voice=Voice(
+                backend=cls.name,
+                model_revision=getattr(cls, "model_revision", None) or "",
+                source="clone",
+                seed=CLONE_SEED,
+                references=(ref,),
+            ),
+        )
+        card_ref = store.put(card)
+        a = reg.assign_card(char.id, language, card_ref, by="assign", locked=True)
+        _echo(
+            f"{_label(char)} {language}: clone card {card_ref} of {cls.name} from {clip.name} "
+            f"({seconds:.1f} s; {_state(a)}, history row {a.n})"
+        )
+
+
 def _split_pack_ref(ref: str) -> tuple[Path, str]:
     """``<pack>:<character>`` split at the first colon whose left side is a pack (a directory
     or a ``.tar.zst``), so a character name may hold colons."""
