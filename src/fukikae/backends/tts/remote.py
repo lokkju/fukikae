@@ -63,6 +63,7 @@ from fukikae.backends.loader import BackendUnavailable
 from fukikae.cards.card import CardError
 from fukikae.config import ConfigError
 from fukikae.gpulock import gpu_lock, held_fds
+from fukikae.privacy import TELEMETRY_OFF
 
 if TYPE_CHECKING:
     from fukikae.cards.card import Voice
@@ -290,6 +291,7 @@ class WorkerSynthesizer(Synthesizer):
         env["PYTHONNOUSERSITE"] = "1"
         # no .pyc beside pinned code: bytecode nobody checked must never be imported
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env.update(TELEMETRY_OFF)  # ruling CD24, online and offline alike
         if online:
             if os.environ.get("HF_TOKEN"):
                 env["HF_TOKEN"] = os.environ["HF_TOKEN"]
