@@ -126,6 +126,22 @@ def tts_cmd(
     ),
     per_character: int = typer.Option(8, "--per-character", min=1, help="Cues per character."),
     seed: int = typer.Option(0, "--seed", help="Seed of the cue sample."),
+    min_slot: float = typer.Option(
+        1.0, "--min-slot", min=0.0, help="Leave out cues whose slot is shorter (seconds)."
+    ),
+    floor_subs: Path = typer.Option(
+        None,
+        "--floor-subs",
+        help="Subtitle file (or a directory matched by SxxEyy) with the text of natural "
+        "English speech, for the WER floor: on the reference workspace's audio at the sampled "
+        "cues, else on --floor-workspace's --floor-episode as a fixed clip set.",
+    ),
+    floor_workspace: Path = typer.Option(
+        None, "--floor-workspace", help="Workspace whose vocals the fixed WER floor set uses."
+    ),
+    floor_episode: str = typer.Option(
+        None, "--floor-episode", help="Episode of the fixed WER floor set, e.g. S01E01."
+    ),
     reference_workspace: Path = typer.Option(
         None,
         "--reference-workspace",
@@ -171,7 +187,11 @@ def tts_cmd(
             backend=backend,
             per_character=per_character,
             seed=seed,
+            min_slot=min_slot,
             reference_workspace=reference_workspace,
+            floor_subs=floor_subs,
+            floor_workspace=floor_workspace,
+            floor_episode=floor_episode,
         )
     except user_errors() as e:
         typer.echo(f"error: {e}", err=True)
@@ -187,9 +207,12 @@ def tts_cmd(
             "mode": result.mode,
             "per_character": per_character,
             "seed": seed,
+            "min_slot": min_slot,
             "asr": f"{ev.ASR.backend}:{ev.ASR.options['model']}",
             "embedder": ev.EMBEDDER.backend,
             "reference": reference_workspace is not None,
+            "emotion_backend": result.tagger,
+            "wer_floor": result.floor,
         }
 
         def rows() -> list[Any]:
