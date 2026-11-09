@@ -28,6 +28,16 @@ Two deliberate departures from the foundation spec (ruling CD11): the tag stage'
 
 To listen, open `out/<episode>.fukikae.mkv` in any player (mpv switches audio with `#` and subtitles with `j`), or play `09-mix/dub.<target>.wav` against `00-extract/audio.wav`.
 
+## Cloning backends
+
+Kokoro runs inside fukikae. The cloning backends run out of process, each in an environment of its own, so their pinned dependencies never meet fukikae's: `workers/<name>/` is a separate uv project (its own Python and lock) and its environment lives in `.venvs/<name>`. fukikae starts the backend as a worker process speaking JSON lines (`fukikae.backends.tts.remote`), on one GPU only (`CUDA_VISIBLE_DEVICES`), and stops and reaps it when the stage ends. `fukikae doctor` lists each worker environment and the command that sets it up. IndexTTS2 (`[tts] backend = "indextts2"`, or a card on it) needs Python 3.11, which uv downloads:
+
+```bash
+UV_PROJECT_ENVIRONMENT=$PWD/.venvs/indextts2 uv sync --directory workers/indextts2 --frozen
+```
+
+The environment takes about 8 GB; the model and its four auxiliary models (pinned revisions, the Hugging Face cache) about 7 GB, downloaded on first use. IndexTTS2 clones from a card's reference clips and takes the source line's audio as a separate emotion reference, scaled by the card's `emotion_strength`; it has no duration control.
+
 ## Profiles
 
 A workspace's `fukikae.toml` picks a tested set of identity settings with `profile = "anime" | "live-action"`; without it the `default` profile applies (WeSpeaker embeddings, the centroid matcher at 0.6, Demucs, pyannote). Precedence, highest first: the workspace's `[x.pair.P]`, its `[x.lang.L]`, its `[x]`, then the profile's `[x.pair.P]`, `[x.lang.L]` and `[x]`, then the built-in fallbacks; a layer that names a different backend drops the options of the layers below it. A workspace `[embed]` table that sets options must name its `backend`. Measured results and held-out verdicts are in `docs/results/2026-11-07-identity-profiles.md` for anime and default, and in `docs/results/2026-11-09-live-action-ground-truth.md` for live-action (superseding the 2026-11-07 doc's live-action section).
