@@ -88,6 +88,17 @@ def test_selection_spans_characters_mixes_emotion_and_keeps_suspects():
     assert flagged == {"indextts2", "qwen3_tts"}
 
 
+def test_a_render_guard_flag_is_kept_beside_a_wer_flag_of_the_same_candidate():
+    pool = _pool()
+    pool[5] = _info(5, 1, "neutral", {"indextts2": "render guard: long"})
+    pool[9] = _info(
+        9, 2, "angry", {"indextts2": "eval tts WER > 0.5", "kokoro": "eval tts WER > 0.5"}
+    )
+    picked = ab.select_cues(pool, count=6, characters=3, seed=1)
+    ids = {p.cue_id for p in picked}
+    assert {"c0005", "c0009"} <= ids
+
+
 def test_selection_is_deterministic_by_seed():
     a = ab.select_cues(_pool(), count=6, characters=3, seed=1)
     b = ab.select_cues(_pool(), count=6, characters=3, seed=1)
