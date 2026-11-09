@@ -42,6 +42,14 @@ confidence), ``instruction`` (``delivery.direction``) and ``target_seconds`` (th
 ``passed`` per cue and ``neutral_only`` when none of them was passed; the stage logs how many
 cues rendered neutral-only.
 
+Render guards (ruling CD18, ``render_guarded``, shared with ``eval tts``): a render longer than
+max(2 s, 2.5x) or shorter than 0.3x the text's expected length (characters over the backend's
+``speech_cps``) is rendered once more with the card's seed plus one, cached under a key holding
+that seed; if it still fails, or the backend takes no seed, ``plan.json`` marks the cue
+``suspect`` (``retry_seed`` records the retry). A source span the tag stage marks as laughter or
+crying (``04b-tag/tags.json``, an input when present) passes no emotion audio
+(``emotion_dropped`` in ``passed``).
+
 ``[tts]`` names the backend for automatic and extras cards; its options go to that backend
 only (a card on another backend renders with that backend's defaults). ``device`` is a stage
 setting (``cpu`` or ``cuda``; default cuda when the backend can use it), not an option, and stays
@@ -58,6 +66,7 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -103,6 +112,16 @@ TRIM_KEEP_S = 0.030
 DELIVERY_CAPS = frozenset({"emotion_audio", "emotion_vector", "instruction"})
 # A source span shorter than this is too short to carry a delivery; no emotion_audio then.
 MIN_REFERENCE_S = 0.1
+# Render guards (ruling CD18): a render longer than max(GUARD_LONG_MIN_S, GUARD_LONG x) or
+# shorter than GUARD_SHORT x the text's expected length (characters over the backend's
+# speech_cps) is a repetition loop or a dropped line.
+GUARD_LONG = 2.5
+GUARD_LONG_MIN_S = 2.0
+GUARD_SHORT = 0.3
+# Tag events that make a source span a bad emotion prompt (the clone laughs instead of speaking),
+# when they cover at least DROP_EVENT_SHARE of it.
+DROP_EVENTS = frozenset({"laughter", "crying"})
+DROP_EVENT_SHARE = 0.3
 # The delivery fields each capability hands the backend.
 _DELIVERY_BY_CAP = {
     "emotion_audio": ("reference",),
@@ -358,16 +377,46 @@ def check_card(
     return card, cls
 
 
-def delivery_passed(c: DubCue, card: Card, cls: type[Synthesizer], slot: float) -> dict[str, Any]:
+def dropping_event(
+    span: tuple[float, float], events: Sequence[tuple[float, float, str]]
+) -> str | None:
+    """The ``DROP_EVENTS`` label covering at least ``DROP_EVENT_SHARE`` of ``span``, if any."""
+    length = span[1] - span[0]
+    if length <= 0:
+        return None
+    best, cover = None, 0.0
+    for a, b, label in events:
+        if label not in DROP_EVENTS:
+            continue
+        o = min(span[1], b) - max(span[0], a)
+        if o > cover:
+            best, cover = label, o
+    return best if best is not None and cover >= DROP_EVENT_SHARE * length else None
+
+
+def delivery_passed(
+    c: DubCue,
+    card: Card,
+    cls: type[Synthesizer],
+    slot: float,
+    events: Sequence[tuple[float, float, str]] = (),
+) -> dict[str, Any]:
     """What the backend gets beyond the card and the text, by its capabilities for the card's
-    source; with ``emotion_strength`` 0, no emotion audio, vector or instruction."""
+    source; with ``emotion_strength`` 0, no emotion audio, vector or instruction. A source span
+    the tag stage marks as laughter or crying (``events``) passes no emotion audio, recorded as
+    ``emotion_dropped`` (ruling CD18: dropped rather than scaled down, since IndexTTS2 carried
+    E12 c0232's laugh at emotion strength 0.8, and a weaker prompt still holds the laugh)."""
     caps = cls.capabilities_for(card.voice.source)
     if card.voice.emotion_strength == 0:
         caps = caps - DELIVERY_CAPS
     out: dict[str, Any] = {}
     d = c.delivery
     if "emotion_audio" in caps and d.reference[1] - d.reference[0] >= MIN_REFERENCE_S:
-        out["emotion_audio"] = [round(d.reference[0], 4), round(d.reference[1], 4)]
+        dropped = dropping_event(d.reference, events)
+        if dropped is not None:
+            out["emotion_dropped"] = dropped
+        else:
+            out["emotion_audio"] = [round(d.reference[0], 4), round(d.reference[1], 4)]
     if "emotion_vector" in caps and d.emotion:
         conf = d.emotion_confidence if d.emotion_confidence is not None else 1.0
         out["emotion_vector"] = {d.emotion: conf}
@@ -395,6 +444,7 @@ def prepare_cue(
     checked: tuple[Card, type[Synthesizer]] | None = None,
     identity: dict[str, Any] | None = None,
     vocals: Path | None = None,
+    events: Sequence[tuple[float, float, str]] = (),
 ) -> RenderJob:
     """The render job of one cue with ``card_id``: the card checked (``check_card``, unless
     ``checked`` holds its result), its backend config, the cache key and the delivery passed.
@@ -406,7 +456,7 @@ def prepare_cue(
     bc = backend_config(cfg, card.voice.backend)
     ident = identity if identity is not None else identity_key("tts", bc)
     slot = cue.end - cue.start
-    passed = delivery_passed(cue, card, cls, slot)
+    passed = delivery_passed(cue, card, cls, slot, events)
     ref_digest = None
     if "emotion_audio" in passed:
         if vocals is None:
@@ -433,13 +483,17 @@ def render_cue(
     *,
     rate: float | None = None,
     ref_dir: Path | None = None,
+    seed: int | None = None,
 ) -> None:
     """Render ``job`` to ``dest`` (atomically) with the backend ``synth`` loads, at the card's
-    rate or ``rate``, then trim its silence and apply ``[voice.post] gain_db``. An emotion
-    reference is cut to ``ref_dir/<cue-id>.wav`` (default ``ref/`` next to ``dest``)."""
+    rate or ``rate`` (and seed or ``seed``), then trim its silence and apply ``[voice.post]
+    gain_db``. An emotion reference is cut to ``ref_dir/<cue-id>.wav`` (default ``ref/`` next
+    to ``dest``)."""
     from fukikae.cards.select import cut_clip
 
     voice = job.card.voice if rate is None else replace(job.card.voice, rate=rate)
+    if seed is not None:
+        voice = replace(voice, seed=seed)
     p = job.passed
     emotion_audio: Path | None = None
     if "emotion_audio" in p:
@@ -467,6 +521,96 @@ def render_cue(
         gain = float(job.card.voice.post.get("gain_db", 0.0))
         if gain:
             _apply_gain(tmp, gain)
+
+
+def expected_seconds(cls: type[Synthesizer], text: str, language: str) -> float:
+    """How long ``text`` should take: its characters over the backend's ``speech_cps`` for the
+    language (the language's typical rate when it declares none)."""
+    from fukikae.cues import CPS, DEFAULT_CPS
+
+    cps = getattr(cls, "speech_cps", {}).get(language) or CPS.get(language, DEFAULT_CPS)
+    return len(text) / float(cps)
+
+
+def suspect_reason(seconds: float, expected: float) -> str | None:
+    """``long`` (a likely repetition loop), ``short`` (a likely dropped line) or None."""
+    if seconds > max(GUARD_LONG_MIN_S, GUARD_LONG * expected):
+        return "long"
+    if seconds < GUARD_SHORT * expected:
+        return "short"
+    return None
+
+
+def retry_key(key: str, seed: int) -> str:
+    return _hash({"render": key, "retry_seed": seed})
+
+
+@dataclass(frozen=True)
+class GuardedRender:
+    """The render a cue keeps (``key`` in the cache), its length, the renders made now, the
+    seed of the one retry (None: none) and why it is still suspect (None: it is not)."""
+
+    key: str
+    seconds: float
+    calls: int
+    retry_seed: int | None = None
+    suspect: str | None = None
+
+
+def render_guarded(
+    job: RenderJob,
+    synth: LazySynth,
+    cache: Path,
+    store: CardStore,
+    *,
+    ref_dir: Path | None = None,
+) -> GuardedRender:
+    """The cue's render at the card's own rate, from ``cache`` or rendered into it, through
+    the render guards (ruling CD18): a render far longer or shorter than the text's expected
+    length is rendered once more with the card's seed plus one, cached under ``retry_key``
+    (so later runs find it without rendering), and kept; if that one fails the guard too, or
+    the backend takes no seed, the render is marked suspect."""
+    calls = 0
+    base = cache / f"{job.key}.wav"
+    if not base.exists():
+        render_cue(job, synth, base, store, ref_dir=ref_dir)
+        calls += 1
+    seconds = wav_seconds(base)
+    text = cast(str, job.cue.text)
+    expected = expected_seconds(job.cls, text, job.card.target_language)
+    why = suspect_reason(seconds, expected)
+    if why is None:
+        return GuardedRender(job.key, seconds, calls)
+    if "seed" not in job.cls.voice_keys:
+        log.warning(
+            "tts: %s render is %s (%.2f s for %.2f s expected) and %s takes no seed to retry "
+            "with; marked suspect", job.cue.id, why, seconds, expected, job.cls.name,
+        )  # fmt: skip
+        return GuardedRender(job.key, seconds, calls, None, why)
+    seed = (job.card.voice.seed or 0) + 1
+    key = retry_key(job.key, seed)
+    path = cache / f"{key}.wav"
+    if not path.exists():
+        render_cue(job, synth, path, store, ref_dir=ref_dir, seed=seed)
+        calls += 1
+    again = wav_seconds(path)
+    still = suspect_reason(again, expected)
+    log.warning(
+        "tts: %s render was %s (%.2f s for %.2f s expected); seed %d gave %.2f s%s",
+        job.cue.id, why, seconds, expected, seed, again,
+        f", still {still}: marked suspect" if still else "",
+    )  # fmt: skip
+    return GuardedRender(key, again, calls, seed, still)
+
+
+def tag_events(work: Path) -> list[tuple[float, float, str]]:
+    """The tag stage's event spans for an episode work dir (none when it didn't run)."""
+    from fukikae.models import Tags
+
+    path = work / "04b-tag" / "tags.json"
+    if not path.exists():
+        return []
+    return [(e.start, e.end, e.label) for e in read_json(path, Tags).events]
 
 
 class TtsStage:
@@ -523,9 +667,11 @@ class TtsStage:
         cfg = self._config(ep)
         cards = self._assigned(ep, self._cues(ep, cfg), cfg.target_language)
         store = CardStore(ep.workspace_root)
+        tags = ep.work / "04b-tag" / "tags.json"
         return [
             self._cues_path(ep, cfg),
             ep.work / "01-separate" / "vocals.wav",
+            *([tags] if tags.exists() else []),
             *(store.card_path(card) for _, card in sorted(cards.items())),
         ]
 
@@ -600,6 +746,7 @@ class TtsStage:
             for b in sorted({card.voice.backend for card, _ in checked.values()})
         }
 
+        events = tag_events(ep.work)
         jobs: dict[str, list[RenderJob]] = {}
         for c in spoken:
             card_id = card_of[c.id]
@@ -613,6 +760,7 @@ class TtsStage:
                 checked=checked[card_id],
                 identity=identities[backend],
                 vocals=vocals,
+                events=events,
             )
             jobs.setdefault(backend, []).append(job)
 
@@ -628,7 +776,7 @@ class TtsStage:
             lazy = LazySynth(backend_config(cfg, backend), synth_device(cfg, cls), cfg)
             try:
                 for job in jobs[backend]:
-                    key, seconds, first, factor, calls = self._render(
+                    key, seconds, first, factor, calls, guard = self._render(
                         job, lazy, cache, store, speedup, out_dir / "ref"
                     )
                     rendered += calls
@@ -648,6 +796,8 @@ class TtsStage:
                         rate_factor=factor,
                         passed=job.passed,
                         neutral_only=neutral_only(job.passed),
+                        retry_seed=guard.retry_seed,
+                        suspect=guard.suspect,
                     )
             finally:
                 lazy.close()
@@ -684,12 +834,14 @@ class TtsStage:
         )
         log.info(
             "tts: %d cues, %d renders, %d from the cache, %d not rendered, %d neutral-only "
-            "(no emotion audio, vector or instruction passed)",
+            "(no emotion audio, vector or instruction passed), %d retried, %d suspect",
             len(cues),
             rendered,
             len(cached),
             len(cues) - len(done),
             sum(1 for c in done.values() if c.neutral_only),
+            sum(1 for c in done.values() if c.retry_seed is not None),
+            sum(1 for c in done.values() if c.suspect),
         )
 
     # -- helpers ---------------------------------------------------------------------------
@@ -760,15 +912,11 @@ class TtsStage:
         store: CardStore,
         speedup: float,
         ref_dir: Path,
-    ) -> tuple[str, float, float, float, int]:
-        """(key of the final wav, its seconds, the first render's seconds, rate factor,
-        renders made)."""
-        calls = 0
-        base = cache / f"{job.key}.wav"
-        if not base.exists():
-            render_cue(job, lazy, base, store, ref_dir=ref_dir)
-            calls += 1
-        seconds = wav_seconds(base)
+    ) -> tuple[str, float, float, float, int, GuardedRender]:
+        """(key of the final wav, its seconds, the guarded render's seconds, rate factor,
+        renders made, the guarded render)."""
+        g = render_guarded(job, lazy, cache, store, ref_dir=ref_dir)
+        calls, seconds = g.calls, g.seconds
         if (
             job.slot > 0
             and seconds > job.slot
@@ -777,16 +925,16 @@ class TtsStage:
         ):
             factor = round(min(seconds / job.slot, speedup), 4)
             if factor > 1.0:
-                key = fitted_key(job.key, factor)
+                key = fitted_key(g.key, factor)
                 fitted = cache / f"{key}.wav"
                 if not fitted.exists():
                     render_cue(
                         job, lazy, fitted, store, rate=job.card.voice.rate * factor,
-                        ref_dir=ref_dir,
+                        ref_dir=ref_dir, seed=g.retry_seed,
                     )  # fmt: skip
                     calls += 1
-                return key, wav_seconds(fitted), seconds, factor, calls
-        return job.key, seconds, seconds, 1.0, calls
+                return key, wav_seconds(fitted), seconds, factor, calls, g
+        return g.key, seconds, seconds, 1.0, calls, g
 
     @staticmethod
     def _link(src: Path, dest: Path) -> None:

@@ -84,6 +84,8 @@ class FakeSynth(Synthesizer):
     CALLS: ClassVar[list[tuple[str, str | None, float]]] = []
     KW: ClassVar[list[dict[str, Any]]] = []  # delivery keywords per call
     DUR: ClassVar[dict[str, float]] = {}
+    SEED_DUR: ClassVar[dict[tuple[str, int | None], float]] = {}  # (text, seed) wins over DUR
+    SEEDS: ClassVar[list[tuple[str, int | None]]] = []
     PAD: ClassVar[tuple[float, float]] = (0.0, 0.0)  # silence before and after, like Kokoro
 
     def __init__(self, options: dict[str, Any], device: str) -> None:
@@ -106,7 +108,9 @@ class FakeSynth(Synthesizer):
         emo = kw.get("emotion_audio")
         kw["emotion_audio_exists"] = emo is not None and Path(emo).is_file()
         self.KW.append({"text": text, **kw})
-        seconds = self.DUR.get(text, len(text) * 0.06) / voice.rate
+        self.SEEDS.append((text, voice.seed))
+        base = self.SEED_DUR.get((text, voice.seed), self.DUR.get(text, len(text) * 0.06))
+        seconds = base / voice.rate
         return tone_wav(out, seconds, self.sample_rate, pad=self.PAD)
 
 
@@ -123,6 +127,8 @@ def fakes(monkeypatch):
     FakeSynth.CALLS = []
     FakeSynth.KW = []
     FakeSynth.DUR = {}
+    FakeSynth.SEED_DUR = {}
+    FakeSynth.SEEDS = []
     FakeSynth.PAD = (0.0, 0.0)
     monkeypatch.setattr(loader, "backend_class", lambda _kind, name: CLASSES[name])
     monkeypatch.setattr(
@@ -622,3 +628,79 @@ def test_cue_key_changes_with_model_identity():
     base = key({"model": "hexgrad/Kokoro-82M", "revision": "a"})
     assert key({"model": "hexgrad/Kokoro-82M", "revision": "b"}) != base
     assert key({"model": "other/model", "revision": "a"}) != base
+
+
+# ---- render guards (ruling CD18) --------------------------------------------------------------
+
+
+def _seeded(ep: Episode, monkeypatch) -> None:
+    monkeypatch.setattr(FakeSynth, "voice_keys", frozenset({"rate", "seed"}))
+    _assign(ep, 1, _stock("am_adam") + "seed = 7\n")
+    _assign(ep, 2, _stock("af_heart"))
+
+
+def test_a_looping_render_is_retried_once_with_the_next_seed(ep, monkeypatch):
+    _seeded(ep, monkeypatch)
+    FakeSynth.SEED_DUR = {("natsu one", 7): 25.0}  # a repetition loop; seed 8 is fine
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert c.retry_seed == 8 and c.suspect is None
+    assert c.seconds == pytest.approx(9 * 0.06, abs=0.05)
+    assert [sd for t, sd in FakeSynth.SEEDS if t == "natsu one"] == [7, 8]
+    # the retry seed is in the cache key: the next run renders nothing and agrees
+    first = (ep.work / "07-tts" / "plan.json").read_bytes()
+    FakeSynth.SEEDS = []
+    TtsStage(CFG).run(ep, CFG)
+    assert FakeSynth.SEEDS == []
+    assert (ep.work / "07-tts" / "plan.json").read_bytes() == first
+
+
+def test_a_render_still_wrong_after_the_retry_is_marked_suspect(ep, monkeypatch):
+    _seeded(ep, monkeypatch)
+    FakeSynth.SEED_DUR = {("natsu one", 7): 0.02, ("natsu one", 8): 0.02}  # far too short
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert c.retry_seed == 8 and c.suspect == "short"
+    others = [x for x in _plan(ep).cues if x.cue_id != "c0001" and x.skipped is None]
+    assert all(x.suspect is None and x.retry_seed is None for x in others)
+
+
+def test_a_backend_without_a_seed_is_marked_suspect_without_a_retry(ep):
+    _two_cards(ep)
+    FakeSynth.DUR = {"lucy one": 30.0}
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0002"]
+    assert c.suspect == "long" and c.retry_seed is None
+    assert len(_calls_for({"lucy one"})) == 1 + 1  # the first render and its rate fit
+
+
+def test_render_guard_bounds():
+    assert tts.suspect_reason(5.0, 1.0) == "long"  # over 2.5x
+    assert tts.suspect_reason(1.9, 0.2) is None  # under the 2 s floor
+    assert tts.suspect_reason(0.2, 1.0) == "short"  # under 0.3x
+    assert tts.suspect_reason(1.0, 1.0) is None
+
+
+def test_laughter_or_crying_at_the_source_drops_the_emotion_audio(ep, monkeypatch):
+    """A laugh in the emotion prompt comes out as a laugh (E12 c0232): no emotion audio then."""
+    from fukikae.models import Tags, TagSpan
+
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    _two_cards(ep)
+    (ep.work / "04b-tag").mkdir()
+    write_json(
+        ep.work / "04b-tag" / "tags.json",
+        Tags(
+            backend="sensevoice",
+            events=[TagSpan(start=3.2, end=4.8, label="laughter"),
+                    TagSpan(start=6.0, end=6.2, label="crying")],
+            emotions=[],
+        ),
+    )  # fmt: skip
+    TtsStage(CFG).run(ep, CFG)
+    plan = {c.cue_id: c for c in _plan(ep).cues}
+    assert plan["c0001"].passed == {"emotion_dropped": "laughter"}
+    assert plan["c0001"].neutral_only
+    assert _kw("natsu one")["emotion_audio"] is None
+    # a crying blip over a tenth of the span leaves the emotion audio in place
+    assert "emotion_audio" in plan["c0002"].passed

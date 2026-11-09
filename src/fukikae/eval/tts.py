@@ -53,6 +53,8 @@ Metrics, per character and overall:
   metrics and ``emotion_low_coverage`` is set. Episodes tagged by different backends are
   refused. A backend that takes no delivery (Kokoro) renders neutral by design, so its
   agreement tracks the neutral share of the source labels (noted in the row).
+- ``high_wer_cues`` (the cues listed in the row's detail), renders whose own WER is over 0.5;
+  ``retried_cues`` and ``suspect_cues``, the render guards' retries and failures (ruling CD18).
 - per card (ruling CD8): ``cps_median`` and quartiles, characters of text per second of the
   trimmed render, for per-card translate budgets later.
 
@@ -129,6 +131,7 @@ EXEMPLARS = 3
 EXEMPLAR_MIN_S = 1.0
 MIN_SLOT_S = 1.0  # shorter slots say more about the slot than the voice
 REF_PAD_S = 0.1  # a reference word's midpoint may sit this far outside the slot
+HIGH_WER = 0.5  # a render this wrong is listed by cue for a listener (ruling CD18)
 COVERAGE_MIN = 0.5  # emotion agreement is a headline only above this coverage on both sides
 FLOOR_CLIPS = 40
 FLOOR_MIN_S = 1.0
@@ -306,6 +309,8 @@ class RenderedCue:
     card_id: str = ""
     backend: str = ""
     voice: str | None = None
+    retry_seed: int | None = None
+    suspect: str | None = None
 
 
 @dataclass
@@ -338,6 +343,12 @@ class CueScore:
     heldout_clips: int = 0
     heldout_seconds: float = 0.0
     ceiling: float | None = None
+    retry_seed: int | None = None  # the render guard retried with this seed (ruling CD18)
+    suspect: str | None = None  # the guard still failed: "long" or "short"
+
+    @property
+    def wer(self) -> float | None:
+        return self.errors / self.ref_words if self.ref_words else None
 
     @property
     def fits(self) -> bool:
@@ -361,6 +372,8 @@ class TtsSummary:
     similarity_source: dict[int, str] = field(default_factory=dict)
     emotion: dict[str, Any] = field(default_factory=dict)
     headline: str = ""  # what speaker_similarity is: "heldout", a source name, or ""
+    high_wer: list[str] = field(default_factory=list)  # "<episode>:<cue>" over HIGH_WER
+    suspect: list[str] = field(default_factory=list)  # "<episode>:<cue> <why>"
     heldout: dict[int, list[list[Any]]] = field(default_factory=dict)  # [episode, start, end]
 
 
@@ -424,6 +437,9 @@ def _metrics(scores: Sequence[CueScore], max_speedup: float) -> dict[str, float]
     if words:
         m["wer"] = _r(sum(s.errors for s in scores) / words)
         m["wer_median"] = _r(np.median([s.errors / s.ref_words for s in scores if s.ref_words]))
+    m["high_wer_cues"] = sum(1 for s in scores if (s.wer or 0.0) > HIGH_WER)
+    m["retried_cues"] = sum(1 for s in scores if s.retry_seed is not None)
+    m["suspect_cues"] = sum(1 for s in scores if s.suspect)
     stretch = [s.stretch for s in scores]
     m["fit_rate"] = _r(np.mean([s.fits for s in scores]))
     m["fit_budget_rate"] = _r(np.mean([x <= max_speedup + 1e-9 for x in stretch]))
@@ -504,13 +520,19 @@ def summarize(
             emotion["note"] = NEUTRAL_NOTE
     srcs = sorted({s.similarity_source for s in scores if s.similarity is not None})
     headline = _headline(scores, srcs)
-    return TtsSummary(per_character, overall, len(scores), per_card, sources, emotion, headline)
+    high = [f"{s.episode}:{s.cue_id}" for s in scores if (s.wer or 0.0) > HIGH_WER]
+    suspect = [f"{s.episode}:{s.cue_id} {s.suspect}" for s in scores if s.suspect]
+    return TtsSummary(
+        per_character, overall, len(scores), per_card, sources, emotion, headline,
+        high_wer=high, suspect=suspect,
+    )  # fmt: skip
 
 
 HEADLINE_METRICS = (
     "speaker_similarity", "speaker_similarity_references", "speaker_similarity_card",
     "speaker_similarity_original", "speaker_similarity_heldout", "speaker_similarity_ceiling",
     "heldout_clips", "heldout_seconds", "heldout_characters", "wer", "wer_median",
+    "high_wer_cues", "retried_cues", "suspect_cues",
     "wer_floor", "wer_floor_clips", "fit_rate", "fit_budget_rate", "stretch_median",
     "stretch_p90", "cps_median", "cues", "characters", "excluded_short", "emotion_agreement",
     "emotion_cues", "emotion_source_coverage", "emotion_render_coverage", "emotion_low_coverage",
@@ -547,6 +569,10 @@ def tts_rows(
     }
     if summary.heldout:
         detail["heldout_exemplars"] = {str(k): v for k, v in summary.heldout.items()}
+    if summary.high_wer:
+        detail["high_wer_cues"] = summary.high_wer
+    if summary.suspect:
+        detail["suspect_cues"] = summary.suspect
     if summary.emotion:
         detail["emotion"] = summary.emotion
     if notes:
@@ -801,9 +827,9 @@ def _render(
         backend_config,
         check_card,
         prepare_cue,
-        render_cue,
+        render_guarded,
         synth_device,
-        wav_seconds,
+        tag_events,
     )
 
     def who(cid: int) -> str:
@@ -819,6 +845,8 @@ def _render(
     neutral: dict[str, bool] = {}
     base = ws.root / ".fukikae" / "eval" / "tts"
     cache = ws.root / ".fukikae" / "tts-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    events = {e: tag_events(ws.work_dir(e)) for e in sorted({e for e, _ in picked})}
     out: list[RenderedCue] = []
     for b in backends:
         jobs = [(e, c) for e, c in picked if checked[cards[_cid(c)]][0].voice.backend == b]
@@ -834,18 +862,20 @@ def _render(
                 vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
                 job = prepare_cue(
                     c, card_ref, cfg, store, who=who(_cid(c)), checked=checked[card_ref],
-                    identity=idents[b], vocals=vocals,
+                    identity=idents[b], vocals=vocals, events=events[e],
                 )  # fmt: skip
-                dest = folder / f"{e}-{c.id}.{job.key}.wav"
+                # the stage's cache and render guards (ruling CD18), then a copy named by key
+                g = render_guarded(job, lazy, cache, store, ref_dir=folder / "ref" / e)
+                dest = folder / f"{e}-{c.id}.{g.key}.wav"
                 if not dest.exists():
-                    if (cache / f"{job.key}.wav").exists():
-                        with atomic_path(dest) as tmp:
-                            shutil.copyfile(cache / f"{job.key}.wav", tmp)
-                    else:
-                        render_cue(job, lazy, dest, store, ref_dir=folder / "ref" / e)
+                    with atomic_path(dest) as tmp:
+                        shutil.copyfile(cache / f"{g.key}.wav", tmp)
                 out.append(
-                    RenderedCue(e, c, dest, wav_seconds(dest), card_ref, b, _voice_name(job.card))
-                )
+                    RenderedCue(
+                        e, c, dest, g.seconds, card_ref, b, _voice_name(job.card),
+                        g.retry_seed, g.suspect,
+                    )
+                )  # fmt: skip
         finally:
             lazy.close()
     return out, bcs, neutral
@@ -1270,6 +1300,8 @@ def evaluate(
                 heldout_clips=len(heldout.get(cid, [])),
                 heldout_seconds=sum(p.seconds for _, p in heldout.get(cid, [])),
                 ceiling=ceiling.get(cid),
+                retry_seed=r.retry_seed,
+                suspect=r.suspect,
             )
         )
     speedup = max_speedup(cfg)
@@ -1359,6 +1391,10 @@ def format_summary(summary: TtsSummary, names: Mapping[int, str], backend: str) 
         )
         if e.get("note"):
             lines.append(f"  note: {e['note']}")
+    if summary.high_wer:
+        lines.append(f"renders with WER over {HIGH_WER:g}: {', '.join(summary.high_wer)}")
+    if summary.suspect:
+        lines.append(f"suspect renders (render guard): {', '.join(summary.suspect)}")
     if o.get("excluded_short"):
         lines.append(f"cues left out for a short slot: {o['excluded_short']:.0f}")
     lines.append("")
