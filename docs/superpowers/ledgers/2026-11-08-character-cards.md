@@ -172,3 +172,18 @@ eval tts on copies at ~/fukikae-scratch/t9a (8 cues per character, seed 0, minim
 E12 IndexTTS2 has two rows over the same renders (a stray second run): WER 0.080 and 0.556. The difference is faster-whisper (no VAD) looping on one render, character 5's c0232, where "That's not it." came out as a laugh ("Mwahahahaha"), the source line's laughter carried by the emotion reference. Every E12 character's references carry a scored emotion (CD5 notes on all nine): emotion2vec labels most E12 turns non-neutral at >= 0.5, so the demotion rarely leaves enough neutral speech. E11 character 1 still hallucinated one line (c0025, "You didn't know?" three times) before the song fix; that cue was a translated lyric.
 Similarity against the clone's own reference spans is generous by construction for IndexTTS2; the listening checkpoint decides.
 The first E11 IndexTTS2 row (sim 0.488, WER 0.171) predates 0cf20e5 and is superseded.
+
+### Task 9a fix round 1 (rulings CD14 to CD18)
+
+Commits 65edcc5 to cd1f5b6. eval tts re-run on the t7 copies (~/fukikae-scratch/t7, which still say `[tts] device = "cpu"`: IndexTTS2 ran on GPU 0 through its own default, CD14), with the deterministic ASR (CD16) and held-out similarity (CD17). Held-out exemplars exist for 3 characters per episode (2, 3, 5 on E11; 1, 2, 4 on E12): single-episode runs leave few eligible turns once the picks and the sampled cues' delivery spans are out. The ceiling is those clips against the reference clips.
+
+| set | backend | cues | sim held-out (headline for clones) | ceiling | sim references | WER / median / floor | fit | stretch p90 | cps | retried / suspect | WER > 0.5 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| FT E11 | indextts2 | 40 (5 chars) | 0.424 (7 clips, 29.4 s) | 0.682 | 0.517 | 0.080 / 0.000 / 0.151 | 0.63 | 1.17 | 13.8 | 3 / 1 (c0058) | c0267 |
+| FT E11 | kokoro | 64 (8) | -0.027 | 0.682 | 0.001 | 0.046 / 0.000 / 0.151 | 0.88 | 1.06 | 17.3 | 0 / 0 | c0058, c0267, c0337 |
+| FT E12 | indextts2 | 72 (9) | 0.304 (7 clips, 28.8 s) | 0.536 | 0.489 | 0.074 / 0.000 / 0.151 | 0.89 | 1.07 | 14.6 | 1 / 1 (c0232) | c0160, c0235, c0236, c0284 |
+| FT E12 | kokoro | 72 (9) | 0.054 | 0.536 | 0.042 | 0.043 / 0.000 / 0.151 | 0.94 | 1.00 | 16.8 | 0 / 0 | c0196, c0235, c0236, c0284 |
+
+Ledger run_ids: 873e0913 (E11 indextts2), 636a717d (E11 kokoro), 0ae8795e (E12 indextts2), 0aabe773 (E12 kokoro); tags candidates-fix1 and baseline-fix1. A second IndexTTS2 E12 pass over the same renders gave identical metrics and the same WER > 0.5 list, and the two-pass gpu test on c0232's render gave the same hypothesis twice. The duplicate Task 9a E12 row 25a875dc (WER 0.556) is retracted (record 07209874).
+
+c0232 ("That's not it.", the laugh render) is caught by the length guard: 3.44 s against 0.98 s expected, seed 1235 gave 2.51 s, still over the 2.45 s bound, so it is marked suspect. The laughter drop could not fire there: the tag stage has no laughter event over that span (E12 has three laughter or crying spans in all). c0235, c0236 and c0284 are over 0.5 WER for both backends, so the cause is the text, not the voice.
