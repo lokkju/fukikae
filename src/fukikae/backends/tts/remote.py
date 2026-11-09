@@ -120,6 +120,7 @@ class WorkerSynthesizer(Synthesizer):
     model: ClassVar[str]
     revision: ClassVar[str]
     devices: ClassVar[frozenset[str]] = frozenset({"cuda", "cpu"})
+    default_device: ClassVar[str | None] = "cuda"  # ruling CD14
     option_keys: ClassVar[frozenset[str]] = frozenset()
     load_timeout_s: ClassVar[float] = 900.0
     synth_timeout_s: ClassVar[float] = 300.0

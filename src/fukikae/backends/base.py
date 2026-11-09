@@ -99,6 +99,8 @@ class Synthesizer(Backend, Protocol):
     # measured on its renders; translate sizes each cue's budget with it (ruling CD7).
     speech_cps: ClassVar[dict[str, float]]
     model_revision: str
+    # Optional, read with getattr (ruling CD14): ``default_device``, where it runs unless
+    # [tts.<backend>] device says otherwise, and ``cpu_refusal``, why it must not run on the CPU.
 
     @classmethod
     def validate_options(cls, options: dict[str, Any], source: str | None = None) -> None:

@@ -38,6 +38,8 @@ UV_PROJECT_ENVIRONMENT=$PWD/.venvs/indextts2 uv sync --directory workers/indextt
 
 The environment takes about 8 GB; the model and its four auxiliary models (pinned revisions, the Hugging Face cache) about 7 GB, downloaded on first use. IndexTTS2 clones from a card's reference clips and takes the source line's audio as a separate emotion reference, scaled by the card's `emotion_strength`; it has no duration control.
 
+Each TTS backend takes its options and its device from its own table, `[tts.<backend>]` (for example `[tts.indextts2] fp16 = true`). Kokoro runs on the CPU and the cloning backends on the GPU unless that table's `device` says otherwise; the old stage-wide `[tts] device` applies only to a backend that declares no default. IndexTTS2 refuses the CPU (fp32, about 9 GB of RAM, minutes per line) unless `force_cpu = true` is in `[tts.indextts2]`.
+
 ## Profiles
 
 A workspace's `fukikae.toml` picks a tested set of identity settings with `profile = "anime" | "live-action"`; without it the `default` profile applies (WeSpeaker embeddings, the centroid matcher at 0.6, Demucs, pyannote). Precedence, highest first: the workspace's `[x.pair.P]`, its `[x.lang.L]`, its `[x]`, then the profile's `[x.pair.P]`, `[x.lang.L]` and `[x]`, then the built-in fallbacks; a layer that names a different backend drops the options of the layers below it. A workspace `[embed]` table that sets options must name its `backend`. Measured results and held-out verdicts are in `docs/results/2026-11-07-identity-profiles.md` for anime and default, and in `docs/results/2026-11-09-live-action-ground-truth.md` for live-action (superseding the 2026-11-07 doc's live-action section).

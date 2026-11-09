@@ -11,7 +11,7 @@ from fukikae.backends.base import Synthesizer
 from fukikae.cards import stock
 from fukikae.cards.card import CardError, Voice, parse_card
 from fukikae.cards.store import CardStore
-from fukikae.config import BackendConfig, Config
+from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.models import (
     Assignments,
     ClusterAssignment,
@@ -704,3 +704,75 @@ def test_laughter_or_crying_at_the_source_drops_the_emotion_audio(ep, monkeypatc
     assert _kw("natsu one")["emotion_audio"] is None
     # a crying blip over a tenth of the span leaves the emotion audio in place
     assert "emotion_audio" in plan["c0002"].passed
+
+
+# ---- device and options per backend (ruling CD14) ---------------------------------------------
+
+
+class GpuSynth(FakeSynth2):
+    devices: ClassVar = frozenset({"cuda", "cpu"})
+    default_device: ClassVar = "cuda"
+
+
+class CpuSynth(FakeSynth):
+    devices: ClassVar = frozenset({"cuda", "cpu"})
+    default_device: ClassVar = "cpu"
+
+
+def test_device_is_per_backend_then_default_then_the_legacy_key(monkeypatch):
+    monkeypatch.setattr(tts, "device_string", lambda _cfg: "cuda:0")
+    legacy_cpu = Config(raw={"tts": {"backend": "fake", "device": "cpu"}})
+    # the backend's own default beats the legacy stage-wide key (the FT copies' trap)
+    assert tts.synth_device(legacy_cpu, GpuSynth) == "cuda:0"
+    assert tts.synth_device(Config(raw={"tts": {"backend": "fake", "device": "cuda"}}),
+                            CpuSynth) == "cpu"  # fmt: skip
+    # [tts.<backend>] device beats both
+    table = Config(raw={"tts": {"backend": "fake", "fake2": {"device": "cpu"}}})
+    assert tts.synth_device(table, GpuSynth) == "cpu"
+
+    # no default declared: the legacy key, else cuda when the backend can use it
+    class Plain(FakeSynth):
+        devices: ClassVar = frozenset({"cuda", "cpu"})
+
+    assert tts.synth_device(legacy_cpu, Plain) == "cpu"
+    assert tts.synth_device(Config(raw={"tts": {"backend": "fake"}}), Plain) == "cuda:0"
+    with pytest.raises(ConfigError, match="device"):
+        tts.synth_device(Config(raw={"tts": {"backend": "fake", "fake2": {"device": "tpu"}}}),
+                         GpuSynth)  # fmt: skip
+
+
+def test_backend_tables_hold_that_backends_options_outside_device_and_the_key():
+    cfg = Config(
+        raw={"tts": {"backend": "fake", "speed": 1, "fake2": {"device": "cpu", "fp16": True}}}
+    )
+    bc, _ = tts.stage_settings(cfg)
+    assert bc.options == {"speed": 1}  # the backend table is not an option of [tts]'s backend
+    assert tts.backend_config(cfg, "fake2").options == {"fp16": True}
+    assert tts.backend_config(cfg, "fake").options == {"speed": 1}
+    # the stage's key sees options, never the device
+    moved = Config(
+        raw={"tts": {"backend": "fake", "speed": 1, "fake2": {"device": "cuda", "fp16": True}}}
+    )
+    assert tts.backend_config(moved, "fake2") == tts.backend_config(cfg, "fake2")
+
+
+def test_indextts2_refuses_the_cpu_unless_forced(monkeypatch):
+    from fukikae.backends.tts.indextts2 import IndexTts2Synthesizer
+    from fukikae.backends.tts.kokoro import KokoroSynthesizer
+    from fukikae.backends.tts.remote import WorkerSynthesizer
+
+    assert KokoroSynthesizer.default_device == "cpu"
+    assert WorkerSynthesizer.default_device == "cuda"
+    monkeypatch.setattr(tts, "device_string", lambda _cfg: "cuda:0")
+    cpu = Config(raw={"tts": {"backend": "kokoro", "indextts2": {"device": "cpu"}}})
+    with pytest.raises(ConfigError, match=r"9 GB.*force_cpu"):
+        tts.synth_device(cpu, IndexTts2Synthesizer)
+    forced = Config(
+        raw={"tts": {"backend": "kokoro", "indextts2": {"device": "cpu", "force_cpu": True}}}
+    )
+    assert tts.synth_device(forced, IndexTts2Synthesizer) == "cpu"
+    assert tts.backend_config(forced, "indextts2").options == {}
+    # no GPU at all is the same trap
+    monkeypatch.setattr(tts, "device_string", lambda _cfg: "cpu")
+    with pytest.raises(ConfigError, match="9 GB"):
+        tts.synth_device(Config(raw={"tts": {"backend": "kokoro"}}), IndexTts2Synthesizer)

@@ -36,6 +36,10 @@ class IndexTts2Synthesizer(WorkerSynthesizer):
     # (72 renders, 9 cards; per card 11.1 to 18.3); 14.3 is the render-weighted mean of the two.
     speech_cps: ClassVar[dict[str, float]] = {"en": 14.3}
     option_keys: ClassVar[frozenset[str]] = frozenset({"fp16"})
+    cpu_refusal: ClassVar[str | None] = (
+        "IndexTTS2 on the CPU runs in fp32, takes about 9 GB of RAM and minutes per line "
+        '(Task 9a: a stage-wide `[tts] device = "cpu"` meant for Kokoro put it there).'
+    )
     model: ClassVar[str] = _impl.REPO
     # The model snapshot and the code that runs it: either changing can change a voice.
     revision: ClassVar[str] = f"{_impl.REVISION}+{_impl.CODE_REVISION[:12]}"
