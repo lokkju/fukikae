@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from fukikae.cli import app
 from fukikae.config import BackendConfig
+from fukikae.eval import clipset as cs
 from fukikae.eval.clipset import (
     Clip,
     clipset_accuracy,
@@ -273,3 +274,22 @@ def test_embedding_cache_misses_when_the_model_identity_changes(tmp_path):
     assert len(calls) == 1
     embed_clips(clips, audio, cfg, embed, cache, "new.onnx|None")
     assert len(calls) == 2
+
+
+def test_cache_identity_never_degrades_to_none(monkeypatch):
+    """GT6's fallback rule: when model resolution fails, the clip-set cache key takes the
+    backend's declared default (or an `unresolved:` marker), never `None|None`."""
+    import fukikae.backends.identity as ident
+    from fukikae.backends.embed.wespeaker import DEFAULT_MODEL
+
+    monkeypatch.setattr(ident, "model_identity", lambda _kind, _cfg: (None, None))
+    key = cs.cache_identity(BackendConfig("wespeaker", {}))
+    assert key != "None|None"
+    assert key.split("|")[0] == DEFAULT_MODEL
+
+
+def test_cache_identity_keeps_the_resolved_model_format():
+    from fukikae.eval.ledger import model_identity
+
+    cfg = BackendConfig("campplus", {})
+    assert cs.cache_identity(cfg) == "|".join(str(x) for x in model_identity("embed", cfg))

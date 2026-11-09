@@ -149,11 +149,35 @@ def test_profile_workspace_override_still_wins(tmp_path):
     assert c.resolve("embed").backend == "ecapa"
 
 
-def test_live_action_profile_is_flagged_provisional():
+def test_live_action_profile_is_no_longer_provisional():
+    """Task 8 of the ground-truth plan replaced R16's provisional Grid pick with one picked on
+    live-action ground truth in four languages."""
     text = (
         cfgmod.resources.files("fukikae.profiles").joinpath("live-action.toml").read_text("utf-8")
     )
-    assert "PROVISIONAL" in text
+    assert "PROVISIONAL" not in text
+
+
+def test_live_action_profile_is_the_ground_truth_pick(tmp_path):
+    """The Task 8 pick (GT12): pyannote clustering_threshold 0.5, centroid at 0.6 in the
+    characters stage, and joint with episode_cannot_link on at 0.6 in [resolve] (the joint cell
+    that tied with centroid on the gate sets)."""
+    c = _ws(tmp_path, 'profile="live-action"\n')
+    assert c.resolve("diarize") == BackendConfig("pyannote", {"clustering_threshold": 0.5})
+    assert c.resolve("characters", key="matcher") == BackendConfig("centroid", {})
+    assert c.registry.match_threshold == 0.6
+    for lang in ("en", "de", "es", "ja", "ko"):  # no language variant ships
+        assert c.resolve("diarize", lang) == c.resolve("diarize")
+        assert c.resolve("resolve", lang, key="matcher", default="joint") == BackendConfig(
+            "joint", {"threshold": 0.6, "episode_cannot_link": True}
+        )
+
+
+def test_live_action_clustering_threshold_reaches_pyannote(tmp_path):
+    from fukikae.backends.diarize.pyannote import PyannoteDiarizer
+
+    c = _ws(tmp_path, 'profile="live-action"\n')
+    assert PyannoteDiarizer(c.resolve("diarize").options, "cpu").clustering_threshold == 0.5
 
 
 def test_no_profile_workspace_with_separation_options_keeps_demucs(tmp_path):
@@ -175,7 +199,7 @@ def test_resolve_settings_come_from_the_profile(tmp_path):
     assert _settings(tmp_path, 'profile="live-action"\n') == (
         "joint",
         0.6,
-        {"episode_cannot_link": False},
+        {"episode_cannot_link": True},
     )
 
 
