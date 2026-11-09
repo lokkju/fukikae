@@ -96,6 +96,21 @@ class CardStore:
             _atomic_write(dest, path)
         return f"sha256:{digest}"
 
+    def adopt_sidecar(self, path: Path, ref: str, kind: SidecarKind) -> Path | None:
+        """Copy ``path`` in as sidecar ``ref`` of ``kind``, after checking its bytes hash to
+        ``ref``; return the new file, or None when the store already has ``ref`` (left as it
+        is)."""
+        if kind not in SIDECAR_DIRS or not is_sidecar_ref(ref):
+            raise CardError(f"not a sidecar of a known kind: {kind!r} {ref!r}")
+        if self._find(ref) is not None:
+            return None
+        digest = ref.removeprefix("sha256:")
+        if _sha256_file(path) != digest:
+            raise CardError(f"{path} does not hash to {ref}; not added to the card store")
+        dest = self.root / SIDECAR_DIRS[kind] / f"{digest}{path.suffix.lower()}"
+        _atomic_write(dest, path)
+        return dest
+
     def _find(self, ref: str) -> Path | None:
         if not is_sidecar_ref(ref):
             return None
