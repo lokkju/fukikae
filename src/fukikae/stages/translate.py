@@ -3,13 +3,16 @@
 Reads ``03-asr/transcript.json``, ``05-characters/assignments.json`` (with its ``turns``),
 ``04b-tag/tags.json`` when the tag stage is on, ``<workspace>/glossary.toml`` when present
 (its ``[terms]`` table maps source terms to renderings) and the cards of the speaking
-characters; writes ``06-translate/cues.<target>.json`` (a ``DubCues``).
+characters (the key holds a hash of each one's ``[style]``, not the card id, ruling CD6, so a
+voice-only change never re-translates); writes ``06-translate/cues.<target>.json`` (a ``DubCues``).
 
 Cues go to the translator in scene windows with the previous window's lines, the speakers'
 ``[style]`` notes and catchphrases, and the glossary. A window whose answer is malformed is
 asked once more; a second failure leaves its cues with ``error`` and no ``text`` (tts skips
 them, and the mix keeps the original vocals there). Cues that come back longer than their
-budget are asked once more, together, with 85% of the budget; the shorter of the two
+budget are asked once more, together, with 85% of the budget (a budget is what the ``[tts]``
+backend's voice says in the slot at ``max_speed``: its ``speech_cps``, else the language's
+typical rate); the shorter of the two
 renderings is kept, and one still long is flagged (``over_budget``, ``overrun``) and left to
 time fitting, never cut. A backend error (HTTP error, timeout) is retried once, then marks
 only that window (``error = "translate: backend: ..."``), and the stage goes on; three such
@@ -30,6 +33,8 @@ subtitle path when subtitles are found, else the ASR path. Stage settings (``max
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import time
@@ -74,6 +79,28 @@ RETRY_BUDGET = 0.85
 MAX_BACKEND_FAILURES = 3
 # Bump when the prompt or the cue rules change what the stage writes for the same inputs.
 PROMPT_VERSION = 3
+
+
+def speech_cps(cfg: Config) -> float:
+    """Characters per second the target TTS backend speaks ``cfg.target_language`` at
+    (``Synthesizer.speech_cps``, ruling CD7), so a budget is what that voice can say in the
+    slot. Without a ``[tts]`` backend, or one that declares no figure for the language, the
+    language's typical rate (``cues.CPS``)."""
+    from fukikae.backends import loader
+    from fukikae.cues import CPS, DEFAULT_CPS
+
+    fallback = CPS.get(cfg.target_language, DEFAULT_CPS)
+    try:
+        name = cfg.resolve("tts").backend
+    except ConfigError:
+        return fallback
+    try:
+        cls = loader.backend_class("tts", name)
+    except (ConfigError, loader.BackendUnavailable) as e:
+        log.warning("translate: budgets use %s cps, not the tts backend's: %s", fallback, e)
+        return fallback
+    figure = getattr(cls, "speech_cps", {}).get(cfg.target_language)
+    return float(figure) if figure else fallback
 
 
 class TranslateStage:
@@ -121,6 +148,7 @@ class TranslateStage:
                 f"[translate] subs_filter must be a list of {', '.join(RULES)}, not {rules!r}"
             )
         settings = {
+            "cps": speech_cps(cfg),
             "source_language": src,
             "max_speed": float(max_speed),
             "source": source,
@@ -193,18 +221,22 @@ class TranslateStage:
         return out
 
     @staticmethod
-    def _styled(ep: Episode, cards: dict[int, str]) -> dict[int, str]:
-        """The cards that carry a [style], the only part of a card translate reads, so a
-        style-less card (the stock cards tts assigns) leaves the key and inputs alone. A card
-        that can't be read stays in, and run() reports it."""
+    def _style_hashes(ep: Episode, cards: dict[int, str]) -> dict[int, str]:
+        """Character -> sha256 of its card's [style] (catchphrases included), the only part of
+        a card translate reads (ruling CD6): a voice-only change never re-translates, and a
+        style-less card (the stock cards tts assigns) contributes nothing. A card that can't be
+        read contributes its id, and run() reports it."""
         store = CardStore(ep.workspace_root)
         out: dict[int, str] = {}
         for cid, card in cards.items():
             try:
-                if not store.has(card) or store.get(card).style:
-                    out[cid] = card
+                style = store.get(card).style
             except CardError:
-                out[cid] = card
+                out[cid] = f"unreadable:{card}"
+                continue
+            if style:
+                text = json.dumps(style, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                out[cid] = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
         return out
 
     def _target(self, ep: Episode) -> str:
@@ -241,9 +273,7 @@ class TranslateStage:
         if self._use_tags():
             paths.append(ep.work / "04b-tag" / "tags.json")
         paths.append(ep.workspace_root / "glossary.toml")
-        store = CardStore(ep.workspace_root)
-        cards = self._styled(ep, self._cards(ep, self._speaking(ep), self._target(ep)))
-        paths += [store.card_path(card) for _, card in sorted(cards.items())]
+        # Card files are not inputs: the key holds a hash of each speaking character's style.
         return paths + self._subtitle_input(ep)
 
     def outputs(self, ep: Episode) -> list[Path]:
@@ -251,7 +281,7 @@ class TranslateStage:
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:
         bc, settings = self._settings(ep, cfg)
-        cards = self._styled(ep, self._cards(ep, self._speaking(ep), cfg.target_language))
+        styles = self._style_hashes(ep, self._cards(ep, self._speaking(ep), cfg.target_language))
         key: dict[str, Any] = {
             "backend": bc.backend,
             "options": bc.options,
@@ -259,7 +289,8 @@ class TranslateStage:
             "target_language": cfg.target_language,
             "max_speed": settings["max_speed"],
             "source": settings["source"],
-            "cards": {str(k): v for k, v in sorted(cards.items())},
+            "styles": {str(k): v for k, v in sorted(styles.items())},
+            "cps": settings["cps"],
             "prompt_version": PROMPT_VERSION,
         }
         file, track = self._subtitles(ep, cfg, settings["source"])
@@ -356,6 +387,7 @@ class TranslateStage:
                 target,
                 settings["max_speed"],
                 settings["subs_filter"],
+                cps=settings["cps"],
             )
         else:
             cues = build_asr_cues(
@@ -365,6 +397,7 @@ class TranslateStage:
                 names,
                 target,
                 settings["max_speed"],
+                cps=settings["cps"],
             )
         speaking = {c.character_id for c in cues if c.character_id is not None}
         cards = self._cards(ep, speaking, target)

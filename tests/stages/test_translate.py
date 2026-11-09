@@ -139,8 +139,19 @@ def ep(tmp_path) -> Episode:
     return Episode(source=tmp_path / "s.mkv", id="e1", work=work, workspace_root=root)
 
 
-def _assign(ep: Episode, character: int, voice: str) -> str:
-    cid = CardStore(ep.workspace_root).put(parse_card(CARD.format(voice=voice)))
+def _assign(
+    ep: Episode,
+    character: int,
+    voice: str,
+    style: str | None = None,
+    catchphrase: str | None = None,
+) -> str:
+    text = CARD.format(voice=voice)
+    if style is not None:
+        text = text.replace("rough and loud", style)
+    if catchphrase is not None:
+        text = text.replace("I'm all fired up!", catchphrase)
+    cid = CardStore(ep.workspace_root).put(parse_card(text))
     with Registry(Workspace(ep.workspace_root).registry_path) as reg:
         reg.assign_card(character, "en", cid, "assign", False)
     return cid
@@ -259,16 +270,45 @@ def test_direction_lands_in_delivery_and_song_is_skipped(ep):
 
 
 @pytest.mark.usefixtures("fake")
-def test_card_change_changes_translate_key(ep):
+def test_voice_only_card_change_keeps_translate_key(ep):
+    """Ruling CD6: translate reads only [style], so the key hashes the style, not the card."""
+    stage = TranslateStage()
+    _assign(ep, 1, "am_adam")
+    a, inputs = stage.config_key(CFG, ep), stage.inputs(ep)
+    assert set(a["styles"]) == {"1"} and a["identity"]["model"] == "fake-model"
+    assert "cards" not in a
+    _assign(ep, 1, "am_michael")  # same style, another voice
+    assert stage.config_key(CFG, ep) == a and stage.inputs(ep) == inputs
+    assert not any(p.parent.name == "cards" for p in inputs)
+
+
+@pytest.mark.usefixtures("fake")
+def test_style_change_changes_translate_key(ep):
     stage = TranslateStage()
     _assign(ep, 1, "am_adam")
     a = stage.config_key(CFG, ep)
-    assert a["cards"] == {"1": a["cards"]["1"]} and a["identity"]["model"] == "fake-model"
-    _assign(ep, 1, "am_michael")
+    _assign(ep, 1, "am_adam", style="quiet and formal")
+    assert stage.config_key(CFG, ep)["styles"] != a["styles"]
+    _assign(ep, 1, "am_adam", catchphrase="Fired up!")
     b = stage.config_key(CFG, ep)
-    assert a != b
-    # the card files are stage inputs too
-    assert any(p.parent.name == "cards" for p in stage.inputs(ep))
+    assert b["styles"] != a["styles"]
+
+
+@pytest.mark.usefixtures("fake")
+def test_budget_follows_the_tts_backends_speech_rate(ep):
+    from fukikae.backends.tts.kokoro import KokoroSynthesizer
+    from fukikae.cues import budget_chars
+
+    cps = KokoroSynthesizer.speech_cps["en"]
+    cfg = Config(
+        source_language="ja",
+        raw={"translate": {"backend": "fake", "max_speed": 1.25}, "tts": {"backend": "kokoro"}},
+    )
+    assert TranslateStage().config_key(cfg, ep)["cps"] == cps
+    assert TranslateStage().config_key(CFG, ep)["cps"] == 15.0  # no [tts]: the language table
+    TranslateStage().run(ep, cfg)
+    for c in _out(ep).cues:
+        assert c.budget == budget_chars(c.end - c.start, "en", 1.25, cps=cps)
 
 
 @pytest.mark.usefixtures("fake")
