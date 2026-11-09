@@ -34,7 +34,6 @@ from fukikae.artifacts import read_json, write_json
 from fukikae.config import Config, ConfigError
 from fukikae.mix import (
     DUB_BITRATE,
-    TRUE_PEAK_DB,
     MixSettings,
     Span,
     build_dub,
@@ -76,7 +75,7 @@ def mix_settings(cfg: Config) -> MixSettings:
     for key in ("keep_original_vocals", "match_dialogue", "protect_bgm", "detect_songs"):
         if key in merged and not isinstance(merged[key], bool):
             raise ConfigError(f"[mix] {key} must be true or false, not {merged[key]!r}")
-    for key in ("duck_db", "fade_ms"):
+    for key in ("duck_db", "fade_ms", "true_peak_db"):
         value = merged.get(key)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int | float)):
             raise ConfigError(f"[mix] {key} must be a number, not {value!r}")
@@ -165,7 +164,6 @@ class MixStage:
             "songs": songs.detector_constants(mix_settings(cfg).songs),
             "target_language": cfg.target_language,
             "bitrate": DUB_BITRATE,
-            "limiter_ceiling_db": TRUE_PEAK_DB,
             "ffmpeg": media.ffmpeg_version(),
             "version": MIX_VERSION,
         }
@@ -265,13 +263,14 @@ class MixStage:
         try:
             stats = build_dub(background, vocals, placed, windows, s, premix)
             original = loudness_stats(ep.work / "00-extract" / "audio.wav")
-            result = normalize(premix, original["i"], dub_wav, TRUE_PEAK_DB)
+            result = normalize(premix, original["i"], dub_wav, s.true_peak_db)
             before = result["source"]
         finally:
             premix.unlink(missing_ok=True)
         after = loudness_stats(dub_wav)
         write_ass(spoken, ass)
         mux(ep.source, dub_wav, ass, target, mkv)
+        encoded = loudness_stats(mkv, "0:a:0")  # the dub track as muxed, after the AAC encode
         write_json(
             report_path,
             MixReport(
@@ -285,8 +284,8 @@ class MixStage:
                 placed=len(placed),
                 removed_seconds=round(sum(b - a for a, b in union(windows)), 3),
                 dub_gain_db=None if stats.dub_gain_db is None else round(stats.dub_gain_db, 2),
-                loudness={"original": original, "premix": before, "final": after},
+                loudness={"original": original, "premix": before, "final": after, "mkv": encoded},
                 gain_db=result["gain_db"],
-                normalization=f"linear gain, true-peak limiter at {TRUE_PEAK_DB} dBTP",
+                normalization=f"linear gain, true-peak limiter at {s.true_peak_db} dBTP",
             ),
         )

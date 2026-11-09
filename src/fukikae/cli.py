@@ -70,7 +70,9 @@ def doctor() -> None:
 
 def configure_logging() -> None:
     """Send fukikae's INFO lines (stage summaries) to stderr, once, unless something already
-    configured the root logger (some model libraries do on import)."""
+    configured the root logger. Model libraries may also configure it later, mid-stage (funasr
+    calls basicConfig on import), so fukikae's logger stops propagating to the root once it has
+    its own handler: each line prints exactly once."""
     import logging
 
     logger = logging.getLogger("fukikae")
@@ -80,6 +82,7 @@ def configure_logging() -> None:
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 
 def pipeline_stages(cfg: "Config") -> "list[Stage]":

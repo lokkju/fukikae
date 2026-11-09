@@ -161,3 +161,24 @@ def test_run_logs_fukikae_info_lines_once(monkeypatch):
     configure_logging()
     configure_logging()
     assert len(logger.handlers) == 1 and logger.getEffectiveLevel() == logging.INFO
+
+
+def test_fukikae_lines_print_once_when_a_library_configures_logging_later(monkeypatch):
+    """funasr calls basicConfig on import, mid-stage; fukikae's lines must not then print twice."""
+    import io
+    import logging
+
+    from fukikae.cli import configure_logging
+
+    logger = logging.getLogger("fukikae")
+    root = logging.getLogger()
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(logger, "propagate", True)
+    configure_logging()
+    ours, theirs = io.StringIO(), io.StringIO()
+    logger.handlers[0].setStream(ours)  # type: ignore[attr-defined]
+    root.addHandler(logging.StreamHandler(theirs))  # what basicConfig would add
+    logging.getLogger("fukikae.stages.mix").info("mix e1: a summary")
+    assert ours.getvalue().count("a summary") == 1
+    assert "a summary" not in theirs.getvalue()
