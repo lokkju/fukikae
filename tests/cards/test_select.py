@@ -257,3 +257,20 @@ def test_reference_exclusions_are_songs_and_singing(tmp_path, monkeypatch):
     assert select.reference_exclusions(work, tags) == [(65.0, 147.0), (300.0, 310.0)]
     # no stems: only the tag stage's singing
     assert select.reference_exclusions(tmp_path / "none", tags) == [(300.0, 310.0)]
+
+
+def test_eligible_references_are_exposed_ranked_and_picks_come_from_them(tmp_path):
+    """Ruling CD17: the eligible list is public; select_references picks from it."""
+    from fukikae.cards.select import eligible_references, pick_references
+
+    starts = [0, 10, 20, 30, 40, 50]
+    turns = [Turn(start=s, end=s + 6, speaker="A") for s in starts]
+    turns.append(Turn(start=60, end=62, speaker="A"))  # too short: not eligible
+    noise = [0.05, 0.01, 0.002, 0.03, 0.02, 0.04]
+    vocals = _vocals(
+        tmp_path / "v.wav", [(t.start, t.end, n) for t, n in zip(turns, noise, strict=False)]
+    )
+    tr = _transcript(turns)
+    ranked = eligible_references(turns, "A", tr, None, vocals)
+    assert [p.start for p in ranked] == [20, 10, 40, 30, 50, 0]  # quietest noise first
+    assert pick_references(ranked) == select_references(turns, "A", tr, None, vocals)

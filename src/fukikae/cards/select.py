@@ -218,22 +218,25 @@ def _emotion(tags: Tags | None, start: float, end: float) -> str | None:
     return None if best.label == "neutral" else best.label
 
 
-def select_references(
+def rank_key(p: RefPick) -> tuple[bool, float, float]:
+    """The CD5 order: unscored-or-neutral turns first, then by SNR, loudest first."""
+    return (p.emotion is not None, -p.snr_db, p.start)
+
+
+def eligible_references(
     turns: list[Turn],
     speaker: str | Collection[str],
     transcript: Transcript,
     tags: Tags | None,
     vocals: Path,
     *,
-    count: int = 3,
-    total: tuple[float, float] = (10.0, 20.0),
     each: tuple[float, float] = (3.0, 12.0),
-    min_total: float = 6.0,
     exclude: Sequence[tuple[float, float]] = (),
-) -> list[RefPick] | None:
-    """Reference clips for the speaker (one diarize label, or several of one character), in
-    the order taken; None when they add up to less than ``min_total`` seconds. ``total[0]``
-    is the preferred minimum (the spec's 10 to 20 s); the greedy fill stops at ``total[1]``."""
+) -> list[RefPick]:
+    """Every turn of the speaker that could be a reference (no overlap with another speaker,
+    within ``each``, outside ``exclude``, with an ASR transcript), in ``rank_key`` order.
+    ``select_references`` picks from this list; eval tts draws held-out exemplars from it
+    (ruling CD17)."""
     from scipy.io import wavfile
 
     mine = {speaker} if isinstance(speaker, str) else set(speaker)
@@ -254,7 +257,19 @@ def select_references(
             continue
         snr = snr_db(_samples(data, rate, start, end), rate)
         eligible.append(RefPick(start, end, text, round(snr, 2), _emotion(tags, start, end)))
-    ranked = sorted(eligible, key=lambda p: (p.emotion is not None, -p.snr_db, p.start))
+    return sorted(eligible, key=rank_key)
+
+
+def pick_references(
+    ranked: Sequence[RefPick],
+    *,
+    count: int = 3,
+    total: tuple[float, float] = (10.0, 20.0),
+    min_total: float = 6.0,
+) -> list[RefPick] | None:
+    """The greedy CD5 fill over ``ranked`` (``eligible_references``' order): up to ``count``
+    clips and ``total[1]`` seconds, scored non-neutral turns only to make up ``min_total``;
+    None under ``min_total``."""
     picks: list[RefPick] = []
     used = 0.0
     for p in ranked:
@@ -266,6 +281,28 @@ def select_references(
             picks.append(p)
             used += p.seconds
     return picks if used >= min_total else None
+
+
+def select_references(
+    turns: list[Turn],
+    speaker: str | Collection[str],
+    transcript: Transcript,
+    tags: Tags | None,
+    vocals: Path,
+    *,
+    count: int = 3,
+    total: tuple[float, float] = (10.0, 20.0),
+    each: tuple[float, float] = (3.0, 12.0),
+    min_total: float = 6.0,
+    exclude: Sequence[tuple[float, float]] = (),
+) -> list[RefPick] | None:
+    """Reference clips for the speaker (one diarize label, or several of one character), in
+    the order taken; None when they add up to less than ``min_total`` seconds. ``total[0]``
+    is the preferred minimum (the spec's 10 to 20 s); the greedy fill stops at ``total[1]``."""
+    ranked = eligible_references(
+        turns, speaker, transcript, tags, vocals, each=each, exclude=exclude
+    )
+    return pick_references(ranked, count=count, total=total, min_total=min_total)
 
 
 def reference_exclusions(
