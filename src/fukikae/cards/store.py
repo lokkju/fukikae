@@ -52,6 +52,22 @@ def _atomic_write(dest: Path, data: bytes | Path) -> None:
         raise
 
 
+class StrippedCardError(CardError):
+    """A hand-written card whose ``[style]`` holds special-token syntax: its file name is the
+    id of the text as written, and the loaded (stripped) card has another id. ``card`` is the
+    stripped card, which ``voices edit`` saves as a new card."""
+
+    def __init__(self, card_id: str, path: Path, card: Card) -> None:
+        self.card_id, self.path, self.card = card_id, path, card
+        super().__init__(
+            f"card {card_id} ({path}): [style] holds special-token syntax (such as <|...|>), "
+            "which is stripped at load (CD23(c)); remove it from the file and re-save it as a "
+            "new card. To do that: `fukikae voices edit <workspace> <character>` opens the "
+            "card with the markup already removed; save it, and the clean copy becomes a new "
+            "card (derived_from the old id), assigned to the character"
+        )
+
+
 class CardStore:
     def __init__(self, workspace_root: Path) -> None:
         self.root = Path(workspace_root) / ".fukikae" / "cards"
@@ -77,8 +93,11 @@ class CardStore:
         path = self.card_path(card_id)
         if not path.is_file():
             raise CardError(f"card {card_id} not found in {self.root}")
-        card = parse_card(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        card = parse_card(text)
         actual = compute_card_id(card)
+        if actual != card_id and compute_card_id(parse_card(text, strip_tokens=False)) == card_id:
+            raise StrippedCardError(card_id, path, card)
         if actual != card_id:
             raise CardError(
                 f"{path} holds card {actual}, not card {card_id}; a card file is never edited "

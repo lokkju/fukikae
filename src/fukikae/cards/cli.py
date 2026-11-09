@@ -27,7 +27,7 @@ from fukikae.cards.card import (
     is_card_id,
     parse_card,
 )
-from fukikae.cards.store import CardStore
+from fukikae.cards.store import CardStore, StrippedCardError
 from fukikae.workspace import Workspace
 
 if TYPE_CHECKING:
@@ -398,7 +398,12 @@ def edit(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
         char = reg.character_by_ref(character)
         cur = _current(reg, char, language)
         assert cur.card_id is not None
-        old = store.get(cur.card_id)
+        try:
+            old = store.get(cur.card_id)
+        except StrippedCardError as e:  # CD23(c): edit the stripped text, save a new card
+            old = e.card
+            _echo(f"card {cur.card_id} held special-token syntax in [style]; it is removed in "
+                  "the copy being edited")  # fmt: skip
         editor = _editor()
         with tempfile.TemporaryDirectory(prefix="fukikae-card-") as tmp:
             path = Path(tmp) / f"{cur.card_id}.toml"
@@ -519,34 +524,18 @@ def _embedder_factory() -> Callable[[str], AbstractContextManager[Embedder]]:
 
     @contextmanager
     def make(name: str) -> Iterator[Embedder]:
-        # ruling CD23(a): an allowlisted name, its pinned checkpoint from the local cache by
-        # path (no hub lookup at all), and the hub offline for the load as a second guard
+        # ruling CD23(a): an allowlisted name and its pinned checkpoint from the local cache,
+        # handed to the backend by path, so the load makes no hub call at all
         pinned, ckpt = local_checkpoint(name)
         bc = BackendConfig(pinned.backend, {"model": str(ckpt)})
-        with _hub_offline():
-            inst = cast("Embedder", loader.create("embed", bc, "cpu"))
-            inst.load()
+        inst = cast("Embedder", loader.create("embed", bc, "cpu"))
+        inst.load()
         try:
             yield inst
         finally:
             inst.unload()
 
     return make
-
-
-@contextmanager
-def _hub_offline() -> Iterator[None]:
-    keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
-    old = {k: os.environ.get(k) for k in keys}
-    os.environ.update(dict.fromkeys(keys, "1"))
-    try:
-        yield
-    finally:
-        for k, v in old.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 def _verify(cfg: Config, store: CardStore, card: Card, record: bool) -> tuple[VerifyResult, Card]:

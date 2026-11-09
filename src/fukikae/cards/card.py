@@ -396,10 +396,11 @@ def _capped(text: str, cap: int, what: str) -> str:
     return text
 
 
-def _parse_style(raw: Any) -> dict[str, Any]:
+def _parse_style(raw: Any, strip_tokens: bool = True) -> dict[str, Any]:
     where = "[style]"
     t = _table(raw, where)
     style: dict[str, Any] = {}
+    clean = _for_translator if strip_tokens else (lambda s: s)
     for key, value in t.items():
         if key == "catchphrases":
             if not isinstance(value, list):
@@ -415,9 +416,7 @@ def _parse_style(raw: Any) -> dict[str, Any]:
                 phrases.append(
                     {
                         k: _capped(
-                            _for_translator(
-                                _str(_require(e, k, "[style] catchphrases entry"), k, where)
-                            ),
+                            clean(_str(_require(e, k, "[style] catchphrases entry"), k, where)),
                             CATCHPHRASE_SIDE_CAP,
                             f"[style] catchphrases {k}",
                         )
@@ -427,11 +426,14 @@ def _parse_style(raw: Any) -> dict[str, Any]:
             style[key] = phrases
         else:
             cap = STYLE_CAPS.get(key, STYLE_TEXT_CAP)
-            style[key] = _capped(_for_translator(_str(value, key, where)), cap, f"[style] {key}")
+            style[key] = _capped(clean(_str(value, key, where)), cap, f"[style] {key}")
     return style
 
 
-def parse_card(text: str) -> Card:
+def parse_card(text: str, *, strip_tokens: bool = True) -> Card:
+    """The card in ``text``, strictly checked. ``strip_tokens`` False keeps special-token
+    syntax in ``[style]`` (CD23(c) strips it); only ``CardStore`` uses it, to recognise a
+    hand-written card whose stored id is that of its unstripped text."""
     try:
         raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
@@ -441,7 +443,7 @@ def parse_card(text: str) -> Card:
     if not target:
         raise CardError("target_language must not be empty")
     voice = _parse_voice(_require(raw, "voice", "the card ([voice])"))
-    style = (_parse_style(raw["style"]) if "style" in raw else None) or None
+    style = (_parse_style(raw["style"], strip_tokens) if "style" in raw else None) or None
     meta: dict[str, Any] = {}
     if "meta" in raw:
         meta = dict(_table(raw["meta"], "[meta]"))
