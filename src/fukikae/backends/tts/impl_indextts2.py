@@ -6,9 +6,10 @@ in fukikae's own environment just to read the pins below.
 
 Pins: the model snapshot ``IndexTeam/IndexTTS-2`` at ``REVISION``, the ``indextts`` code at git
 commit ``CODE_REVISION`` (checked at load against the installed package's ``direct_url.json``),
-and the four auxiliary models IndexTTS2 would otherwise fetch unpinned (``AUX``). All come from
-the Hugging Face cache first; a download happens only when one is missing and never under
-``HF_HUB_OFFLINE``. QwenEmotion (text to emotion) is not loaded: fukikae never asks for it.
+and the four auxiliary models IndexTTS2 would otherwise fetch unpinned (``AUX``). ``fetch`` (the
+setup step, ``fukikae backends setup indextts2``) downloads them; ``load`` reads only the Hugging
+Face cache (the worker runs with ``HF_HUB_OFFLINE=1``) and names the setup command when a file
+is missing. QwenEmotion (text to emotion) is not loaded: fukikae never asks for it.
 
 What it honours (ruling recorded in the character-cards ledger, Task 9a):
 
@@ -78,18 +79,34 @@ PROMPT_GAP_S = 0.2
 LANGUAGES = ("en", "zh")
 
 
+SETUP = "fukikae backends setup indextts2"
+
+
 def _snapshot(repo: str, revision: str, files: list[str]) -> str:
-    from huggingface_hub import constants, snapshot_download
+    """The pinned snapshot from the local cache only."""
+    from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
     try:
         return snapshot_download(
             repo, revision=revision, allow_patterns=files, local_files_only=True
         )
-    except LocalEntryNotFoundError:
-        if constants.HF_HUB_OFFLINE:
-            raise
-    return snapshot_download(repo, revision=revision, allow_patterns=files)
+    except LocalEntryNotFoundError as e:
+        raise RuntimeError(
+            f"{repo}@{revision[:12]} is not in the Hugging Face cache; download it with `{SETUP}`"
+        ) from e
+
+
+def fetch() -> None:
+    """The setup step: download every pinned snapshot into the Hugging Face cache."""
+    import sys
+
+    from huggingface_hub import snapshot_download
+
+    pins = [(REPO, REVISION, CHECKPOINT_FILES), *AUX.values()]
+    for repo, rev, files in pins:
+        print(f"fetching {repo}@{rev[:12]}", file=sys.stderr, flush=True)
+        snapshot_download(repo, revision=rev, allow_patterns=files)
 
 
 def installed_code_revision() -> str | None:
@@ -116,7 +133,7 @@ class Impl:
         if found != CODE_REVISION:
             raise RuntimeError(
                 f"the worker environment has indextts at {found!r}, and this fukikae pins "
-                f"{CODE_REVISION}; re-sync it (`uv sync --frozen` in workers/indextts2)"
+                f"{CODE_REVISION}; set it up again with `{SETUP}`"
             )
         model_dir = _snapshot(REPO, REVISION, CHECKPOINT_FILES)
         aux = {}

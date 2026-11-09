@@ -42,10 +42,18 @@ class FakeWorker(WorkerSynthesizer):
 
 
 @pytest.fixture(autouse=True)
-def fake_impl(monkeypatch):
+def fake_impl(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("FUKIKAE_TTS_FAKE_IMPL", "tests.fixtures.fake_tts_impl")
     monkeypatch.setenv("PYTHONPATH", str(ROOT))
     monkeypatch.setattr(gpulock, "leftover_jobs", lambda _gpu: [])
+    # a checkout whose worker env was set up from its lock (the hash recorded at sync)
+    checkout = tmp_path_factory.mktemp("checkout")
+    (checkout / "workers" / "faketts").mkdir(parents=True)
+    (checkout / "workers" / "faketts" / "uv.lock").write_text("version = 1\n")
+    (checkout / ".venvs" / "faketts").mkdir(parents=True)
+    remote.record_lock(checkout / "workers" / "faketts", checkout / ".venvs" / "faketts")
+    monkeypatch.setenv("FUKIKAE_WORKER_CHECKOUT", str(checkout))
+    return checkout
 
 
 def _ref(tmp_path: Path) -> Path:
@@ -207,7 +215,7 @@ def test_missing_worker_env_names_the_setup_command(monkeypatch, tmp_path):
     monkeypatch.setattr(FakeWorker, "interpreter", WorkerSynthesizer.interpreter)
     monkeypatch.setenv("FUKIKAE_WORKER_CHECKOUT", str(tmp_path))
     w = FakeWorker({}, "cpu")
-    with pytest.raises(loader.BackendUnavailable, match="uv sync") as e:
+    with pytest.raises(loader.BackendUnavailable, match="fukikae backends setup faketts") as e:
         w.load()
     assert ".venvs/faketts" in str(e.value)
 
@@ -277,6 +285,62 @@ def test_gpu_worker_sees_only_its_card(monkeypatch, tmp_path):
         assert seen["device"] == "cuda:0"
     finally:
         w.unload()
+
+
+def test_the_worker_env_is_an_allowlist_and_offline(monkeypatch, tmp_path):
+    """mise puts decrypted secrets in fukikae's environment; none reach the worker, which
+    runs offline (downloads happen only in the setup step)."""
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "do-not-leak")
+    monkeypatch.setenv("HF_TOKEN", "hf_do_not_leak")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    w = FakeWorker({}, "cpu")
+    w.load()
+    try:
+        w.synthesize("echo", _voice(), "en", tmp_path / "o.wav", resolve=lambda _r: _ref(tmp_path))
+        env = json.loads((tmp_path / "o.wav.json").read_text())["env"]
+    finally:
+        w.unload()
+    assert "CLOUDFLARE_API_TOKEN" not in env["names"] and "HF_TOKEN" not in env["names"]
+    assert {"PATH", "HOME", "LC_ALL", "HF_HOME"} <= set(env["names"])
+    assert env["HF_HUB_OFFLINE"] == "1" and env["TRANSFORMERS_OFFLINE"] == "1"
+
+
+def test_a_worker_env_synced_from_another_lock_is_refused(fake_impl):
+    (fake_impl / "workers" / "faketts" / "uv.lock").write_text("version = 2\n")
+    w = FakeWorker({}, "cpu")
+    with pytest.raises(loader.BackendUnavailable, match="fukikae backends setup faketts"):
+        w.load()
+    assert w.pid is None
+    (fake_impl / ".venvs" / "faketts" / remote.LOCK_HASH_FILE).unlink()
+    with pytest.raises(loader.BackendUnavailable, match="setup"):
+        w.load()
+
+
+def test_setup_syncs_locked_records_the_lock_and_fetches_online(fake_impl, monkeypatch, tmp_path):
+    ran: list[tuple[list[str], dict[str, str]]] = []
+
+    def run(cmd, **kw):
+        ran.append((list(cmd), dict(kw.get("env") or {})))
+        if cmd[0] == "uv":  # what uv sync would leave behind
+            return subprocess.CompletedProcess(cmd, 0)
+        return subprocess.run(cmd, **kw)
+
+    monkeypatch.setattr(FakeWorker, "interpreter", lambda _self: Path(sys.executable))
+    hash_file = fake_impl / ".venvs" / "faketts" / remote.LOCK_HASH_FILE
+    hash_file.unlink()
+    log = tmp_path / "fake-fetch.json"
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    FakeWorker.setup(run=run)
+    (sync, sync_env), (fetch, fetch_env) = ran
+    assert sync[:2] == ["uv", "sync"] and "--locked" in sync and "--frozen" not in sync
+    assert sync_env["UV_PROJECT_ENVIRONMENT"] == str(fake_impl / ".venvs" / "faketts")
+    assert fetch[-2:] == ["faketts", "--fetch"]
+    assert "HF_HUB_OFFLINE" not in fetch_env
+    assert json.loads(log.read_text()) == {"offline": None}
+    assert hash_file.read_text().strip() == remote.lock_digest(
+        fake_impl / "workers" / "faketts" / "uv.lock"
+    )
 
 
 # ---- the worker side --------------------------------------------------------------------

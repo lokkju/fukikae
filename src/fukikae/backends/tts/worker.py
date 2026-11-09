@@ -17,11 +17,12 @@ or ``{"ok": false, "error": "..."}``. Requests:
   ``{"ok": true, "seconds": <float>}``; the impl writes a mono wav to ``out``
 - ``{"op": "unload"}`` -> ``{"ok": true}``
 
-The worker exits when stdin closes. Every path in a request must be absolute and name an
-existing file (``out``: an existing directory); a malformed request gets an error answer and the
-worker keeps going. Library output on stdout (progress bars, prints) would corrupt the
-protocol, so file descriptor 1 is pointed at stderr before anything is imported, and answers go
-to a private duplicate of the original stdout.
+``--fetch`` after the name runs the impl module's ``fetch()`` (the setup step's download of its
+pinned files) and exits. The worker exits when stdin closes. Every path in a request must be
+absolute and name an existing file (``out``: an existing directory); a malformed request gets
+an error answer and the worker keeps going. Library output on stdout (progress bars, prints)
+would corrupt the protocol, so file descriptor 1 is pointed at stderr before anything is
+imported, and answers go to a private duplicate of the original stdout.
 
 ``FUKIKAE_TTS_FAKE_IMPL`` (tests only) names a module to use instead of ``impl_<name>``.
 """
@@ -149,10 +150,19 @@ def _impl_module(name: str) -> str:
     return fake if fake else f"fukikae.backends.tts.impl_{name}"
 
 
-def main(name: str) -> int:
+def main(name: str, fetch: bool = False) -> int:
     if not _NAME.fullmatch(name):
         print(f"worker: not a backend name: {name!r}", file=sys.stderr)
         return 2
+    if fetch:
+        # the setup step: download what the impl pins, then exit; the protocol never runs
+        module = importlib.import_module(_impl_module(name))
+        step = getattr(module, "fetch", None)
+        if step is None:
+            print(f"worker: {name} has nothing to fetch", file=sys.stderr)
+        else:
+            step()
+        return 0
     # Keep the real stdout for answers; everything else written to fd 1 goes to stderr.
     proto = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
     os.dup2(2, 1)
@@ -207,7 +217,10 @@ def main(name: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: python -m fukikae.backends.tts.worker <name>", file=sys.stderr)
+    args = sys.argv[1:]
+    if len(args) == 2 and args[1] == "--fetch":
+        sys.exit(main(args[0], fetch=True))
+    if len(args) != 1:
+        print("usage: python -m fukikae.backends.tts.worker <name> [--fetch]", file=sys.stderr)
         sys.exit(2)
-    sys.exit(main(sys.argv[1]))
+    sys.exit(main(args[0]))

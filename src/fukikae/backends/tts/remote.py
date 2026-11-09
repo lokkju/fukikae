@@ -4,10 +4,15 @@ A ``WorkerSynthesizer`` is a ``Synthesizer`` whose model lives in a worker proce
 (``fukikae.backends.tts.worker``) started with the interpreter of ``<checkout>/.venvs/<extra>``.
 Each worker environment is a uv project of its own under ``<checkout>/workers/<extra>/`` (its
 own Python version and lock), so a model's pins never meet fukikae's: IndexTTS2, for one, needs
-Python < 3.12 and exact torch, transformers and numpy pins. Set one up with::
+Python < 3.12 and exact torch, transformers and numpy pins. Set one up with
+``fukikae backends setup <name>`` (``WorkerSynthesizer.setup``): ``uv sync --locked`` into
+``.venvs/<extra>``, the lock's sha256 recorded there (``LOCK_HASH_FILE``), then the worker's
+``--fetch`` step, the only time it downloads (the model's pinned snapshots). ``load`` refuses an
+environment whose recorded hash doesn't match ``workers/<extra>/uv.lock``.
 
-    UV_PROJECT_ENVIRONMENT=<checkout>/.venvs/<extra> \
-        uv sync --directory <checkout>/workers/<extra> --frozen
+The worker's environment is an allowlist (``worker_env``: PATH, HOME, locale, temp, the Hugging
+Face and torch caches, ``CUDA_*``), never fukikae's whole environment, which holds the secrets
+mise decrypts; at runtime it also sets ``HF_HUB_OFFLINE=1`` and ``TRANSFORMERS_OFFLINE=1``.
 
 ``<checkout>`` is the repository this module was loaded from, or ``FUKIKAE_WORKER_CHECKOUT``.
 
@@ -70,6 +75,27 @@ SECONDS_SLACK = 0.05
 STDERR_LINES = 30
 HELLO_TIMEOUT_S = 60.0
 KILL_WAIT_S = 10.0
+LOCK_HASH_FILE = "fukikae-uv-lock.sha256"
+ENV_ALLOW = frozenset(
+    {
+        "PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "TERM",
+        "HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "XDG_CACHE_HOME", "TORCH_HOME",
+        "LD_LIBRARY_PATH", "PYTHONPATH",
+        "FUKIKAE_TTS_FAKE_IMPL",  # tests only: the worker's fake impl
+    }
+)  # fmt: skip
+ENV_ALLOW_PREFIXES = ("LC_", "CUDA_")
+
+
+def lock_digest(lock: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(Path(lock).read_bytes()).hexdigest()
+
+
+def record_lock(project_dir: Path, venv: Path) -> None:
+    """Write the sha256 of ``project_dir/uv.lock`` into the environment synced from it."""
+    (Path(venv) / LOCK_HASH_FILE).write_text(lock_digest(Path(project_dir) / "uv.lock") + "\n")
 
 
 class BackendError(RuntimeError):
@@ -174,10 +200,56 @@ class WorkerSynthesizer(Synthesizer):
         return [str(self.interpreter()), "-m", WORKER_MODULE, self.name]
 
     def setup_hint(self) -> str:
-        return (
-            f"UV_PROJECT_ENVIRONMENT={self.venv()} uv sync --directory {self.project_dir()} "
-            "--frozen"
-        )
+        return f"fukikae backends setup {self.name}"
+
+    def lock_problem(self) -> str | None:
+        """Why the environment doesn't match its project's lock, or None when it does."""
+        lock = self.project_dir() / "uv.lock"
+        recorded = self.venv() / LOCK_HASH_FILE
+        if not lock.is_file():
+            return f"{lock} is missing"
+        if not recorded.is_file():
+            return (
+                f"{self.venv()} records no lock hash (it was not set up by `{self.setup_hint()}`)"
+            )
+        if recorded.read_text().strip() != lock_digest(lock):
+            return f"{self.venv()} was synced from another version of {lock}"
+        return None
+
+    def worker_env(self, *, online: bool = False) -> dict[str, str]:
+        """The allowlisted environment the worker gets (never fukikae's secrets); offline
+        unless ``online`` (the setup step's download, which may also use ``HF_TOKEN``)."""
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k in ENV_ALLOW or k.startswith(ENV_ALLOW_PREFIXES)
+        }
+        src = str(self.checkout() / "src")
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (src, env.get("PYTHONPATH")) if p)
+        env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONNOUSERSITE"] = "1"
+        if online:
+            if os.environ.get("HF_TOKEN"):
+                env["HF_TOKEN"] = os.environ["HF_TOKEN"]
+        else:
+            env["HF_HUB_OFFLINE"] = "1"
+            env["TRANSFORMERS_OFFLINE"] = "1"
+        return env
+
+    @classmethod
+    def setup(cls, *, fetch: bool = True, run: Callable[..., Any] = subprocess.run) -> None:
+        """Set the worker environment up: ``uv sync --locked`` into ``.venvs/<extra>``, record
+        the lock's hash, then (``fetch``) run the worker's ``--fetch`` step online."""
+        inst = cls({}, "cpu")
+        env = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(inst.venv())}
+        log.info("syncing %s from %s", inst.venv(), inst.project_dir() / "uv.lock")
+        run(["uv", "sync", "--locked", "--directory", str(inst.project_dir())], env=env, check=True)
+        record_lock(inst.project_dir(), inst.venv())
+        if fetch:
+            log.info("fetching the %s model files", cls.name)
+            with tempfile.TemporaryDirectory(prefix=f"fukikae-{cls.name}-setup-") as cwd:
+                run([*inst.command(), "--fetch"], env=inst.worker_env(online=True), cwd=cwd,
+                    check=True)  # fmt: skip
 
     # -- lifecycle ---------------------------------------------------------------------------
 
@@ -190,10 +262,12 @@ class WorkerSynthesizer(Synthesizer):
                 f"{self.venv()} does not exist; set it up with `{self.setup_hint()}` "
                 '(README, "Cloning backends")'
             )
-        env = dict(os.environ)
-        src = str(self.checkout() / "src")
-        env["PYTHONPATH"] = os.pathsep.join(p for p in (src, env.get("PYTHONPATH")) if p)
-        env["PYTHONUNBUFFERED"] = "1"
+        problem = self.lock_problem()
+        if problem:
+            raise BackendUnavailable(
+                f"tts backend {self.name!r}: {problem}; set it up again with `{self.setup_hint()}`"
+            )
+        env = self.worker_env()
         if self.device.startswith("cuda"):
             gpu = nvml_index(self.device)
             # Ruling CD15: the card's lock, held until the worker is reaped (the worker gets

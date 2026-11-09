@@ -2,8 +2,7 @@
 
 The model runs in the worker (``impl_indextts2``, under ``.venvs/indextts2``); this class is
 what the tts stage, cards and eval see. Set the worker up with
-``UV_PROJECT_ENVIRONMENT=<checkout>/.venvs/indextts2 uv sync --directory
-<checkout>/workers/indextts2 --frozen``.
+``fukikae backends setup indextts2``.
 """
 
 from __future__ import annotations
