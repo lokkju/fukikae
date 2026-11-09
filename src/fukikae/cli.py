@@ -61,31 +61,66 @@ def backends_list() -> None:
 
 @backends_app.command("setup")
 def backends_setup(
-    name: str = typer.Argument(..., help="A TTS backend that runs in its own environment."),
+    name: str = typer.Argument(..., help="A backend with model files to fetch."),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="Sync only; download nothing."),
+    workspace: Path | None = typer.Option(
+        None,
+        "--workspace",
+        help="Fetch the model this workspace's config names (default: the default profile's).",
+    ),
 ) -> None:
-    """Set up a cloning backend's worker environment: `uv sync --locked`, the lock's hash
-    recorded, then its pinned model files downloaded (the only step that downloads)."""
+    """Fetch a backend's pinned model files: the only step that downloads (ruling CD24). A
+    cloning TTS backend's worker environment is set up first (`uv sync --locked`, the lock's
+    hash recorded); an in-process backend (Kokoro, SenseVoice, emotion2vec, the managed
+    translator's GGUF) fetches its pinned snapshot into the Hugging Face cache."""
     import subprocess
 
-    from fukikae.backends.loader import BackendUnavailable, backend_class
+    from fukikae.backends.base import KINDS
+    from fukikae.backends.loader import BackendUnavailable, backend_class, names
     from fukikae.backends.tts.remote import WorkerSynthesizer
     from fukikae.config import ConfigError
 
+    kinds = [k for k in KINDS if name in names(k)]
+    if not kinds:
+        typer.echo(f"error: no backend named {name!r} (see `fukikae backends list`)", err=True)
+        raise typer.Exit(1)
     try:
-        cls = backend_class("tts", name)
+        cls = backend_class(kinds[0], name)
     except (ConfigError, BackendUnavailable) as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
-    if not (isinstance(cls, type) and issubclass(cls, WorkerSynthesizer)):
-        typer.echo(f"error: {name} runs inside fukikae; nothing to set up", err=True)
-        raise typer.Exit(1)
-    try:
-        cls.setup(fetch=not no_fetch)
-    except subprocess.CalledProcessError as e:
-        typer.echo(f"error: {' '.join(map(str, e.cmd))} exited with {e.returncode}", err=True)
-        raise typer.Exit(1) from e
-    typer.echo(f"{name}: set up in {cls({}, 'cpu').venv()}")
+    if isinstance(cls, type) and issubclass(cls, WorkerSynthesizer):
+        try:
+            cls.setup(fetch=not no_fetch)
+        except subprocess.CalledProcessError as e:
+            typer.echo(f"error: {' '.join(map(str, e.cmd))} exited with {e.returncode}", err=True)
+            raise typer.Exit(1) from e
+        typer.echo(f"{name}: set up in {cls({}, 'cpu').venv()}")
+        return
+    fetch = getattr(cls, "fetch", None)
+    if fetch is None:
+        typer.echo(f"{name}: nothing to fetch")
+        return
+    if no_fetch:
+        typer.echo(f"{name}: --no-fetch, nothing done")
+        return
+    for path in fetch(_setup_options(kinds[0], name, workspace)):
+        typer.echo(f"{name}: {path}")
+
+
+def _setup_options(kind: str, name: str, workspace: Path | None) -> dict[str, object]:
+    """The options ``name`` gets in ``workspace``'s config (or the default profile's)."""
+    import tempfile
+
+    from fukikae.config import load_config
+
+    with tempfile.TemporaryDirectory(prefix="fukikae-setup-") as tmp:
+        cfg = load_config(workspace or Path(tmp), None)
+        try:
+            bc = cfg.resolve(kind)
+        except Exception:  # noqa: BLE001 - a kind with no table: the backend's defaults
+            return {}
+    return dict(bc.options) if bc.backend == name else {}
 
 
 @app.command()

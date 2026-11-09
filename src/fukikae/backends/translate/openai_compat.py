@@ -20,8 +20,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, ClassVar
 
-from huggingface_hub import hf_hub_download
-
+from fukikae.backends.local import fetch_file, local_file
 from fukikae.backends.translate.llama_server import LlamaServer
 from fukikae.config import ConfigError
 from fukikae.translation import (
@@ -98,12 +97,21 @@ class OpenAICompatTranslator:
             return
         if not self.model or not self.file:
             raise ConfigError('[translate] mode = "managed" needs model (a hub repo) and file')
-        gguf = Path(hf_hub_download(self.model, self.file, revision=self.revision))
+        # the pinned GGUF from the local cache only (ruling CD24)
+        gguf = local_file("openai_compat", self.model, self.file, self.revision)
         server = LlamaServer(self.binary, gguf, self.gpu_index, ctx=self.ctx)
         server.__enter__()
         self._server = server
         self._base_url = server.base_url + "/v1"
         self._key = server.api_key
+
+    @classmethod
+    def fetch(cls, options: dict[str, Any] | None = None) -> list[Path]:
+        """Download the managed mode's GGUF (``fukikae backends setup openai_compat``)."""
+        inst = cls(options or {}, "cpu")
+        if inst.mode != "managed" or not inst.model or not inst.file:
+            return []
+        return [fetch_file(inst.model, inst.file, inst.revision)]
 
     def unload(self) -> None:
         server, self._server = self._server, None

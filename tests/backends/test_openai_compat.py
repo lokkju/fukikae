@@ -103,11 +103,11 @@ def test_managed_mode_downloads_and_runs_the_server(monkeypatch, fake, tmp_path)
     gguf.write_bytes(b"GGUF")
     calls = []
 
-    def fake_download(repo, filename, revision=None):
+    def fake_local(_backend, repo, filename, revision=None):
         calls.append((repo, filename, revision))
-        return str(gguf)
+        return gguf
 
-    monkeypatch.setattr(openai_compat, "hf_hub_download", fake_download)
+    monkeypatch.setattr(openai_compat, "local_file", fake_local)
     t = OpenAICompatTranslator(
         {
             "mode": "managed",
@@ -182,7 +182,7 @@ def test_managed_mode_sends_the_servers_key(monkeypatch, fake, tmp_path):
     gguf.write_bytes(b"GGUF")
     record = tmp_path / "requests.jsonl"
     monkeypatch.setenv("FAKE_LLAMA_RECORD", str(record))
-    monkeypatch.setattr(openai_compat, "hf_hub_download", lambda *_a, **_k: str(gguf))
+    monkeypatch.setattr(openai_compat, "local_file", lambda *_a, **_k: gguf)
     t = OpenAICompatTranslator({"model": "r/m", "file": "x.gguf", "binary": fake}, "cuda:0")
     t.load()
     try:

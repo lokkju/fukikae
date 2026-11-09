@@ -61,17 +61,18 @@ class Emotion2vecTagger:
         )
 
     def _snapshot(self) -> str:
-        """The pinned snapshot's path: the local cache first, a download only when it is
-        missing (never under HF_HUB_OFFLINE)."""
-        from huggingface_hub import constants, snapshot_download
-        from huggingface_hub.errors import LocalEntryNotFoundError
+        """The pinned snapshot from the local cache only (ruling CD24)."""
+        from fukikae.backends.local import local_snapshot
 
-        try:
-            return snapshot_download(self.model, revision=self.revision, local_files_only=True)
-        except LocalEntryNotFoundError:
-            if constants.HF_HUB_OFFLINE:
-                raise
-        return snapshot_download(self.model, revision=self.revision)
+        return str(local_snapshot("emotion2vec", self.model, self.revision))
+
+    @classmethod
+    def fetch(cls, options: dict[str, Any] | None = None) -> list[Path]:
+        """Download the pinned snapshot (``fukikae backends setup emotion2vec``)."""
+        from fukikae.backends.local import fetch_snapshot
+
+        inst = cls(options or {}, "cpu")
+        return [fetch_snapshot(inst.model, inst.revision)]
 
     def unload(self) -> None:
         self._model = None

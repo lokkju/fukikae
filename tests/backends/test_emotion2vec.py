@@ -116,23 +116,20 @@ def hub(monkeypatch):
     return h
 
 
-def test_second_load_makes_no_network_call(hub):
-    Emotion2vecTagger({}, "cpu").load()
-    assert hub.calls == [True, False]  # cache miss, then the one download
+def test_runtime_loads_never_download(hub):
+    # ruling CD24: a cache miss names the setup command; only fetch downloads
+    from fukikae.backends.loader import BackendUnavailable
+
+    with pytest.raises(BackendUnavailable, match="fukikae backends setup emotion2vec"):
+        Emotion2vecTagger({}, "cpu").load()
+    assert hub.calls == [True]
+    Emotion2vecTagger.fetch()
+    assert hub.calls == [True, False]
     hub.calls.clear()
     t = Emotion2vecTagger({}, "cpu")
     t.load()
     assert hub.calls == [True]
     assert t._model["model"] == f"/cache/{DEFAULT_MODEL}/{DEFAULT_REVISION}"
-
-
-def test_offline_never_downloads(hub, monkeypatch):
-    from huggingface_hub import constants
-
-    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
-    with pytest.raises(Exception, match="not cached"):
-        Emotion2vecTagger({}, "cpu").load()
-    assert hub.calls == [True]
 
 
 @pytest.mark.slow
