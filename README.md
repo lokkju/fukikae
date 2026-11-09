@@ -16,7 +16,7 @@ mise -C . exec -- ffprobe -version   # ffmpeg comes from mise, not the host
 
 `fukikae run <workspace> <episode>` runs, in order: extract, separate, language, asr, diarize, characters, tag (when `[tag] enabled`), translate, tts, timefit and mix. Each writes under `<workspace>/.fukikae/episodes/<episode>/`:
 
-- `06-translate/cues.<target>.json`: the lines to dub (translated on the ASR path, the subtitle text on the subtitle path).
+- `06-translate/cues.<target>.json`: the lines to dub (translated on the ASR path, the subtitle text on the subtitle path). With `[translate] source = "auto"` (every profile) the subtitle path reads target-language subtitles when there are dialogue subtitles: a `[subs] file` or `track`, a sidecar, or the embedded dialogue track; a track titled signs, songs or forced, or too sparse for dialogue (under 3 cues a minute, or 40% of the densest track), is skipped, a forced flag on a track that carries every line is not believed, and a plain track wins over CC/SDH (ruling CD25).
 - `07-tts/<cue>.wav` and `plan.json`: one render per spoken cue, silence trimmed, rate-fitted up to `[timefit] max_speedup`.
 - `08-timefit/<cue>.wav` and `report.json`: each render placed in its slot. What the rate fit left is time-stretched (ffmpeg `atempo`, pitch kept; rate and stretch together never exceed `max_speedup`), then up to `borrow_silence_ms` of silence is borrowed after the slot and before it. A line that still doesn't fit plays whole past its slot and is listed under `over`; nothing is cut. `summary` counts stretched, borrowed and over lines.
 - `09-mix/dub.<target>.wav`, `dub.<target>.ass` and `report.json`: the dub track and its subtitles (`Speaker: line`). The original vocals are removed over each dubbed line's whole slot and wherever its audio plays, and kept elsewhere; a line that is not dubbed (errored, untranslated, skipped) keeps its voice even where a dubbed slot overlaps it, and over songs and laughter the original vocals stay untouched. Songs come from a theme-song detector on the separation stems (openings and endings: loud music with near-constant, pitched vocals in the first 6 or last 4 minutes; every candidate window's scores are in the report), subtitle cues the filter marked as songs, and the tag stage's singing spans; a translated lyric inside a song is not placed, and `dropped` says which source caught it. The dub's level follows the original dialogue's, and the mix's EBU R128 integrated loudness the original mix's, by one linear gain and a true-peak limiter at -1.5 dBTP (headroom for the AAC encode), so the loudness range is unchanged (`loudness` in the report holds integrated loudness, range and true peak of the original, the mix before and after, and the dub track in the mkv after encoding).
@@ -27,6 +27,33 @@ mise -C . exec -- ffprobe -version   # ffmpeg comes from mise, not the host
 Two deliberate departures from the foundation spec (ruling CD11): the tag stage's BGM spans do not keep the original vocals by default, because SenseVoice marks BGM under ordinary dialogue (on Fairy Tail E11, 10 dialogue lines sat in BGM spans outside any song, which would have played the dub over the untouched Japanese line); and the original vocals are cleared over a dubbed line's whole slot, not only where the dub plays, because a dub shorter than its slot would otherwise let the original line resume mid-sentence.
 
 To listen, open `out/<episode>.fukikae.mkv` in any player (mpv switches audio with `#` and subtitles with `j`), or play `09-mix/dub.<target>.wav` against `00-extract/audio.wav`.
+
+## Voices: cards, cloning by default, packs
+
+Every recurring character speaks with a voice card per target language: a small TOML file in the workspace's card store (`.fukikae/cards/<id>.toml`, the id a hash of what the card sounds like), with its reference clips and fingerprint beside it. The registry records which card each character has, with a numbered history.
+
+**Automatic cards.** The first time a character needs a voice in an episode and has no card for the target language, the tts stage gives it one, `auto` and unlocked, and logs a line to `07-tts/assignments.log`:
+
+- With `[tts] clone_backend` set (every profile sets `indextts2`, the operator's pick after a blind listening test, D24), a clone card of that backend. Its reference clips are the character's cleanest turns on the separated vocals across the episodes the workspace has processed: no overlap with another speaker, 3 to 12 s each, an ASR transcript that isn't implausibly sparse for its length, outside theme songs and tagged singing, ranked by signal-to-noise with turns that emotion2vec scores non-neutral last (up to 3 clips, 20 s). When a chosen clip is scored non-neutral, the log and `voices show` say `references may carry emotion: <labels>`.
+- A character with under 6 s of such speech gets a stock Kokoro voice from the pool matching its estimated gender instead, and the line says so: `character 7: 4.2 s of clean speech, under 6 s; stock voice am_puck`.
+- Extras (unrecurring speakers) always get stock voices, one per speaker label.
+- An automatic card never replaces a card that exists. To start over, assign a card by hand.
+
+Set `clone_backend = ""` under `[tts]` in a workspace's `fukikae.toml` to give new characters stock voices only; `[tts] backend` (Kokoro) is the stock and extras backend either way. Qwen3-TTS and CosyVoice 3 also passed the listening test; a character can be given either with `voices assign` or `voices clone --backend`.
+
+**Changing a voice.** `fukikae voices <command> <workspace> <character> ...`, where a character is its registry id or name:
+
+- `list`, `show`, `history`: what each character has, the current card (`references may carry emotion` and the clone mode included), the assignment rows.
+- `assign <card>`: a card id from the store, `stock:kokoro:<voice>`, or one character's card from a pack (`<pack>:<name>`); locked unless `--no-lock`.
+- `clone --clip <wav> --transcript TEXT [--backend NAME]`: a clone from a clip you cut yourself, 3 to 30 s of the character alone, for a character whose automatic references are wrong (a cluster that merged two voices, say); assigned locked.
+- `edit` (a copy of the card in `$EDITOR`, assigned locked), `derive --to <lang>` (the same voice for another target language), `revert [--to N]`, `lock`, `unlock`, `restock` (re-pins automatic stock cards after a Kokoro revision bump).
+- `verify [--record]`: renders a fixed test script and compares its speaker embedding with the card's fingerprint.
+
+Locked cards and cards an operator chose are never replaced by automatic assignment or by an import without `--replace`.
+
+**Packs.** `fukikae voices export <workspace> -o <pack>[.tar.zst]` writes the named characters' current cards, clips and fingerprints to a pack (names and external ids, never registry ids); `fukikae voices import <workspace> <pack>` assigns them to another workspace's characters by external id, then by name, as `import:<title>`, unlocked, and verifies each fingerprinted card. A pack is untrusted input: it is read without extraction, every member checked against the layout and size limits, cards re-parsed and their ids recomputed, and a fingerprint can only name an allowlisted embedder that is already on disk, so a pack can never cause a download or load code.
+
+**Models and privacy.** `fukikae backends setup <name>` is the only command that downloads: worker environments (`uv sync --locked`) and every pinned model, IndexTTS2's included (`fukikae backends setup indextts2` before the first run). Runs load models from the local cache only, with pyannote's, Hugging Face's and onnxruntime's telemetry turned off for the whole process and for every worker (ruling CD24). Ten older backends (ASR, alignment, diarization, dialogue separation and four embedders) still fetch an unpinned model on a cache miss; pinning them is open work.
 
 ## Cloning backends
 
