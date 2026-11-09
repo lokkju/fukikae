@@ -281,3 +281,50 @@ Fingerprint embedders are an allowlist (`FINGERPRINT_EMBEDDERS`: WeSpeaker ResNe
 - **Blinding.** Per cue, `random.Random(f"ab-blind:{seed}:{slot}")` over the sorted candidate names; files are only `cueNN_A.wav`..., `cueNN_ref.wav`, `cueNN_ref_en.wav`; every clip of a cue covers one window (slot and every placed render plus 0.3 s), mono 48 kHz, at -23 LUFS by linear gain plus the -1 dBTP limiter (CD10). Checked: equal frames per cue, -23.0 LUFS (one clip -23.1), no backend name in `index.html` or `README.txt`, the key unlinked.
 - **Scene.** FT E12 922.6 to 997.6 s (75 s, picked as the window with the most cloned characters speaking, clear of songs), 23 cues through tts, timefit and mix per candidate, no character needing a stock fallback; `audio/scene01_*.wav` and `video/scene01_*.mkv` (720p h264, FLAC).
 - **Verdict.** `verdict.toml` takes per-cue and per-scene rankings by letter (filled before opening the key), then `[overall] pick` (a candidate name, or `stock`), `passed`, and `[[override]]` per character (set, registry id, backend or `stock`, optional mode). Task 12 reads it with `fukikae.eval.ab.read_verdict(pack)`, which resolves every letter through `key.toml` and rejects names that aren't candidates; picking kokoro counts as `stock`.
+
+## Task 12: the verdict applied, full dubs and the held-out row (2026-11-09)
+
+**Ruling D24 (the operator's verdict, D15 checkpoint).**
+- Default clone backend: IndexTTS2. `[tts] clone_backend = "indextts2"` is in the default, anime and live-action profiles; `[tts] backend` stays Kokoro for stock and extras.
+- Passed: IndexTTS2, Qwen3-TTS and CosyVoice 3.
+- No per-character overrides. D12 resumes; characters under 6 s of clean speech fall back to stock, reported.
+- Source: the blind rankings in `~/fukikae-review/ab-2026-11/verdict.toml`, read with `read_verdict`, with `[overall]` left empty by the operator. Decoded first places and points (3/2/1): indextts2 4 (scene included) and 20, qwen3_tts 3 and 17, cosyvoice3:zero_shot 2 and 10, cosyvoice3 2 and 9, qwen3_tts:xvector 2 and 9; kokoro never ranked.
+
+**Ruling CD25.** The subtitle path reads a dialogue track only (`media.dialogue_track`):
+- never a track whose title says signs, songs or forced;
+- never one with under 3 cues a minute, or under 40% of the densest track of the language (from `NUMBER_OF_FRAMES` and the duration);
+- a forced flag yields to a dialogue-sized count, and a flagged track of unknown size is skipped;
+- plain tracks win over CC/SDH.
+
+FT E11's only English track (flagged forced, "English", 344 cues, 14.4 a minute) now counts as dialogue. E12 to E14 skip the 3-cue "Forced" track.
+
+**The clone path.** `cards.auto.workspace_cloning` builds the clone source. It applies CD5 selection over the character's turns in every processed episode of the workspace and takes the episode with the most picked speech. `ensure_assignments(..., cloning=...)` makes the clone card or the reported stock fallback, `by = "auto"` and unlocked, under the CD2, CD3 and CD9 refusals. Two additions to selection:
+- a sparse-text filter, which drops a turn whose text rate is under 0.3 of the speaker's median and under 1 character a second (0.4 words a second in spaced languages);
+- a stock gender estimate that skips theme songs and singing.
+
+Fingerprints are not recorded at assignment (`voices verify --record` does it). `voices clone --clip --transcript [--backend]` assigns a hand-cut clone card, locked.
+
+**The female-sounding FT characters (operator note).** These are merged clusters, not wrong turns:
+- In the A/B copy, character 3 (SPEAKER_13) is the opening's singer plus single lines from seven speakers. Its picks were Young Makarov's "くそ" followed by 3.4 s with no speech, and a Natsu line.
+- Character 2 (SPEAKER_12) is Charle, Wendy and Happy plus two Natsu spans. Its picks were Charle's line and a turn holding both Happy and Natsu.
+- In the full run, by subtitle names across E11 to E14, character 2 is Wendy 67, Happy 65, Charle 25 and Natsu 15. Its card cloned Wendy and Charle in E14; character 3's cloned Touka in E13.
+- The sparse filter drops the "くそ" turn, which sends A/B character 3 to stock (`af_heart`, unknown band). Character 2's picks are unchanged.
+- An embedding-centroid check would not separate these voices: Charle's spans sit at 0.72 to 0.75 to the centroid.
+- The fix belongs in identity: subtitle speaker names, or a registry split followed by `voices clone`.
+- Clips are in `~/fukikae-review/t12-refs/`.
+
+**IndexTTS2's comma pause.** The text was the subtitle line verbatim, and IndexTTS2's normaliser keeps the comma. The model renders the vocative comma as a 170 ms pause. Documented, not changed.
+
+**Full dubs (`~/fukikae-scratch/t12/out/`).**
+- FT E11 to E14 on the subtitle path, 251 to 354 cues each. 15 characters were cloned and none fell back to stock. 2 to 7 lines an episode stay over their slot after fitting.
+- BBT de E01 to E03 on the ASR path, 4 characters cloned. 48 to 55 lines an episode stay over after fitting, because of the German budget. E03 has 168 extras cues.
+- The FT copy's registry was reembedded from ECAPA first.
+
+**Held-out row.** FT E14, IndexTTS2, run `f912c020`, run once with committed defaults:
+- held-out similarity 0.449 over 2 characters (ceiling 0.698), and 0.518 against the references over 6 characters;
+- WER 0.104 pooled (median 0);
+- fit 0.75;
+- emotion agreement 0.357;
+- 0 suspect renders.
+
+Results doc: `docs/results/2026-11-09-character-cards.md`.
