@@ -13,12 +13,12 @@ file.
 Metrics, per character and overall:
 
 - ``speaker_similarity``: WeSpeaker cosine between each render and the normalized mean of the
-  character's references. A card with reference clips (a clone) is compared with those clips
-  (``similarity_source = "card"``). A stock card has none, so it is compared with the
-  character's original-voice exemplars, the three longest diarize turns no other speaker
-  overlaps, from the separated vocals of the sampled episodes (``"original"``): that is the
-  voice a clone would try to reproduce, so stock voices give the baseline on the same scale
-  (the plan's decision). Across languages the original voice is another actor in another
+  character's references: the clips ``cards.select.select_references`` picks from the sampled
+  episodes (``similarity_source = "references"``), the same spans a clone card of this run is
+  cut from, for every backend, so stock and clone renders are on one scale (the plan's
+  decision). A character with too little clean speech for that is compared with the clips of
+  its card when it has some (``"card"``), else with its three longest diarize turns no other
+  speaker overlaps (``"original"``). Across languages the original voice is another actor in another
   language, so stock numbers are low by construction; they are a floor, not a verdict.
   Each source has its own metric (``speaker_similarity_card``, ``speaker_similarity_original``);
   ``speaker_similarity``, the report's headline, exists only when every sampled character
@@ -43,6 +43,13 @@ Metrics, per character and overall:
   agreement tracks the neutral share of the source labels (noted in the row).
 - per card (ruling CD8): ``cps_median`` and quartiles, characters of text per second of the
   trimmed render, for per-card translate budgets later.
+
+With ``--backend`` naming a backend that clones and has no stock voices (IndexTTS2), each
+sampled character gets a clone card built from those references (``clone_card``; mode
+``clone``), put in the card store and never assigned; a character with too little clean speech
+is skipped and noted, not rendered with a stock voice. A backend with stock voices renders
+stock cards (mode ``stock``), as before. The CD5 warning ("references may carry emotion")
+is a note of the run and of the row.
 
 With ``--reference-workspace`` (BBT: the English original track's workspace, on the same
 timeline as the dubbed track), each cue's slot is matched to the English words whose midpoint
@@ -74,7 +81,14 @@ from fukikae.artifacts import atomic_path, read_json
 from fukikae.backends import loader
 from fukikae.backends.identity import identity_key, model_identity
 from fukikae.cards.card import Card
-from fukikae.cards.select import gender_of, speaker_f0
+from fukikae.cards.select import (
+    RefPick,
+    clone_card,
+    gender_of,
+    reference_report,
+    select_references,
+    speaker_f0,
+)
 from fukikae.cards.stock import pick_stock, revision, stock_card
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config
@@ -451,6 +465,7 @@ def tts_rows(
     tag: str | None,
     workspace: Path,
     options: Mapping[str, Any] | None = None,
+    notes: Sequence[str] = (),
 ) -> list[Any]:
     """One ``tts`` ledger row for one TTS backend's renders."""
     from fukikae.eval.ledger import make_row
@@ -464,6 +479,8 @@ def tts_rows(
     }
     if summary.emotion:
         detail["emotion"] = summary.emotion
+    if notes:
+        detail["notes"] = list(notes)
     return [
         make_row(
             stage="tts",
@@ -575,6 +592,58 @@ def _stock_cards(
     return out
 
 
+def character_references(
+    ws: Workspace, episodes: Sequence[str], cid: int
+) -> tuple[str, list[RefPick]] | None:
+    """The character's reference clips (``select_references``) in the episode where they add
+    up to the most speech, with that episode; None when no episode has enough."""
+    best: tuple[str, list[RefPick]] | None = None
+    for e in episodes:
+        work = ws.work_dir(e)
+        asg_path = work / "05-characters" / "assignments.json"
+        tr_path = work / "03-asr" / "transcript.json"
+        vocals = work / "01-separate" / "vocals.wav"
+        if not (asg_path.exists() and tr_path.exists() and vocals.exists()):
+            continue
+        asg = read_json(asg_path, Assignments)
+        speakers = {
+            a.cluster
+            for a in asg.clusters
+            if a.character_id == cid and a.status not in ("extra", "review")
+        }
+        if not speakers or not asg.turns:
+            continue
+        tags_path = work / "04b-tag" / "tags.json"
+        tags = read_json(tags_path, Tags) if tags_path.exists() else None
+        picks = select_references(asg.turns, speakers, read_json(tr_path, Transcript), tags, vocals)
+        if picks and (
+            best is None or sum(p.seconds for p in picks) > sum(p.seconds for p in best[1])
+        ):
+            best = (e, picks)
+    return best
+
+
+def _clone_cards(
+    ws: Workspace,
+    cfg: Config,
+    store: CardStore,
+    cls: type[Any],
+    refs: Mapping[int, tuple[str, list[RefPick]] | None],
+    source_language: str,
+) -> dict[int, str]:
+    """A clone card of ``cls`` per character with references (put in the store, never
+    assigned)."""
+    out: dict[int, str] = {}
+    for cid, found in sorted(refs.items()):
+        if found is None:
+            continue
+        e, picks = found
+        vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
+        card = clone_card(cls, picks, store, vocals, source_language, cfg.target_language, e)
+        out[cid] = store.put(card)
+    return out
+
+
 def _render(
     ws: Workspace,
     cfg: Config,
@@ -620,9 +689,10 @@ def _render(
         try:
             for e, c in jobs:
                 card_ref = cards[_cid(c)]
+                vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
                 job = prepare_cue(
                     c, card_ref, cfg, store, who=who(_cid(c)), checked=checked[card_ref],
-                    identity=idents[b],
+                    identity=idents[b], vocals=vocals,
                 )  # fmt: skip
                 dest = folder / f"{e}-{c.id}.{job.key}.wav"
                 if not dest.exists():
@@ -630,7 +700,7 @@ def _render(
                         with atomic_path(dest) as tmp:
                             shutil.copyfile(cache / f"{job.key}.wav", tmp)
                     else:
-                        render_cue(job, lazy, dest, store)
+                        render_cue(job, lazy, dest, store, ref_dir=folder / "ref" / e)
                 out.append(
                     RenderedCue(e, c, dest, wav_seconds(dest), card_ref, b, _voice_name(job.card))
                 )
@@ -809,9 +879,31 @@ def evaluate(
                 raise ValueError(f"no sampled character has a {target!r} card")
         cards = {cid: assigned[cid] for cid in chars if cid in assigned}
         mode = "assigned"
-    else:
-        cards = _stock_cards(ws, cfg, store, backend, picked, assigned)
-        mode = "stock"
+    refs = {
+        cid: character_references(ws, sorted({e for e, c in picked if c.character_id == cid}), cid)
+        for cid in sorted({_cid(c) for _, c in picked})
+    }
+    for cid, found in refs.items():
+        for line in reference_report(found[1]) if found else []:
+            notes.append(f"character {cid}: {line}")
+    if backend is not None:
+        cls = loader.backend_class("tts", backend)
+        sources = getattr(cls, "sources", frozenset())
+        if "clone" in sources and "stock" not in sources:
+            mode = "clone"
+            cards = _clone_cards(ws, cfg, store, cls, refs, source_language)
+            skipped = [cid for cid in refs if cid not in cards]
+            if skipped:
+                notes.append(
+                    "skipped (too little clean speech for a clone, under 6 s): "
+                    + ", ".join(f"character {cid}" for cid in skipped)
+                )
+                picked = [(e, c) for e, c in picked if _cid(c) in cards]
+                if not picked:
+                    raise ValueError("no sampled character has enough clean speech for a clone")
+        else:
+            cards = _stock_cards(ws, cfg, store, backend, picked, assigned)
+            mode = "stock"
 
     # 1. TTS backend(s).
     renders, bcs, neutral = _render(ws, cfg, store, picked, cards, names)
@@ -823,6 +915,15 @@ def evaluate(
     sim_source: dict[int, str] = {}
     for cid, card_ref in cards.items():
         card = store.get(card_ref)
+        found = refs.get(cid)
+        if found is not None:
+            e, picks = found
+            sim_source[cid] = "references"
+            vocals16 = ws.work_dir(e) / "01-separate" / "vocals_16k.wav"
+            if not vocals16.exists():
+                to_16k(ws.work_dir(e) / "01-separate" / "vocals.wav", vocals16)
+            ref_spans[cid] = [(vocals16, (p.start, p.end)) for p in picks]
+            continue
         if card.voice.references:
             sim_source[cid] = "card"
             clips = []
