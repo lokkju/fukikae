@@ -224,7 +224,7 @@ Run 2026-11-09. Sweep (Step 1) as recorded under Task 7b and in `.superpowers/sd
 - Literal rule: ct 0.4, joint with `episode_cannot_link` on at 0.50-0.60, 18 clean / 1 merge / 0.857. Next: ct 0.5, centroid or joint with cannot-link on at 0.50-0.60, 17 / 1 / 0.714. Provisional (ct 0.6, joint, cannot-link off, 0.60): 16 / 4 / 0.857.
 - GT12 overrides the literal rule: ct 0.4 against ct 0.5 is a tie (the one character is りん on Kaze, 0.79 at ct 0.6, 0.74-0.80 at ct 0.5, 0.84 at ct 0.4; 0.4 is outside VBx's `Uniform(0.5, 0.8)` tuning range), and ct 0.5 is picked.
 - At ct 0.5, centroid and joint with cannot-link on tie at 17 / 1 / 0.714 for 0.50, 0.55 and 0.60 (both 16 at 0.65). Simpler matcher: centroid. Threshold: 0.6, the top of the plateau and today's value (Task 9's choice in the same situation).
-- **Pick:** `[diarize] clustering_threshold = 0.5`, `[characters] matcher = "centroid"` at `[registry] match_threshold = 0.6`. `[resolve]` holds the tied joint cell: joint, 0.6, `episode_cannot_link = true` (was `false`).
+- **Pick** (GT12 clustering value, GT14 matcher and threshold tie-break): `[diarize] clustering_threshold = 0.5`, `[characters] matcher = "centroid"` at `[registry] match_threshold = 0.6`. `[resolve]` holds the tied joint cell: joint, 0.6, `episode_cannot_link = true` (was `false`). That cell was never held out: every held-out run took the centroid path.
 - **Language variants: none.** en, es, ja (kaze) and ko (grid) have no ct 0.5 cell above the pick. de has one by the letter: joint, cannot-link off, 0.60 gives 2 / 1 / 1.00 against the pick's 2 / 1 / 0.75. The gain is Sheldon's E02 speech (204 s, unassigned under centroid) joining the merged Leonard + Sheldon id; same merge, same failing verdict. It is a joint setting, read only by `registry resolve`, and a `[resolve.lang.de]` table would never be read on the centroid path the pick ships. Not shipped; for the controller to confirm as a ruling.
 
 ### Profile (Step 3)
@@ -254,7 +254,28 @@ Workspaces `~/fukikae-ws/t8/ws/<set>-pick`: `cp -al` of the ct 0.5 copy with its
 
 ### Kaze E11, pending
 
-`~/fukikae-ws/t8/ws/kaze-pick` exists with E01-E03's characters stage run at the committed profile (no E11, nothing scored). Follow-up, once, no re-tuning: copy EP011 through the read-only volume (`--group-add 100`, as Task 7b), link it as `Kaze Kaoru - S01E11.mkv`, run the Task 7b onset check against `aligned/S01E11.ass`, then `KAZE_EPS=S01E11 scripts/ground-truth/holdout_run.sh kaze-pick` (diarizes at 0.5 and runs characters) and `scripts/ground-truth/holdout_score.sh ~/fukikae-ws/t8/ws/kaze-pick` (tag `t8-holdout`). Kaze can't show over-merge (one recurring character in tuning).
+`~/fukikae-ws/t8/ws/kaze-pick` exists with E01-E03's characters stage run at the committed profile (no E11, nothing scored); the default profile's tuning registry is Task 7b's in `~/fukikae-ws/kaze-default`. Follow-up, once each, no re-tuning, from the repository root. Kaze can't show over-merge (one recurring character in tuning).
+
+```bash
+# 1. Copy EP011 (week 3 must be under complete/tv/, nothing of it under incomplete/)
+docker volume create --driver local --opt type=nfs \
+  --opt o=addr=truenas.storage.lodenheim.lokkju.com,ro,nfsvers=4 \
+  --opt device=:/mnt/mega/media/ums fukikae-ums-ro
+docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-ums-ro:/ums:ro alpine:3.20 \
+  sh -c 'ls /ums/downloads/torrents/incomplete/tv | grep -i kaze; C=/ums/downloads/torrents/complete/tv; ls -l "$C"/*Kaze*Week*03*/Kaze.Kaoru.EP011.*.mkv; du -k "$C"/*Kaze*Week*03*/Kaze.Kaoru.EP011.*.mkv'
+docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-ums-ro:/ums:ro \
+  -v /home/lokkju/fukikae-ws/media:/out alpine:3.20 \
+  sh -c 'set -e; f=$(ls /ums/downloads/torrents/complete/tv/*Kaze*/Kaze.Kaoru.EP011.*.mkv); cp "$f" "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"; chmod 0640 "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"'
+docker volume rm fukikae-ums-ro
+# 2. Caption-onset check against ~/fukikae-ws/subs/kaze-kaoru/aligned/S01E11.ass, as Task 7b (pyannote turns and energy VAD)
+# 3. Live-action pick (diarizes E11 at clustering 0.5, then characters), scored once
+KAZE_EPS=S01E11 scripts/ground-truth/holdout_run.sh kaze-pick
+scripts/ground-truth/holdout_score.sh ~/fukikae-ws/t8/ws/kaze-pick
+# 4. Default profile (diarizes E11 at 0.6, then characters against Task 7b's registry), scored once
+mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae \
+  fukikae run ~/fukikae-ws/kaze-default S01E11 --to characters
+scripts/ground-truth/holdout_score.sh ~/fukikae-ws/kaze-default
+```
 
 ### Reproducibility
 
