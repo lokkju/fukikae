@@ -187,3 +187,23 @@ Commits 65edcc5 to cd1f5b6. eval tts re-run on the t7 copies (~/fukikae-scratch/
 Ledger run_ids: 873e0913 (E11 indextts2), 636a717d (E11 kokoro), 0ae8795e (E12 indextts2), 0aabe773 (E12 kokoro); tags candidates-fix1 and baseline-fix1. A second IndexTTS2 E12 pass over the same renders gave identical metrics and the same WER > 0.5 list, and the two-pass gpu test on c0232's render gave the same hypothesis twice. The duplicate Task 9a E12 row 25a875dc (WER 0.556) is retracted (record 07209874).
 
 c0232 ("That's not it.", the laugh render) is caught by the length guard: 3.44 s against 0.98 s expected, seed 1235 gave 2.51 s, still over the 2.45 s bound, so it is marked suspect. The laughter drop could not fire there: the tag stage has no laughter event over that span (E12 has three laughter or crying spans in all). c0235, c0236 and c0284 are over 0.5 WER for both backends, so the cause is the text, not the voice.
+
+### Task 9b: CosyVoice 3 beside Kokoro and IndexTTS2
+
+CosyVoice 3 (Fun-CosyVoice3-0.5B-2512 at 29e01c4e, CosyVoice code 074ca6dc, Matcha-TTS dd9105b3) in `[tts.cosyvoice3] mode = "auto"`, which was cross-lingual for every card here (Japanese and German clips, English text). eval tts on the t7 copies (FT) and ~/fukikae-scratch/t8/bbt-de (`--reference-workspace` bbt-en), 8 cues per character, seed 0, deterministic ASR (CD16), held-out similarity with the ceiling (CD17). The clone cards' reference spans are identical to IndexTTS2's on all three sets (same `select_references`, checked card by card). Kokoro and IndexTTS2 on FT were re-run over their cached renders without ledger rows and reproduced the fix-round rows exactly; BBT got fresh rows for all three (no held-out rows existed for it).
+
+| set | backend | cues | sim held-out | ceiling | sim refs | WER / median / floor | fit | stretch p90 | cps | emotion agr. | retried / suspect | WER > 0.5 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| FT E11 | kokoro | 64 (8) | -0.027 | 0.682 | 0.001 | 0.046 / 0 / 0.151 | 0.88 | 1.06 | 17.3 | low cov. | 0 / 0 | c0058, c0267, c0337 |
+| FT E11 | indextts2 | 40 (5) | 0.424 | 0.682 | 0.517 | 0.080 / 0 / 0.151 | 0.63 | 1.17 | 13.8 | low cov. | 3 / 1 | c0267 |
+| FT E11 | cosyvoice3 | 40 (5) | 0.428 | 0.682 | 0.478 | 0.080 / 0 / 0.151 | 0.80 | 1.12 | 15.0 | low cov. | 0 / 0 | c0054, c0058, c0267 |
+| FT E12 | kokoro | 72 (9) | 0.054 | 0.536 | 0.042 | 0.043 / 0 / 0.151 | 0.94 | 1.00 | 16.8 | 0.10 | 0 / 0 | c0196, c0235, c0236, c0284 |
+| FT E12 | indextts2 | 72 (9) | 0.304 | 0.536 | 0.489 | 0.074 / 0 / 0.151 | 0.89 | 1.07 | 14.6 | 0.31 | 1 / 1 | c0160, c0235, c0236, c0284 |
+| FT E12 | cosyvoice3 | 72 (9) | 0.249 | 0.536 | 0.455 | 0.061 / 0 / 0.151 | 0.90 | 1.00 | 16.4 | 0.17 | 0 / 0 | c0160, c0184, c0196, c0235, c0284 |
+| BBT de | kokoro | 24 (3) | 0.086 | 0.605 | 0.094 | 0.010 / 0 / 0.102 | 0.21 | 1.52 | 18.2 | 0.47 | 0 / 0 | - |
+| BBT de | indextts2 | 24 (3) | 0.540 | 0.605 | 0.608 | 0.024 / 0 / 0.102 | 0.08 | 1.73 | 17.0 | 0.35 | 0 / 0 | - |
+| BBT de | cosyvoice3 | 24 (3) | 0.444 | 0.605 | 0.544 | 0.021 / 0 / 0.102 | 0.08 | 2.48 | 12.8 | 0.39 | 0 / 0 | - |
+
+Held-out covers 3 of 5 (E11), 3 of 9 (E12) and 3 of 3 (BBT) characters; the table and rows now say so (`similarity_headline_note`). Against the English original (BBT): duration ratio 1.28 / 1.38 / 1.61, emotion agreement 0.56 / 0.41 / 0.65, similarity to the original actor 0.089 / 0.117 / 0.154 (Kokoro / IndexTTS2 / CosyVoice 3).
+Ledger run_ids: 4333da21 (E12 cosyvoice3), a219b732 (E11 cosyvoice3), 0879aa04, 217d180d, 26d1032f (BBT kokoro, indextts2, cosyvoice3); tag candidates-9b.
+Resources: worker venv 5.4 GB, model 5.1 GB (HF cache on /nvme), about 3.8 GB of VRAM over idle on GPU 0, load 28 s, about 0.6 to 0.8 s of compute per second of speech; a second render with the same seed is byte-identical.
