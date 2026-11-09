@@ -112,6 +112,8 @@ class Cue:
     start: float
     end: float
     text: str
+    style: str = ""  # the ASS event's style name; empty for other formats
+    ruby: bool = False  # an ASS furigana event (a `\\fscy` under 70 in its overrides)
 
 
 COLOURS: dict[str, tuple[int, int, int]] = {
@@ -158,8 +160,12 @@ _TAG = re.compile(r"<[^>]*>|\{[^}]*\}")
 _STAMP = re.compile(r"(?:(\d+):)?(\d+):(\d+)(?:[.,](\d+))?")
 
 
+# Invisible directional marks (Netflix starts every cue with U+202A) hide a tag at the line start.
+_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
 def strip_markup(text: str) -> str:
-    return html.unescape(_TAG.sub("", text)).replace(" ", " ").replace("‎", "")
+    return _INVISIBLE.sub("", html.unescape(_TAG.sub("", text)).replace("\xa0", " "))
 
 
 def _stamp(s: str) -> float:
@@ -219,8 +225,9 @@ def _ass_text(raw: str) -> str:
 
     def override(m: re.Match[str]) -> str:
         out = ""
-        for c in re.finditer(r"\\1?c&H([0-9A-Fa-f]{1,6})&?", m.group(0)):
-            v = c.group(1).rjust(6, "0")
+        for c in re.finditer(r"\\1?c&H([0-9A-Fa-f]{1,8})&?", m.group(0)):
+            v = c.group(1)
+            v = v[-6:] if len(v) > 6 else v.rjust(6, "0")  # AABBGGRR: drop the alpha byte
             b, g, r = int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16)
             out = f"<c.{colour_from_rgb(r, g, b)}>"
         if "\\r" in m.group(0) and not out:
@@ -228,6 +235,16 @@ def _ass_text(raw: str) -> str:
         return out
 
     return re.sub(r"\{[^}]*\}", override, raw)
+
+
+_FSCY = re.compile(r"\\fscy(\d+(?:\.\d+)?)")
+
+
+def _is_ruby(raw: str) -> bool:
+    """Furigana events are small (`\\fscy50`); tagged parentheses shrink with `\\fscx` only."""
+    return any(
+        float(m.group(1)) < 70 for b in re.findall(r"\{[^}]*\}", raw) for m in _FSCY.finditer(b)
+    )
 
 
 def parse_ass_cues(text: str) -> list[Cue]:
@@ -251,7 +268,10 @@ def parse_ass_cues(text: str) -> list[Cue]:
                 start, end = _stamp(d["start"]), _stamp(d["end"])
             except (KeyError, ValueError):
                 continue
-            cues.append(Cue(start, end, _ass_text(d.get("text", ""))))
+            raw_text = d.get("text", "")
+            cues.append(
+                Cue(start, end, _ass_text(raw_text), d.get("style", ""), _is_ruby(raw_text))
+            )
     return cues
 
 
@@ -306,7 +326,14 @@ def parse_ttml_cues(text: str) -> list[Cue]:
 
 
 def read_text(path: Path) -> str:
-    return Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    """UTF-16 by its BOM, else UTF-8 (a UTF-8 BOM dropped); newlines translated to `\\n` as
+    `Path.read_text` does."""
+    raw = Path(path).read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = raw.decode("utf-16", errors="replace")
+    else:
+        text = raw.decode("utf-8-sig", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def read_cues(path: Path) -> list[Cue]:

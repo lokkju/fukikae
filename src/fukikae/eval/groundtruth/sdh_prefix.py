@@ -1,6 +1,7 @@
 """Speaker tags in SDH/closed captions: `NAME:`, `(NAME)`, `[NAME]`, `- NAME:`."""
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from fukikae.eval.groundtruth.base import (
@@ -22,6 +23,8 @@ DEFAULT_SOUNDS = frozenset(
         "sigh", "gasp", "scoffs", "mutters", "whimpers", "snores", "coughs", "yelling",
         "radio", "tv", "vídeo", "video", "смех", "вздох", "вздыхает", "кричит",
         "웃", "한숨", "음성", "소리", "울음", "신음", "경적", "자막", "함께", "音声", "声",
+        "音楽", "拍手", "足音", "物音", "爆音", "雑音", "銃声", "歓声", "罵声", "悲鳴", "吐息",
+        "ため息", "笑い", "クラクション", "ノック", "アナウンス", "男性", "女性", "一同", "全員",
     }
 )  # fmt: skip
 
@@ -34,8 +37,12 @@ _CJK = re.compile(r"[\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\u3400-\u9fff\uac00-
 # `A과 B`, `A와 B`, `A랑 B` (Korean) and `AとB`, `A和B` (Japanese, Chinese): several speakers.
 _PAIR = re.compile(
     r"[\uac00-\ud7af]+[과와랑]\s+[\uac00-\ud7af]+"
-    r"|[\u3040-\u30ff\u3400-\u9fff]+[と和与跟][\u3040-\u30ff\u3400-\u9fff]+"
+    r"|[\u3040-\u30ff\u3400-\u9fff]{2,}[と和与跟][\u3040-\u30ff\u3400-\u9fff]{2,}"
 )
+_SEVERAL = re.compile(r"[・･、／]")  # `アリス･チョータ`: several speakers
+_SOUND_END = re.compile(r".{2,}[音声息鳴]$")  # 通知音, 荒い息, ふざけ合う声; 琴音 is two characters
+_GROUP = re.compile(r"(?:[0-9０-９]+人|たち|達)$")  # ３人, アリスたち
+_KANJI_RUBY = re.compile(r"(?<=[\u3400-\u9fff々])[(（][\u3040-\u30ffー]+[)）]")
 _HANGUL_ENDING = re.compile(r"(?:하며|으며|면서|하다|이다)$")  # whole description endings
 _HANGUL_SHORT_ENDING = re.compile(
     r"[며다음]$"
@@ -62,6 +69,8 @@ def _is_description(name: str, sounds: frozenset[str]) -> bool:
     last = words[-1]
     if not _CJK.search(last):
         return False
+    if _SEVERAL.search(name) or _SOUND_END.search(last) or _GROUP.search(last):
+        return True
     return bool(
         _HANGUL_ENDING.search(last)
         or ((len(last) >= 3 or len(words) >= 2) and _HANGUL_SHORT_ENDING.search(last))
@@ -85,10 +94,39 @@ def valid_name(name: str, sounds: frozenset[str], upper_only: bool = False) -> b
     return not (cased and upper_only and name != name.upper())
 
 
+def strip_ruby(text: str) -> str:
+    """Remove a `(かな)` or `（かな）` run (hiragana, katakana, ー only) that directly follows a
+    kanji: `有栖(ありす)` -> `有栖`."""
+    return _KANJI_RUBY.sub("", text)
+
+
+def ja_short_names(names: Iterable[str]) -> dict[str, str]:
+    """A two-word CJK tag (`有栖 始`, family and given name) maps to its last word when that word
+    is also a tag on its own in the same file. Hangul tags too (`김 철수` -> `철수`): Korean SDH
+    uses given names as well."""
+    pool = set(names)
+    out: dict[str, str] = {}
+    for name in pool:
+        words = name.split()
+        if len(words) == 2 and _CJK.search(name) and words[1] in pool:
+            out[name] = words[1]
+    return out
+
+
+def joins_known_tags(name: str, pool: set[str]) -> bool:
+    """`始と薫`: a joiner with a tag of the same file on each side. Single-character names escape
+    the 2+ characters rule of `_PAIR`, so the file's own tags tell a pair from a compound name."""
+    for m in re.finditer(r"[と和与跟]", name):
+        a, b = name[: m.start()], name[m.end() :]
+        if a in pool and b in pool:
+            return True
+    return False
+
+
 def extract_tag(line: str, sounds: frozenset[str] = DEFAULT_SOUNDS) -> tuple[str, str] | None:
     """(name, rest of the line) when `line` starts with a speaker tag, after markup and a
     leading dash are removed."""
-    text = _DASH.sub("", strip_markup(line)).strip()
+    text = _DASH.sub("", strip_ruby(strip_markup(line)).replace("\u3000", " ")).strip()
     m = _BRACKET.match(text)
     if m and valid_name(m.group(1), sounds):
         return m.group(1).strip(), m.group(2).strip()
@@ -132,13 +170,17 @@ def read_sdh(
     cues: list[Cue], namer: Namer, sounds: frozenset[str] = DEFAULT_SOUNDS
 ) -> list[GroundTruthLine]:
     out: list[GroundTruthLine] = []
-    for cue in cues:
-        segs = cue_segments(cue.text, sounds)
+    per_cue = [cue_segments(cue.text, sounds) for cue in cues]
+    pool = {s.name for segs in per_cue for s in segs if s.name}
+    short = ja_short_names(pool)
+    for cue, segs in zip(cues, per_cue, strict=True):
         spans = split_times(
             cue.start, cue.end, [max(1, len(re.sub(r"\s", "", s.text))) for s in segs]
         )
         for seg, (a, b) in zip(segs, spans, strict=True):
-            name = namer(seg.name) if seg.name else None
+            name = namer(short.get(seg.name, seg.name)) if seg.name else None
+            if seg.name and joins_known_tags(seg.name, pool):
+                name = None  # several speakers
             if name:
                 out.append(GroundTruthLine(a, b, name))
     return out

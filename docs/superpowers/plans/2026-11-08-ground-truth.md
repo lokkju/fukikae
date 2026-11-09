@@ -561,7 +561,36 @@ Expected: 10 ledger rows; `fukikae eval report --stage embedder` shows both sets
 
 - [ ] **Step 7: Record** the counts, maps, alignment fits and the baseline matrix in the execution ledger; commit any code fix from the real-file checks separately (`fix(eval): ...`).
 
-### Task 8: Re-pick the live-action profile, hold out once, write the results [needs Task 7]
+### Task 7c: Bazinga English sets and a check on the transcript aligner [operator ruling D18; data in ~/fukikae-ws/bazinga]
+
+Added to the plan between Task 7 and Task 8. Bazinga (`bazinga/bazinga`, gated, operator has access; pin revision 96db30fff0964b6fa1ae9e3c713a1e2f42081360) is 13 English series with full-episode 16 kHz mono PCM audio from Region 2 PAL DVDs and word-level annotations: `<episode> <speaker_id> <start> <end> <token> <confidence> [...]`. Speaker ids are gold and stable across a series (`leonard_hofstadter`); timings are silver forced alignment; confidence is quantised 0.99/0.95/0.1, and 0.1 words are evenly spaced fillers, not aligned (discussion #5). Pseudo-speakers: `all`, `multiple_persons`, anything containing `unknown`. No overlap labels. Verified on TBBT S01E01: annotations match the shipped audio (lag -0.01 s, drift 0.00002 s/s). The audio is PAL-fast: 4.27% short and about +0.71 semitone (21:59.6 against ~23 min for the pilot). Research notes: <scratch>/bazinga/.
+
+#### Code
+
+- `fukikae eval bazinga-labels <annotation file(s)> --out <dir> [--min-confidence 0.9] [--time-scale 1.0]`: words to turns (merge consecutive words of one speaker; a gap over 1.0 s between words of the same speaker starts a new turn), dropping pseudo-speakers. A turn's span comes only from its words at or above `--min-confidence`; a turn with none is dropped. Every time is multiplied by `--time-scale`, which is 1.04271 (25/23.976) for audio slowed to film speed. Output: the named-ASS ground-truth format the identity harness reads with `--gt ass` (reuse Task 4's `write_named_ass`), one file per episode named `S01E<NN>.ass`. Report per episode: words kept and dropped by reason, turns, speakers.
+- Tests: the confidence filter (a turn of 0.1 words is dropped; a mixed turn is trimmed to its confident words), pseudo-speaker drops, the turn split on a gap, time scaling, and a round trip through `read_ground_truth(..., "ass")`.
+
+#### Sets
+
+- `bazinga-tbbt` (The Big Bang Theory S01) and `bazinga-office` (The Office S01), English, genre live-action. Tune S01E01-S01E03, hold out S01E05, in both.
+- Two conditions per show, as separate workspaces: `-pal` (the audio as shipped, labels at scale 1.0) and `-film` (audio slowed to film speed with `ffmpeg -af asetrate=16000*0.95904,aresample=16000`, which changes pitch and tempo together, as the PAL speed-up did; labels at `--time-scale 1.04271`). The gap between the two prices PAL pitch for the embedders. Ledger set names `bazinga-tbbt` and `bazinga-office`, condition in the options or the tag.
+- Before scoring, check the film condition the same way the research did: VAD onsets against the scaled label turn starts (lag and drift near zero). Run `subalign --speech` on one episode of each condition; report it.
+- Baselines: both profiles (live-action and default) on tuning episodes only, as Task 7 does, tagged `t7c-baseline`.
+
+#### The aligner check (the same 17 episodes as our own release)
+
+Our BBT labels (Task 7) come from bigbangtrans transcripts aligned to our Blu-ray's English subtitles, at film speed. Bazinga's TBBT S01 labels are gold speakers on PAL audio. For S01E01-S01E03:
+1. Scale Bazinga's labels by 1.04271.
+2. Align them to our release with `subalign --speech` on our bbt-en workspace audio, or anchor-match them against our aligned ASS when the text lines up.
+3. Report speaker agreement over the time where both name a speaker: the share of seconds where our label equals Bazinga's, after mapping names (`leonard_hofstadter` to Leonard, and so on, through a small explicit map written in the report), with per-character confusion.
+
+This is the accuracy of Task 4's transcript aligner. Below 95% agreement, list the failure patterns.
+
+#### Constraints
+
+Global Constraints apply. Download only the needed files: the annotations and wavs for TBBT S01E01-E05 and The Office S01E01-E05, plus characters.txt and credits.txt, via huggingface_hub with the token file, never printed. Store them outside the repo under ~/fukikae-ws/bazinga/. Check `df -h /` first. Never commit audio or annotations.
+
+### Task 8: Re-pick the live-action profile, hold out once, write the results [needs Tasks 7, 7b (Kaze) and 7c]
 
 **Files:**
 - Modify: `src/fukikae/profiles/live-action.toml`, `README.md` (live-action bullet), `CLAUDE.md` only if profile rules change
@@ -571,7 +600,11 @@ Expected: 10 ledger rows; `fukikae eval report --stage embedder` shows both sets
 **Interfaces:**
 - Consumes: Task 7's workspaces and labels; `eval identity` (harness mode for sweeps, `--from-assignments` for held-out); `eval report --export`.
 
-- [ ] **Step 1: Sweep on tuning episodes only** (harness, diarization segmentation, `--embedder wespeaker`, `--tag t8-sweep`): matcher `centroid`, `joint` with `--matcher-option episode_cannot_link=false`, and `joint` with `episode_cannot_link=true`; `--threshold` 0.50, 0.55, 0.60, 0.65, 0.70, 0.75; sets `bbt-en`, `bbt-de`, `bbt-es`, `aib`, `kaze`, `grid` with their tuning episodes and ground-truth flags. 108 runs, embeddings cached after the first per set.
+- Controller rulings applied to this task (2026-11-08):
+  - GT8: Alice in Borderland (`aib`) is out of the gate and out of the pick sums; it is reported as a diagnostic row only (its SDH labels spread over other speakers; 2 recurring characters on ~26 s).
+  - GT9: the de/es merges happen in pyannote's clustering (one diarized speaker holds 93-97% of both leads), so Step 1 adds diarize-level variables. (a) A diagnostic pass with `--segmentation subtitles` on bbt-de and bbt-es across the threshold sweep, to confirm diarization as the cause (not part of the pick). (b) pyannote `clustering_threshold` at the current value and two lower values (for example the current minus 0.1 and minus 0.2): re-diarize the tuning episodes of every gate set at each value (GT6 keys the cache on it), crossed with the matcher sweep below. The pick rule is unchanged and may select a clustering threshold, which then ships in the live-action profile's `[diarize]` table.
+  - Gate sets: bbt-en, bbt-de, bbt-es, kaze, grid, and Task 7c's bazinga-tbbt and bazinga-office (PAL condition in the pick; film reported alongside).
+- [ ] **Step 1: Sweep on tuning episodes only** (harness, diarization segmentation, `--embedder wespeaker`, `--tag t8-sweep`): matcher `centroid`, `joint` with `--matcher-option episode_cannot_link=false`, and `joint` with `episode_cannot_link=true`; `--threshold` 0.50, 0.55, 0.60, 0.65, 0.70, 0.75; sets per the gate list above (aib as a diagnostic only) with their tuning episodes and ground-truth flags, at each clustering threshold. Embeddings cached after the first run per set and diarization.
 
 - [ ] **Step 2: Pick by Task 9's rule** from `fukikae eval report --tag t8-sweep --metric clean` (and `merges`, `fraction`): clean characters summed over the six sets, then fewest merges summed, then mean fraction. BBT counts three times, as Fairy Tail's two tracks did in Task 9; state that. A language variant (`[resolve.lang.<L>]` or `[characters.lang.<L>]`) ships only if the best setting on that language's sets beats the genre pick there by at least 5 points of fraction with no fewer clean characters. Record the pick and every variant decision as rulings with their numbers.
 

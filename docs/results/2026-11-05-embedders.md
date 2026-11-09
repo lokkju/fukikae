@@ -221,3 +221,20 @@ CAM++ on the `en_voxceleb` file scored worst (24% NC on fairytail diarization). 
 - Anime (fairytail ja and en): keep ECAPA as the default; carry `wespeaker` forward as the one candidate to test further with the matcher and threshold work (a tie with ECAPA on the anime cells, ahead on the Grid cells, which are six characters, and about an eighth of ECAPA's GPU memory in the like-for-like measurement) and eres2netv2 as a second candidate for the subtitle segmentation (CPU-only, but it adds merges on ja diarization), and treat fusion as optional, since it adds nothing over wespeaker. Drop wavlm_sv and campplus. Do not expect an embedder swap to fix TOUKA or the CANA + JUVIA / JUVIA + LUCY merges; those need either more enrolment speech per character or the matcher work of the next tasks.
 - Live action (Grid, thin): `wespeaker` (96% diarization, 93% subtitles against ECAPA's 81% and 82%), on six characters and 85 labeled spans. Flagged thin: the difference is one or two characters (종이 0% to 100%, 새하 51% to 100%) and should be re-checked on a larger live-action set before it drives a default.
 - No profile or default was changed in this task. The ledger ruling for the numbers above is recorded in the report.
+
+Note (2026-11-08): the CAM++ numbers above used the English VoxCeleb model (`3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx`) and are superseded for Chinese by the clip-set rerun with `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`; the anime and Grid cells are re-measured with the zh_en model in the next section.
+
+## CAM++ rerun with the zh_en model (2026-11-08)
+
+The CAM++ rows above used the English VoxCeleb file (`3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx`). The `campplus` default is now `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` (CPU), and the six cells were re-run with the same command and tuning pairs (ledger tag `t6-campplus-zhen2`). The old CAM++, WeSpeaker and ECAPA numbers are from the tables above.
+
+| Cell | campplus zh_en NC | campplus en_voxceleb NC (old row) | wespeaker NC | ecapa NC | zh_en passing/recurring |
+|---|---|---|---|---|---|
+| fairytail, diarization | 66% | 24% | 70% | 68% | 2/9 |
+| fairytail, subtitles | 65% | 21% | 63% | 64% | 6/11 |
+| fairytail-en, diarization | 65% | 36% | 71% | 72% | 6/10 |
+| fairytail-en, subtitles | 71% | 31% | 73% | 69% | 6/11 |
+| grid, diarization | 81% | 30% | 96% | 81% | 1/2 |
+| grid, subtitles | 87% | 24% | 93% | 82% | 0/6 |
+
+With the right model CAM++ is within 7 points of ECAPA in every cell (ahead on three) and 2 to 15 points under WeSpeaker on five of the six cells; it is ahead of WeSpeaker only on fairytail subtitles (+2). It beats WeSpeaker by 5 points or more in no cell, so nothing is flagged. Ruling R9's drop of CAM++ stands on the new numbers, though its stated reason (the English model's collapse) no longer applies. No default changes.

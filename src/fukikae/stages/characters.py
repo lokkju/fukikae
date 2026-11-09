@@ -41,7 +41,12 @@ from fukikae.artifacts import read_json, write_json
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.models import Assignments, ClusterAssignment, Diarization
 from fukikae.registry.matching import decide, load_clusters, match, mean_embedding, pin
-from fukikae.registry.projection import KIND_LDA, Projection, projected_tops, series_of
+from fukikae.registry.projection import (
+    KIND_LDA,
+    Projection,
+    load_series_projection,
+    projected_tops,
+)
 from fukikae.registry.store import Registry
 from fukikae.stages.language import LanguageResult
 from fukikae.workspace import Episode, Workspace
@@ -108,7 +113,7 @@ class CharactersStage:
         if mc.backend != "centroid":  # centroid keeps the key manifests already hold
             created = None
             with Registry(Workspace(ep.workspace_root).registry_path) as reg:
-                stored = reg.load_projection(series_of(cfg), KIND_LDA)
+                stored, _ = load_series_projection(reg, cfg, KIND_LDA, warn=False)
                 created = None if stored is None else stored.created
             key["matcher"] = {"name": mc.backend, "options": mc.options, "projection": created}
         return key
@@ -118,15 +123,15 @@ class CharactersStage:
         """The series' LDA projection for ``matcher = "lda"``, else None (centroid)."""
         if mc.backend != "lda":
             return None
-        series = series_of(cfg)
-        stored = reg.load_projection(series, KIND_LDA)
+        stored, tried = load_series_projection(reg, cfg, KIND_LDA)
         if stored is None:
             log.warning(
-                "[characters] matcher lda: no lda projection stored for series %r; matching "
+                "[characters] matcher lda: no lda projection stored for series %s; matching "
                 "by centroid. Fit one with `fukikae registry adapt`.",
-                series,
+                " or ".join(repr(s) for s in tried),
             )
             return None
+        series = stored.series
         p = Projection(stored.matrix, stored.mean)
         if dim and p.dim != dim:
             raise ConfigError(

@@ -14,6 +14,7 @@ from typing import Any, cast
 from fukikae import media, runctx
 from fukikae.artifacts import atomic_path
 from fukikae.backends.base import Separator
+from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
@@ -47,7 +48,11 @@ class SeparateStage:
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
         bc = self._backend_cfg(cfg)
-        return {"backend": bc.backend, "options": bc.options}
+        return {
+            "backend": bc.backend,
+            "options": bc.options,
+            "identity": identity_key("separation", bc),
+        }
 
     def run(self, ep: Episode, cfg: Config) -> None:
         bc = self._backend_cfg(cfg)

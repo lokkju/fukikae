@@ -30,7 +30,7 @@ from fukikae.eval.groundtruth.ass_names import (
     parse_ass,
 )
 from fukikae.eval.groundtruth.base import read_cues
-from fukikae.eval.groundtruth.colour import has_colour
+from fukikae.eval.groundtruth.colour import Anonymous, has_colour, workspace_colour_map
 from fukikae.eval.speakers import LabeledClip, label_key, write_labels
 from fukikae.media import MediaError, ProbeResult, SubTrack, _norm_lang, probe, run_ffmpeg
 from fukikae.models import Diarization, Turn
@@ -259,6 +259,7 @@ def auto_label(
     source: str = "ass",
     gt_file: Path | None = None,
     force: bool = False,
+    colour_anonymous: str | None = None,
 ) -> AutoLabelResult:
     """Label every diarized span from the ground truth read with `source` (ass, sdh, colour).
     The subtitles must line up with the detected speech (`check_alignment`); `force` scores a
@@ -267,6 +268,7 @@ def auto_label(
         raise ValueError(f"unknown --source {source!r}; use one of {', '.join(KINDS)}")
     ws = Workspace(root)
     merged = {**load_alias_file(Path(root) / "labels-aliases.yaml"), **(aliases or {})}
+    colour_map = workspace_colour_map(Path(root), source, colour_anonymous)
     seen: dict[str, Counter[str]] = {}
     hits: Counter[tuple[str, str]] = Counter()
     clips: list[LabeledClip] = []
@@ -292,6 +294,10 @@ def auto_label(
             episode=ep.id,
             seen=seen,
             hits=hits,
+            colour_names=colour_map,
+            anonymous=cast(Anonymous, colour_anonymous or "drop")
+            if colour_map is not None
+            else None,
         )
         truth, report, applied = check_alignment(
             truth,

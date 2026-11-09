@@ -10,7 +10,8 @@ together and in the held-out one.
 
 Reads pipeline artifacts (``04-diarize/turns.json``, ``01-separate/vocals_16k.wav``) and the
 subtitles; writes only the embedding cache, extracted subtitle tracks under
-``.fukikae/cache/subtitles/`` and the optional ``--json`` file. Never touches the registry.
+``.fukikae/cache/subtitles/``, the optional ``--json`` file and the results ledger's rows
+(one per split, unless ``--no-ledger``). Never touches the registry.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from fukikae.eval.groundtruth import AlignmentReport, GroundTruthLine
     from fukikae.eval.identity.metrics import IdentityScore
     from fukikae.eval.identity.segments import Segment
+    from fukikae.eval.ledger import LedgerRow
     from fukikae.registry.matchers import Matcher, RegistryState, SegmentLike
     from fukikae.workspace import Workspace
 
@@ -134,9 +136,12 @@ def _ground_truth(
     n_episodes: int,
     subtitle_track: int | None,
     aliases: dict[str, str],
+    colour_names: dict[str, str] | None = None,
+    colour_anonymous: str | None = None,
 ) -> tuple[Path, list[GroundTruthLine]]:
     from fukikae.eval import autolabel
     from fukikae.eval.groundtruth import Kind, read_ground_truth
+    from fukikae.eval.groundtruth.colour import Anonymous
     from fukikae.media import probe
 
     if gt_file is not None:
@@ -151,7 +156,15 @@ def _ground_truth(
             _, path = autolabel.choose_text_track(
                 ep.source, pr, scratch, kind, ws.config.source_language, subtitle_track
             )
-    return path, read_ground_truth(path, cast(Kind, kind), aliases, episode=eid)
+    lines = read_ground_truth(
+        path,
+        cast(Kind, kind),
+        aliases,
+        episode=eid,
+        colour_names=colour_names,
+        anonymous=cast(Anonymous, colour_anonymous or "drop") if colour_names else None,
+    )
+    return path, lines
 
 
 def _pooled(
@@ -204,6 +217,7 @@ def run_identity(
     aliases: dict[str, str] | None = None,
     force: bool = False,
     from_assignments: bool = False,
+    colour_anonymous: str | None = None,
 ) -> IdentityRun:
     import numpy as np
 
@@ -211,6 +225,7 @@ def run_identity(
     from fukikae.eval.groundtruth import KINDS as GT_KINDS
     from fukikae.eval.groundtruth import check_alignment
     from fukikae.eval.groundtruth.base import load_alias_file
+    from fukikae.eval.groundtruth.colour import workspace_colour_map
     from fukikae.eval.identity.cache import EmbeddingCache, ResidentEmbedder, cache_root
     from fukikae.eval.identity.metrics import MIN_SPEECH_S, nearest_centroid_accuracy, score
     from fukikae.eval.identity.segments import KINDS as SEG_KINDS
@@ -270,6 +285,7 @@ def run_identity(
         except TypeError as e:
             raise ValueError(f"matcher {matcher}: {e}") from e
     merged_aliases = {**load_alias_file(ws.root / "labels-aliases.yaml"), **(aliases or {})}
+    colour_map = workspace_colour_map(ws.root, gt_kind, colour_anonymous)
 
     refs = list(tune) + ([holdout] if holdout else [])
     order = ids + ([hold_id] if hold_id else [])
@@ -291,8 +307,9 @@ def run_identity(
             if not (work / "04-diarize").is_dir():
                 raise FileNotFoundError(f"{eid}: no diarization under {work / '04-diarize'}")
             path, lines = _ground_truth(
-                ws, ref, eid, gt_kind, gt_file, len(refs), subtitle_track, merged_aliases
-            )
+                ws, ref, eid, gt_kind, gt_file, len(refs), subtitle_track, merged_aliases,
+                colour_map, colour_anonymous,
+            )  # fmt: skip
             lines, rep, applied = check_alignment(
                 lines,
                 speech_turns(work),
@@ -385,7 +402,11 @@ def run_identity(
         "threshold": thr,
         "min_new_seconds": min_new,
         "min_speech": floor,
+        "profile": cfg.profile,
     }
+    if colour_map:
+        settings["colour_map"] = colour_map
+        settings["colour_anonymous"] = colour_anonymous or "drop"
     if segmentation == "asr":
         settings["segment_embedder"] = {
             "backend": seg_emb_cfg.backend,
@@ -403,6 +424,83 @@ def run_identity(
         tune_nc,
         hold_nc,
     )
+
+
+# ---- ledger ----
+
+_NOT_OPTIONS = ("workspace", "tune", "holdout")
+
+
+def identity_rows(run: IdentityRun, cfg: Config, test_set: str, tag: str | None) -> list[LedgerRow]:
+    """Ledger rows for a run: one `tune` row, and a `holdout` row when it has one. Both
+    carry the same options (the run's settings without the workspace and episodes, plus the
+    profile's hash), so they share a matrix row."""
+    from fukikae.config import BackendConfig
+    from fukikae.eval.identity.metrics import OVERALL, clean_count
+    from fukikae.eval.ledger import make_row, model_identity, options_hash
+
+    st = run.settings
+    options = {k: v for k, v in st.items() if k not in _NOT_OPTIONS}
+    options.setdefault("profile", cfg.profile)
+    options["profile_hash"] = options_hash(cfg.profile_raw)
+    emb = st["embedder"]
+    backend = str(emb["backend"])
+    model, revision = model_identity("embed", BackendConfig(backend, dict(emb["options"])))
+
+    def metrics(s: IdentityScore, nc: dict[str, float]) -> dict[str, float | int | str]:
+        out: dict[str, float | int | str] = {
+            "fraction": s.fraction,
+            "passing": s.passing,
+            "recurring": s.recurring,
+            "clean": clean_count(s),
+            "merges": len(s.merges),
+            "strict_fraction": s.strict_fraction,
+            "weighted_share": s.weighted_share,
+            "coverage": s.coverage,
+            "verdict": s.verdict,
+        }
+        if OVERALL in nc:
+            out["nc_overall"] = nc[OVERALL]
+        return out
+
+    splits: list[tuple[str, list[str], IdentityScore, dict[str, float]]] = [
+        ("tune", list(st["tune"]), run.tune, run.tune_nc)
+    ]
+    if run.holdout is not None and run.holdout_episode is not None:
+        splits.append(("holdout", [run.holdout_episode], run.holdout, run.holdout_nc))
+    return [
+        make_row(
+            stage="identity",
+            backend=backend,
+            model=model,
+            revision=revision,
+            options=options,
+            language=cfg.source_language or "und",
+            genre=cfg.series.genre,
+            series=cfg.series.title,
+            test_set=test_set,
+            split=split,
+            episodes=episodes,
+            metrics=metrics(score, nc),
+            detail={"merges": [list(m) for m in score.merges], "nc": dict(nc)},
+            workspace=st.get("workspace"),
+            tag=tag,
+        )
+        for split, episodes, score, nc in splits
+    ]
+
+
+def write_ledger(rows_of: Any, ledger: Path | None) -> None:
+    """Append the rows `rows_of()` builds; any failure is a warning, never an exit code,
+    so a ledger problem never hides a result already printed."""
+    from fukikae.eval.ledger import append_rows
+
+    try:
+        path = append_rows(rows_of(), ledger)
+    except Exception as e:  # noqa: BLE001 - the result is out; the ledger is best effort
+        typer.echo(f"warning: ledger not written: {e}", err=True)
+        return
+    typer.echo(f"ledger: appended to {path}", err=True)
 
 
 # ---- output ----
@@ -556,6 +654,13 @@ def identity_cmd(
     alias: list[str] = typer.Option(
         None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
     ),
+    colour_anonymous: str = typer.Option(
+        None,
+        "--colour-anonymous",
+        help="With --gt colour and a labels-colours.yaml: what to do with colours the map "
+        "lacks. drop (default) excludes them; series keeps them as colour:<name>; episode as "
+        "<name>@<episode>.",
+    ),
     segmentation: str = typer.Option(
         "diarization",
         "--segmentation",
@@ -610,6 +715,19 @@ def identity_cmd(
         help="Score the pipeline's 05-characters/assignments.json (the characters stage or "
         "`registry resolve`) instead of running a matcher; diarization segmentation only.",
     ),
+    test_set: str = typer.Option(
+        None, "--set", help="Ledger test-set name (default: the workspace directory's name)."
+    ),
+    tag: str = typer.Option(None, "--tag", help="Free-form ledger tag for this run."),
+    no_ledger: bool = typer.Option(
+        False, "--no-ledger", help="Do not append rows to the results ledger."
+    ),
+    ledger: Path = typer.Option(
+        None,
+        "--ledger",
+        help="Results ledger (default: $FUKIKAE_RESULTS, else "
+        "$XDG_DATA_HOME/fukikae/results.jsonl).",
+    ),
 ) -> None:
     """Score cross-episode speaker identity against subtitle ground truth, offline."""
     from fukikae import runctx
@@ -635,6 +753,7 @@ def identity_cmd(
             gt_file=gt_file,
             subtitle_track=subtitle_track,
             aliases=parse_aliases(alias),
+            colour_anonymous=colour_anonymous,
             force=force,
             from_assignments=from_assignments,
         )
@@ -646,3 +765,8 @@ def identity_cmd(
         json_out.parent.mkdir(parents=True, exist_ok=True)
         with atomic_path(json_out) as tmp:
             tmp.write_text(json.dumps(to_json(result), indent=2), encoding="utf-8")
+    if not no_ledger:
+        from fukikae.workspace import Workspace
+
+        name = test_set or Path(workspace).resolve().name
+        write_ledger(lambda: identity_rows(result, Workspace(workspace).config, name, tag), ledger)

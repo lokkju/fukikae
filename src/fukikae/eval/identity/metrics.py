@@ -318,3 +318,9 @@ def nearest_centroid_accuracy(
     out = {display[k]: right[k] / total[k] for k in sorted(total, key=lambda k: -total[k])}
     out[OVERALL] = sum(right.values()) / sum(total.values())
     return out
+
+
+def clean_count(s: IdentityScore) -> int:
+    """Passing characters that are in no merge: Task 9's first selection key."""
+    merged = {name for a, b, _ in s.merges for name in (a, b)}
+    return sum(1 for c in s.characters if c.passing and c.name not in merged)
