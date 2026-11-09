@@ -1,12 +1,21 @@
-# PROVISIONAL live-action profile (Ruling R16). Written from one tuning pair of Grid
-# (Korean, E02 + E04): two recurring characters on 12% subtitle coverage, so one character is
-# the whole difference between candidates. Revisit when D9's ground truth lands.
-# It fails the 90% held-out bar on Grid E05: fraction 0.80 (4 of 5 recurring).
+# Live action (ground-truth plan, Task 8, 2026-11-09; docs/results/2026-11-09-live-action-ground-truth.md).
+# Tuned on seven gate sets, tuning episodes only: The Big Bang Theory S01E01-E02 in English,
+# German and Spanish (one show counted three times), Bazinga's TBBT and The Office S01E01-E03
+# (PAL audio), Kaze, Kaoru S01E01-E03 (Japanese) and Grid E02 + E04 (Korean).
 #
-# Grid's best setting is joint WITHOUT episode_cannot_link at 0.6 (2 of 2 recurring pass,
-# against centroid's 1 of 2): it rejoins one character's split clusters inside an episode.
-# The characters stage cannot run joint and keeps centroid; `fukikae registry resolve`
-# reads [resolve] below.
+# Pyannote's clustering_threshold drops from community-1's 0.6 to 0.5: at 0.6 one diarized
+# speaker held 93-97% of both Leonard and Sheldon on the Spanish and German dubs; from 0.5 the
+# Spanish leads split. The German leads stay merged at every value swept (0.6, 0.5, 0.4).
+# At 0.5, centroid at 0.6 sums to 17 clean characters with 1 merge (mean fraction 0.714) over
+# the gate sets, against 16 and 4 for the old provisional setting (0.6, joint without
+# episode_cannot_link). Joint with episode_cannot_link on ties with centroid at 0.50-0.60;
+# the simpler matcher wins the tie, and 0.6 is the top of the plateau.
+# 0.4 sums to 18 / 1 / 0.857, one character more, all of it りん on Kaze crossing 80%
+# (0.79 -> 0.84) on the thinnest set; 0.4 is outside VBx's tuning range (0.5-0.8), so the
+# controller treats it as a tie and picks 0.5 (Ruling GT12).
+# Held out once after this pick: passes BBT S01E03 en and es (4/4) and Bazinga Office S01E05;
+# fails BBT S01E03 de (0.80, Leonard + Sheldon merged), Bazinga TBBT S01E05 (0.67) and Grid E05
+# (0.80, no merge). Kaze, Kaoru E11 pending.
 [registry]
 min_new_seconds = 20.0
 match_threshold = 0.6
@@ -16,6 +25,7 @@ backend = "demucs"   # Ruling R15: the dialogue backend stays opt-in
 
 [diarize]
 backend = "pyannote"
+clustering_threshold = 0.5   # community-1 ships 0.6; changing it re-runs diarize (cache key)
 
 [embed]
 backend = "wespeaker"
@@ -27,12 +37,12 @@ emotion_backend = "emotion2vec"
 enabled = true
 
 [characters]
-matcher = "centroid"   # the per-episode stage; joint runs through [resolve]
+matcher = "centroid"   # the pick: the per-episode stage at [registry] match_threshold
 
-[resolve]   # `fukikae registry resolve` (Ruling R17); CLI flags override
+[resolve]   # `fukikae registry resolve` (Ruling R17); the joint cell that tied with centroid
 matcher = "joint"
 threshold = 0.6
-episode_cannot_link = false
+episode_cannot_link = true
 
 [translate]   # character-cards Task 4: a managed llama-server on gpu_device with Qwen3-8B Q6_K
 backend = "openai_compat"

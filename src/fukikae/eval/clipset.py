@@ -136,6 +136,19 @@ def split_clips(clips: list[Clip]) -> tuple[list[Clip], list[Clip], str, list[st
     return train, test, rule, skipped
 
 
+def cache_identity(cfg: BackendConfig) -> str:
+    """The embedder's model identity as the clip-set cache keys it, ``model|revision``.
+
+    It follows GT6's fallback rule (`identity_key`): a model that can't be resolved takes the
+    backend's declared default, else an ``unresolved:`` marker, so the key never degrades to
+    ``None|None`` and two unresolvable models can't share cached embeddings by accident.
+    """
+    from fukikae.backends.identity import identity_key
+
+    key = identity_key("embed", cfg)
+    return f"{key['model']}|{key['revision']}"
+
+
 def _clip_key(path: Path) -> str:
     st = path.stat()
     blob = json.dumps([str(path), st.st_size, st.st_mtime_ns], ensure_ascii=False)
