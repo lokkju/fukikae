@@ -225,3 +225,27 @@ def find_target_subtitles(
         ):
             return None, t
     return None, None
+
+
+_FFMPEG_VERSION: str | None = None
+
+
+def ffmpeg_version() -> str:
+    """The first line of ``ffmpeg -version`` (memoized), for the cache keys of stages whose
+    output ffmpeg's filters shape; ``"unavailable"`` when ffmpeg can't be run."""
+    global _FFMPEG_VERSION
+    if _FFMPEG_VERSION is None:
+        try:
+            out = _run(["ffmpeg", "-hide_banner", "-version"]).stdout
+            _FFMPEG_VERSION = out.splitlines()[0].strip() if out.strip() else "unknown"
+        except MediaError:
+            _FFMPEG_VERSION = "unavailable"
+    return _FFMPEG_VERSION
+
+
+def run_ffmpeg_log(args: list[str]) -> str:
+    """Run ffmpeg at log level info and return its stderr, for filters that report on it
+    (loudnorm's JSON)."""
+    return _run(
+        ["ffmpeg", "-nostdin", "-hide_banner", "-nostats", "-v", "info", "-y", *args]
+    ).stderr

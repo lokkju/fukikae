@@ -31,3 +31,15 @@ subs_condense = true
 
 [tts]   # character-cards Task 6: Kokoro stock voices until the cloning backend is chosen (D15)
 backend = "kokoro"
+
+[timefit]   # character-cards Task 7: rate (tts) and time-stretch share max_speedup; then borrowed silence
+max_speedup = 1.25
+max_slowdown = 0.9
+borrow_silence_ms = 400
+
+[mix]   # character-cards Task 7: original vocals kept outside dub cues; songs (detector, subtitles, tags) untouched
+keep_original_vocals = true
+fade_ms = 40
+match_dialogue = true
+protect_bgm = false   # SenseVoice marks BGM under ordinary dialogue (Task 3 review)
+detect_songs = true

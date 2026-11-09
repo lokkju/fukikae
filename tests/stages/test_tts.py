@@ -472,7 +472,7 @@ def test_pipeline_runs_tts_after_translate():
     from fukikae.cli import pipeline_stages
 
     names = [s.name for s in pipeline_stages(Config(raw={"tts": {"backend": "kokoro"}}))]
-    assert names[-2:] == ["translate", "tts"]
+    assert names[-4:] == ["translate", "tts", "timefit", "mix"]
 
 
 def test_render_padding_is_trimmed_before_caching_and_the_rate_fit(ep):

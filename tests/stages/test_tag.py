@@ -99,8 +99,14 @@ def test_disabled_tag_stage_is_not_in_the_run_list():
 
     assert "tag" not in [s.name for s in pipeline_stages(Config())]
     on = Config(raw={"tag": {"backend": "sensevoice", "enabled": True}})
-    names = [s.name for s in pipeline_stages(on)]
-    assert names[-4:] == ["characters", "tag", "translate", "tts"]
+    stages = pipeline_stages(on)
+    names = [s.name for s in stages]
+    assert names[-6:] == ["characters", "tag", "translate", "tts", "timefit", "mix"]
+    from fukikae.stages.mix import MixStage
+
+    mix_on, mix_off = stages[-1], pipeline_stages(Config())[-1]
+    assert isinstance(mix_on, MixStage) and isinstance(mix_off, MixStage)
+    assert mix_on.tags is True and mix_off.tags is False  # the mix reads the tag stage's spans
 
 
 def test_tag_enabled_defaults_false_and_workspace_overrides_profile():
