@@ -90,7 +90,6 @@ STAGE_KEYS = ("device", "gender")
 TRIM_FRAME_S = 0.010
 TRIM_DB = 40.0
 TRIM_KEEP_S = 0.030
-DEFAULT_MAX_SPEEDUP = 1.25
 DELIVERY_CAPS = frozenset({"emotion_audio", "emotion_vector", "instruction"})
 # The delivery fields each capability hands the backend.
 _DELIVERY_BY_CAP = {
@@ -101,15 +100,11 @@ _DELIVERY_BY_CAP = {
 
 
 def max_speedup(cfg: Config) -> float:
-    """``[timefit] max_speedup``, the workspace's over the profile's; 1.25 when unset."""
-    value: Any = DEFAULT_MAX_SPEEDUP
-    for source in (cfg.profile_raw, cfg.raw):
-        table = source.get("timefit")
-        if isinstance(table, dict) and "max_speedup" in table:
-            value = table["max_speedup"]
-    if isinstance(value, bool) or not isinstance(value, int | float) or not value >= 1.0:
-        raise ConfigError(f"[timefit] max_speedup must be a number >= 1.0, not {value!r}")
-    return float(value)
+    """``[timefit] max_speedup``, the workspace's over the profile's; 1.25 when unset (read by
+    ``fukikae.timefit.fit_settings``, the one reader of ``[timefit]``)."""
+    from fukikae.timefit import fit_settings
+
+    return fit_settings(cfg).max_speedup
 
 
 def delivery_inputs(

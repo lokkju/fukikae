@@ -184,3 +184,67 @@ class TtsRun(BaseModel):
     rendered: list[str]
     cached: list[str]
     report: list[str] = []
+
+
+class FitReportCue(BaseModel):
+    """One placed cue in ``08-timefit/report.json``: the cue's slot, where its audio starts
+    (``start``, before the slot when silence was borrowed), how long it plays (``seconds``,
+    the fitted wav), the render's length and rate factor from the tts stage, the time-stretch
+    applied (1.0 when none), the silence borrowed on each side, and ``over_by``, what still
+    did not fit (the audio plays whole, past the borrowed silence)."""
+
+    cue_id: str
+    slot_start: float
+    slot_end: float
+    start: float
+    seconds: float
+    rendered_seconds: float
+    rate_factor: float
+    stretch: float
+    borrowed_before: float
+    borrowed_after: float
+    over_by: float
+
+
+class FitReport(BaseModel):
+    """The timefit stage's artifact, ``08-timefit/report.json``. ``over`` lists the cues left
+    longer than their slot plus the silence they could borrow; ``summary`` counts placed,
+    stretched, borrowed and over cues, the median stretch of the stretched ones, and the
+    worst overrun. Nothing in it depends on the run."""
+
+    schema_version: int = 1
+    episode: str
+    cues: list[FitReportCue]
+    over: list[str]
+    summary: dict[str, Any] = {}
+
+
+class ProtectedSpan(BaseModel):
+    """A span where the mix keeps the original vocals untouched, and what said so:
+    ``detector`` (the theme-song detector), ``subs`` (a subtitle cue the filter marked as a
+    song), ``tag`` (an ASR cue the translate stage skipped as a song from tag spans),
+    ``tag:singing``, ``tag:bgm`` or ``tag:laughter``. ``score`` is the detector's."""
+
+    start: float
+    end: float
+    source: str
+    score: float | None = None
+
+
+class MixReport(BaseModel):
+    """What the mix stage did, ``09-mix/report.json``. ``dropped`` maps each fitted cue that
+    was not placed, because it falls in a song span, to that span's source; ``loudness`` holds
+    the integrated loudness (LUFS) of the original mix, the dub mix before normalization and
+    after."""
+
+    schema_version: int = 1
+    episode: str
+    target_language: str
+    songs: list[ProtectedSpan]
+    laughter: list[ProtectedSpan]
+    dropped: dict[str, str]
+    placed: int
+    removed_seconds: float
+    dub_gain_db: float | None
+    loudness: dict[str, float]
+    normalization: str
