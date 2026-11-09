@@ -593,10 +593,18 @@ def _stock_cards(
 
 
 def character_references(
-    ws: Workspace, episodes: Sequence[str], cid: int
+    ws: Workspace,
+    episodes: Sequence[str],
+    cid: int,
+    exclusions: dict[str, list[tuple[float, float]]] | None = None,
 ) -> tuple[str, list[RefPick]] | None:
-    """The character's reference clips (``select_references``) in the episode where they add
-    up to the most speech, with that episode; None when no episode has enough."""
+    """The character's reference clips (``select_references``, songs and singing excluded) in
+    the episode where they add up to the most speech, with that episode; None when no episode
+    has enough. ``exclusions`` caches each episode's excluded spans."""
+    from fukikae.cards.select import reference_exclusions
+    from fukikae.stages.mix import mix_settings
+
+    cache = exclusions if exclusions is not None else {}
     best: tuple[str, list[RefPick]] | None = None
     for e in episodes:
         work = ws.work_dir(e)
@@ -615,7 +623,11 @@ def character_references(
             continue
         tags_path = work / "04b-tag" / "tags.json"
         tags = read_json(tags_path, Tags) if tags_path.exists() else None
-        picks = select_references(asg.turns, speakers, read_json(tr_path, Transcript), tags, vocals)
+        if e not in cache:
+            cache[e] = reference_exclusions(work, tags, mix_settings(ws.config).songs)
+        picks = select_references(
+            asg.turns, speakers, read_json(tr_path, Transcript), tags, vocals, exclude=cache[e]
+        )
         if picks and (
             best is None or sum(p.seconds for p in picks) > sum(p.seconds for p in best[1])
         ):
