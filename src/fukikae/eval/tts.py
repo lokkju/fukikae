@@ -184,6 +184,20 @@ def sample_cues(
     return sorted(out, key=lambda p: (p[0], p[1].start, p[1].id))
 
 
+def restrict(
+    picked: list[tuple[str, DubCue]], characters: Sequence[int] | None
+) -> list[tuple[str, DubCue]]:
+    """``picked`` limited to ``characters`` (None: all). The sample is seeded per character,
+    so these are the cues a full run scores for them; a character with no cue is an error."""
+    if characters is None:
+        return picked
+    want = set(characters)
+    missing = want - {cast(int, c.character_id) for _, c in picked}
+    if missing:
+        raise ValueError(f"no sampled cue for character(s) {', '.join(map(str, sorted(missing)))}")
+    return [p for p in picked if p[1].character_id in want]
+
+
 # ---- metrics --------------------------------------------------------------------------------
 
 
@@ -1035,6 +1049,7 @@ def evaluate(
     floor_subs: Path | None = None,
     floor_workspace: Path | None = None,
     floor_episode: str | None = None,
+    characters: Sequence[int] | None = None,
 ) -> EvalResult:
     from fukikae.eval.autolabel import gt_path_for
     from fukikae.registry.store import Registry
@@ -1067,7 +1082,7 @@ def evaluate(
         and not floor_episode
     ):
         raise ValueError("a fixed WER floor set needs --floor-episode")
-    picked = sample_cues(docs, per_character, seed, min_slot)
+    picked = restrict(sample_cues(docs, per_character, seed, min_slot), characters)
     excluded = count_short(docs, min_slot)
     if not picked:
         raise ValueError(

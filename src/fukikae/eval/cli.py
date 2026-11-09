@@ -127,6 +127,12 @@ def tts_cmd(
     ),
     per_character: int = typer.Option(8, "--per-character", min=1, help="Cues per character."),
     seed: int = typer.Option(0, "--seed", help="Seed of the cue sample."),
+    characters: str = typer.Option(
+        None,
+        "--characters",
+        help="Score only these character ids (comma-separated); each keeps the cues a full "
+        "run samples for it.",
+    ),
     min_slot: float = typer.Option(
         1.0, "--min-slot", min=0.0, help="Leave out cues whose slot is shorter (seconds)."
     ),
@@ -193,6 +199,9 @@ def tts_cmd(
             floor_subs=floor_subs,
             floor_workspace=floor_workspace,
             floor_episode=floor_episode,
+            characters=(
+                [int(x) for x in characters.split(",") if x.strip()] if characters else None
+            ),
         )
     except user_errors() as e:
         typer.echo(f"error: {e}", err=True)
