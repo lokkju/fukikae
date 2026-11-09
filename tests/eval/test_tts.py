@@ -1012,3 +1012,15 @@ def test_heldout_similarity_is_the_clone_headline_with_ceiling_and_counts():
     assert s2.overall["speaker_similarity"] == pytest.approx(0.1)
     assert s2.overall["speaker_similarity_heldout"] == pytest.approx(0.05)
     assert s2.headline == "references"
+
+
+def test_cues_over_half_wrong_are_listed():
+    """Ruling CD18: eval names the renders a listener should check first."""
+    scores = [
+        _score(cue_id="c1", errors=0, ref_words=4),
+        _score(cue_id="c2", errors=3, ref_words=4),
+        _score(cue_id="c3", episode="S01E02", errors=2, ref_words=4),  # 0.5 is not over
+    ]
+    s = ev.summarize(scores, max_speedup=1.25)
+    assert s.high_wer == ["S01E01:c2"]
+    assert s.overall["high_wer_cues"] == 1
