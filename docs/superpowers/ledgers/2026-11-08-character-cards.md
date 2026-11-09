@@ -145,3 +145,30 @@ WER floor: the same ASR (faster-whisper large-v3, no VAD) on natural English spe
 BBT against the English original: duration ratio 1.28, emotion agreement 0.56 (18 cues; coverage 0.92 / 0.83), similarity to the original actor 0.089, 0 unmatched cues.
 Kokoro takes no delivery; its renders are neutral (E12 65%, BBT 60% of labelled renders), so agreement tracks the neutral share of the source labels.
 The rows from 6009538 and eba6683 stay in the append-only ledger under their older options hashes; the e29a7bb rows supersede them.
+
+## Task 9a: worker plumbing, reference selection (CD5) and IndexTTS2 (2026-11-09)
+
+Commits d068ea7, 4e335a8, b2df55f, 53ff885, 0cf20e5, 924bfda, 32d39ea.
+
+Calls for review:
+- Worker environments are separate uv projects (`workers/<extra>/`, own Python and lock, venv in `.venvs/<extra>`), not extras of fukikae's lock: `indextts` declares `requires-python = ">=3.10,<3.12"` and pins torch 2.8, transformers 4.52.1 and numpy 2.2.6, which fukikae (>= 3.12) cannot resolve. The worker runs the venv's interpreter directly with `PYTHONPATH=<checkout>/src`; `worker.py` and `impl_*.py` import only the standard library and the model's packages.
+- IndexTTS2 declares `capabilities = {emotion_audio}` only. Its emotion vector and emotion text replace the emotion audio prompt rather than add to it, and every cue has a source span; the released inference code has no duration control (`use_speed` fixed at 0, no target length). QwenEmotion is not loaded.
+- Reference selection excludes theme songs and singing (`reference_exclusions`): on E11 the opening's separated lyrics were the cleanest turns and became two of character 1's three references (WER 0.654 for that character before the fix, 0.192 after).
+- `[tts] device` is a stage-wide preference: the E11/E12 copies said `device = "cpu"` (for Kokoro), which put IndexTTS2 on the CPU; removed on the 9a copies. A per-backend device may be wanted.
+
+Pins: IndexTeam/IndexTTS-2 740dcaff396282ffb241903d150ac011cd4b1ede; indextts git d9e41aac89fd00b3d71497fddb287b7f24613712; w2v-bert-2.0 da985ba0, MaskGCT semantic codec 265c6cef, CAMPPlus e4b6ede7, BigVGAN 22k 633ff708. Downloads 7.2 GB (HF cache on /nvme), worker venv 8.3 GB. Load about 70 s cold (WeTextProcessing builds its FST once, 43 s), 9.0 GB on GPU 0, about 3 to 4 s per line (E11: 40 renders plus scoring in 199 s; E12: 72 in about 410 s). Speech rate after trimming 14.3 cps (E11 13.8, E12 14.6; per card 11.1 to 18.3), now `IndexTts2Synthesizer.speech_cps`.
+
+eval tts on copies at ~/fukikae-scratch/t9a (8 cues per character, seed 0, minimum slot 1 s). Similarity for both backends is against the same `select_references` spans (`references`); characters without 6 s of clean, non-song speech have no clone and are skipped for IndexTTS2 (E11: 4, 7, 8), so Kokoro's E11 references figure covers the same five characters.
+
+| set | backend | cues | sim (references) | WER / floor | fit | fit within 1.25 | stretch p90 | cps | emotion agreement | BBT: dur ratio / emo vs original / sim to original |
+|---|---|---|---|---|---|---|---|---|---|---|
+| FT E11 | indextts2 | 40 (5 chars) | 0.521 | 0.080 / 0.151 | 0.58 | 0.90 | 1.26 | 13.8 | low coverage (SenseVoice) | |
+| FT E11 | kokoro | 64 (8) | 0.001 (same 5) | 0.046 / 0.151 | 0.88 | 0.98 | 1.06 | 17.3 | low coverage | |
+| FT E12 | indextts2 | 72 (9) | 0.483 | 0.080 or 0.556 / 0.151 | 0.89 | 0.94 | 1.07 | 14.6 | 0.30 (63 cues) | |
+| FT E12 | kokoro | 72 (9) | 0.042 | 0.043 / 0.151 | 0.94 | 1.00 | 1.00 | 16.8 | 0.10 (59) | |
+| BBT de E01 | indextts2 | 24 (3) | 0.609 | 0.024 / 0.102 | 0.13 | | 1.63 | 17.0 | 0.32 (22) | 1.37 / 0.43 / 0.125 |
+| BBT de E01 | kokoro | 24 (3) | 0.094 | 0.010 / 0.102 | 0.21 | | 1.52 | 18.2 | 0.47 (19) | 1.28 / 0.56 / 0.089 |
+
+E12 IndexTTS2 has two rows over the same renders (a stray second run): WER 0.080 and 0.556. The difference is faster-whisper (no VAD) looping on one render, character 5's c0232, where "That's not it." came out as a laugh ("Mwahahahaha"), the source line's laughter carried by the emotion reference. Every E12 character's references carry a scored emotion (CD5 notes on all nine): emotion2vec labels most E12 turns non-neutral at >= 0.5, so the demotion rarely leaves enough neutral speech. E11 character 1 still hallucinated one line (c0025, "You didn't know?" three times) before the song fix; that cue was a translated lyric.
+Similarity against the clone's own reference spans is generous by construction for IndexTTS2; the listening checkpoint decides.
+The first E11 IndexTTS2 row (sim 0.488, WER 0.171) predates 0cf20e5 and is superseded.
