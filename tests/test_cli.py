@@ -53,10 +53,12 @@ def test_run_command_extracts(tmp_path, readonly_copy):
 
 def _user_errors():
     from fukikae.backends.loader import BackendUnavailable
+    from fukikae.cards.card import CardError
     from fukikae.config import ConfigError
     from fukikae.gpu import VramTimeout
 
     return [
+        CardError("character 1: card 0123456789abcdef needs sidecar sha256:9e1f"),
         VramTimeout("not enough free VRAM"),
         ConfigError("unknown asr backend 'nope'"),
         BackendUnavailable("asr backend 'qwen3_asr' cannot be imported"),
