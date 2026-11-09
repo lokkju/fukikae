@@ -591,3 +591,15 @@ def test_bad_split_is_refused(tmp_path):
     root = _workspace(tmp_path)
     res = _invoke(str(root), "--episodes", "S01E11", "--split", "test")
     assert res.exit_code == 2
+
+
+def test_render_neutral_share_counts_only_labelled_renders():
+    scores = [
+        _score(cue_id="c1", source_emotion="happy", render_emotion="neutral"),
+        _score(cue_id="c2", source_emotion="sad", render_emotion="sad"),
+        _score(cue_id="c3"),  # never tagged: no source label
+        _score(cue_id="c4"),
+    ]
+    s = ev.summarize(scores, max_speedup=1.25)
+    assert s.overall["render_neutral_share"] == pytest.approx(0.5)
+    assert s.overall["render_labelled"] == 2
