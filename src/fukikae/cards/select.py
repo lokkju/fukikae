@@ -12,16 +12,19 @@ and demote nothing; unlabelled and low-confidence turns rank by SNR alone. Whene
 reference is scored non-neutral, ``reference_report`` says "references may carry emotion:
 <labels>", and ``clone_card`` records the labels in ``[meta] reference_emotions`` (outside
 the card id), which ``fukikae voices show`` prints. Under ``min_total`` there is no clone.
+Turns overlapping ``exclude`` (``reference_exclusions``: the theme songs the mix stage's
+detector finds on the stems, and the tag stage's singing spans) are never references:
+separated song vocals are clean and loud, so they would otherwise rank first.
 """
 
 from __future__ import annotations
 
 import math
 import tempfile
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
@@ -226,6 +229,7 @@ def select_references(
     total: tuple[float, float] = (10.0, 20.0),
     each: tuple[float, float] = (3.0, 12.0),
     min_total: float = 6.0,
+    exclude: Sequence[tuple[float, float]] = (),
 ) -> list[RefPick] | None:
     """Reference clips for the speaker (one diarize label, or several of one character), in
     the order taken; None when they add up to less than ``min_total`` seconds. ``total[0]``
@@ -242,6 +246,8 @@ def select_references(
         if not each[0] <= end - start <= each[1]:
             continue
         if any(o.start < end and start < o.end for o in others):
+            continue
+        if any(a < end and start < b for a, b in exclude):
             continue
         text = turn_text(transcript, start, end)
         if not text:
@@ -260,6 +266,26 @@ def select_references(
             picks.append(p)
             used += p.seconds
     return picks if used >= min_total else None
+
+
+def reference_exclusions(
+    work: Path, tags: Tags | None, settings: Any = None
+) -> list[tuple[float, float]]:
+    """Spans no reference may overlap, for an episode work dir: theme songs from the
+    separation stems (``fukikae.songs.detect_theme_songs`` with ``settings``, a
+    ``SongSettings``; skipped when the stems are missing) and the tag stage's singing spans."""
+    from fukikae import songs
+
+    out: list[tuple[float, float]] = []
+    sep = work / "01-separate"
+    stems = [sep / "background.wav", sep / "vocals.wav", sep / "vocals_16k.wav"]
+    if all(p.exists() for p in stems):
+        spans, _ = songs.detect_theme_songs(stems[0], stems[1], stems[2], settings)
+        out += [(float(sp.start), float(sp.end)) for sp in spans]
+    for e in tags.events if tags else []:
+        if e.label == "singing":
+            out.append((float(e.start), float(e.end)))
+    return out
 
 
 def reference_report(picks: list[RefPick]) -> list[str]:

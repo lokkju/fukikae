@@ -226,3 +226,34 @@ def test_clone_card_records_reference_emotions_outside_the_id(tmp_path):
         vocals, "ja", "en", "S01E11",
     )  # fmt: skip
     assert card_id(plain) == card_id(card) and "reference_emotions" not in plain.meta
+
+
+def test_turns_inside_songs_are_not_references(tmp_path):
+    """Separated theme-song vocals are clean and loud: without the song spans they would rank
+    first (Fairy Tail E11's opening lyrics did, Task 9a)."""
+    turns = [Turn(start=s, end=s + 5, speaker="A") for s in (0, 10, 20)]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 5, 0.0005), (10, 15, 0.01), (20, 25, 0.01)])
+    picks = select_references(turns, "A", _transcript(turns), None, vocals, exclude=[(-1, 6)])
+    assert sorted(_spans(picks)) == [(10, 15), (20, 25)]
+
+
+def test_reference_exclusions_are_songs_and_singing(tmp_path, monkeypatch):
+    from fukikae import songs
+    from fukikae.cards import select
+
+    work = tmp_path / "ep"
+    sep = work / "01-separate"
+    sep.mkdir(parents=True)
+    for n in ("background.wav", "vocals.wav", "vocals_16k.wav"):
+        (sep / n).write_bytes(b"")
+    monkeypatch.setattr(
+        songs, "detect_theme_songs",
+        lambda *_a, **_k: ([songs.SongSpan(65.0, 147.0, "detector", 0.9)], []),
+    )  # fmt: skip
+    tags = Tags(
+        backend="sensevoice", emotions=[],
+        events=[TagSpan(start=300, end=310, label="singing"), TagSpan(start=1, end=2, label="bgm")],
+    )  # fmt: skip
+    assert select.reference_exclusions(work, tags) == [(65.0, 147.0), (300.0, 310.0)]
+    # no stems: only the tag stage's singing
+    assert select.reference_exclusions(tmp_path / "none", tags) == [(300.0, 310.0)]
