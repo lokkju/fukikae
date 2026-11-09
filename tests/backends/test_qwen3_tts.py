@@ -29,7 +29,7 @@ def test_qwen3_tts_declares_only_what_was_verified():
     # ruling CD20: no delivery capability without an A/B showing it works (report, Task 9c)
     assert cls.capabilities == frozenset()
     assert cls.capabilities_for("clone") == frozenset()
-    assert cls.voice_keys == frozenset({"seed", "temperature", "top_p"})
+    assert cls.voice_keys == frozenset({"seed", "temperature", "top_p", "qwen3_tts_mode"})
     assert cls.sample_rate == 24000
     assert {"en", "ja", "de", "zh"} <= cls.languages
     assert cls.default_device == "cuda"
@@ -59,6 +59,30 @@ def test_auto_mode_uses_the_transcripts_when_every_clip_has_one():
         impl.resolve_mode("icl", ["", "x"])
     with pytest.raises(ValueError, match="mode"):
         impl.resolve_mode("both", [])
+
+
+def test_the_card_mode_beats_the_stage_mode_which_is_only_the_fallback():
+    # CD21: a card at the default (auto) takes the stage option when there is one
+    assert impl.card_mode("icl", "xvector") == "icl"
+    assert impl.card_mode("xvector", "icl") == "xvector"
+    assert impl.card_mode("auto", "xvector") == "xvector"
+    assert impl.card_mode("auto", None) == "auto"
+    assert impl.card_mode(None, None) == "auto"
+    with pytest.raises(ValueError, match="mode"):
+        impl.card_mode("sideways", None)
+
+
+def test_the_card_mode_reaches_the_worker_request(tmp_path):
+    from fukikae.backends.tts.remote import WorkerSynthesizer
+
+    voice = dataclasses.replace(_clone_card().voice, qwen3_tts_mode="xvector")
+    ref = tmp_path / "r.wav"
+    ref.write_bytes(b"")
+    payload = WorkerSynthesizer.voice_payload(voice, lambda _r: ref)
+    assert payload["qwen3_tts_mode"] == "xvector"
+    from fukikae.backends.tts import worker
+
+    worker._voice({**payload, "references": []})  # the worker accepts the key
 
 
 def test_language_codes_map_to_the_model_names():

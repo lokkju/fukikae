@@ -15,12 +15,22 @@ from typing import TYPE_CHECKING
 
 import typer
 
-from fukikae.cards.card import Card, CardError, card_id, dump_card, parse_card
+from fukikae.cards.card import (
+    MODE_FIELDS,
+    Card,
+    CardError,
+    Voice,
+    card_id,
+    dump_card,
+    parse_card,
+)
 from fukikae.cards.store import CardStore
 from fukikae.workspace import Workspace
 
 if TYPE_CHECKING:
     from fukikae.registry.store import CardAssignment, Character, Registry
+
+_DEFAULTS = Voice("", "", "")
 
 voices_app = typer.Typer(
     help="Character cards: assign, swap, edit and derive each character's voice.",
@@ -90,6 +100,15 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
                 typer.echo(f"{c.id}\t{c.name or '-'}\t{a.card_id}\t{a.by}\t{_state(a)}")
 
 
+def _modes(card: Card) -> list[tuple[str, str, tuple[str, ...], bool]]:
+    """(field, value, allowed values, at its default) of the card's own backend's clone mode."""
+    return [
+        (key, getattr(card.voice, key), modes, getattr(card.voice, key) == getattr(_DEFAULTS, key))
+        for key, modes in MODE_FIELDS.items()
+        if key.startswith(card.voice.backend + "_")
+    ]
+
+
 @voices_app.command("show")
 def show(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG) -> None:
     """Show a character's current card for the target language, then the card itself."""
@@ -112,6 +131,10 @@ def show(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
         emotions = card.meta.get("reference_emotions")
         if emotions:  # ruling CD5
             typer.echo(f"references may carry emotion: {', '.join(map(str, emotions))}")
+        for _key, mode, modes, is_default in _modes(card):  # ruling CD21
+            typer.echo(
+                f"clone mode: {mode}" + (f" (default; {', '.join(modes)})" if is_default else "")
+            )
         typer.echo("")
         typer.echo(dump_card(card), nl=False)
 
@@ -294,7 +317,12 @@ def edit(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
         editor = _editor()
         with tempfile.TemporaryDirectory(prefix="fukikae-card-") as tmp:
             path = Path(tmp) / f"{cur.card_id}.toml"
-            path.write_text(dump_card(old), encoding="utf-8")
+            hint = "".join(  # a default is not in the file; say what can be set (ruling CD21)
+                f'# {key} = "{mode}"  ({", ".join(modes)})\n'
+                for key, mode, modes, is_default in _modes(old)
+                if is_default
+            )
+            path.write_text(hint + dump_card(old), encoding="utf-8")
             done = subprocess.run([*editor, str(path)], check=False)  # noqa: S603
             if done.returncode != 0:
                 raise _fail(f"the editor exited with {done.returncode}; nothing changed")

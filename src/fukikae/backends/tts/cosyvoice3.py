@@ -26,7 +26,7 @@ class CosyVoice3Synthesizer(WorkerSynthesizer):
     # probe, fp32), CUDA context and allocator included.
     vram_mb: ClassVar[int] = 4500
     sources: ClassVar[frozenset[str]] = frozenset({"clone"})
-    voice_keys: ClassVar[frozenset[str]] = frozenset({"seed", "rate"})
+    voice_keys: ClassVar[frozenset[str]] = frozenset({"seed", "rate", "cosyvoice3_mode"})
     # Ruling CD20: no delivery capability without A/B evidence. Instruct mode was withdrawn:
     # its prompt wording was unverified, and it drops the LLM's speaker prompt (Task 9b fix 1).
     capabilities: ClassVar[frozenset[str]] = frozenset()

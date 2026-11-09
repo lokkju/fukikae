@@ -387,3 +387,44 @@ def test_show_warns_when_references_may_carry_emotion(tmp_path: Path):
     r = invoke("show", str(ws.root), "Natsu")
     assert r.exit_code == 0, r.output
     assert "references may carry emotion: angry, sad" in r.output
+
+
+def _mode_card(backend: str, **voice):
+    from dataclasses import replace
+
+    card = parse_card(STOCK_CARD)
+    return replace(card, voice=replace(card.voice, backend=backend, **voice))
+
+
+def test_show_prints_the_clone_mode(tmp_path: Path):
+    """CD21: the mode is on the card, so show names it, the default included."""
+    ws, cid, store = setup(tmp_path)
+    card_id = store.put(_mode_card("qwen3_tts", qwen3_tts_mode="xvector"))
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", card_id, by="assign", locked=True)
+    r = invoke("show", str(ws.root), "Natsu")
+    assert "clone mode: xvector" in r.output and 'qwen3_tts_mode = "xvector"' in r.output
+    card_id = store.put(_mode_card("cosyvoice3"))
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", card_id, by="assign", locked=True)
+    r = invoke("show", str(ws.root), "Natsu")
+    assert "clone mode: cross_lingual (default; cross_lingual, zero_shot)" in r.output
+    other = store.put(parse_card(STOCK_CARD))
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", other, by="assign", locked=True)
+    assert "clone mode" not in invoke("show", str(ws.root), "Natsu").output
+
+
+def test_edit_offers_the_clone_mode_at_its_default(tmp_path: Path, monkeypatch):
+    ws, cid, store = setup(tmp_path)
+    a = store.put(_mode_card("qwen3_tts"))
+    assert invoke("assign", str(ws.root), "Natsu", a, "--no-lock").exit_code == 0
+    seen = tmp_path / "seen.toml"
+    script = tmp_path / "editor.py"
+    script.write_text(f"import shutil, sys\nshutil.copy(sys.argv[1], {str(seen)!r})\n")
+    monkeypatch.setenv("EDITOR", f"{sys.executable} {script}")
+    r = invoke("edit", str(ws.root), "Natsu")
+    assert r.exit_code == 0, r.output
+    text = seen.read_text()
+    assert '# qwen3_tts_mode = "auto"  (icl, xvector, auto)' in text
+    tomllib.loads(text)  # a comment, still a card

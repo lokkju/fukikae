@@ -345,6 +345,8 @@ FULL_VOICE = Voice(
     options={"steps": 3},
     post={"gain_db": 1.0},
     fingerprint=FULL_FINGERPRINT,
+    qwen3_tts_mode="xvector",
+    cosyvoice3_mode="zero_shot",
 )
 
 
@@ -575,3 +577,83 @@ def test_caps_leave_existing_card_ids_alone():
     assert card_id(parse_card(SPEC_CARD)) == "31a12ee8813d8ba9"
     styled = _styled('register = "rough"\ncatchphrases = [ { source = "a", target = "" } ]\n')
     assert card_id(parse_card(styled)) == "6f04a42dacae1eca"
+
+
+# --- CD21: the clone mode is a per-card voice option -------------------------------------
+
+_CLONE_HEAD = f"""\
+target_language = "en"
+
+[voice]
+backend = "{{backend}}"
+model_revision = "r1"
+source = "clone"
+seed = 5
+{{extra}}
+[[voice.references]]
+clip = "{CLIP}"
+transcript = "やあ"
+language = "ja"
+"""
+
+
+def _clone(backend: str = "qwen3_tts", extra: str = "") -> Card:
+    return parse_card(_CLONE_HEAD.format(backend=backend, extra=extra))
+
+
+def test_the_mode_fields_leave_a_pre_existing_clone_card_id_alone():
+    # computed before the fields existed (CD1)
+    assert card_id(_clone()) == "63bc7947abb26872"
+    # spelling the default explicitly changes nothing; another mode is another voice
+    assert card_id(_clone(extra='qwen3_tts_mode = "auto"')) == "63bc7947abb26872"
+    assert card_id(_clone("cosyvoice3", 'cosyvoice3_mode = "cross_lingual"')) == card_id(
+        _clone("cosyvoice3")
+    )
+    assert card_id(_clone(extra='qwen3_tts_mode = "xvector"')) != "63bc7947abb26872"
+    assert card_id(_clone("cosyvoice3", 'cosyvoice3_mode = "zero_shot"')) != card_id(
+        _clone("cosyvoice3")
+    )
+    assert "_mode" not in canonical_form(_clone())
+
+
+def test_the_mode_round_trips_and_is_checked_at_load():
+    c = _clone(extra='qwen3_tts_mode = "icl"')
+    assert c.voice.qwen3_tts_mode == "icl"
+    assert 'qwen3_tts_mode = "icl"' in dump_card(c)
+    assert card_id(parse_card(dump_card(c))) == card_id(c)
+    assert "_mode" not in dump_card(_clone())
+    z = _clone("cosyvoice3", 'cosyvoice3_mode = "zero_shot"')
+    assert z.voice.cosyvoice3_mode == "zero_shot"
+    with pytest.raises(CardError, match=r"qwen3_tts_mode.*icl.*xvector.*auto"):
+        _clone(extra='qwen3_tts_mode = "zero_shot"')
+    with pytest.raises(CardError, match=r"cosyvoice3_mode.*cross_lingual.*zero_shot"):
+        _clone("cosyvoice3", 'cosyvoice3_mode = "auto"')
+    with pytest.raises(CardError, match="qwen3_tts_mode"):
+        _clone(extra="qwen3_tts_mode = 3")
+
+
+class _CloneBackend(Fake):
+    sources: ClassVar[frozenset[str]] = frozenset({"clone"})
+    voice_keys: ClassVar[frozenset[str]] = frozenset({"seed"})
+
+
+def test_the_mode_is_validated_per_backend():
+    class Qwen(_CloneBackend):
+        name: ClassVar[str] = "qwen3_tts"
+        voice_keys: ClassVar[frozenset[str]] = frozenset({"seed", "qwen3_tts_mode"})
+
+    class Cosy(_CloneBackend):
+        name: ClassVar[str] = "cosyvoice3"
+        voice_keys: ClassVar[frozenset[str]] = frozenset({"seed", "cosyvoice3_mode"})
+
+    validate_for_backend(_clone(extra='qwen3_tts_mode = "xvector"'), Qwen)
+    validate_for_backend(_clone("cosyvoice3", 'cosyvoice3_mode = "zero_shot"'), Cosy)
+    # a backend that doesn't list the key refuses a non-default value, and takes the default
+    plain = type("Plain", (_CloneBackend,), {"name": "qwen3_tts"})
+    validate_for_backend(_clone(), plain)
+    with pytest.raises(CardError, match="qwen3_tts_mode"):
+        validate_for_backend(_clone(extra='qwen3_tts_mode = "icl"'), plain)
+    # the other backend's field is not supported either
+    odd = replace(_clone().voice, cosyvoice3_mode="zero_shot")
+    with pytest.raises(CardError, match="cosyvoice3_mode"):
+        validate_for_backend(Card("en", odd), Qwen)

@@ -34,7 +34,7 @@ def test_cosyvoice3_declares_what_the_released_model_supports():
     assert cls.capabilities == frozenset()
     assert cls.capabilities_for("clone") == frozenset()
     # rate is CosyVoice's speed
-    assert cls.voice_keys == frozenset({"seed", "rate"})
+    assert cls.voice_keys == frozenset({"seed", "rate", "cosyvoice3_mode"})
     assert cls.sample_rate == 24000
     assert "en" in cls.languages and "ja" not in cls.languages
     assert cls.default_device == "cuda"
@@ -55,6 +55,17 @@ def test_an_unknown_mode_is_refused_at_construction():
         cls({"mode": "sideways"}, "cpu")
     with pytest.raises(ConfigError, match="no option"):
         cls({"temperature": 0.5}, "cpu")
+
+
+def test_the_card_mode_beats_the_stage_mode_which_is_only_the_fallback():
+    # CD21: a card at the default (cross_lingual) takes the stage option when there is one
+    assert impl.card_mode("zero_shot", "cross_lingual") == "zero_shot"
+    assert impl.card_mode("cross_lingual", "zero_shot") == "zero_shot"
+    assert impl.card_mode("cross_lingual", "auto") == "auto"
+    assert impl.card_mode("cross_lingual", None) == "cross_lingual"
+    assert impl.card_mode(None, None) == "cross_lingual"
+    with pytest.raises(ValueError, match="mode"):
+        impl.card_mode("sideways", None)
 
 
 def test_auto_mode_is_cross_lingual_when_a_reference_differs_from_the_target():
