@@ -548,9 +548,8 @@ def test_renders_from_the_tts_stage_cache_are_linked_not_rerendered(tmp_path):
     for c in [cue(1, 1, "natsu one"), cue(2, 2, "lucy one"),
               cue(3, 1, "natsu two is longer than its slot")]:  # fmt: skip
         key = tts_stage.cue_key(
-            cards[c.character_id], c.text or "", c.delivery, BackendConfig("fake", {}),
-            capabilities=FakeSynth.capabilities, identity={"model": "fake-model", "revision": "r1"},
-            slot=c.end - c.start,
+            cards[c.character_id], c.text or "", {}, BackendConfig("fake", {}),
+            identity={"model": "fake-model", "revision": "r1"},
         )  # fmt: skip
         tone_wav(cache / f"{key}.wav", 0.5, 24000)
     assert store.has(cards[1]) and cfg.target_language == "en"

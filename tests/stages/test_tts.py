@@ -460,24 +460,34 @@ def test_config_key_has_cards_extras_and_model_identity(ep):
     assert store.card_path(natsu) in inputs and store.card_path(lucy) in inputs
 
 
-def test_cue_key_hashes_only_the_delivery_the_backend_receives():
+def test_cue_key_hashes_what_is_passed_not_the_delivery_record():
     bc = BackendConfig("kokoro", {})
-    plain = Delivery(reference=(1.0, 2.0))
-    angry = Delivery(reference=(1.0, 2.0), emotion="angry", emotion_confidence=0.9)
-    base = cue_key("0123456789abcdef", "Hi.", plain, bc, capabilities=frozenset())
+    base = cue_key("0123456789abcdef", "Hi.", {}, bc)
     assert len(base) == 16
-    assert cue_key("0123456789abcdef", "Hi.", angry, bc, capabilities=frozenset()) == base
-    assert cue_key("0123456789abcdef", "Hi!", plain, bc, capabilities=frozenset()) != base
-    assert cue_key("fedcba9876543210", "Hi.", plain, bc, capabilities=frozenset()) != base
-    assert cue_key("0123456789abcdef", "Hi.", plain, BackendConfig("kokoro", {"x": 1})) != base
-    caps = frozenset({"emotion_vector"})
-    assert cue_key("0123456789abcdef", "Hi.", angry, bc, capabilities=caps) != cue_key(
-        "0123456789abcdef", "Hi.", plain, bc, capabilities=caps
-    )
-    # without capabilities given, the whole delivery record counts
-    assert cue_key("0123456789abcdef", "Hi.", angry, bc) != cue_key(
-        "0123456789abcdef", "Hi.", plain, bc
-    )
+    assert cue_key("0123456789abcdef", "Hi!", {}, bc) != base
+    assert cue_key("fedcba9876543210", "Hi.", {}, bc) != base
+    assert cue_key("0123456789abcdef", "Hi.", {}, BackendConfig("kokoro", {"x": 1})) != base
+    angry = {"emotion_vector": {"angry": 0.9}, "emotion_strength": 0.8}
+    assert cue_key("0123456789abcdef", "Hi.", angry, bc) != base
+    # Kokoro's keys are what they were: a backend that is passed nothing hashes {} as before
+    assert base == tts._hash(
+        {"card": "0123456789abcdef", "text": "Hi.", "delivery": {}, "backend": "kokoro",
+         "options": {}, "identity": None, "version": tts.RENDER_VERSION}
+    )  # fmt: skip
+
+
+def test_a_dropped_or_zero_strength_emotion_keys_like_nothing_passed(ep, monkeypatch):
+    """With emotion strength 0 nothing is passed, so the key is the neutral render's."""
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    monkeypatch.setattr(FakeSynth, "voice_keys", frozenset({"rate", "emotion_strength"}))
+    _assign(ep, 1, _stock("am_adam") + "emotion_strength = 0.0\n")
+    _assign(ep, 2, _stock("af_heart"))
+    TtsStage(CFG).run(ep, CFG)
+    zero = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset())
+    TtsStage(CFG).run(ep, CFG)
+    none = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert zero.passed == none.passed == {} and zero.key == none.key
 
 
 def test_pipeline_runs_tts_after_translate():
@@ -618,12 +628,9 @@ def test_capabilities_for_defaults_to_capabilities():
 
 def test_cue_key_changes_with_model_identity():
     bc = BackendConfig("kokoro", {})
-    d = Delivery(reference=(1.0, 2.0))
 
     def key(identity):
-        return cue_key(
-            "0123456789abcdef", "Hi.", d, bc, capabilities=frozenset(), identity=identity
-        )
+        return cue_key("0123456789abcdef", "Hi.", {}, bc, identity=identity)
 
     base = key({"model": "hexgrad/Kokoro-82M", "revision": "a"})
     assert key({"model": "hexgrad/Kokoro-82M", "revision": "b"}) != base

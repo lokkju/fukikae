@@ -19,6 +19,7 @@ separated song vocals are clean and loud, so they would otherwise rank first.
 
 from __future__ import annotations
 
+import logging
 import math
 import tempfile
 from collections.abc import Collection, Sequence
@@ -33,6 +34,8 @@ if TYPE_CHECKING:
     from fukikae.cards.card import Card
     from fukikae.cards.store import CardStore
     from fukikae.models import Tags, Transcript, Turn
+
+log = logging.getLogger(__name__)
 
 FRAME_S = 0.040
 HOP_S = 0.020
@@ -316,9 +319,15 @@ def reference_exclusions(
     out: list[tuple[float, float]] = []
     sep = work / "01-separate"
     stems = [sep / "background.wav", sep / "vocals.wav", sep / "vocals_16k.wav"]
-    if all(p.exists() for p in stems):
+    missing = [p.name for p in stems if not p.exists()]
+    if not missing:
         spans, _ = songs.detect_theme_songs(stems[0], stems[1], stems[2], settings)
         out += [(float(sp.start), float(sp.end)) for sp in spans]
+    else:
+        log.warning(
+            "%s: no %s, so theme songs are not excluded from reference selection (only tagged "
+            "singing is)", work, ", ".join(missing),
+        )  # fmt: skip
     for e in tags.events if tags else []:
         if e.label == "singing":
             out.append((float(e.start), float(e.end)))
