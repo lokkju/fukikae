@@ -27,6 +27,7 @@ EXTRAS: dict[str, str] = {
     "fusion": "pyannote",
     "sensevoice": "sensevoice",
     "emotion2vec": "sensevoice",
+    "kokoro": "kokoro",
 }
 
 

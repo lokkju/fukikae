@@ -32,11 +32,12 @@ def test_doctor_reports_llama_server_and_its_version(tmp_path, monkeypatch):
     assert rows["llama-server"][0] is False
 
 
-def test_translate_is_the_last_stage_without_tag():
+def test_tts_follows_translate_without_tag():
     from fukikae.cli import pipeline_stages
     from fukikae.config import Config
 
-    assert [s.name for s in pipeline_stages(Config())][-2:] == ["characters", "translate"]
+    names = [s.name for s in pipeline_stages(Config())][-3:]
+    assert names == ["characters", "translate", "tts"]
 
 
 @pytest.mark.ffmpeg

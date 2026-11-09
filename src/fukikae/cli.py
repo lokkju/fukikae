@@ -78,6 +78,7 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
     from fukikae.stages.separate import SeparateStage
     from fukikae.stages.tag import TagStage, tag_enabled
     from fukikae.stages.translate import TranslateStage
+    from fukikae.stages.tts import TtsStage
 
     stages: list[Stage] = [
         ExtractStage(),
@@ -91,6 +92,7 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
     if tags:
         stages.append(TagStage())
     stages.append(TranslateStage(cfg.target_language, tags=tags, cfg=cfg))
+    stages.append(TtsStage(cfg))
     return stages
 
 

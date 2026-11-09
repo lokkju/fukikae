@@ -42,6 +42,7 @@ from fukikae.artifacts import read_json, write_json
 from fukikae.backends.base import Translator
 from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
+from fukikae.cards.card import CardError
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.cues import assign_subtitle_speakers, build_asr_cues, is_marked, windows
@@ -191,6 +192,21 @@ class TranslateStage:
                     out[cid] = a.card_id
         return out
 
+    @staticmethod
+    def _styled(ep: Episode, cards: dict[int, str]) -> dict[int, str]:
+        """The cards that carry a [style], the only part of a card translate reads, so a
+        style-less card (the stock cards tts assigns) leaves the key and inputs alone. A card
+        that can't be read stays in, and run() reports it."""
+        store = CardStore(ep.workspace_root)
+        out: dict[int, str] = {}
+        for cid, card in cards.items():
+            try:
+                if not store.has(card) or store.get(card).style:
+                    out[cid] = card
+            except CardError:
+                out[cid] = card
+        return out
+
     def _target(self, ep: Episode) -> str:
         if self.target_language is not None:
             return self.target_language
@@ -226,7 +242,7 @@ class TranslateStage:
             paths.append(ep.work / "04b-tag" / "tags.json")
         paths.append(ep.workspace_root / "glossary.toml")
         store = CardStore(ep.workspace_root)
-        cards = self._cards(ep, self._speaking(ep), self._target(ep))
+        cards = self._styled(ep, self._cards(ep, self._speaking(ep), self._target(ep)))
         paths += [store.card_path(card) for _, card in sorted(cards.items())]
         return paths + self._subtitle_input(ep)
 
@@ -235,7 +251,7 @@ class TranslateStage:
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:
         bc, settings = self._settings(ep, cfg)
-        cards = self._cards(ep, self._speaking(ep), cfg.target_language)
+        cards = self._styled(ep, self._cards(ep, self._speaking(ep), cfg.target_language))
         key: dict[str, Any] = {
             "backend": bc.backend,
             "options": bc.options,
