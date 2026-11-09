@@ -346,3 +346,117 @@ def test_real_kokoro_record_and_verify_on_cpu(tmp_path: Path, monkeypatch: pytes
     res, _ = verify_card(recorded, store, make_synth=make_synth, make_embedder=make_embedder,
                          record=False, work=tmp_path / "w2")  # fmt: skip
     assert res.status == "match" and res.cosine is not None and res.cosine > 0.99, res
+
+
+# -- ruling CD23(a): the fingerprint embedder is an allowlist, loaded from local files only ----
+
+
+@pytest.fixture
+def no_network_no_models(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every way a model could be fetched or loaded fails the test if it is called."""
+    import huggingface_hub
+
+    calls: list[str] = []
+
+    def trap(what: str):
+        def f(*a: Any, **kw: Any) -> Any:
+            calls.append(what)
+            raise AssertionError(f"{what} called with {a} {kw}")
+
+        return f
+
+    for fn in ("hf_hub_download", "snapshot_download", "try_to_load_from_cache"):
+        monkeypatch.setattr(huggingface_hub, fn, trap(fn))
+        monkeypatch.setattr(verify, fn, trap(fn), raising=False)
+    real_create = loader.create
+
+    def create(kind: str, bc: Any, dev: str) -> Any:
+        if kind == "embed":
+            trap("loader.create(embed)")()
+        return real_create(kind, bc, dev)
+
+    monkeypatch.setattr(loader, "create", create)
+    return calls
+
+
+def _with_embedder(store: CardStore, tmp: Path, embedder: str) -> Card:
+    path = tmp / "v.npy"
+    np.save(path, np.ones(64, dtype=np.float32))
+    ref = store.add_sidecar(path, "vector")
+    from fukikae.cards.card import Fingerprint
+
+    return Card(
+        "en", Voice(**{**card().voice.__dict__, "fingerprint": Fingerprint(embedder, ref, 0.85)})
+    )
+
+
+@pytest.mark.parametrize("embedder", ["wespeaker:evil/model", "ecapa:anything", "wespeaker"])
+def test_unknown_embedder_loads_nothing_and_is_unavailable(
+    tmp_path: Path, no_network_no_models: list[str], embedder: str
+):
+    store = CardStore(tmp_path)
+    c = _with_embedder(store, tmp_path, embedder)
+    made: list[str] = []
+
+    @contextlib.contextmanager
+    def never(name: str) -> Iterator[Any]:
+        made.append(name)
+        if name != verify.FINGERPRINT_EMBEDDER:
+            raise AssertionError(f"the embedder factory was asked for {name}")
+        yield FftEmbedder()
+
+    for record in (False, True):
+        res, _ = verify_card(c, store, make_synth=Source, make_embedder=never, record=record,
+                             work=tmp_path / "w")  # fmt: skip
+        if record:  # recording ignores the old embedder and uses the pinned one: still no load
+            continue
+        assert res.status == "unavailable" and embedder in res.detail and "allow" in res.detail
+    assert made == [verify.FINGERPRINT_EMBEDDER] and no_network_no_models == []
+    assert TEST_SCRIPT["en"] == FakeSynth.RENDERS  # only the recording rendered
+
+
+def test_cli_embedder_factory_refuses_unknown_names(no_network_no_models: list[str]):
+    make = cards_cli._embedder_factory()
+    for name in ("wespeaker:evil/model", "ecapa:speechbrain/whatever"):
+        with pytest.raises(verify.EmbedderUnavailable), make(name):
+            pass
+    assert no_network_no_models == []
+
+
+def test_missing_local_model_is_unavailable_and_never_downloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_network_no_models: list[str]
+):
+    looked: list[tuple] = []
+
+    def cache_miss(repo: str, filename: str, revision: str | None = None, **kw: Any) -> None:
+        looked.append((repo, filename, revision, kw))
+        return None
+
+    monkeypatch.setattr(verify, "try_to_load_from_cache", cache_miss)
+    res, _ = verify_card(card(), CardStore(tmp_path), make_synth=Source,
+                         make_embedder=cards_cli._embedder_factory(), record=True,
+                         work=tmp_path / "w")  # fmt: skip
+    assert res.status == "unavailable" and "not in the local" in res.detail
+    pinned = verify.FINGERPRINT_EMBEDDERS[verify.FINGERPRINT_EMBEDDER]
+    assert looked == [(pinned.repo, pinned.filename, pinned.revision, {})]
+    assert no_network_no_models == []
+
+
+def test_cli_import_with_a_hostile_embedder_loads_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_network_no_models: list[str]
+):
+    monkeypatch.setattr(cards_cli, "_synth_factory", lambda _cfg: Source)
+    src, src_cid, store = _ws(tmp_path, "src")
+    hostile = store.put(_with_embedder(store, tmp_path, "ecapa:attacker/hyperparams"))
+    with Registry(src / ".fukikae" / "registry" / "registry.sqlite") as reg:
+        reg.assign_card(src_cid, "en", hostile, by="assign", locked=True)
+    pack = tmp_path / "p.tar.zst"
+    assert runner.invoke(app, ["voices", "export", str(src), "-o", str(pack)]).exit_code == 0
+    dst, dst_cid, _ = _ws(tmp_path, "dst")
+    r = runner.invoke(app, ["voices", "import", str(dst), str(pack)])
+    assert r.exit_code == 0, r.output
+    assert "unavailable" in r.output and "allow" in r.output
+    assert no_network_no_models == [] and FakeSynth.RENDERS == []
+    with Registry(dst / ".fukikae" / "registry" / "registry.sqlite") as reg:
+        cur = reg.card_for(dst_cid, "en")
+        assert cur is not None and cur.card_id == hostile

@@ -108,7 +108,7 @@ Each TTS backend declares which sources and which `[voice]` keys it supports, an
 
 ## Series metadata
 
-`fukikae.toml` gains a `[series]` table: `title`, optional `tmdb`, `tvdb`, `anidb` ids, and `genre` (defaulting to the profile name: anime, live-action, default). The operator sets these by hand; nothing is looked up online, keeping the offline constraint. `characters` gains an optional `external_id` (an AniDB character id, set with `registry rename --external-id`). Pack import refuses only on a conflicting id (both sides have, say, an AniDB id and they differ); when either side lacks ids it matches on normalized title and warns (my call). The results ledger reads `genre` from here.
+`fukikae.toml` gains a `[series]` table: `title`, optional `tmdb`, `tvdb`, `anidb` ids, and `genre` (defaulting to the profile name: anime, live-action, default). The operator sets these by hand; nothing is looked up online, keeping the offline constraint. `characters` gains an optional `external_id` (an AniDB character id, set with `registry rename --external-id`). Pack import refuses a conflicting id (both sides have, say, an AniDB id and they differ) and passes on a shared one; when the two sides share no id it compares normalized titles: equal passes with a warning that matching was by title, different refuses. `--force-series` overrides either refusal. The results ledger reads `genre` from here.
 
 ## Registry changes
 
@@ -153,7 +153,7 @@ cast.toml        # (character key, target language) -> card id; key = name plus 
 ```
 
 - `fukikae voices export <series> [--characters ...] [--no-clips] -o <pack>` writes one. `--no-clips` exports only cards that need no audio (stock, blend, design, latent) and lists the ones left out.
-- `fukikae voices import <series> <pack> [--dry-run] [--replace]` matches characters by external character id, then by name (case- and width-insensitive), shows the mapping and the unmatched characters, and assigns the cards with history `import:<pack title>`. Locked or hand-assigned characters are skipped unless `--replace`. A pack whose series ids don't match the series' own is refused unless `--force-series`.
+- `fukikae voices import <series> <pack> [--dry-run] [--replace]` matches characters by external character id, then by name (case- and width-insensitive), shows the mapping and the unmatched characters, and assigns the cards with history `import:<pack title>`. Locked or hand-assigned characters are skipped unless `--replace`. A pack whose series ids conflict with the series' own, or that shares no id with it and has a different title, is refused unless `--force-series`.
 - Registry ids never appear in a pack; only the character key does.
 
 Sharing therefore works between registries whose characters are named. Naming is the operator's (registry `rename`, or a cast-list import later).
@@ -202,7 +202,7 @@ Rows go to the results ledger keyed by backend, model revision, language pair an
 - The translator's delivery `direction` is requested only for marked delivery, to keep prompts short on a small model.
 - The fingerprint is excluded from the card id, so recording one never re-renders anything.
 - This plan builds the `tag` stage (on by default in the anime and live-action profiles) and the subtitle-first path, ASR plus translation first.
-- Series ids and genre are set by hand in `[series]`; pack import refuses only on conflicting ids and otherwise matches by title with a warning.
+- Series ids and genre are set by hand in `[series]`; pack import refuses on conflicting ids, and with no shared id matches by title (with a warning) or refuses a different title; `--force-series` overrides.
 - BBT's German and Spanish dubs are the second TTS evaluation set, with the original English track as the reference for duration and delivery.
 
 ## Left to the builder

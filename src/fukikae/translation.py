@@ -174,14 +174,21 @@ def _block(label: str, value: Any) -> str:
 
 def build_messages(req: TranslateRequest) -> list[dict[str, str]]:
     """``[system, user]``; see the module docstring for what goes where."""
+    from fukikae.backends.tts.worker import without_special_tokens as clean
+
+    # card text: special tokens were stripped at card load; again here (ruling CD23(c))
     fixed = [
-        {"speaker": name, "source": s, "target": t}
+        {"speaker": name, "source": clean(s), "target": clean(t)}
         for name, note in sorted(req.styles.items())
         for s, t in note.catchphrases
-        if s.strip() and t.strip()  # a derived card's empty target is no rendering
+        if clean(s).strip() and clean(t).strip()  # a derived card's empty target is none
     ]
     styles = {
-        name: {k: v for k, v in dataclasses.asdict(note).items() if v and k != "catchphrases"}
+        name: {
+            k: clean(v)
+            for k, v in dataclasses.asdict(note).items()
+            if v and k != "catchphrases" and clean(v)
+        }
         for name, note in sorted(req.styles.items())
     }
     styles = {k: v for k, v in styles.items() if v}

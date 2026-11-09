@@ -47,7 +47,7 @@ import tempfile
 import tomllib
 import unicodedata
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import IO, Any, NamedTuple, cast
 
@@ -57,7 +57,7 @@ import tomli_w
 from fukikae.cards.card import Card, CardError, card_id, dump_card, parse_card, sidecars
 from fukikae.cards.store import SIDECAR_DIRS, CardStore, SidecarKind, _atomic_write
 from fukikae.config import SERIES_ID_KEYS, SeriesInfo
-from fukikae.registry.store import OPERATOR_BY, Registry
+from fukikae.registry.store import Registry, replace_refusal
 
 PACK_FORMAT = 1
 CLIP_MAX_S = 30.0
@@ -438,6 +438,15 @@ class _Budget:
         self.limits, self.files, self.total = limits, 0, 0
         self.seen: set[str] = set()
 
+    def directory(self, name: str) -> None:
+        """A directory entry: no bytes, but it counts toward the file limit."""
+        self.files += 1
+        if self.files > self.limits.max_files:
+            raise PackError(f"pack holds more than {self.limits.max_files} files")
+        if name in self.seen:
+            raise PackError(f"pack holds {name} twice")
+        self.seen.add(name)
+
     def member(self, name: str, size: int) -> None:
         self.files += 1
         if self.files > self.limits.max_files:
@@ -522,7 +531,9 @@ class _CappedStream(io.RawIOBase):
         return len(data)
 
 
-def _stage_tar_zst(path: Path, staging: Path, limits: PackLimits) -> None:
+def _scan_tar_zst(path: Path, limits: PackLimits, staging: Path | None) -> None:
+    """One streaming pass over the archive with every member check; ``staging`` None reads
+    and discards the data (the size pass), else copies each member into it."""
     import zstandard
 
     budget = _Budget(limits)
@@ -545,14 +556,35 @@ def _stage_tar_zst(path: Path, staging: Path, limits: PackLimits) -> None:
                             continue
                         _check_layout(name, m.isdir())
                         if m.isdir():
+                            budget.directory(name)
                             continue
                         budget.member(name, m.size)
                         f = tf.extractfile(m)
                         if f is None:  # pragma: no cover - isreg members always have data
                             raise PackError(f"{name} has no data")
-                        _copy_bounded(f, staging / name, m.size, name)
+                        if staging is None:
+                            _discard_bounded(f, m.size, name)
+                        else:
+                            _copy_bounded(f, staging / name, m.size, name)
         except (tarfile.TarError, zstandard.ZstdError, EOFError) as e:
             raise PackError(f"{path} is not a readable .tar.zst pack: {e}") from e
+
+
+def _discard_bounded(src: IO[bytes], size: int, name: str) -> None:
+    left = size
+    while left > 0:
+        chunk = src.read(min(left, 1 << 20))
+        if not chunk:
+            raise PackError(f"{name} is shorter than its header says")
+        left -= len(chunk)
+
+
+def _stage_tar_zst(path: Path, staging: Path, limits: PackLimits) -> None:
+    """Check every member's name, type and size over the whole stream first, writing
+    nothing, so a bomb or an oversized pack is refused before anything is staged; then stage
+    it in a second pass, with the same checks again."""
+    _scan_tar_zst(path, limits, None)
+    _scan_tar_zst(path, limits, staging)
 
 
 def _stage_dir(path: Path, staging: Path, limits: PackLimits) -> None:
@@ -574,6 +606,7 @@ def _stage_dir(path: Path, staging: Path, limits: PackLimits) -> None:
             raise PackError(f"pack member {printable(name)!r} is not a regular file")
         _check_layout(name, is_dir)
         if is_dir:
+            budget.directory(name)
             continue
         # no symlink followed, and a FIFO swapped in after the scan can't block the open
         fd = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -821,17 +854,12 @@ def series_check(pack: Pack, series: SeriesInfo) -> tuple[bool, str]:
 # -- import ---------------------------------------------------------------------------------
 
 
-def _protected(cur: Any) -> bool:
-    """What ``Registry.assign_card`` refuses to replace for an import (ruling CD2): a locked
-    or operator-chosen card. An earlier unlocked import is replaceable (CD3)."""
-    return bool(cur.locked or cur.chosen_by in OPERATOR_BY)
-
-
 def plan_import(pack: Pack, reg: Registry, *, replace: bool) -> ImportPlan:
     """Match each cast entry to a character by external id, then by normalized name (never to
     a character whose own external id differs), and sort the matches into assignments,
     skipped protected characters (unless ``replace``) and already-current cards."""
     chars = reg.characters()
+    by = f"import:{pack.meta.title}"
     assign: list[Match] = []
     skipped: list[Skip] = []
     unmatched: list[Unmatched] = []
@@ -873,50 +901,85 @@ def plan_import(pack: Pack, reg: Registry, *, replace: bool) -> ImportPlan:
         cur = reg.card_for(char.id, lang)
         if cur is not None and cur.card_id == e.card:
             unchanged.append(m)
-        elif cur is not None and _protected(cur) and not replace:
-            state = "locked" if cur.locked else "operator-chosen"
-            why = f"{lang}: card {cur.card_id} is {state} ({cur.chosen_by}); pass --replace"
-            skipped.append(Skip(key, char.id, f"{why} to replace it"))
+        elif not replace and (why := replace_refusal(cur, by)) is not None:
+            skipped.append(Skip(key, char.id, f"{lang}: {why}; pass --replace to replace it"))
         else:
             assign.append(m)
     return ImportPlan(assign, skipped, unmatched, unchanged, replace)
 
 
-def copy_cards(pack: Pack, store: CardStore, ids: list[str]) -> list[Path]:
+@dataclass
+class CopyReport:
+    """What ``copy_cards`` did: files it created, files it rewrote (with their old bytes, for
+    ``rollback``), cards whose fingerprint it merged in, and fingerprint conflicts it left."""
+
+    created: list[Path] = field(default_factory=list)
+    rewritten: dict[Path, bytes] = field(default_factory=dict)
+    merged: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)
+
+    def rollback(self) -> None:
+        """Put the store back as it was: remove what was created, restore what was rewritten."""
+        for p in self.created:
+            p.unlink(missing_ok=True)
+        for p, old in self.rewritten.items():
+            _atomic_write(p, old)
+
+
+def copy_cards(pack: Pack, store: CardStore, ids: list[str]) -> CopyReport:
     """Copy ``ids`` (with the cards they blend with and every sidecar) from the checked pack
-    into ``store``; return the files it created, so a caller can remove them on failure.
-    Nothing in the store is overwritten: a card already there stays as it is (its own
-    fingerprint, or none), and only its missing clips and latents are added from the pack."""
-    created: list[Path] = []
+    into ``store``. A card the store already holds keeps its file, except (ruling CD22) when
+    it has no fingerprint and the pack's copy has one: the fingerprint is merged in (the id
+    doesn't change; the fingerprint is outside it) and the old bytes kept for rollback. When
+    both have fingerprints and they differ, the local one stays and the conflict is reported.
+    On any failure everything it did is rolled back before the error propagates."""
+    report = CopyReport()
     try:
         wanted: set[str] = set()
         for cid in ids:
             _closure(cid, pack.cards, wanted)
         for cid in sorted(wanted):
             card = pack.cards[cid]
-            exists = store.has(cid)
+            theirs = card.voice.fingerprint
+            local = store.get(cid) if store.has(cid) else None
+            merge = local is not None and local.voice.fingerprint is None and theirs is not None
+            if local is not None and theirs is not None and local.voice.fingerprint is not None:
+                mine = local.voice.fingerprint
+                if mine != theirs:
+                    report.conflicts.append(
+                        f"card {cid}: kept the local fingerprint ({printable(mine.embedder)}, "
+                        f"{mine.vector}, threshold {mine.threshold:g}); the pack's differs "
+                        f"({printable(theirs.embedder)}, {theirs.vector}, threshold "
+                        f"{theirs.threshold:g})"
+                    )
             for ref, kind in _sidecar_kinds(card).items():
-                if exists and kind == "vector":
+                if kind == "vector" and local is not None and not merge:
                     continue
                 new = store.adopt_sidecar(pack.sidecars[ref], ref, cast(SidecarKind, kind))
                 if new is not None:
-                    created.append(new)
-            if not exists:
-                created.append(store.card_path(cid))
+                    report.created.append(new)
+            path = store.card_path(cid)
+            if local is None:
+                report.created.append(path)
                 store.put(card)
-        return created
+            elif merge:
+                report.rewritten[path] = path.read_bytes()
+                store.put(replace(local, voice=replace(local.voice, fingerprint=theirs)))
+                report.merged.append(cid)
+        return report
     except BaseException:
-        for p in created:
-            p.unlink(missing_ok=True)
+        report.rollback()
         raise
 
 
-def apply_import(plan: ImportPlan, pack: Pack, reg: Registry, store: CardStore) -> None:
-    """Copy the planned cards into the store and assign them, ``by = import:<pack title>`` and
-    unlocked, in one registry transaction; on any failure the files it added are removed."""
-    if not plan.assign:
-        return
-    created = copy_cards(pack, store, [m.card_id for m in plan.assign])
+def apply_import(plan: ImportPlan, pack: Pack, reg: Registry, store: CardStore) -> CopyReport:
+    """Copy the planned cards into the store (merging fingerprints into cards it already
+    holds, assigned or unchanged, CD22) and assign them, ``by = import:<pack title>`` and
+    unlocked, in one registry transaction; on any failure the store is rolled back."""
+    ids = [m.card_id for m in plan.assign] + [m.card_id for m in plan.unchanged]
+    if not ids:
+        return CopyReport()
+    report = copy_cards(pack, store, ids)
     by = f"import:{pack.meta.title}"
     try:
         with reg.transaction():
@@ -929,9 +992,9 @@ def apply_import(plan: ImportPlan, pack: Pack, reg: Registry, store: CardStore) 
                     override=plan.replace, note=note,
                 )  # fmt: skip
     except BaseException:
-        for p in created:
-            p.unlink(missing_ok=True)
+        report.rollback()
         raise
+    return report
 
 
 __all__ = [
@@ -940,6 +1003,7 @@ __all__ = [
     "PACK_FORMAT",
     "CastEntry",
     "CharacterKey",
+    "CopyReport",
     "ExportReport",
     "ImportPlan",
     "Match",

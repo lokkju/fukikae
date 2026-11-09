@@ -3,11 +3,12 @@
 ``verify_card`` renders ``TEST_SCRIPT[card.target_language]`` (three fixed sentences) with the
 card's own backend and seed, through the tts stage's ``render_cue`` (ruling CD12: the same
 trim and gain as a dub), embeds the three renders end to end with the fingerprint's embedder
-(WeSpeaker for a first recording, the identity embedder, so one embedding space for the
-project) and compares that with the stored vector: ``match`` when the cosine reaches the
-fingerprint's threshold, else ``mismatch``. ``record`` stores the new vector as a ``vector``
-sidecar and returns the card with its ``[voice.fingerprint]``; the fingerprint is outside the
-card id (spec), so recording changes no id, assignment or cache key.
+(only an allowlisted embedder, ``FINGERPRINT_EMBEDDERS``, loaded from the local cache and never
+downloaded, ruling CD23(a); today the pinned WeSpeaker ResNet34, the identity embedder, so one
+embedding space for the project) and compares that with the stored vector: ``match`` when the
+cosine reaches the fingerprint's threshold, else ``mismatch``. ``record`` stores the new vector
+as a ``vector`` sidecar and returns the card with its ``[voice.fingerprint]``; the fingerprint
+is outside the card id (spec), so recording changes no id, assignment or cache key.
 
 It reports, never raises, for what stops a verification: ``no_fingerprint`` (nothing recorded
 and not recording; nothing rendered), ``missing_sidecar`` (a clip, latent or the fingerprint
@@ -91,10 +92,63 @@ class SynthSource(Protocol):
     def close(self) -> None: ...
 
 
-def embedder_backend(name: str) -> tuple[str, dict[str, Any]]:
-    """The embed backend and options of a fingerprint embedder name (``backend[:model]``)."""
-    backend, _, model = name.partition(":")
-    return backend, ({"model": model} if model else {})
+class EmbedderUnavailable(Exception):  # noqa: N818 - named like loader.BackendUnavailable
+    """A fingerprint embedder that is not on the allowlist, or not in the local cache."""
+
+
+@dataclass(frozen=True)
+class PinnedEmbedder:
+    """A fingerprint embedder fukikae trusts: an embed backend and the one checkpoint file,
+    at a pinned revision, it loads from the local Hugging Face cache."""
+
+    backend: str
+    repo: str
+    revision: str
+    filename: str
+
+
+# Ruling CD23(a): the only embedders verify loads. A card's embedder string is untrusted (a
+# pack carries it), so it selects from this table and never names a model to fetch.
+FINGERPRINT_EMBEDDERS: dict[str, PinnedEmbedder] = {
+    FINGERPRINT_EMBEDDER: PinnedEmbedder(
+        backend="wespeaker",
+        repo="pyannote/wespeaker-voxceleb-resnet34-LM",
+        revision="837717ddb9ff5507820346191109dc79c958d614",
+        filename="pytorch_model.bin",
+    ),
+}
+
+
+def try_to_load_from_cache(repo: str, filename: str, revision: str | None = None) -> Any:
+    """``huggingface_hub.try_to_load_from_cache``: a lookup in the local cache, never the
+    network."""
+    from huggingface_hub import try_to_load_from_cache as lookup
+
+    return lookup(repo, filename, revision=revision)
+
+
+def local_checkpoint(name: str) -> tuple[PinnedEmbedder, Path]:
+    """The allowlisted embedder ``name`` and its checkpoint file in the local cache; raises
+    ``EmbedderUnavailable`` for any other name or a checkpoint that isn't there. Nothing is
+    downloaded."""
+    pinned = FINGERPRINT_EMBEDDERS.get(name)
+    if pinned is None:
+        raise EmbedderUnavailable(_not_allowed(name))
+    found = try_to_load_from_cache(pinned.repo, pinned.filename, revision=pinned.revision)
+    if not isinstance(found, str) or not Path(found).is_file():
+        raise EmbedderUnavailable(
+            f"{pinned.repo}@{pinned.revision[:12]} ({pinned.filename}) is not in the local "
+            "Hugging Face cache, and verify never downloads; run any WeSpeaker stage once "
+            "(identity, eval) to fetch it"
+        )
+    return pinned, Path(found)
+
+
+def _not_allowed(name: str) -> str:
+    return (
+        f"fingerprint embedder {name!r} is not on the allowlist "
+        f"({', '.join(sorted(FINGERPRINT_EMBEDDERS))}); nothing was loaded"
+    )
 
 
 def _needed_sidecars(card: Card) -> list[str]:
@@ -232,6 +286,13 @@ def verify_card(
             except (CardError, ValueError, OSError) as e:
                 if not record:
                     return VerifyResult("missing_sidecar", None, f"fingerprint vector: {e}"), card
+    # the embedder: always the pinned one to record; the card's own to verify, which must be
+    # on the allowlist (ruling CD23(a)), checked before anything renders or loads
+    name = FINGERPRINT_EMBEDDER if record else (fp.embedder if fp is not None else "")
+    if name not in FINGERPRINT_EMBEDDERS:
+        return VerifyResult("unavailable", None, _not_allowed(name)), card
+    if fp is not None and fp.embedder != name:
+        stored = None  # another embedder's vector: nothing to compare the new one with
     if card.target_language not in TEST_SCRIPT:
         return VerifyResult(
             "unavailable", None,
@@ -256,12 +317,13 @@ def verify_card(
     test = work / "verify.wav"
     seconds = _concat(renders, test)
 
-    name = fp.embedder if fp is not None and (stored is not None or not record) else None
-    name = name or FINGERPRINT_EMBEDDER
     try:
         with make_embedder(name) as emb:
             vec = np.asarray(emb.embed(test, [(0.0, seconds)])[0], dtype=np.float32)
-    except (ConfigError, loader.BackendUnavailable, ImportError, RuntimeError, OSError) as e:
+    except (
+        EmbedderUnavailable, ConfigError, loader.BackendUnavailable, ImportError, RuntimeError,
+        OSError,
+    ) as e:  # fmt: skip
         return VerifyResult("unavailable", None, f"embedder {name!r}: {e}"), card
 
     cos = None

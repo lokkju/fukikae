@@ -704,15 +704,245 @@ def test_npy_header_larger_than_file_refused(tmp_path: Path):
     _import_refused(tmp_path, pack, "plain .npy")
 
 
-def test_pack_fingerprint_never_overwrites_the_stores_card(tmp_path: Path):
+# -- fix round 1: CD22, CD23(d), CD23(e) and the minors -------------------------------------
+
+
+def _fp(store: CardStore, tmp: Path, card: Card, value: float, name: str = "fake:1") -> Card:
+    path = tmp / f"fp{value}.npy"
+    np.save(path, np.full(4, value, dtype=np.float32))
+    ref = store.add_sidecar(path, "vector")
+    voice = Voice(**{**card.voice.__dict__, "fingerprint": Fingerprint(name, ref, 0.85)})
+    return Card(card.target_language, voice, card.style, card.meta)
+
+
+def test_cd22_pack_fingerprint_merges_into_a_stored_card_without_one(tmp_path: Path):
     pack, card_file = _fingerprinted_dir_pack(tmp_path)
+    cid = card_file.removesuffix(".toml")
     _, reg_b, store_b = workspace(tmp_path, "b")
-    natsu = character(reg_b, "Natsu")
-    store_b.put(stock())  # the same card, without a fingerprint
-    before = (store_b.root / card_file).read_bytes()
+    character(reg_b, "Natsu")
+    store_b.put(stock())  # the same card, no fingerprint
     with read_pack(pack) as p:
+        report = apply_import(plan_import(p, reg_b, replace=False), p, reg_b, store_b)
+        pack_fp = p.cards[cid].voice.fingerprint
+    assert report.merged == [cid] and report.conflicts == []
+    got = store_b.get(cid)  # same id, fingerprint now in the file
+    assert got.voice.fingerprint == pack_fp and pack_fp is not None
+    assert not store_b.missing_sidecars(got)
+
+
+def test_cd22_rollback_restores_the_old_card_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    pack, card_file = _fingerprinted_dir_pack(tmp_path)
+    dst, reg_b, store_b = workspace(tmp_path, "b")
+    character(reg_b, "Natsu")
+    store_b.put(stock())
+    before = snapshot(dst)
+
+    def boom(self, *a, **kw):  # noqa: ARG001
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(Registry, "assign_card", boom)
+    with read_pack(pack) as p, pytest.raises(RuntimeError):
         apply_import(plan_import(p, reg_b, replace=False), p, reg_b, store_b)
-    assert (store_b.root / card_file).read_bytes() == before
-    assert not (store_b.root / "vectors").exists()
-    cur = reg_b.card_for(natsu, "en")
-    assert cur is not None and cur.card_id == card_file.removesuffix(".toml")
+    assert snapshot(dst) == before
+
+
+def test_cd22_differing_fingerprints_keep_the_local_one_and_report_both(tmp_path: Path):
+    _, reg_a, store_a = workspace(tmp_path, "a")
+    theirs = _fp(store_a, tmp_path, stock(), 0.5)
+    cid = store_a.put(theirs)
+    reg_a.assign_card(character(reg_a, "Natsu"), "en", cid, by="auto", locked=False)
+    export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
+                no_clips=False, title="t", author="")  # fmt: skip
+    _, reg_b, store_b = workspace(tmp_path, "b")
+    character(reg_b, "Natsu")
+    mine = _fp(store_b, tmp_path, stock(), 0.25)
+    assert store_b.put(mine) == cid
+    with read_pack(tmp_path / "p") as p:
+        report = apply_import(plan_import(p, reg_b, replace=False), p, reg_b, store_b)
+    assert store_b.get(cid).voice.fingerprint == mine.voice.fingerprint
+    assert report.merged == [] and len(report.conflicts) == 1
+    line = report.conflicts[0]
+    assert cid in line and mine.voice.fingerprint.vector in line  # type: ignore[union-attr]
+    assert theirs.voice.fingerprint.vector in line  # type: ignore[union-attr]
+
+
+def test_cli_import_merges_and_verifies_the_merged_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fukikae.cards import cli as cards_cli
+
+    verified: list[str] = []
+    monkeypatch.setattr(
+        cards_cli, "_verify_after",
+        lambda _ws, store, cards: verified.extend(
+            c for _, c in cards if store.get(c).voice.fingerprint is not None
+        ),
+    )  # fmt: skip
+    pack, card_file = _fingerprinted_dir_pack(tmp_path)
+    dst, reg_b, store_b = workspace(tmp_path, "b")
+    character(reg_b, "Natsu")
+    store_b.put(stock())
+    reg_b.close()
+    r = runner.invoke(app, ["voices", "import", str(dst), str(pack)])
+    assert r.exit_code == 0, r.output
+    assert "fingerprint" in r.output and "merged" in r.output
+    assert verified == [card_file.removesuffix(".toml")]
+
+
+def test_protection_has_one_predicate(tmp_path: Path):
+    # CD23(d): plan_import asks the registry, the same rule assign_card enforces
+    from fukikae.registry.store import ProtectedAssignmentError, replace_refusal
+
+    _, reg, store = workspace(tmp_path, "r")
+    cid = character(reg, "A")
+    s1, s2 = store.put(stock("af_heart")), store.put(stock("am_adam"))
+    for by, locked in (("assign", False), ("auto", True), ("import:x", False), ("auto", False)):
+        reg.assign_card(cid, "en", s1, by=by, locked=locked, override=True)
+        cur = reg.card_for(cid, "en")
+        why = replace_refusal(cur, "import:t")
+        try:
+            reg.assign_card(cid, "en", s2, by="import:t", locked=False)
+            refused = False
+        except ProtectedAssignmentError:
+            refused = True
+        assert refused == (why is not None), (by, locked)
+        assert not hasattr(packs, "_protected")
+
+
+def test_cli_import_reports_a_registry_refusal_and_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _, reg_a, store_a = workspace(tmp_path, "a")
+    reg_a.assign_card(character(reg_a, "Natsu"), "en", store_a.put(clone(store_a, tmp_path)),
+                      by="auto", locked=False)  # fmt: skip
+    export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
+                no_clips=False, title="t", author="")  # fmt: skip
+    dst, reg_b, store_b = workspace(tmp_path, "b")
+    natsu = character(reg_b, "Natsu")
+    reg_b.assign_card(natsu, "en", store_b.put(stock()), by="auto", locked=False)
+    reg_b.close()
+    real = packs.plan_import
+
+    def racing(pack, reg, *, replace):  # the operator locks Natsu between plan and apply
+        plan = real(pack, reg, replace=replace)
+        reg.lock_card(natsu, "en", True)
+        return plan
+
+    monkeypatch.setattr(packs, "plan_import", racing)
+    before = snapshot(dst)
+    r = runner.invoke(app, ["voices", "import", str(dst), str(tmp_path / "p")])
+    assert r.exit_code == 1 and "nothing was imported" in r.output and "Traceback" not in r.output
+    assert snapshot(dst) == before
+
+
+def test_escape_in_a_card_key_never_reaches_stdout(tmp_path: Path):
+    # CD23(e): CardError messages quote the key; the CLI prints them through printable
+    members = []
+    for info, data in good_pack_members(tmp_path):
+        if info.name.startswith("cards/"):
+            text = (data or b"").decode().replace("[voice]\n", '[voice]\n"\\u001b[2J\\u0007" = 1\n')
+            members.append(reg_member(info.name, text.encode()))
+        else:
+            members.append((info, data))
+    tar_zst(tmp_path / "evil.tar.zst", members)
+    _import_refused(tmp_path, tmp_path / "evil.tar.zst", "unknown key")
+    r = runner.invoke(app, ["voices", "import", str(tmp_path / "victim"),
+                            str(tmp_path / "evil.tar.zst")])  # fmt: skip
+    assert "\x1b" not in r.output and "\x07" not in r.output and "[2J" in r.output
+
+
+def test_escape_in_a_stored_card_never_reaches_stdout(tmp_path: Path):
+    root, reg, store = workspace(tmp_path, "w")
+    cid = character(reg, "Natsu")
+    sid = store.put(stock())
+    reg.assign_card(cid, "en", sid, by="assign", locked=True)
+    reg.close()
+    path = store.card_path(sid)
+    path.write_text(path.read_text() + '\n[style]\nregister = "x\\u001b[31mred"\n')
+    for args in (["show", str(root), "Natsu"], ["verify", str(root), "Natsu"]):
+        r = runner.invoke(app, ["voices", *args])
+        assert "\x1b" not in r.output, (args, r.output)
+
+
+def test_assign_from_pack_with_a_colon_in_the_name(tmp_path: Path):
+    src, reg_a, store_a = workspace(tmp_path, "a")
+    s = store_a.put(stock("am_adam"))
+    reg_a.assign_card(character(reg_a, "Dr. Who: Origins"), "en", s, by="auto", locked=False)
+    reg_a.close()
+    pack = tmp_path / "p.tar.zst"
+    assert runner.invoke(app, ["voices", "export", str(src), "-o", str(pack)]).exit_code == 0
+    dst, reg_b, _ = workspace(tmp_path, "b")
+    other = character(reg_b, "Someone")
+    reg_b.close()
+    r = runner.invoke(app, ["voices", "assign", str(dst), "Someone", f"{pack}:dr. who: origins"])
+    assert r.exit_code == 0, r.output
+    with Registry(dst / ".fukikae" / "registry" / "registry.sqlite") as reg:
+        cur = reg.card_for(other, "en")
+        assert cur is not None and cur.card_id == s
+
+
+def test_assign_from_pack_merges_the_fingerprint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from fukikae.cards import cli as cards_cli
+
+    monkeypatch.setattr(cards_cli, "_verify_after", lambda *_a: None)
+    pack, card_file = _fingerprinted_dir_pack(tmp_path)
+    dst, reg_b, store_b = workspace(tmp_path, "b")
+    character(reg_b, "Someone")
+    store_b.put(stock())
+    reg_b.close()
+    r = runner.invoke(
+        app, ["voices", "assign", str(dst), "Someone", f"{pack}:Natsu", "--no-verify"]
+    )
+    assert r.exit_code == 0, r.output
+    assert store_b.get(card_file.removesuffix(".toml")).voice.fingerprint is not None
+
+
+def test_import_notes_another_target_language(tmp_path: Path):
+    _, reg_a, store_a = workspace(tmp_path, "a")
+    reg_a.assign_card(character(reg_a, "A"), "es", store_a.put(stock(lang="es")), by="auto",
+                      locked=False)  # fmt: skip
+    export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
+                no_clips=False, title="t", author="")  # fmt: skip
+    dst, reg_b, _ = workspace(tmp_path, "b")
+    character(reg_b, "A")
+    reg_b.close()
+    r = runner.invoke(app, ["voices", "import", str(dst), str(tmp_path / "p"), "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert "'es'" in r.output and "target language" in r.output and "'en'" in r.output
+
+
+def test_bomb_refused_before_anything_is_staged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    members = good_pack_members(tmp_path)
+    big = reg_member("clips/" + "c" * 64 + ".wav", b"\0" * 1_000_000)
+    tar_zst(tmp_path / "bomb.tar.zst", [*members, big])  # the oversized member comes last
+    copied: list[str] = []
+    real = packs._copy_bounded
+
+    def spy(src, dest, size, name):
+        copied.append(name)
+        return real(src, dest, size, name)
+
+    monkeypatch.setattr(packs, "_copy_bounded", spy)
+    with pytest.raises(PackError, match="total"):
+        read_pack(tmp_path / "bomb.tar.zst", limits=PackLimits(max_total=100_000))
+    assert copied == []
+
+
+def test_directory_entries_count_toward_the_file_limit(tmp_path: Path):
+    members = good_pack_members(tmp_path)  # 3 files
+    dirs = []
+    for d in ("clips", "latents", "vectors"):
+        info = tarfile.TarInfo(d)
+        info.type = tarfile.DIRTYPE
+        dirs.append((info, None))
+    tar_zst(tmp_path / "p.tar.zst", [*dirs, *members])
+    with pytest.raises(PackError, match="files"):
+        read_pack(tmp_path / "p.tar.zst", limits=PackLimits(max_files=4))
+    d = tmp_path / "dirpack"
+    for info, data in members:
+        (d / info.name).parent.mkdir(parents=True, exist_ok=True)
+        (d / info.name).write_bytes(data or b"")
+    for sub in ("clips", "latents"):
+        (d / sub).mkdir()
+    with pytest.raises(PackError, match="files"):
+        read_pack(d, limits=PackLimits(max_files=4))

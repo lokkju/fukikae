@@ -5,8 +5,10 @@ from __future__ import annotations
 import datetime as dt
 import os
 import shlex
+import sqlite3
 import subprocess
 import tempfile
+import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
@@ -30,6 +32,7 @@ from fukikae.workspace import Workspace
 
 if TYPE_CHECKING:
     from fukikae.backends.base import Embedder, Synthesizer
+    from fukikae.cards.packs import CopyReport
     from fukikae.cards.verify import SynthSource, VerifyResult
     from fukikae.config import Config
     from fukikae.registry.store import CardAssignment, Character, Registry
@@ -48,8 +51,22 @@ _LANG = typer.Option(
 )
 
 
+def _terminal_safe(text: str) -> str:
+    """``text`` without control or format characters (tabs and line breaks kept): card and
+    pack text, error messages that quote it included, reaches the terminal only through this
+    (ruling CD23(e))."""
+    return "\n".join(
+        "".join(ch for ch in line if ch == "\t" or unicodedata.category(ch)[0] != "C")
+        for line in text.split("\n")
+    )
+
+
+def _echo(message: str = "", nl: bool = True, err: bool = False) -> None:
+    typer.echo(_terminal_safe(message), nl=nl, err=err)
+
+
 def _fail(msg: str) -> typer.Exit:
-    typer.echo(f"error: {msg}", err=True)
+    _echo(f"error: {msg}", err=True)
     return typer.Exit(1)
 
 
@@ -95,13 +112,13 @@ def _current(reg: Registry, char: Character, lang: str) -> CardAssignment:
 def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
     """List every character with its card for the target language."""
     with _session(workspace, lang) as (reg, _, language):
-        typer.echo(f"character\tname\t{language} card\tby\tstate")
+        _echo(f"character\tname\t{language} card\tby\tstate")
         for c in reg.characters():
             a = reg.card_for(c.id, language)
             if a is None:
-                typer.echo(f"{c.id}\t{c.name or '-'}\t-\t-\t-")
+                _echo(f"{c.id}\t{c.name or '-'}\t-\t-\t-")
             else:
-                typer.echo(f"{c.id}\t{c.name or '-'}\t{a.card_id}\t{a.by}\t{_state(a)}")
+                _echo(f"{c.id}\t{c.name or '-'}\t{a.card_id}\t{a.by}\t{_state(a)}")
 
 
 def _modes(card: Card) -> list[tuple[str, str, tuple[str, ...], bool]]:
@@ -119,28 +136,26 @@ def show(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
     with _session(workspace, lang) as (reg, store, language):
         char = reg.character_by_ref(character)
         others = [x for x in reg.card_languages(char.id) if x != language]
-        typer.echo(
+        _echo(
             f"character {_label(char)}"
             + (f", external id {char.external_id}" if char.external_id else "")
             + (f"; cards also for {', '.join(others)}" if others else "")
         )
         a = reg.card_for(char.id, language)
         if a is None or a.card_id is None:
-            typer.echo(f"{language}: no card")
+            _echo(f"{language}: no card")
             return
-        typer.echo(f"{language}: card {a.card_id} ({a.by}, {_state(a)}, history row {a.n})")
+        _echo(f"{language}: card {a.card_id} ({a.by}, {_state(a)}, history row {a.n})")
         if a.note:
-            typer.echo(f"note: {a.note}")
+            _echo(f"note: {a.note}")
         card = store.get(a.card_id)
         emotions = card.meta.get("reference_emotions")
         if emotions:  # ruling CD5
-            typer.echo(f"references may carry emotion: {', '.join(map(str, emotions))}")
+            _echo(f"references may carry emotion: {', '.join(map(str, emotions))}")
         for _key, mode, modes, is_default in _modes(card):  # ruling CD21
-            typer.echo(
-                f"clone mode: {mode}" + (f" (default; {', '.join(modes)})" if is_default else "")
-            )
-        typer.echo("")
-        typer.echo(dump_card(card), nl=False)
+            _echo(f"clone mode: {mode}" + (f" (default; {', '.join(modes)})" if is_default else ""))
+        _echo("")
+        _echo(dump_card(card), nl=False)
 
 
 @voices_app.command("assign")
@@ -165,12 +180,12 @@ def assign(
 
     with _session(workspace, lang) as (reg, store, language):
         char = reg.character_by_ref(character)
-        created: list[Path] = []
+        copied: CopyReport | None = None
         try:
             if ref.startswith("stock:"):
                 ref = _stock(store, ref, language)
             elif not is_card_id(ref) and ":" in ref:
-                ref, created = _from_pack(workspace, store, ref, language)
+                ref, copied = _from_pack(workspace, store, ref, language)
             if not store.has(ref):
                 raise _fail(
                     f"card {ref} is not in the card store ({store.root}); nothing was assigned"
@@ -183,38 +198,60 @@ def assign(
                     f"<workspace> <character> --lang {card.target_language} --to {language}`"
                 )
             a = reg.assign_card(char.id, language, ref, by="assign", locked=not no_lock)
-        except PackError as e:
-            raise _fail(str(e)) from e
-        except BaseException:
-            for p in created:
-                p.unlink(missing_ok=True)
+        except BaseException as e:
+            if copied is not None:
+                copied.rollback()
+            if isinstance(e, PackError):
+                raise _fail(str(e)) from e
             raise
-        typer.echo(f"{_label(char)} {language}: card {ref} ({_state(a)}, history row {a.n})")
+        _echo(f"{_label(char)} {language}: card {ref} ({_state(a)}, history row {a.n})")
+        if copied is not None:
+            _copy_lines(copied)
         if not no_verify:
             _verify_after(workspace, store, [(_label(char), ref)])
 
 
+def _split_pack_ref(ref: str) -> tuple[Path, str]:
+    """``<pack>:<character>`` split at the first colon whose left side is a pack (a directory
+    or a ``.tar.zst``), so a character name may hold colons."""
+    for i, ch in enumerate(ref):
+        if ch != ":":
+            continue
+        path = Path(ref[:i])
+        if path.is_dir() or (path.is_file() and path.name.endswith(".tar.zst")):
+            return path, ref[i + 1 :]
+    from fukikae.cards.packs import PackError
+
+    raise PackError(f"{ref!r} is not a card id, a stock voice or <pack>:<character>")
+
+
 def _from_pack(
     workspace: Path, store: CardStore, ref: str, language: str
-) -> tuple[str, list[Path]]:
+) -> tuple[str, CopyReport]:
     """``<pack>:<character>``: that character's card for ``language`` copied (checked) from
-    the pack into the store; returns its id and the files added. The series check only
-    warns here: the operator named the card."""
-    from fukikae.cards.packs import PackError, copy_cards, printable, read_pack, series_check
+    the pack into the store, its fingerprint merged into a stored copy that has none (CD22);
+    returns its id and what was copied (for rollback). The series check only warns here: the
+    operator named the card."""
+    from fukikae.cards.packs import copy_cards, printable, read_pack, series_check
 
-    path, _, who = ref.rpartition(":")
-    if not Path(path).exists():
-        raise PackError(f"{ref!r} is not a card id, a stock voice or <pack>:<character>")
-    with read_pack(Path(path)) as pack:
+    path, who = _split_pack_ref(ref)
+    with read_pack(path) as pack:
         entry = pack.entry(who, language)
         ok, why = series_check(pack, Workspace(workspace).config.series)
         if not ok:
-            typer.echo(f"warning: {why}")
-        typer.echo(
+            _echo(f"warning: {why}")
+        _echo(
             f"pack {printable(pack.meta.title)!r}: {printable(entry.key.name)} {language} "
             f"is card {entry.card}"
         )
         return entry.card, copy_cards(pack, store, [entry.card])
+
+
+def _copy_lines(copied: CopyReport) -> None:
+    for cid in copied.merged:
+        _echo(f"card {cid}: fingerprint merged from the pack (the store's copy had none)")
+    for line in copied.conflicts:
+        _echo(f"fingerprint conflict: {line}")
 
 
 def _stock(store: CardStore, ref: str, language: str) -> str:
@@ -262,7 +299,7 @@ def restock(
             try:
                 rev = revision(v.backend)
             except (CardError, ConfigError, BackendUnavailable) as e:
-                typer.echo(f"{_label(char)}: card {a.card_id} left alone ({e})")
+                _echo(f"{_label(char)}: card {a.card_id} left alone ({e})")
                 continue
             if v.model_revision == rev:
                 continue
@@ -273,16 +310,16 @@ def restock(
             )
             changed += 1
             if dry_run:
-                typer.echo(f"would restock {what}")
+                _echo(f"would restock {what}")
                 continue
             new_id = store.put(new)
             n = reg.assign_card(
                 char.id, language, new_id, by="restock", locked=False,
                 note=f"restocked from card {a.card_id}",
             ).n  # fmt: skip
-            typer.echo(f"restocked {what}: card {new_id} (history row {n})")
+            _echo(f"restocked {what}: card {new_id} (history row {n})")
         if not changed:
-            typer.echo("nothing to restock")
+            _echo("nothing to restock")
 
 
 @voices_app.command("history")
@@ -292,13 +329,13 @@ def history(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _L
         char = reg.character_by_ref(character)
         rows = reg.card_history(char.id, language)
         if not rows:
-            typer.echo(f"{_label(char)} {language}: no history")
+            _echo(f"{_label(char)} {language}: no history")
             return
         cur = reg.card_for(char.id, language)
-        typer.echo("n\tassigned\tby\tcard\tstate\tnote")
+        _echo("n\tassigned\tby\tcard\tstate\tnote")
         for h in rows:
             mark = " *" if cur is not None and h.n == cur.n else ""
-            typer.echo(
+            _echo(
                 f"{h.n}{mark}\t{h.assigned}\t{h.by}\t{h.card_id or '-'}\t{_state(h)}\t"
                 f"{h.note or ''}".rstrip()
             )
@@ -324,14 +361,14 @@ def revert(
                     f"card {a.card_id} is not in the card store ({store.root}); nothing was "
                     "reverted. Restore the card file or pick another history row with --to"
                 )
-        typer.echo(f"{_label(char)} {language}: card {a.card_id} (history row {a.n})")
+        _echo(f"{_label(char)} {language}: card {a.card_id} (history row {a.n})")
 
 
 def _lock(workspace: Path, character: str, lang: str | None, locked: bool) -> None:
     with _session(workspace, lang) as (reg, _, language):
         char = reg.character_by_ref(character)
         a = reg.lock_card(char.id, language, locked)
-        typer.echo(f"{_label(char)} {language}: card {a.card_id} {_state(a)}")
+        _echo(f"{_label(char)} {language}: card {a.card_id} {_state(a)}")
 
 
 @voices_app.command("lock")
@@ -385,7 +422,7 @@ def edit(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
                 f"{language!r}; use `fukikae voices derive` for another language"
             )
         if card_id(new) == cur.card_id:
-            typer.echo(
+            _echo(
                 f"{_label(char)} {language}: card {cur.card_id} unchanged ([meta] and the "
                 "fingerprint are not part of a card's identity)"
             )
@@ -397,14 +434,14 @@ def edit(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
         ):
             # a fingerprint describes how the old voice rendered, not the edited one
             new = replace(new, voice=replace(new.voice, fingerprint=None))
-            typer.echo("the voice changed, so its fingerprint was dropped")
+            _echo("the voice changed, so its fingerprint was dropped")
         new = replace(
             new,
             meta={**new.meta, "derived_from": cur.card_id, "created": dt.date.today()},
         )
         new_id = store.put(new)
         a = reg.assign_card(char.id, language, new_id, by="edit", locked=True)
-        typer.echo(
+        _echo(
             f"{_label(char)} {language}: card {new_id}, derived from {cur.card_id} "
             f"({_state(a)}, history row {a.n})"
         )
@@ -450,7 +487,7 @@ def derive(
         )
         new_id = store.put(new)
         a = reg.assign_card(char.id, to, new_id, by="derive", locked=False)
-        typer.echo(
+        _echo(
             f"{_label(char)} {to}: card {new_id}, derived from {language} card {cur.card_id} "
             f"({_state(a)}, history row {a.n})"
         )
@@ -477,20 +514,39 @@ def _synth_factory(cfg: Config) -> Callable[[Card], SynthSource]:
 def _embedder_factory() -> Callable[[str], AbstractContextManager[Embedder]]:
     """The fingerprint embedder, on the CPU (three short sentences; the GPU stays free)."""
     from fukikae.backends import loader
-    from fukikae.cards.verify import embedder_backend
+    from fukikae.cards.verify import local_checkpoint
     from fukikae.config import BackendConfig
 
     @contextmanager
     def make(name: str) -> Iterator[Embedder]:
-        backend, options = embedder_backend(name)
-        inst = cast("Embedder", loader.create("embed", BackendConfig(backend, options), "cpu"))
-        inst.load()
+        # ruling CD23(a): an allowlisted name, its pinned checkpoint from the local cache by
+        # path (no hub lookup at all), and the hub offline for the load as a second guard
+        pinned, ckpt = local_checkpoint(name)
+        bc = BackendConfig(pinned.backend, {"model": str(ckpt)})
+        with _hub_offline():
+            inst = cast("Embedder", loader.create("embed", bc, "cpu"))
+            inst.load()
         try:
             yield inst
         finally:
             inst.unload()
 
     return make
+
+
+@contextmanager
+def _hub_offline() -> Iterator[None]:
+    keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    old = {k: os.environ.get(k) for k in keys}
+    os.environ.update(dict.fromkeys(keys, "1"))
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def _verify(cfg: Config, store: CardStore, card: Card, record: bool) -> tuple[VerifyResult, Card]:
@@ -521,7 +577,7 @@ def _verify_after(workspace: Path, store: CardStore, cards: list[tuple[str, str]
             line = f"verify {printable(label)} card {cid}: {res.status} ({res.detail})"
         except Exception as e:  # report, never block
             line = f"verify {printable(label)} card {cid}: could not run ({type(e).__name__}: {e})"
-        typer.echo(line)
+        _echo(line)
 
 
 @voices_app.command("verify")
@@ -548,7 +604,7 @@ def verify_cmd(
         # the fingerprint is outside the id: putting the recorded card rewrites the same file
         if res.status == "recorded" and store.put(new) != cid:  # pragma: no cover
             raise _fail(f"recording changed card {cid}'s id; nothing was stored")
-        typer.echo(f"card {cid}: {res.status.replace('_', ' ')} ({res.detail})")
+        _echo(f"card {cid}: {res.status.replace('_', ' ')} ({res.detail})")
         if res.status not in ("match", "recorded"):
             raise typer.Exit(1)
 
@@ -592,8 +648,8 @@ def export(
         except PackError as e:
             raise _fail(str(e)) from e
         for what, why in report.left_out:
-            typer.echo(f"left out: {what}: {why}")
-        typer.echo(f"wrote {out}: {report.written} card assignment(s)")
+            _echo(f"left out: {what}: {why}")
+        _echo(f"wrote {out}: {report.written} card assignment(s)")
 
 
 @voices_app.command("import")
@@ -632,7 +688,7 @@ def import_(
         with pack:
             ok, why = series_check(pack, Workspace(workspace).config.series)
             meta = pack.meta
-            typer.echo(
+            _echo(
                 f"pack {printable(meta.title)!r}"
                 + (f" by {printable(meta.author)}" if meta.author else "")
                 + f": {len(pack.cast)} cast entr{'y' if len(pack.cast) == 1 else 'ies'}"
@@ -640,41 +696,47 @@ def import_(
             if not ok:
                 if not force_series:
                     raise _fail(f"{why}; pass --force-series to import it anyway")
-                typer.echo(f"forced: {why}")
+                _echo(f"forced: {why}")
             else:
-                typer.echo(why)
+                _echo(why)
             plan = plan_import(pack, reg, replace=replace_cards)
             names = {c.id: c for c in reg.characters()}
+            target = Workspace(workspace).config.target_language
+            for other in sorted({m.target_language for m in plan.assign} - {target}):
+                _echo(
+                    f"note: the pack assigns cards for {other!r}, not this workspace's target "
+                    f"language {target!r}; they are used only when dubbing into {other!r}"
+                )
 
             def who(key: CharacterKey, cid: int) -> str:
                 return f"{printable(key.name)} -> character {_label(names[cid])}"
 
             for m in plan.assign:
-                typer.echo(
+                _echo(
                     f"{who(m.key, m.character_id)} {m.target_language} by {m.matched_by}: "
                     f"card {m.card_id}"
                 )
             for m in plan.unchanged:
-                typer.echo(f"unchanged: {who(m.key, m.character_id)} {m.target_language}: "
+                _echo(f"unchanged: {who(m.key, m.character_id)} {m.target_language}: "
                            f"already card {m.card_id}")  # fmt: skip
             for s in plan.skipped:
-                typer.echo(f"skipped: {who(s.key, s.character_id)}: {s.reason}")
+                _echo(f"skipped: {who(s.key, s.character_id)}: {s.reason}")
             for u in plan.unmatched:
                 ext = f" (external id {u.key.external_id})" if u.key.external_id else ""
-                typer.echo(
-                    f"unmatched: {printable(u.key.name)}{ext} {u.target_language}: {u.reason}"
-                )
+                _echo(f"unmatched: {printable(u.key.name)}{ext} {u.target_language}: {u.reason}")
             if dry_run:
-                typer.echo("dry run: nothing changed")
+                _echo("dry run: nothing changed")
                 return
             try:
-                apply_import(plan, pack, reg, store)
-            except PackError as e:
+                copied = apply_import(plan, pack, reg, store)  # rolls back on any failure
+            except (PackError, CardError, ValueError, sqlite3.Error) as e:
+                # ProtectedAssignmentError (a ValueError) included: a card locked meanwhile
                 raise _fail(f"{e}; nothing was imported") from e
-            typer.echo(f"imported {len(plan.assign)} card assignment(s) as import:"
+            _echo(f"imported {len(plan.assign)} card assignment(s) as import:"
                        f"{printable(meta.title)}")  # fmt: skip
+            _copy_lines(copied)
             if not no_verify:
-                _verify_after(
-                    workspace, store, [(names[m.character_id].name or str(m.character_id),
-                                        m.card_id) for m in plan.assign],
-                )  # fmt: skip
+                label = {m.card_id: names[m.character_id].name or str(m.character_id)
+                         for m in [*plan.unchanged, *plan.assign]}  # fmt: skip
+                todo = [m.card_id for m in plan.assign] + copied.merged
+                _verify_after(workspace, store, [(label.get(c, c), c) for c in dict.fromkeys(todo)])
