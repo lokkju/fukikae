@@ -1,12 +1,14 @@
 """`fukikae eval tts`: score TTS renders per character and write results-ledger rows.
 
 A sample of each character's translated cues (``sample_cues``; extras, skipped, errored and
-empty cues left out) is rendered with the character's card at the card's own rate, with no
-rate fit and no time-stretch, trimmed of silence exactly as the tts stage trims (the render's
-cache key is the stage's ``cue_key``, so a render already in ``.fukikae/tts-cache`` is linked,
-not made again). Renders live in ``<ws>/.fukikae/eval/tts/<backend>-<revision>/`` as
-``<episode>-<cue-id>.<key>.wav``: the key in the name means a swapped card or changed text
-renders again instead of reusing a stale file.
+empty cues, and slots under ``--min-slot``, default 1.0 s, left out and counted as
+``excluded_short``) is rendered with the character's card at the card's own rate, with no
+rate fit and no time-stretch, through the tts stage's own ``prepare_cue`` and ``render_cue``
+(ruling CD12), so check, key, delivery, trim and gain are the stage's (a render already in
+``.fukikae/tts-cache`` is copied, not made again). Renders live in
+``<ws>/.fukikae/eval/tts/<backend>-<revision>/`` as ``<episode>-<cue-id>.<key>.wav``: the
+key in the name means a swapped card or changed text renders again instead of reusing a stale
+file.
 
 Metrics, per character and overall:
 
@@ -18,21 +20,34 @@ Metrics, per character and overall:
   voice a clone would try to reproduce, so stock voices give the baseline on the same scale
   (the plan's decision). Across languages the original voice is another actor in another
   language, so stock numbers are low by construction; they are a floor, not a verdict.
+  Each source has its own metric (``speaker_similarity_card``, ``speaker_similarity_original``);
+  ``speaker_similarity``, the report's headline, exists only when every sampled character
+  shares one source, so the two kinds are never pooled.
 - ``wer``: word error rate of an English faster-whisper large-v3 pass over the render (no VAD,
   so short lines are not cut) against the cue's text, both normalized by
-  ``fukikae.eval.asr.normalize``; pooled over words, not averaged over cues.
+  ``fukikae.eval.asr.normalize``; pooled over words, not averaged over cues. It is read
+  against ``wer_floor``, the same ASR on natural English speech against its subtitle text
+  (``--floor-subs``): the original track at the sampled cues when there is a reference
+  workspace, else a fixed clip set (``--floor-workspace``, ``--floor-episode``). The floor
+  carries the subtitles' own condensation and OCR errors, so a render WER near it is as good
+  as this ASR can tell.
 - ``fit_rate``: share of renders no longer than their slot before any rate fit or stretch;
   ``stretch_median`` and ``stretch_p90`` of the speed-up each would need (1.0 when it fits);
   ``fit_budget_rate``: share within ``[timefit] max_speedup``.
-- ``emotion_agreement`` (when the tag stage labelled the source lines): share of labelled
-  cues whose render the same emotion backend labels the same way. A backend that takes no
-  delivery (Kokoro) scores only its neutral delivery against the labels.
+- ``emotion_agreement`` (when the tag stage labelled the source lines): share of the cues
+  where both the source line and the render carry a label (same backend for both) whose
+  labels match; an unlabelled render is not a miss. Coverage of each side (labelled share of
+  the sampled cues) is recorded; under 50% on either side the agreement is kept out of the
+  metrics and ``emotion_low_coverage`` is set. Episodes tagged by different backends are
+  refused. A backend that takes no delivery (Kokoro) renders neutral by design, so its
+  agreement tracks the neutral share of the source labels (noted in the row).
 - per card (ruling CD8): ``cps_median`` and quartiles, characters of text per second of the
   trimmed render, for per-card translate budgets later.
 
 With ``--reference-workspace`` (BBT: the English original track's workspace, on the same
 timeline as the dubbed track), each cue's slot is matched to the English words whose midpoint
-falls inside it (``reference_span``), and the row adds ``ref_duration_ratio`` (median render
+falls inside it, within 0.1 s (``reference_span``; ``ref_unmatched`` counts cues with none),
+and the row adds ``ref_duration_ratio`` (median render
 seconds over the original line's spoken seconds), ``ref_emotion_agreement`` (the render's
 emotion against the original line's, both by the tag backend) and ``ref_speaker_similarity``
 (the render against the original actor at that line).
@@ -73,6 +88,12 @@ ASR = BackendConfig("faster_whisper", {"model": "large-v3", "vad_filter": False}
 DEFAULT_TAGGER = "emotion2vec"
 EXEMPLARS = 3
 EXEMPLAR_MIN_S = 1.0
+MIN_SLOT_S = 1.0  # shorter slots say more about the slot than the voice
+REF_PAD_S = 0.1  # a reference word's midpoint may sit this far outside the slot
+COVERAGE_MIN = 0.5  # emotion agreement is a headline only above this coverage on both sides
+FLOOR_CLIPS = 40
+FLOOR_MIN_S = 1.0
+FLOOR_MIN_WORDS = 3
 RATE_16K = 16000
 
 
@@ -89,15 +110,26 @@ def eligible(c: DubCue) -> bool:
     )
 
 
+def count_short(cues: Mapping[str, DubCues], min_slot: float = MIN_SLOT_S) -> int:
+    """Eligible cues left out of the sample for a slot under ``min_slot``."""
+    return sum(
+        1 for d in cues.values() for c in d.cues if eligible(c) and c.end - c.start < min_slot
+    )
+
+
 def sample_cues(
-    cues: Mapping[str, DubCues], per_character: int = 8, seed: int = 0
+    cues: Mapping[str, DubCues],
+    per_character: int = 8,
+    seed: int = 0,
+    min_slot: float = MIN_SLOT_S,
 ) -> list[tuple[str, DubCue]]:
-    """Up to ``per_character`` eligible cues per character over every episode, drawn with a
-    generator seeded by ``seed`` and the character, returned in (episode, start) order."""
+    """Up to ``per_character`` eligible cues per character over every episode, slots of at
+    least ``min_slot``, drawn with a generator seeded by ``seed`` and the character, returned
+    in (episode, start) order."""
     by_char: dict[int, list[tuple[str, DubCue]]] = {}
     for episode in sorted(cues):
         for c in sorted(cues[episode].cues, key=lambda c: (c.start, c.id)):
-            if eligible(c):
+            if eligible(c) and c.end - c.start >= min_slot:
                 by_char.setdefault(cast(int, c.character_id), []).append((episode, c))
     out: list[tuple[str, DubCue]] = []
     for cid, items in sorted(by_char.items()):
@@ -132,7 +164,7 @@ def _words_in(transcript: Transcript, slot: tuple[float, float], pad: float) -> 
 
 
 def reference_span(
-    transcript: Transcript, slot: tuple[float, float], pad: float = 0.3
+    transcript: Transcript, slot: tuple[float, float], pad: float = REF_PAD_S
 ) -> tuple[float, float] | None:
     """First start to last end of the words whose midpoint lies in the slot widened by
     ``pad``; None when there are none."""
@@ -143,7 +175,7 @@ def reference_span(
 
 
 def reference_speech(
-    transcript: Transcript, slot: tuple[float, float], pad: float = 0.3
+    transcript: Transcript, slot: tuple[float, float], pad: float = REF_PAD_S
 ) -> float | None:
     """Seconds the original line takes inside the slot (``reference_span``'s length)."""
     span = reference_span(transcript, slot, pad)
@@ -255,6 +287,8 @@ class CueScore:
     ref_seconds: float | None = None
     ref_emotion: str | None = None
     ref_similarity: float | None = None
+    neutral_only: bool = False  # the backend takes no delivery at all
+    ref_matched: bool | None = None  # None: no reference workspace
 
     @property
     def fits(self) -> bool:
@@ -276,17 +310,49 @@ class TtsSummary:
     cues: int
     per_card: dict[str, dict[str, Any]] = field(default_factory=dict)
     similarity_source: dict[int, str] = field(default_factory=dict)
+    emotion: dict[str, Any] = field(default_factory=dict)
 
 
 def _r(x: float) -> float:
     return round(float(x), 4)
 
 
+def _agreement(
+    m: dict[str, float], prefix: str, pairs: Sequence[tuple[str | None, str | None]]
+) -> dict[str, Any]:
+    """Agreement over the pairs where both labels exist, with each side's coverage (labelled
+    share of all pairs). Under ``COVERAGE_MIN`` on either side the agreement stays out of the
+    metrics and ``<prefix>_low_coverage`` is set instead."""
+    n = len(pairs)
+    src = sum(1 for a, _ in pairs if a)
+    ren = sum(1 for _, b in pairs if b)
+    both = [(a, b) for a, b in pairs if a and b]
+    agree = _r(np.mean([a == b for a, b in both])) if both else None
+    low = n == 0 or src / n < COVERAGE_MIN or ren / n < COVERAGE_MIN or not both
+    m[f"{prefix}_source_coverage"] = _r(src / n) if n else 0.0
+    m[f"{prefix}_render_coverage"] = _r(ren / n) if n else 0.0
+    m[f"{prefix}_cues"] = len(both)
+    if low:
+        m[f"{prefix}_low_coverage"] = 1
+    elif agree is not None:
+        m[f"{prefix}_agreement"] = agree
+    return {
+        "agreement": agree,
+        "cues": len(both),
+        "source_coverage": m[f"{prefix}_source_coverage"],
+        "render_coverage": m[f"{prefix}_render_coverage"],
+        "low_coverage": low,
+    }
+
+
 def _metrics(scores: Sequence[CueScore], max_speedup: float) -> dict[str, float]:
     m: dict[str, float] = {"cues": len(scores)}
-    sims = [s.similarity for s in scores if s.similarity is not None]
-    if sims:
-        m["speaker_similarity"] = _r(np.mean(sims))
+    sources = sorted({s.similarity_source for s in scores if s.similarity is not None})
+    for src in sources:
+        vals = [s.similarity for s in scores if s.similarity_source == src]
+        m[f"speaker_similarity_{src}"] = _r(np.mean([v for v in vals if v is not None]))
+    if len(sources) == 1:  # never pooled across reference kinds
+        m["speaker_similarity"] = m[f"speaker_similarity_{sources[0]}"]
     words = sum(s.ref_words for s in scores)
     if words:
         m["wer"] = _r(sum(s.errors for s in scores) / words)
@@ -298,35 +364,40 @@ def _metrics(scores: Sequence[CueScore], max_speedup: float) -> dict[str, float]
         m["stretch_median"] = _r(np.median(finite))
         m["stretch_p90"] = _r(np.percentile(finite, 90))
     m["cps_median"] = _r(np.median([s.cps for s in scores]))
-    labelled = [s for s in scores if s.source_emotion]
-    if labelled:
-        m["emotion_agreement"] = _r(
-            np.mean([s.render_emotion == s.source_emotion for s in labelled])
-        )
-        m["emotion_cues"] = len(labelled)
+    if any(s.source_emotion for s in scores):
+        _agreement(m, "emotion", [(s.source_emotion, s.render_emotion) for s in scores])
     tagged = [s for s in scores if s.render_emotion]
     if tagged:
         m["render_neutral_share"] = _r(np.mean([s.render_emotion == "neutral" for s in tagged]))
         m["render_labelled"] = len(tagged)
+    if any(s.ref_matched is not None for s in scores):
+        m["ref_unmatched"] = sum(1 for s in scores if s.ref_matched is False)
     ref = [s for s in scores if s.ref_seconds]
     if ref:
         m["ref_cues"] = len(ref)
         m["ref_duration_ratio"] = _r(
             np.median([s.seconds / cast(float, s.ref_seconds) for s in ref])
         )
-        emo = [s for s in ref if s.ref_emotion]
-        if emo:
-            m["ref_emotion_agreement"] = _r(
-                np.mean([s.render_emotion == s.ref_emotion for s in emo])
-            )
+        if any(s.ref_emotion for s in ref):
+            _agreement(m, "ref_emotion", [(s.ref_emotion, s.render_emotion) for s in ref])
         rsim = [s.ref_similarity for s in ref if s.ref_similarity is not None]
         if rsim:
             m["ref_speaker_similarity"] = _r(np.mean(rsim))
     return m
 
 
-def summarize(scores: Sequence[CueScore], max_speedup: float) -> TtsSummary:
-    """Per-character and overall metrics, and each card's speech rate (ruling CD8)."""
+NEUTRAL_NOTE = (
+    "the TTS backend takes no delivery, so its renders are neutral by design and agreement is "
+    "expected to track the neutral share of the source labels"
+)
+
+
+def summarize(
+    scores: Sequence[CueScore], max_speedup: float, tagger: str | None = None
+) -> TtsSummary:
+    """Per-character and overall metrics, each card's speech rate (ruling CD8) and the emotion
+    scoring's backends and coverage. ``tagger`` is the backend that labelled both the source
+    lines and the renders."""
     by_char: dict[int, list[CueScore]] = {}
     by_card: dict[str, list[CueScore]] = {}
     for s in scores:
@@ -348,14 +419,23 @@ def summarize(scores: Sequence[CueScore], max_speedup: float) -> TtsSummary:
             "cps_p75": _r(np.percentile(cps, 75)),
         }
     sources = {cid: ss[0].similarity_source for cid, ss in sorted(by_char.items())}
-    return TtsSummary(per_character, overall, len(scores), per_card, sources)
+    emotion: dict[str, Any] = {}
+    if any(s.source_emotion for s in scores):
+        emotion = _agreement({}, "emotion", [(s.source_emotion, s.render_emotion) for s in scores])
+        emotion |= {"source_backend": tagger, "render_backend": tagger}
+        if scores and all(s.neutral_only for s in scores):
+            emotion["note"] = NEUTRAL_NOTE
+    return TtsSummary(per_character, overall, len(scores), per_card, sources, emotion)
 
 
 HEADLINE_METRICS = (
-    "speaker_similarity", "wer", "fit_rate", "fit_budget_rate", "stretch_median",
-    "stretch_p90", "cps_median", "cues", "characters", "emotion_agreement", "emotion_cues",
+    "speaker_similarity", "speaker_similarity_card", "speaker_similarity_original", "wer",
+    "wer_floor", "wer_floor_clips", "fit_rate", "fit_budget_rate", "stretch_median",
+    "stretch_p90", "cps_median", "cues", "characters", "excluded_short", "emotion_agreement",
+    "emotion_cues", "emotion_source_coverage", "emotion_render_coverage", "emotion_low_coverage",
     "render_neutral_share", "render_labelled", "ref_duration_ratio", "ref_emotion_agreement",
-    "ref_speaker_similarity", "ref_cues",
+    "ref_emotion_cues", "ref_emotion_source_coverage", "ref_emotion_render_coverage",
+    "ref_emotion_low_coverage", "ref_speaker_similarity", "ref_cues", "ref_unmatched",
 )  # fmt: skip
 
 
@@ -377,6 +457,13 @@ def tts_rows(
 
     model, rev = model_identity("tts", backend_cfg)
     metrics = {k: summary.overall[k] for k in HEADLINE_METRICS if k in summary.overall}
+    detail: dict[str, Any] = {
+        "per_character": {str(k): v for k, v in summary.per_character.items()},
+        "per_card": summary.per_card,
+        "similarity_source": {str(k): v for k, v in summary.similarity_source.items()},
+    }
+    if summary.emotion:
+        detail["emotion"] = summary.emotion
     return [
         make_row(
             stage="tts",
@@ -391,11 +478,7 @@ def tts_rows(
             split=split,
             episodes=episodes,
             metrics=metrics,
-            detail={
-                "per_character": {str(k): v for k, v in summary.per_character.items()},
-                "per_card": summary.per_card,
-                "similarity_source": {str(k): v for k, v in summary.similarity_source.items()},
-            },
+            detail=detail,
             workspace=str(workspace),
             tag=tag,
         )
@@ -415,6 +498,8 @@ class EvalResult:
     names: dict[int, str]
     mode: str
     notes: list[str] = field(default_factory=list)
+    tagger: str | None = None
+    floor: str | None = None  # how the WER floor was measured
 
 
 @contextlib.contextmanager
@@ -497,54 +582,65 @@ def _render(
     picked: list[tuple[str, DubCue]],
     cards: dict[int, str],
     names: dict[int, str],
-) -> tuple[list[RenderedCue], dict[str, BackendConfig]]:
-    from fukikae.stages.tts import TtsStage, _Lazy, cue_key, trim_silence, wav_seconds
+) -> tuple[list[RenderedCue], dict[str, BackendConfig], dict[str, bool]]:
+    """Each picked cue rendered through the tts stage's own render path (ruling CD12)."""
+    from fukikae.stages.tts import (
+        DELIVERY_CAPS,
+        LazySynth,
+        backend_config,
+        check_card,
+        prepare_cue,
+        render_cue,
+        synth_device,
+        wav_seconds,
+    )
 
     def who(cid: int) -> str:
         return f"character {cid}" + (f" ({names[cid]})" if cid in names else "")
 
     checked = {
-        card: TtsStage._check(store, card, who(cid), cfg.target_language)
+        card: check_card(store, card, who(cid), cfg.target_language)
         for cid, card in sorted(cards.items())
     }
     backends = sorted({card.voice.backend for card, _ in checked.values()})
-    bcs = {b: TtsStage._backend_cfg(cfg, b) for b in backends}
+    bcs = {b: backend_config(cfg, b) for b in backends}
     idents = {b: identity_key("tts", bcs[b]) for b in backends}
-    _, device_pref = TtsStage._settings(cfg)
+    neutral: dict[str, bool] = {}
     base = ws.root / ".fukikae" / "eval" / "tts"
     cache = ws.root / ".fukikae" / "tts-cache"
     out: list[RenderedCue] = []
     for b in backends:
-        jobs = [
-            (e, c)
-            for e, c in picked
-            if checked[cards[cast(int, c.character_id)]][0].voice.backend == b
-        ]
-        cls = checked[cards[cast(int, jobs[0][1].character_id)]][1]
+        jobs = [(e, c) for e, c in picked if checked[cards[_cid(c)]][0].voice.backend == b]
+        cls = checked[cards[_cid(jobs[0][1])]][1]
+        neutral[b] = not (cls.capabilities & DELIVERY_CAPS)
         rev = idents[b].get("revision") or getattr(cls, "model_revision", None) or "unknown"
         folder = base / f"{b}-{rev}"
         folder.mkdir(parents=True, exist_ok=True)
-        lazy = _Lazy(bcs[b], TtsStage._device(cfg, cls, device_pref), cfg)
+        lazy = LazySynth(bcs[b], synth_device(cfg, cls), cfg)
         try:
             for e, c in jobs:
-                cid = cards[cast(int, c.character_id)]
-                card, cls = checked[cid]
-                slot = c.end - c.start
-                key = cue_key(
-                    cid, cast(str, c.text), c.delivery, bcs[b],
-                    capabilities=cls.capabilities, identity=idents[b], slot=slot,
+                card_ref = cards[_cid(c)]
+                job = prepare_cue(
+                    c, card_ref, cfg, store, who=who(_cid(c)), checked=checked[card_ref],
+                    identity=idents[b],
                 )  # fmt: skip
-                dest = folder / f"{e}-{c.id}.{key}.wav"
+                dest = folder / f"{e}-{c.id}.{job.key}.wav"
                 if not dest.exists():
-                    if (cache / f"{key}.wav").exists():
+                    if (cache / f"{job.key}.wav").exists():
                         with atomic_path(dest) as tmp:
-                            shutil.copyfile(cache / f"{key}.wav", tmp)
+                            shutil.copyfile(cache / f"{job.key}.wav", tmp)
                     else:
-                        _synth(lazy, card, cls, c, slot, dest, store, trim_silence)
-                out.append(RenderedCue(e, c, dest, wav_seconds(dest), cid, b, _voice_name(card)))
+                        render_cue(job, lazy, dest, store)
+                out.append(
+                    RenderedCue(e, c, dest, wav_seconds(dest), card_ref, b, _voice_name(job.card))
+                )
         finally:
             lazy.close()
-    return out, bcs
+    return out, bcs, neutral
+
+
+def _cid(c: DubCue) -> int:
+    return cast(int, c.character_id)
 
 
 def _voice_name(card: Card) -> str | None:
@@ -556,28 +652,9 @@ def _voice_name(card: Card) -> str | None:
     return v.source
 
 
-def _synth(
-    lazy: Any, card: Card, cls: Any, c: DubCue, slot: float, dest: Path, store: CardStore, trim: Any
-) -> None:
-    from fukikae.stages.tts import TtsStage, _apply_gain
-
-    p = TtsStage._passed(c, card, cls, slot)
-    with atomic_path(dest) as tmp:
-        lazy.get().synthesize(
-            cast(str, c.text),
-            card.voice,
-            card.target_language,
-            tmp,
-            resolve=store.sidecar_path,
-            emotion_vector=p.get("emotion_vector"),
-            instruction=p.get("instruction"),
-            emotion_strength=p.get("emotion_strength", card.voice.emotion_strength),
-            target_seconds=p.get("target_seconds"),
-        )
-        trim(tmp)
-        gain = float(card.voice.post.get("gain_db", 0.0))
-        if gain:
-            _apply_gain(tmp, gain)
+def sidecar_stem(ref: str) -> str:
+    """A short file stem for a ``sha256:<hex>`` sidecar ref: its first 16 hex digits."""
+    return ref.removeprefix("sha256:")[:16]
 
 
 def _sixteen(path: Path) -> Path:
@@ -602,6 +679,61 @@ def _label(tags: Tags, start: float) -> str | None:
     return None
 
 
+def _write_clip(wav: np.ndarray, span: tuple[float, float], dest: Path) -> Path:
+    from scipy.io import wavfile
+
+    if not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        seg = wav[max(0, int(span[0] * RATE_16K)) : int(span[1] * RATE_16K)]
+        with atomic_path(dest) as tmp:
+            wavfile.write(tmp, RATE_16K, (np.clip(seg, -1, 1) * 32767).astype("<i2"))
+    return dest
+
+
+def _read16k(path: Path) -> np.ndarray:
+    from fukikae.backends.embed._common import read_wav16k
+
+    return read_wav16k(path)
+
+
+def floor_clips(
+    out_dir: Path,
+    subs: Sequence[Any],
+    vocals: Path,
+    *,
+    episode: str,
+    slots: Sequence[tuple[float, float]] | None = None,
+    limit: int = FLOOR_CLIPS,
+) -> list[tuple[Path, str]]:
+    """Natural-speech clips with their subtitle text, for the WER floor: with ``slots``, the
+    subtitle lines whose midpoint falls in each slot (within ``REF_PAD_S``), one clip per slot
+    that has any; without, up to ``limit`` lines of at least ``FLOOR_MIN_S`` and
+    ``FLOOR_MIN_WORDS`` words, evenly spaced over the episode (a fixed set)."""
+    wav = _read16k(vocals)
+    picks: list[tuple[tuple[float, float], str]] = []
+    if slots is not None:
+        for a, b in slots:
+            hit = [c for c in subs if a - REF_PAD_S <= (c.start + c.end) / 2 <= b + REF_PAD_S]
+            if hit:
+                picks.append(
+                    ((min(c.start for c in hit), max(c.end for c in hit)),
+                     " ".join(c.text for c in hit))
+                )  # fmt: skip
+    else:
+        ok = [
+            c
+            for c in subs
+            if c.end - c.start >= FLOOR_MIN_S
+            and len(normalize(c.text, "en").split()) >= FLOOR_MIN_WORDS
+        ]
+        step = max(1, len(ok) // limit) if ok else 1
+        picks = [((c.start, c.end), c.text) for c in ok[::step][:limit]]
+    return [
+        (_write_clip(wav, span, out_dir / f"{episode}-{span[0]:.2f}.16k.wav"), text)
+        for span, text in picks
+    ]
+
+
 def evaluate(
     root: Path,
     episodes: Sequence[str],
@@ -609,10 +741,16 @@ def evaluate(
     backend: str | None = None,
     per_character: int = 8,
     seed: int = 0,
+    min_slot: float = MIN_SLOT_S,
     reference_workspace: Path | None = None,
+    floor_subs: Path | None = None,
+    floor_workspace: Path | None = None,
+    floor_episode: str | None = None,
 ) -> EvalResult:
+    from fukikae.eval.autolabel import gt_path_for
     from fukikae.registry.store import Registry
     from fukikae.stages.tts import max_speedup
+    from fukikae.subtitles import read_cues
 
     ws = Workspace(root)
     cfg = ws.config
@@ -622,11 +760,33 @@ def evaluate(
     if len(sources) != 1:
         raise ValueError(f"episodes are translated from different languages: {sorted(sources)}")
     source_language = sources.pop()
-    picked = sample_cues(docs, per_character, seed)
+    taggers = {e: _tagger_name(ws, e) for e in episodes}
+    named = sorted({t for t in taggers.values() if t})
+    if len(named) > 1:
+        raise ValueError(
+            "the episodes' emotions come from different taggers ("
+            + ", ".join(f"{e} {t}" for e, t in taggers.items() if t)
+            + "); evaluate them separately"
+        )
+    tagger = named[0] if named else None
+    if floor_subs is not None and floor_workspace is None and reference_workspace is None:
+        raise ValueError("--floor-subs needs --reference-workspace or --floor-workspace")
+    if (
+        floor_subs is not None
+        and reference_workspace is None
+        and floor_workspace is not None
+        and not floor_episode
+    ):
+        raise ValueError("a fixed WER floor set needs --floor-episode")
+    picked = sample_cues(docs, per_character, seed, min_slot)
+    excluded = count_short(docs, min_slot)
     if not picked:
-        raise ValueError("no cue to render: every cue is an extra, skipped, failed or empty")
+        raise ValueError(
+            f"no cue to render: every cue is an extra, skipped, failed, empty or shorter than "
+            f"{min_slot:g} s"
+        )
     store = CardStore(ws.root)
-    chars = sorted({cast(int, c.character_id) for _, c in picked})
+    chars = sorted({_cid(c) for _, c in picked})
     with Registry(ws.registry_path) as reg:
         names = {c.id: c.name for c in reg.characters() if c.name}
         assigned: dict[int, str] = {}
@@ -635,6 +795,8 @@ def evaluate(
             if a is not None and a.card_id is not None:
                 assigned[cid] = a.card_id
     notes: list[str] = []
+    if excluded:
+        notes.append(f"left out {excluded} cue(s) with a slot under {min_slot:g} s")
     if backend is None:
         missing = [cid for cid in chars if cid not in assigned]
         if missing:
@@ -652,8 +814,9 @@ def evaluate(
         mode = "stock"
 
     # 1. TTS backend(s).
-    renders, bcs = _render(ws, cfg, store, picked, cards, names)
+    renders, bcs, neutral = _render(ws, cfg, store, picked, cards, names)
     small = {(r.episode, r.cue.id): _sixteen(r.path) for r in renders}
+    eval_dir = ws.root / ".fukikae" / "eval" / "tts"
 
     # Original-voice references per character, or the card's clips.
     ref_spans: dict[int, list[tuple[Path, tuple[float, float]]]] = {}
@@ -664,11 +827,10 @@ def evaluate(
             sim_source[cid] = "card"
             clips = []
             for ref in card.voice.references:
-                src = store.sidecar_path(ref.clip)
-                dest = ws.root / ".fukikae" / "eval" / "tts" / "refs" / f"{ref.clip[7:23]}.16k.wav"
+                dest = eval_dir / "refs" / f"{sidecar_stem(ref.clip)}.16k.wav"
                 if not dest.exists():
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    to_16k(src, dest)
+                    to_16k(store.sidecar_path(ref.clip), dest)
                 clips.append((dest, (0.0, wav_seconds_16k(dest))))
             ref_spans[cid] = clips
             continue
@@ -687,7 +849,7 @@ def evaluate(
             sim_source[cid] = "none"
             notes.append(f"character {cid}: no clean original turn, so no speaker similarity")
 
-    # The original English line of each cue, from the reference workspace.
+    # The original line of each cue, from the reference workspace.
     ref_ws = Workspace(reference_workspace) if reference_workspace else None
     ref_line: dict[tuple[str, str], tuple[float, float]] = {}
     ref_vocals: dict[str, Path] = {}
@@ -706,6 +868,32 @@ def evaluate(
                     if span is not None and span[1] > span[0]:
                         ref_line[(e, r.cue.id)] = span
 
+    # The WER floor's natural-speech clips.
+    floor: list[tuple[Path, str]] = []
+    floor_desc: str | None = None
+    if floor_subs is not None:
+        if ref_ws is not None and (
+            floor_workspace is None or Path(floor_workspace).resolve() == ref_ws.root.resolve()
+        ):
+            eps = sorted({r.episode for r in renders})
+            for e in eps:
+                vocals = ref_ws.work_dir(e) / "01-separate" / "vocals_16k.wav"
+                if not vocals.exists():
+                    continue
+                subs = read_cues(gt_path_for(floor_subs, e, len(eps)))
+                slots = [(r.cue.start, r.cue.end) for r in renders if r.episode == e]
+                floor += floor_clips(eval_dir / "floor", subs, vocals, episode=e, slots=slots)
+            floor_desc = f"reference:{ref_ws.root}:{floor_subs}"
+        else:
+            fws = Workspace(cast(Path, floor_workspace))
+            ep = cast(str, floor_episode).upper()
+            vocals = fws.work_dir(ep) / "01-separate" / "vocals_16k.wav"
+            if not vocals.exists():
+                raise FileNotFoundError(f"{ep}: no {vocals} for the WER floor")
+            subs = read_cues(gt_path_for(floor_subs, ep, 1))
+            floor = floor_clips(eval_dir / "floor-fixed", subs, vocals, episode=ep)
+            floor_desc = f"fixed:{fws.root}:{ep}:{floor_subs}"
+
     gpu = device_string(cfg)
     # 2. WeSpeaker.
     sims: dict[tuple[str, str], float] = {}
@@ -717,51 +905,55 @@ def evaluate(
         for r in renders:
             k = (r.episode, r.cue.id)
             vec = emb.embed(small[k], [(0.0, r.seconds)])
-            cid = cast(int, r.cue.character_id)
+            cid = _cid(r.cue)
             if cid in ref_vecs:
                 sims[k] = similarity(vec, ref_vecs[cid])
             if k in ref_line:
                 orig = emb.embed(ref_vocals[r.episode], [ref_line[k]])
                 ref_sims[k] = similarity(vec, orig)
 
-    # 3. faster-whisper.
+    # 3. faster-whisper: the renders, then the natural-speech floor clips.
     hyps: dict[tuple[str, str], str] = {}
+    floor_errors = floor_words = 0
     with _model("asr", ASR, gpu, cfg) as asr:
         for r in renders:
             k = (r.episode, r.cue.id)
             tr = asr.transcribe(small[k], target)
             hyps[k] = " ".join(s.text for s in tr.segments).strip()
+        for path, text in floor:
+            tr = asr.transcribe(path, target)
+            errs, words = word_errors(" ".join(s.text for s in tr.segments), text, target)
+            floor_errors += errs
+            floor_words += words
 
-    # 4. The tagger(s), on the CPU.
+    # 4. The tagger, on the CPU: every render of a tagged episode, and every matched line.
     render_emotion: dict[tuple[str, str], str | None] = {}
     ref_emotion: dict[tuple[str, str], str | None] = {}
-    taggers: dict[str, list[RenderedCue]] = {}
-    for r in renders:
-        name = _tagger_name(ws, r.episode)
-        wants = (name and r.cue.delivery.emotion) or (r.episode, r.cue.id) in ref_line
-        if wants:
-            taggers.setdefault(name or DEFAULT_TAGGER, []).append(r)
-    for name, items in sorted(taggers.items()):
-        with _model("tag", BackendConfig(name, {}), "cpu", cfg) as tagger:
-            for r in items:
+    to_tag = [r for r in renders if taggers.get(r.episode) or (r.episode, r.cue.id) in ref_line]
+    if to_tag:
+        name = tagger or DEFAULT_TAGGER
+        with _model("tag", BackendConfig(name, {}), "cpu", cfg) as tg:
+            for r in to_tag:
                 k = (r.episode, r.cue.id)
-                tags = tagger.tag(small[k], [Turn(start=0.0, end=r.seconds, speaker="render")])
+                tags = tg.tag(small[k], [Turn(start=0.0, end=r.seconds, speaker="render")])
                 render_emotion[k] = _label(tags, 0.0)
-            for e in sorted({r.episode for r in items if (r.episode, r.cue.id) in ref_line}):
-                mine = [r for r in items if r.episode == e and (e, r.cue.id) in ref_line]
+            for e in sorted(ref_vocals):
+                mine = [r for r in to_tag if r.episode == e and (e, r.cue.id) in ref_line]
+                if not mine:
+                    continue
                 turns = [
                     Turn(start=ref_line[(e, r.cue.id)][0], end=ref_line[(e, r.cue.id)][1],
                          speaker="original")
                     for r in mine
                 ]  # fmt: skip
-                tags = tagger.tag(ref_vocals[e], turns)
+                tags = tg.tag(ref_vocals[e], turns)
                 for r in mine:
                     ref_emotion[(e, r.cue.id)] = _label(tags, ref_line[(e, r.cue.id)][0])
 
     scores: list[CueScore] = []
     for r in renders:
         k = (r.episode, r.cue.id)
-        cid = cast(int, r.cue.character_id)
+        cid = _cid(r.cue)
         errors, words = word_errors(hyps.get(k, ""), cast(str, r.cue.text), target)
         line = ref_line.get(k)
         scores.append(
@@ -780,16 +972,28 @@ def evaluate(
                 hyp=hyps.get(k, ""),
                 errors=errors,
                 ref_words=words,
-                source_emotion=r.cue.delivery.emotion if _tagger_name(ws, r.episode) else None,
+                source_emotion=r.cue.delivery.emotion if taggers.get(r.episode) else None,
                 render_emotion=render_emotion.get(k),
                 ref_seconds=None if line is None else line[1] - line[0],
                 ref_emotion=ref_emotion.get(k),
                 ref_similarity=ref_sims.get(k),
+                neutral_only=neutral.get(r.backend, False),
+                ref_matched=None if ref_ws is None else line is not None,
             )
         )
     speedup = max_speedup(cfg)
-    summaries = {b: summarize([s for s in scores if s.backend == b], speedup) for b in sorted(bcs)}
-    return EvalResult(scores, summaries, bcs, source_language, list(episodes), names, mode, notes)
+    summaries: dict[str, TtsSummary] = {}
+    for b in sorted(bcs):
+        s = summarize([x for x in scores if x.backend == b], speedup, tagger=tagger)
+        s.overall["excluded_short"] = excluded
+        if floor_words:
+            s.overall["wer_floor"] = _r(floor_errors / floor_words)
+            s.overall["wer_floor_clips"] = len(floor)
+        summaries[b] = s
+    return EvalResult(
+        scores, summaries, bcs, source_language, list(episodes), names, mode, notes, tagger,
+        floor_desc,
+    )  # fmt: skip
 
 
 def wav_seconds_16k(path: Path) -> float:
@@ -802,10 +1006,12 @@ def wav_seconds_16k(path: Path) -> float:
 # ---- output ---------------------------------------------------------------------------------
 
 _COLUMNS = (
-    ("speaker_similarity", "sim"), ("wer", "wer"), ("fit_rate", "fit"),
+    ("speaker_similarity", "sim"), ("speaker_similarity_card", "sim_card"),
+    ("speaker_similarity_original", "sim_orig"), ("wer", "wer"), ("fit_rate", "fit"),
     ("stretch_median", "str50"), ("stretch_p90", "str90"), ("cps_median", "cps"),
-    ("emotion_agreement", "emo"), ("ref_duration_ratio", "ref_dur"),
-    ("ref_emotion_agreement", "ref_emo"), ("ref_speaker_similarity", "ref_sim"), ("cues", "n"),
+    ("emotion_agreement", "emo"), ("emotion_render_coverage", "emo_cov"),
+    ("ref_duration_ratio", "ref_dur"), ("ref_emotion_agreement", "ref_emo"),
+    ("ref_speaker_similarity", "ref_sim"), ("cues", "n"),
 )  # fmt: skip
 
 
@@ -828,6 +1034,24 @@ def format_summary(summary: TtsSummary, names: Mapping[int, str], backend: str) 
         f"{'overall':<24}" + "".join(cell(summary.overall, k) for k, _ in cols)
         + f"  ({summary.overall.get('characters', 0):.0f} characters)"
     )  # fmt: skip
+    o = summary.overall
+    if "wer_floor" in o:
+        lines.append(
+            f"WER floor (natural speech, same ASR): {o['wer_floor']:.3f} over "
+            f"{o['wer_floor_clips']:.0f} clips; render WER {o.get('wer', 0):.3f} is read against it"
+        )
+    if summary.emotion:
+        e = summary.emotion
+        state = "LOW COVERAGE, not a headline" if e["low_coverage"] else "headline"
+        lines.append(
+            f"emotion ({e.get('source_backend')}): source coverage {e['source_coverage']:.2f}, "
+            f"render coverage {e['render_coverage']:.2f}, {e['cues']} cues with both labels, "
+            f"agreement {e['agreement'] if e['agreement'] is not None else '-'} ({state})"
+        )
+        if e.get("note"):
+            lines.append(f"  note: {e['note']}")
+    if o.get("excluded_short"):
+        lines.append(f"cues left out for a short slot: {o['excluded_short']:.0f}")
     lines.append("")
     lines.append(f"{'card':<18}{'voice':<14}{'cues':>5}{'cps p25':>9}{'median':>8}{'p75':>7}")
     for cid, c in summary.per_card.items():
@@ -846,12 +1070,15 @@ __all__ = [
     "RenderedCue",
     "TtsSummary",
     "clean_exemplars",
+    "count_short",
     "duration_fit",
     "evaluate",
+    "floor_clips",
     "format_summary",
     "reference_span",
     "reference_speech",
     "sample_cues",
+    "sidecar_stem",
     "similarity",
     "summarize",
     "to_16k",

@@ -1,5 +1,6 @@
 """`fukikae eval tts`: sampling, metrics, ledger rows and the command end to end on fakes."""
 
+import shutil
 import wave
 from pathlib import Path
 from typing import Any, ClassVar
@@ -426,8 +427,8 @@ voice = "{voice}"
 """
 
 
-def _workspace(tmp_path: Path, *, emotions: bool = True) -> Path:
-    root = tmp_path / "ws"
+def _workspace(tmp_path: Path, *, emotions: bool | str = True, name: str = "ws") -> Path:
+    root = tmp_path / name
     root.mkdir()
     (root / "fukikae.toml").write_text(
         'source_language = "ja"\n\n[series]\ntitle = "Fairy Tail"\ngenre = "anime"\n\n'
@@ -465,8 +466,8 @@ def _workspace(tmp_path: Path, *, emotions: bool = True) -> Path:
     emo: dict[str, Any] = {"emotion": "happy"} if emotions else {}
     cues = [
         cue(1, 1, "natsu one", **emo),
-        cue(2, 2, "lucy one"),
-        cue(3, 1, "natsu two is longer than its slot"),
+        cue(2, 2, "lucy one", **(emo if emotions == "all" else {})),
+        cue(3, 1, "natsu two is longer than its slot", **(emo if emotions == "all" else {})),
         cue(4, None, "extra line", extra="S5"),
         cue(5, 2, None, skip="song"),
     ]
@@ -500,7 +501,13 @@ def test_cli_writes_one_row_to_the_isolated_ledger(tmp_path):
     assert (r.model, r.revision) == ("fake-model", "r1")
     assert r.metrics["cues"] == 3 and r.metrics["characters"] == 2
     assert r.metrics["speaker_similarity"] == pytest.approx(1.0)
-    assert r.metrics["emotion_agreement"] == pytest.approx(1.0)
+    # One of three source lines labelled: under half, so no headline agreement.
+    assert "emotion_agreement" not in r.metrics
+    assert r.metrics["emotion_low_coverage"] == 1
+    assert r.metrics["emotion_source_coverage"] == pytest.approx(1 / 3, abs=1e-4)
+    assert r.metrics["emotion_render_coverage"] == pytest.approx(1.0)
+    assert r.detail["emotion"]["source_backend"] == "emotion2vec"
+    assert r.detail["emotion"]["render_backend"] == "emotion2vec"
     assert r.metrics["fit_rate"] == pytest.approx(2 / 3, abs=1e-4)
     assert r.options["mode"] == "assigned"
     assert r.detail["similarity_source"] == {"1": "original", "2": "original"}
@@ -603,3 +610,188 @@ def test_render_neutral_share_counts_only_labelled_renders():
     s = ev.summarize(scores, max_speedup=1.25)
     assert s.overall["render_neutral_share"] == pytest.approx(0.5)
     assert s.overall["render_labelled"] == 2
+
+
+# ---- fix round 1 --------------------------------------------------------------------------
+
+
+def test_unlabelled_renders_are_not_misses():
+    scores = [
+        _score(cue_id="c1", source_emotion="happy", render_emotion="happy"),
+        _score(cue_id="c2", source_emotion="sad", render_emotion=None),
+        _score(cue_id="c3", source_emotion="sad", render_emotion="sad"),
+        _score(cue_id="c4", source_emotion="angry", render_emotion="neutral"),
+    ]
+    s = ev.summarize(scores, max_speedup=1.25)
+    assert s.overall["emotion_cues"] == 3
+    assert s.overall["emotion_agreement"] == pytest.approx(2 / 3, abs=1e-4)
+    assert s.overall["emotion_render_coverage"] == pytest.approx(0.75)
+    assert "emotion_low_coverage" not in s.overall
+
+
+def test_low_render_coverage_flags_the_row(tmp_path):
+    scores = [
+        _score(cue_id="c1", source_emotion="happy", render_emotion="happy"),
+        _score(cue_id="c2", source_emotion="sad"),
+        _score(cue_id="c3", source_emotion="sad"),
+    ]
+    s = ev.summarize(scores, max_speedup=1.25)
+    assert "emotion_agreement" not in s.overall
+    assert s.overall["emotion_low_coverage"] == 1
+    assert s.emotion["agreement"] == pytest.approx(1.0)
+    (r,) = ev.tts_rows(
+        s, cfg=Config(), backend_cfg=BackendConfig("kokoro", {}), source_language="ja",
+        test_set="t", split="tune", episodes=["S01E11"], tag=None, workspace=tmp_path,
+    )  # fmt: skip
+    assert r.metrics["emotion_low_coverage"] == 1 and "emotion_agreement" not in r.metrics
+    assert r.detail["emotion"]["low_coverage"] is True
+
+
+def test_neutral_only_backend_is_noted():
+    s = ev.summarize(
+        [_score(source_emotion="happy", render_emotion="neutral", neutral_only=True)],
+        max_speedup=1.25,
+    )
+    assert "neutral share" in s.emotion["note"]
+
+
+def test_similarity_is_split_by_reference_source():
+    scores = [
+        _score(cue_id="c1", similarity=0.8, similarity_source="card"),
+        _score(cue_id="c2", character_id=2, similarity=0.1, similarity_source="original"),
+    ]
+    s = ev.summarize(scores, max_speedup=1.25)
+    assert s.overall["speaker_similarity_card"] == pytest.approx(0.8)
+    assert s.overall["speaker_similarity_original"] == pytest.approx(0.1)
+    assert "speaker_similarity" not in s.overall  # never pooled across sources
+    one = ev.summarize(scores[1:], max_speedup=1.25)
+    assert one.overall["speaker_similarity"] == pytest.approx(0.1)
+    assert one.overall["speaker_similarity_original"] == pytest.approx(0.1)
+
+
+def test_sample_skips_short_slots_and_counts_them():
+    cues = [cue(1, 1, "short", slot=0.6), cue(2, 1, "long enough", slot=1.5)]
+    docs = {"S01E01": _doc(cues)}
+    assert [c.text for _, c in ev.sample_cues(docs, min_slot=1.0)] == ["long enough"]
+    assert ev.count_short(docs, min_slot=1.0) == 1
+    assert len(ev.sample_cues(docs, min_slot=0.0)) == 2
+
+
+def test_reference_span_default_pad_is_tight():
+    tr = _transcript([(1.85, 2.05, "edge"), (2.5, 3.0, "in")])
+    # "edge" has its midpoint 0.05 s before the slot: inside the 0.1 s pad.
+    assert ev.reference_span(tr, (2.0, 3.2)) == pytest.approx((1.85, 3.0))
+    tr2 = _transcript([(1.5, 1.8, "early"), (2.5, 3.0, "in")])
+    assert ev.reference_span(tr2, (2.0, 3.2)) == pytest.approx((2.5, 3.0))
+
+
+def test_sidecar_stem_names_the_clip():
+    assert ev.sidecar_stem("sha256:" + "ab" * 32) == "ab" * 8
+
+
+def _floor_subs(path: Path) -> Path:
+    path.write_text(
+        "1\n00:00:03,000 --> 00:00:04,500\nhello there my friend\n\n"
+        "2\n00:00:06,100 --> 00:00:07,600\nthis is a longer line\n\n"
+        "3\n00:00:20,000 --> 00:00:21,500\nnobody dubbed this one\n\n"
+        "4\n00:00:30,000 --> 00:00:30,400\ntoo short ok\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _en_workspace(tmp_path: Path) -> Path:
+    ref = tmp_path / "en"
+    work = Workspace(ref).work_dir("S01E11")
+    tone_wav(work / "01-separate" / "vocals_16k.wav", 40.0, 16000)
+    (work / "03-asr").mkdir(parents=True)
+    write_json(
+        work / "03-asr" / "transcript.json",
+        _transcript([(3.1, 3.5, "hello"), (3.6, 4.1, "there"), (6.2, 7.2, "longer")]),
+    )
+    return ref
+
+
+def test_wer_floor_from_the_original_track_on_the_sampled_cues(tmp_path):
+    root = _workspace(tmp_path, emotions=False)
+    ref = _en_workspace(tmp_path)
+    subs = _floor_subs(tmp_path / "S01E11.srt")
+    res = _invoke(
+        str(root), "--episodes", "S01E11", "--reference-workspace", str(ref),
+        "--floor-subs", str(subs),
+    )  # fmt: skip
+    assert res.exit_code == 0, res.output
+    (r,) = read_rows(ledger_path())[0]
+    assert "wer_floor" in r.metrics and r.metrics["wer_floor_clips"] == 2
+    assert r.options["wer_floor"].startswith("reference:")
+    assert r.metrics["ref_unmatched"] == 1
+
+
+def test_wer_floor_from_a_fixed_clip_set_without_a_reference(tmp_path):
+    root = _workspace(tmp_path, emotions=False)
+    ref = _en_workspace(tmp_path)
+    subs = _floor_subs(tmp_path / "S01E11.srt")
+    res = _invoke(
+        str(root), "--episodes", "S01E11", "--floor-workspace", str(ref),
+        "--floor-subs", str(subs), "--floor-episode", "S01E11",
+    )  # fmt: skip
+    assert res.exit_code == 0, res.output
+    (r,) = read_rows(ledger_path())[0]
+    assert r.metrics["wer_floor_clips"] == 3  # the 0.4 s cue is too short
+    assert r.options["wer_floor"].startswith("fixed:")
+    assert "ref_cues" not in r.metrics
+
+
+def test_min_slot_is_an_option_and_exclusions_are_counted(tmp_path):
+    root = _workspace(tmp_path, emotions=False)
+    res = _invoke(str(root), "--episodes", "S01E11", "--min-slot", "2.5")
+    # Every character cue has a 2.0 s slot: nothing left to render.
+    assert res.exit_code == 1 and "no cue to render" in res.output
+    res = _invoke(str(root), "--episodes", "S01E11", "--min-slot", "1.5")
+    assert res.exit_code == 0, res.output
+    (r,) = read_rows(ledger_path())[0]
+    assert r.options["min_slot"] == 1.5 and r.metrics["excluded_short"] == 0
+
+
+def test_full_coverage_reports_agreement(tmp_path):
+    root = _workspace(tmp_path, emotions="all")
+    assert _invoke(str(root), "--episodes", "S01E11").exit_code == 0
+    (r,) = read_rows(ledger_path())[0]
+    assert r.metrics["emotion_agreement"] == pytest.approx(1.0)
+    assert "emotion_low_coverage" not in r.metrics
+
+
+def test_mixed_taggers_across_episodes_are_refused(tmp_path):
+    root = _workspace(tmp_path)
+    src = Workspace(root).work_dir("S01E11")
+    dst = Workspace(root).work_dir("S01E12")
+    shutil.copytree(src, dst)
+    write_json(dst / "04b-tag" / "tags.json", Tags(backend="sensevoice", events=[], emotions=[]))
+    res = _invoke(str(root), "--episodes", "S01E11,S01E12")
+    assert res.exit_code == 1 and "tagger" in res.output
+
+
+def test_stage_and_eval_render_the_same_audio_under_the_same_key(tmp_path):
+    from fukikae.artifacts import read_json
+    from fukikae.models import TtsPlan
+    from fukikae.stages.tts import TtsStage
+    from fukikae.workspace import Episode
+
+    a = _workspace(tmp_path, emotions=False, name="a")
+    b = _workspace(tmp_path, emotions=False, name="b")
+    assert _invoke(str(a), "--episodes", "S01E11", "--no-ledger").exit_code == 0
+    cfg = Workspace(b).config
+    ep = Episode(
+        source=tmp_path / "s.mkv", id="S01E11", work=Workspace(b).work_dir("S01E11"),
+        workspace_root=b,
+    )  # fmt: skip
+    TtsStage(cfg).run(ep, cfg)
+    plan = {c.cue_id: c for c in read_json(ep.work / "07-tts" / "plan.json", TtsPlan).cues}
+    folder = a / ".fukikae" / "eval" / "tts" / "fake-r1"
+    for cue_id in ("c0001", "c0002", "c0003"):
+        (render,) = [p for p in folder.glob(f"S01E11-{cue_id}.*.wav") if ".16k." not in p.name]
+        key = render.name.split(".")[1]
+        cached = b / ".fukikae" / "tts-cache" / f"{key}.wav"
+        assert cached.read_bytes() == render.read_bytes()
+        if plan[cue_id].rate_factor == 1.0:
+            assert plan[cue_id].key == key

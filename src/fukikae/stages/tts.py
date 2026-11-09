@@ -198,18 +198,22 @@ def _apply_gain(path: Path, gain_db: float) -> None:
     wavfile.write(path, rate, (x * np.float32(10 ** (gain_db / 20))).astype(np.float32))
 
 
-@dataclass
-class _Job:
+@dataclass(frozen=True)
+class RenderJob:
+    """Everything one cue's render depends on (``prepare_cue``): the card, its backend class
+    and config, the cache key, the slot and the delivery fields the backend is handed."""
+
     cue: DubCue
     card_id: str
     card: Card
     cls: type[Synthesizer]
+    backend_cfg: BackendConfig
     key: str
     slot: float
     passed: dict[str, Any]
 
 
-class _Lazy:
+class LazySynth:
     """One backend, created and loaded on first use, unloaded by ``close``."""
 
     def __init__(self, bc: BackendConfig, device: str, cfg: Config) -> None:
@@ -237,6 +241,165 @@ class _Lazy:
             self.inst = None
 
 
+# -- the render path, shared by the stage and `eval tts` (ruling CD12) -------------------------
+
+
+def stage_settings(cfg: Config) -> tuple[BackendConfig, str | None]:
+    """``[tts]`` as (backend config without the stage keys, device preference)."""
+    bc = cfg.resolve("tts")
+    device = bc.options.get("device")
+    if device is not None and device not in ("cpu", "cuda"):
+        raise ConfigError(f'[tts] device must be "cpu" or "cuda", not {device!r}')
+    options = {k: v for k, v in bc.options.items() if k not in STAGE_KEYS}
+    return BackendConfig(bc.backend, options), device
+
+
+def backend_config(cfg: Config, backend: str) -> BackendConfig:
+    """The config a card on ``backend`` renders with: ``[tts]``'s options when it names that
+    backend, else the backend's defaults."""
+    bc, _ = stage_settings(cfg)
+    return bc if bc.backend == backend else BackendConfig(backend, {})
+
+
+def synth_device(cfg: Config, cls: type[Synthesizer]) -> str:
+    """The device ``cls`` renders on: ``[tts] device``, else cuda when it can use it."""
+    _, pref = stage_settings(cfg)
+    want = pref or ("cuda" if "cuda" in cls.devices else "cpu")
+    if want not in cls.devices:
+        raise ConfigError(f"[tts] device {want!r}: {cls.name} runs on {sorted(cls.devices)}")
+    return device_string(cfg) if want == "cuda" else "cpu"
+
+
+def check_card(
+    store: CardStore, card_id: str, who: str, target: str
+) -> tuple[Card, type[Synthesizer]]:
+    """The card and its backend class, or a CardError naming ``who``, the card and what
+    to do."""
+    fix = "assign another card with `fukikae voices assign`"
+    try:
+        card = store.get(card_id)
+    except CardError as e:
+        raise CardError(f"{who}: {e}; {fix}") from e
+    if card.target_language != target:
+        raise CardError(
+            f"{who}: card {card_id} is for {card.target_language!r}, not {target!r}; {fix}"
+        )
+    backend = card.voice.backend
+    try:
+        cls = cast(type[Synthesizer], loader.backend_class("tts", backend))
+    except (ConfigError, loader.BackendUnavailable) as e:
+        raise CardError(f"{who}: card {card_id}: {e}") from e
+    try:
+        validate_for_backend(card, cls, lookup=store.get)
+        v = card.voice
+        if v.source == "stock" and v.voice:
+            check_stock_voice(backend, v.voice)
+        for voice_id, _ in v.voices:
+            check_stock_voice(backend, voice_id)
+    except CardError as e:
+        raise CardError(f"{who}: card {card_id}: {e}; {fix}") from e
+    rev = getattr(cls, "model_revision", None)
+    if rev and card.voice.model_revision != rev:
+        raise CardError(
+            f"{who}: card {card_id} was made for {backend} model revision "
+            f"{card.voice.model_revision!r}, and this fukikae renders with {rev!r}; the voice "
+            f"could differ, so it is not rendered. {fix[0].upper()}{fix[1:]} (a stock voice "
+            f"is `stock:{backend}:<voice>`)"
+        )
+    if not loader.supports(cls, target):
+        raise CardError(f"{who}: card {card_id}: {backend} does not speak {target!r}; {fix}")
+    if "emotion_audio" in cls.capabilities:
+        raise CardError(
+            f"{who}: card {card_id}: the tts stage does not pass emotion_audio yet "
+            "(it arrives with the cloning backends)"
+        )
+    needed = [(r.clip, "clips") for r in card.voice.references]
+    if card.voice.latent:
+        needed.append((card.voice.latent, "latents"))
+    missing = set(store.missing_sidecars(card))
+    for ref, sub in needed:
+        if ref in missing:
+            raise CardError(
+                f"{who}: card {card_id} needs sidecar {ref} which is not in "
+                f"{store.root / sub}; import the pack with clips or `fukikae voices assign` "
+                "another card"
+            )
+    return card, cls
+
+
+def delivery_passed(c: DubCue, card: Card, cls: type[Synthesizer], slot: float) -> dict[str, Any]:
+    """What the backend gets beyond the card and the text, by its capabilities."""
+    caps = cls.capabilities
+    out: dict[str, Any] = {}
+    d = c.delivery
+    if "emotion_vector" in caps and d.emotion:
+        conf = d.emotion_confidence if d.emotion_confidence is not None else 1.0
+        out["emotion_vector"] = {d.emotion: conf}
+    if "instruction" in caps and d.direction:
+        out["instruction"] = d.direction
+    if "duration" in caps:
+        out["target_seconds"] = round(slot, 4)
+    if out.keys() & {"emotion_vector", "instruction"}:
+        out["emotion_strength"] = card.voice.emotion_strength
+    return out
+
+
+def prepare_cue(
+    cue: DubCue,
+    card_id: str,
+    cfg: Config,
+    store: CardStore,
+    *,
+    who: str,
+    checked: tuple[Card, type[Synthesizer]] | None = None,
+    identity: dict[str, Any] | None = None,
+) -> RenderJob:
+    """The render job of one cue with ``card_id``: the card checked (``check_card``, unless
+    ``checked`` holds its result), its backend config, the cache key and the delivery passed.
+    ``identity`` is the backend's ``identity_key``, looked up when not given."""
+    card, cls = (
+        checked if checked is not None else check_card(store, card_id, who, cfg.target_language)
+    )
+    bc = backend_config(cfg, card.voice.backend)
+    ident = identity if identity is not None else identity_key("tts", bc)
+    slot = cue.end - cue.start
+    key = cue_key(
+        card_id,
+        cast(str, cue.text),
+        cue.delivery,
+        bc,
+        capabilities=cls.capabilities,
+        identity=ident,
+        slot=slot,
+    )
+    return RenderJob(cue, card_id, card, cls, bc, key, slot, delivery_passed(cue, card, cls, slot))
+
+
+def render_cue(
+    job: RenderJob, synth: LazySynth, dest: Path, store: CardStore, *, rate: float | None = None
+) -> None:
+    """Render ``job`` to ``dest`` (atomically) with the backend ``synth`` loads, at the card's
+    rate or ``rate``, then trim its silence and apply ``[voice.post] gain_db``."""
+    voice = job.card.voice if rate is None else replace(job.card.voice, rate=rate)
+    p = job.passed
+    with atomic_path(dest) as tmp:
+        synth.get().synthesize(
+            cast(str, job.cue.text),
+            voice,
+            job.card.target_language,
+            tmp,
+            resolve=store.sidecar_path,
+            emotion_vector=p.get("emotion_vector"),
+            instruction=p.get("instruction"),
+            emotion_strength=p.get("emotion_strength", job.card.voice.emotion_strength),
+            target_seconds=p.get("target_seconds"),
+        )
+        trim_silence(tmp)
+        gain = float(job.card.voice.post.get("gain_db", 0.0))
+        if gain:
+            _apply_gain(tmp, gain)
+
+
 class TtsStage:
     name = "tts"
 
@@ -249,20 +412,6 @@ class TtsStage:
 
     def _config(self, ep: Episode) -> Config:
         return self.cfg if self.cfg is not None else Workspace(ep.workspace_root).config
-
-    @staticmethod
-    def _settings(cfg: Config) -> tuple[BackendConfig, str | None]:
-        bc = cfg.resolve("tts")
-        device = bc.options.get("device")
-        if device is not None and device not in ("cpu", "cuda"):
-            raise ConfigError(f'[tts] device must be "cpu" or "cuda", not {device!r}')
-        options = {k: v for k, v in bc.options.items() if k not in STAGE_KEYS}
-        return BackendConfig(bc.backend, options), device
-
-    @classmethod
-    def _backend_cfg(cls, cfg: Config, backend: str) -> BackendConfig:
-        bc, _ = cls._settings(cfg)
-        return bc if bc.backend == backend else BackendConfig(backend, {})
 
     @staticmethod
     def _cues_path(ep: Episode, cfg: Config) -> Path:
@@ -315,7 +464,7 @@ class TtsStage:
         return [ep.work / "07-tts" / "plan.json"]
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:
-        bc, _ = self._settings(cfg)
+        bc, _ = stage_settings(cfg)
         cues = self._cues(ep, cfg)
         cards = self._assigned(ep, cues, cfg.target_language)
         store = CardStore(ep.workspace_root)
@@ -327,9 +476,7 @@ class TtsStage:
         return {
             "backend": bc.backend,
             "options": bc.options,
-            "identity": {
-                b: identity_key("tts", self._backend_cfg(cfg, b)) for b in sorted(backends)
-            },
+            "identity": {b: identity_key("tts", backend_config(cfg, b)) for b in sorted(backends)},
             "max_speedup": max_speedup(cfg),
             "cards": {str(k): v for k, v in sorted(cards.items())},
             "extras": extras_voices(cues, cfg) if cues else {},
@@ -348,7 +495,7 @@ class TtsStage:
         cues = doc.cues
         vocals = ep.work / "01-separate" / "vocals.wav"
         store = CardStore(ep.workspace_root)
-        default_bc, device_pref = self._settings(cfg)
+        default_bc, _ = stage_settings(cfg)
         speedup = max_speedup(cfg)
 
         cards, names, report = self._assign(ep, cfg, cues, store, vocals)
@@ -378,29 +525,26 @@ class TtsStage:
             users.setdefault(card, who(c))
 
         # Every card is checked before any model loads.
-        checked = {cid: self._check(store, cid, users[cid], target) for cid in users}
+        checked = {cid: check_card(store, cid, users[cid], target) for cid in users}
         identities = {
-            b: identity_key("tts", self._backend_cfg(cfg, b))
+            b: identity_key("tts", backend_config(cfg, b))
             for b in sorted({card.voice.backend for card, _ in checked.values()})
         }
 
-        jobs: dict[str, list[_Job]] = {}
+        jobs: dict[str, list[RenderJob]] = {}
         for c in spoken:
             card_id = card_of[c.id]
-            card, cls = checked[card_id]
-            slot = c.end - c.start
-            backend = card.voice.backend
-            key = cue_key(
+            backend = checked[card_id][0].voice.backend
+            job = prepare_cue(
+                c,
                 card_id,
-                cast(str, c.text),
-                c.delivery,
-                self._backend_cfg(cfg, backend),
-                capabilities=cls.capabilities,
+                cfg,
+                store,
+                who=users[card_id],
+                checked=checked[card_id],
                 identity=identities[backend],
-                slot=slot,
             )
-            passed = self._passed(c, card, cls, slot)
-            jobs.setdefault(backend, []).append(_Job(c, card_id, card, cls, key, slot, passed))
+            jobs.setdefault(backend, []).append(job)
 
         cache = ep.workspace_root / ".fukikae" / "tts-cache"
         cache.mkdir(parents=True, exist_ok=True)
@@ -411,7 +555,7 @@ class TtsStage:
         fresh: list[str] = []
         for backend in sorted(jobs):
             cls = jobs[backend][0].cls
-            lazy = _Lazy(self._backend_cfg(cfg, backend), self._device(cfg, cls, device_pref), cfg)
+            lazy = LazySynth(backend_config(cfg, backend), synth_device(cfg, cls), cfg)
             try:
                 for job in jobs[backend]:
                     key, seconds, first, factor, calls = self._render(
@@ -536,95 +680,15 @@ class TtsStage:
             out[label] = store.put(stock_card(backend, voice, cfg.target_language, rev))
         return out
 
-    @staticmethod
-    def _check(
-        store: CardStore, card_id: str, who: str, target: str
-    ) -> tuple[Card, type[Synthesizer]]:
-        """The card and its backend class, or a CardError naming ``who``, the card and what
-        to do."""
-        fix = "assign another card with `fukikae voices assign`"
-        try:
-            card = store.get(card_id)
-        except CardError as e:
-            raise CardError(f"{who}: {e}; {fix}") from e
-        if card.target_language != target:
-            raise CardError(
-                f"{who}: card {card_id} is for {card.target_language!r}, not {target!r}; {fix}"
-            )
-        backend = card.voice.backend
-        try:
-            cls = cast(type[Synthesizer], loader.backend_class("tts", backend))
-        except (ConfigError, loader.BackendUnavailable) as e:
-            raise CardError(f"{who}: card {card_id}: {e}") from e
-        try:
-            validate_for_backend(card, cls, lookup=store.get)
-            v = card.voice
-            if v.source == "stock" and v.voice:
-                check_stock_voice(backend, v.voice)
-            for voice_id, _ in v.voices:
-                check_stock_voice(backend, voice_id)
-        except CardError as e:
-            raise CardError(f"{who}: card {card_id}: {e}; {fix}") from e
-        rev = getattr(cls, "model_revision", None)
-        if rev and card.voice.model_revision != rev:
-            raise CardError(
-                f"{who}: card {card_id} was made for {backend} model revision "
-                f"{card.voice.model_revision!r}, and this fukikae renders with {rev!r}; the voice "
-                f"could differ, so it is not rendered. {fix[0].upper()}{fix[1:]} (a stock voice "
-                f"is `stock:{backend}:<voice>`)"
-            )
-        if not loader.supports(cls, target):
-            raise CardError(f"{who}: card {card_id}: {backend} does not speak {target!r}; {fix}")
-        if "emotion_audio" in cls.capabilities:
-            raise CardError(
-                f"{who}: card {card_id}: the tts stage does not pass emotion_audio yet "
-                "(it arrives with the cloning backends)"
-            )
-        needed = [(r.clip, "clips") for r in card.voice.references]
-        if card.voice.latent:
-            needed.append((card.voice.latent, "latents"))
-        missing = set(store.missing_sidecars(card))
-        for ref, sub in needed:
-            if ref in missing:
-                raise CardError(
-                    f"{who}: card {card_id} needs sidecar {ref} which is not in "
-                    f"{store.root / sub}; import the pack with clips or `fukikae voices assign` "
-                    "another card"
-                )
-        return card, cls
-
-    @staticmethod
-    def _passed(c: DubCue, card: Card, cls: type[Synthesizer], slot: float) -> dict[str, Any]:
-        caps = cls.capabilities
-        out: dict[str, Any] = {}
-        d = c.delivery
-        if "emotion_vector" in caps and d.emotion:
-            conf = d.emotion_confidence if d.emotion_confidence is not None else 1.0
-            out["emotion_vector"] = {d.emotion: conf}
-        if "instruction" in caps and d.direction:
-            out["instruction"] = d.direction
-        if "duration" in caps:
-            out["target_seconds"] = round(slot, 4)
-        if out.keys() & {"emotion_vector", "instruction"}:
-            out["emotion_strength"] = card.voice.emotion_strength
-        return out
-
-    @staticmethod
-    def _device(cfg: Config, cls: type[Synthesizer], pref: str | None) -> str:
-        want = pref or ("cuda" if "cuda" in cls.devices else "cpu")
-        if want not in cls.devices:
-            raise ConfigError(f"[tts] device {want!r}: {cls.name} runs on {sorted(cls.devices)}")
-        return device_string(cfg) if want == "cuda" else "cpu"
-
     def _render(
-        self, job: _Job, lazy: _Lazy, cache: Path, store: CardStore, speedup: float
+        self, job: RenderJob, lazy: LazySynth, cache: Path, store: CardStore, speedup: float
     ) -> tuple[str, float, float, float, int]:
         """(key of the final wav, its seconds, the first render's seconds, rate factor,
         renders made)."""
         calls = 0
         base = cache / f"{job.key}.wav"
         if not base.exists():
-            self._synth(lazy, job, job.card.voice, base, store)
+            render_cue(job, lazy, base, store)
             calls += 1
         seconds = wav_seconds(base)
         if (
@@ -638,31 +702,10 @@ class TtsStage:
                 key = fitted_key(job.key, factor)
                 fitted = cache / f"{key}.wav"
                 if not fitted.exists():
-                    voice = replace(job.card.voice, rate=job.card.voice.rate * factor)
-                    self._synth(lazy, job, voice, fitted, store)
+                    render_cue(job, lazy, fitted, store, rate=job.card.voice.rate * factor)
                     calls += 1
                 return key, wav_seconds(fitted), seconds, factor, calls
         return job.key, seconds, seconds, 1.0, calls
-
-    @staticmethod
-    def _synth(lazy: _Lazy, job: _Job, voice: Any, dest: Path, store: CardStore) -> None:
-        p = job.passed
-        with atomic_path(dest) as tmp:
-            lazy.get().synthesize(
-                cast(str, job.cue.text),
-                voice,
-                job.card.target_language,
-                tmp,
-                resolve=store.sidecar_path,
-                emotion_vector=p.get("emotion_vector"),
-                instruction=p.get("instruction"),
-                emotion_strength=p.get("emotion_strength", job.card.voice.emotion_strength),
-                target_seconds=p.get("target_seconds"),
-            )
-            trim_silence(tmp)
-            gain = float(job.card.voice.post.get("gain_db", 0.0))
-            if gain:
-                _apply_gain(tmp, gain)
 
     @staticmethod
     def _link(src: Path, dest: Path) -> None:
