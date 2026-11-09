@@ -383,6 +383,42 @@ def test_worker_validates_requests(tmp_path):
             worker.validate_request(req)
 
 
+def test_worker_validates_voice_keys_and_types(tmp_path):
+    def voice(**kw: Any) -> dict[str, Any]:
+        ref = str(_ref(tmp_path))
+        return {"source": "clone", "references": [{"clip": ref, "transcript": "x"}], **kw}
+
+    ok = voice(seed=1234, temperature=0.8, top_p=0.8, emotion_strength=0.8, rate=1.0)
+    assert worker.validate_request(_synth_req(tmp_path, voice=ok))
+    assert worker.validate_request(_synth_req(tmp_path, voice=voice(seed=None, top_p=None)))
+    for bad in (
+        voice(seed="7"), voice(seed=True), voice(seed=-1), voice(seed=2**32), voice(seed=1.5),
+        voice(temperature=0), voice(temperature="hot"), voice(temperature=float("inf")),
+        voice(top_p=0), voice(top_p=1.5), voice(emotion_strength=2), voice(evil="rm -rf"),
+    ):  # fmt: skip
+        with pytest.raises(worker.RequestError):
+            worker.validate_request(_synth_req(tmp_path, voice=bad))
+
+
+def test_worker_stderr_capture_is_bounded(monkeypatch):
+    """A worker that floods stderr costs a bounded ring of lines, and the error keeps the
+    last ones."""
+    flood = (
+        "import sys\n"
+        "for i in range(200000): sys.stderr.write(f'noise {i}\\n')\n"
+        "sys.stderr.write('the last words\\n'); sys.stderr.flush()\n"
+        "sys.stdin.readline(); print('not json', flush=True); sys.stdin.read()"
+    )
+    monkeypatch.setattr(ScriptWorker, "SCRIPT", flood)
+    w = ScriptWorker({}, "cpu")
+    with pytest.raises(BackendError, match="protocol") as e:
+        w.load()
+    tail = str(e.value).split("--- worker stderr (last lines) ---\n", 1)[1]
+    assert tail.splitlines()[-1] == "the last words"
+    assert len(tail.splitlines()) <= remote.STDERR_LINES
+    assert remote.STDERR_KEEP < 200000
+
+
 def test_worker_answers_bad_lines_with_errors_and_keeps_going():
     env = {**os.environ, "FUKIKAE_TTS_FAKE_IMPL": "tests.fixtures.fake_tts_impl"}
     env["PYTHONPATH"] = os.pathsep.join([str(ROOT), str(ROOT / "src")])

@@ -48,6 +48,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import weakref
 from collections.abc import Callable
@@ -73,6 +74,8 @@ MAX_OUTPUT = 256 << 20
 MAX_RENDER_S = 600.0
 SECONDS_SLACK = 0.05
 STDERR_LINES = 30
+STDERR_KEEP = 2000  # lines of worker stderr held in memory, newest last
+STDERR_LINE_MAX = 4096  # bytes per held line; a longer one is split
 HELLO_TIMEOUT_S = 60.0
 KILL_WAIT_S = 10.0
 LOCK_HASH_FILE = "fukikae-uv-lock.sha256"
@@ -100,6 +103,36 @@ def record_lock(project_dir: Path, venv: Path) -> None:
 
 class BackendError(RuntimeError):
     """A worker that failed, broke the protocol, timed out or died."""
+
+
+class _StderrTail:
+    """The worker's stderr, drained by a thread into a ring of ``STDERR_KEEP`` lines, so a
+    worker that floods it costs bounded memory and no disk."""
+
+    def __init__(self, stream: IO[bytes]) -> None:
+        self._stream = stream
+        self._lines: collections.deque[str] = collections.deque(maxlen=STDERR_KEEP)
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._drain, name="tts-worker-stderr", daemon=True)
+        self._thread.start()
+
+    def _drain(self) -> None:
+        with contextlib.suppress(OSError, ValueError):
+            for raw in iter(lambda: self._stream.readline(STDERR_LINE_MAX), b""):
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                with self._lock:
+                    self._lines.append(line)
+
+    def tail(self, n: int, wait: float = 0.0) -> str:
+        if wait:
+            self._thread.join(wait)
+        with self._lock:
+            return "\n".join(list(self._lines)[-n:])
+
+    def close(self) -> None:
+        self._thread.join(5.0)
+        with contextlib.suppress(OSError):
+            self._stream.close()
 
 
 def _die_with_parent() -> None:  # pragma: no cover - runs in the child between fork and exec
@@ -164,7 +197,7 @@ class WorkerSynthesizer(Synthesizer):
         self.device = device
         self.pid: int | None = None
         self._proc: subprocess.Popen[bytes] | None = None
-        self._err: IO[bytes] | None = None
+        self._err: _StderrTail | None = None
         self._cwd: Path | None = None
         self._buf = b""
         self._finalizer: weakref.finalize[Any, Any] | None = None
@@ -279,7 +312,6 @@ class WorkerSynthesizer(Synthesizer):
         else:
             env["CUDA_VISIBLE_DEVICES"] = ""
             worker_device = "cpu"
-        self._err = tempfile.TemporaryFile()  # noqa: SIM115 - closed in _stop
         self._cwd = Path(tempfile.mkdtemp(prefix=f"fukikae-{self.name}-"))
         self._buf = b""
         log.info("starting the %s worker on %s", self.name, self.device)
@@ -288,7 +320,7 @@ class WorkerSynthesizer(Synthesizer):
                 self.command(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=self._err,
+                stderr=subprocess.PIPE,
                 env=env,
                 cwd=self._cwd,
                 bufsize=0,
@@ -299,6 +331,8 @@ class WorkerSynthesizer(Synthesizer):
             self._stop()
             raise BackendError(f"cannot start the {self.name} worker: {e}") from e
         self.pid = self._proc.pid
+        assert self._proc.stderr is not None
+        self._err = _StderrTail(self._proc.stderr)
         self._finalizer = weakref.finalize(self, _reap, self._proc)
         try:
             hello = self._request({"op": "hello"}, HELLO_TIMEOUT_S)
@@ -361,13 +395,9 @@ class WorkerSynthesizer(Synthesizer):
     def _stderr_tail(self) -> str:
         if self._err is None:
             return ""
-        self._err.flush()
-        self._err.seek(0)
-        lines = collections.deque(
-            self._err.read().decode("utf-8", errors="replace").splitlines(), STDERR_LINES
-        )
-        self._err.seek(0, os.SEEK_END)
-        return "\n".join(lines)
+        # a worker that has exited has written all it will; let the drain catch up
+        done = self._proc is not None and self._proc.poll() is not None
+        return self._err.tail(STDERR_LINES, wait=2.0 if done else 0.2)
 
     def _fail(self, what: str, *, kill: bool = True) -> NoReturn:
         tail = self._stderr_tail()
