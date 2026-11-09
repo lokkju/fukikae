@@ -101,17 +101,23 @@ def _ppid(pid: int) -> int | None:
     return int(fields[1]) if len(fields) > 1 else None
 
 
-def _cuda_devices(pid: int) -> str | None:
-    """The process's CUDA_VISIBLE_DEVICES; None when unset or unreadable (any card, then)."""
+def _read_environ(pid: int) -> list[bytes]:
+    """The process's environment entries; OSError when it can't be read (another user's)."""
+    with open(f"/proc/{pid}/environ", "rb") as f:
+        return f.read().split(b"\0")
+
+
+def _cuda_devices(pid: int) -> tuple[bool, str | None]:
+    """(readable, CUDA_VISIBLE_DEVICES): ``(True, None)`` when the variable is unset (every
+    card is visible), ``(False, None)`` when the environment can't be read."""
     try:
-        with open(f"/proc/{pid}/environ", "rb") as f:
-            env = f.read().split(b"\0")
+        env = _read_environ(pid)
     except OSError:
-        return None
+        return False, None
     for item in env:
         if item.startswith(b"CUDA_VISIBLE_DEVICES="):
-            return item.partition(b"=")[2].decode("utf-8", errors="replace")
-    return None
+            return True, item.partition(b"=")[2].decode("utf-8", errors="replace")
+    return True, None
 
 
 def _ours(pid: int, me: int) -> bool:
@@ -128,7 +134,12 @@ def _ours(pid: int, me: int) -> bool:
 
 
 def _on_card(pid: int, index: int) -> bool:
-    visible = _cuda_devices(pid)
+    """Whether ``pid`` can use card ``index``. A process whose environment can't be read
+    (another user's) is skipped, with a debug log, rather than taken to be on every card."""
+    readable, visible = _cuda_devices(pid)
+    if not readable:
+        log.debug("leftover scan: cannot read /proc/%d/environ; skipping that process", pid)
+        return False
     if visible is None:
         return True
     if not visible.strip():
