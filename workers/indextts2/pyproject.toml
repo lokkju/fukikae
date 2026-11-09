@@ -1,0 +1,26 @@
+# The IndexTTS2 worker environment. A uv project of its own: indextts needs Python < 3.12 and
+# exact pins (torch 2.8, transformers 4.52.1, numpy 2.2) that fukikae's environment can't hold,
+# so it never joins fukikae's lock. fukikae starts it as a JSON-lines worker
+# (fukikae.backends.tts.remote) with the venv at <checkout>/.venvs/indextts2.
+[project]
+name = "fukikae-worker-indextts2"
+version = "0"
+requires-python = "==3.11.*"
+dependencies = [
+    "indextts",
+    "torch==2.8.*",
+    "torchaudio==2.8.*",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+indextts = { git = "https://github.com/index-tts/index-tts.git", rev = "d9e41aac89fd00b3d71497fddb287b7f24613712" }
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

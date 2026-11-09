@@ -312,3 +312,33 @@ def test_worker_impl_name_must_be_an_identifier():
         input="", capture_output=True, text=True, env=env, timeout=60, check=False,
     )  # fmt: skip
     assert r.returncode != 0 and r.stdout == ""
+
+
+@pytest.mark.gpu
+def test_real_indextts2_renders_a_clone_line(tmp_path, monkeypatch):
+    """Needs `.venvs/indextts2` (README, "Cloning backends") and GPU 0."""
+    from fukikae.backends.tts.indextts2 import IndexTts2Synthesizer
+
+    monkeypatch.delenv("FUKIKAE_TTS_FAKE_IMPL")
+
+    ref = tmp_path / "ref.wav"
+    import numpy as np
+    from scipy.io import wavfile
+
+    t = np.arange(16000 * 4) / 16000
+    wavfile.write(ref, 16000, (0.2 * np.sin(2 * np.pi * 180 * t) * 32767).astype("<i2"))
+    synth = IndexTts2Synthesizer({}, "cuda:0")
+    synth.load()
+    try:
+        v = Voice(
+            backend="indextts2",
+            model_revision=synth.model_revision,
+            source="clone",
+            seed=1234,
+            references=(Reference(clip="sha256:" + "b" * 64, transcript="", language="ja"),),
+        )
+        out = tmp_path / "o.wav"
+        seconds = synth.synthesize("Hello there, Lucy.", v, "en", out, resolve=lambda _r: ref)
+        assert 0.5 < seconds < 6
+    finally:
+        synth.unload()
