@@ -33,6 +33,15 @@ first and the factor. ``max_speedup`` is ``[timefit] max_speedup`` (default 1.25
 rate and time-stretch share. A backend with the ``duration`` capability gets the slot as its
 target length instead.
 
+Delivery: each cue passes what ``capabilities_for(card.voice.source)`` allows, scaled by the
+card's ``emotion_strength``: ``emotion_audio`` (the cue's ``delivery.reference`` span cut from
+``01-separate/vocals.wav`` into ``07-tts/ref/<cue-id>.wav``; the key hashes those samples, so
+new vocals under the same span render again), ``emotion_vector`` (the tag label at its
+confidence), ``instruction`` (``delivery.direction``) and ``target_seconds`` (the slot, for
+``duration``). ``emotion_strength = 0`` passes none of the first three. ``plan.json`` records
+``passed`` per cue and ``neutral_only`` when none of them was passed; the stage logs how many
+cues rendered neutral-only.
+
 ``[tts]`` names the backend for automatic and extras cards; its options go to that backend
 only (a card on another backend renders with that backend's defaults). ``device`` is a stage
 setting (``cpu`` or ``cuda``; default cuda when the backend can use it), not an option, and stays
@@ -91,6 +100,8 @@ TRIM_FRAME_S = 0.010
 TRIM_DB = 40.0
 TRIM_KEEP_S = 0.030
 DELIVERY_CAPS = frozenset({"emotion_audio", "emotion_vector", "instruction"})
+# A source span shorter than this is too short to carry a delivery; no emotion_audio then.
+MIN_REFERENCE_S = 0.1
 # The delivery fields each capability hands the backend.
 _DELIVERY_BY_CAP = {
     "emotion_audio": ("reference",),
@@ -135,20 +146,32 @@ def cue_key(
     capabilities: frozenset[str] | None = None,
     identity: dict[str, Any] | None = None,
     slot: float | None = None,
+    reference_audio: str | None = None,
 ) -> str:
     """First 16 hex of the sha256 of the card id, text, delivery (only what a backend with
-    ``capabilities`` receives, when given), backend config and model identity."""
-    return _hash(
-        {
-            "card": card_id,
-            "text": text,
-            "delivery": delivery_inputs(delivery, capabilities, slot),
-            "backend": backend_cfg.backend,
-            "options": backend_cfg.options,
-            "identity": identity,
-            "version": RENDER_VERSION,
-        }
-    )
+    ``capabilities`` receives, when given), backend config and model identity, plus the digest
+    of the emotion reference's samples when one is passed."""
+    payload: dict[str, Any] = {
+        "card": card_id,
+        "text": text,
+        "delivery": delivery_inputs(delivery, capabilities, slot),
+        "backend": backend_cfg.backend,
+        "options": backend_cfg.options,
+        "identity": identity,
+        "version": RENDER_VERSION,
+    }
+    if reference_audio is not None:
+        payload["reference_audio"] = reference_audio
+    return _hash(payload)
+
+
+def span_digest(vocals: Path, span: tuple[float, float]) -> str:
+    """First 16 hex of the sha256 of the samples of ``span`` in ``vocals``."""
+    from scipy.io import wavfile
+
+    rate, data = wavfile.read(vocals, mmap=True)
+    seg = np.ascontiguousarray(data[max(0, int(span[0] * rate)) : max(0, int(span[1] * rate))])
+    return hashlib.sha256(f"{rate}:{seg.dtype.str}:".encode() + seg.tobytes()).hexdigest()[:16]
 
 
 def fitted_key(key: str, factor: float) -> str:
@@ -211,6 +234,7 @@ class RenderJob:
     key: str
     slot: float
     passed: dict[str, Any]
+    vocals: Path | None = None  # the emotion_audio source
 
 
 class LazySynth:
@@ -308,11 +332,6 @@ def check_card(
         )
     if not loader.supports(cls, target):
         raise CardError(f"{who}: card {card_id}: {backend} does not speak {target!r}; {fix}")
-    if "emotion_audio" in cls.capabilities:
-        raise CardError(
-            f"{who}: card {card_id}: the tts stage does not pass emotion_audio yet "
-            "(it arrives with the cloning backends)"
-        )
     needed = [(r.clip, "clips") for r in card.voice.references]
     if card.voice.latent:
         needed.append((card.voice.latent, "latents"))
@@ -328,10 +347,15 @@ def check_card(
 
 
 def delivery_passed(c: DubCue, card: Card, cls: type[Synthesizer], slot: float) -> dict[str, Any]:
-    """What the backend gets beyond the card and the text, by its capabilities."""
-    caps = cls.capabilities
+    """What the backend gets beyond the card and the text, by its capabilities for the card's
+    source; with ``emotion_strength`` 0, no emotion audio, vector or instruction."""
+    caps = cls.capabilities_for(card.voice.source)
+    if card.voice.emotion_strength == 0:
+        caps = caps - DELIVERY_CAPS
     out: dict[str, Any] = {}
     d = c.delivery
+    if "emotion_audio" in caps and d.reference[1] - d.reference[0] >= MIN_REFERENCE_S:
+        out["emotion_audio"] = [round(d.reference[0], 4), round(d.reference[1], 4)]
     if "emotion_vector" in caps and d.emotion:
         conf = d.emotion_confidence if d.emotion_confidence is not None else 1.0
         out["emotion_vector"] = {d.emotion: conf}
@@ -339,9 +363,14 @@ def delivery_passed(c: DubCue, card: Card, cls: type[Synthesizer], slot: float) 
         out["instruction"] = d.direction
     if "duration" in caps:
         out["target_seconds"] = round(slot, 4)
-    if out.keys() & {"emotion_vector", "instruction"}:
+    if out.keys() & DELIVERY_CAPS:
         out["emotion_strength"] = card.voice.emotion_strength
     return out
+
+
+def neutral_only(passed: dict[str, Any]) -> bool:
+    """No emotion audio, vector or instruction was passed: the render is neutral speech."""
+    return not (passed.keys() & DELIVERY_CAPS)
 
 
 def prepare_cue(
@@ -353,35 +382,62 @@ def prepare_cue(
     who: str,
     checked: tuple[Card, type[Synthesizer]] | None = None,
     identity: dict[str, Any] | None = None,
+    vocals: Path | None = None,
 ) -> RenderJob:
     """The render job of one cue with ``card_id``: the card checked (``check_card``, unless
     ``checked`` holds its result), its backend config, the cache key and the delivery passed.
-    ``identity`` is the backend's ``identity_key``, looked up when not given."""
+    ``identity`` is the backend's ``identity_key``, looked up when not given. ``vocals`` (the
+    episode's separated vocals) is needed when the backend takes ``emotion_audio``."""
     card, cls = (
         checked if checked is not None else check_card(store, card_id, who, cfg.target_language)
     )
     bc = backend_config(cfg, card.voice.backend)
     ident = identity if identity is not None else identity_key("tts", bc)
     slot = cue.end - cue.start
+    passed = delivery_passed(cue, card, cls, slot)
+    ref_digest = None
+    if "emotion_audio" in passed:
+        if vocals is None:
+            raise ValueError(f"{who}: {cls.name} takes emotion_audio, and no vocals were given")
+        ref_digest = span_digest(vocals, cast(tuple[float, float], tuple(passed["emotion_audio"])))
     key = cue_key(
         card_id,
         cast(str, cue.text),
         cue.delivery,
         bc,
-        capabilities=cls.capabilities,
+        capabilities=cls.capabilities_for(card.voice.source),
         identity=ident,
         slot=slot,
+        reference_audio=ref_digest,
     )
-    return RenderJob(cue, card_id, card, cls, bc, key, slot, delivery_passed(cue, card, cls, slot))
+    return RenderJob(cue, card_id, card, cls, bc, key, slot, passed, vocals)
 
 
 def render_cue(
-    job: RenderJob, synth: LazySynth, dest: Path, store: CardStore, *, rate: float | None = None
+    job: RenderJob,
+    synth: LazySynth,
+    dest: Path,
+    store: CardStore,
+    *,
+    rate: float | None = None,
+    ref_dir: Path | None = None,
 ) -> None:
     """Render ``job`` to ``dest`` (atomically) with the backend ``synth`` loads, at the card's
-    rate or ``rate``, then trim its silence and apply ``[voice.post] gain_db``."""
+    rate or ``rate``, then trim its silence and apply ``[voice.post] gain_db``. An emotion
+    reference is cut to ``ref_dir/<cue-id>.wav`` (default ``ref/`` next to ``dest``)."""
+    from fukikae.cards.select import cut_clip
+
     voice = job.card.voice if rate is None else replace(job.card.voice, rate=rate)
     p = job.passed
+    emotion_audio: Path | None = None
+    if "emotion_audio" in p:
+        assert job.vocals is not None, "prepare_cue checks vocals for emotion_audio"
+        folder = ref_dir if ref_dir is not None else dest.parent / "ref"
+        folder.mkdir(parents=True, exist_ok=True)
+        emotion_audio = folder / f"{job.cue.id}.wav"
+        start, end = p["emotion_audio"]
+        with atomic_path(emotion_audio) as tmp_ref:
+            cut_clip(job.vocals, start, end, tmp_ref)
     with atomic_path(dest) as tmp:
         synth.get().synthesize(
             cast(str, job.cue.text),
@@ -389,6 +445,7 @@ def render_cue(
             job.card.target_language,
             tmp,
             resolve=store.sidecar_path,
+            emotion_audio=emotion_audio,
             emotion_vector=p.get("emotion_vector"),
             instruction=p.get("instruction"),
             emotion_strength=p.get("emotion_strength", job.card.voice.emotion_strength),
@@ -543,6 +600,7 @@ class TtsStage:
                 who=users[card_id],
                 checked=checked[card_id],
                 identity=identities[backend],
+                vocals=vocals,
             )
             jobs.setdefault(backend, []).append(job)
 
@@ -559,7 +617,7 @@ class TtsStage:
             try:
                 for job in jobs[backend]:
                     key, seconds, first, factor, calls = self._render(
-                        job, lazy, cache, store, speedup
+                        job, lazy, cache, store, speedup, out_dir / "ref"
                     )
                     rendered += calls
                     if calls:
@@ -577,7 +635,7 @@ class TtsStage:
                         slot=round(job.slot, 4),
                         rate_factor=factor,
                         passed=job.passed,
-                        neutral_only=not (cls.capabilities & DELIVERY_CAPS),
+                        neutral_only=neutral_only(job.passed),
                     )
             finally:
                 lazy.close()
@@ -613,11 +671,13 @@ class TtsStage:
             ),
         )
         log.info(
-            "tts: %d cues, %d renders, %d from the cache, %d not rendered",
+            "tts: %d cues, %d renders, %d from the cache, %d not rendered, %d neutral-only "
+            "(no emotion audio, vector or instruction passed)",
             len(cues),
             rendered,
             len(cached),
             len(cues) - len(done),
+            sum(1 for c in done.values() if c.neutral_only),
         )
 
     # -- helpers ---------------------------------------------------------------------------
@@ -681,14 +741,20 @@ class TtsStage:
         return out
 
     def _render(
-        self, job: RenderJob, lazy: LazySynth, cache: Path, store: CardStore, speedup: float
+        self,
+        job: RenderJob,
+        lazy: LazySynth,
+        cache: Path,
+        store: CardStore,
+        speedup: float,
+        ref_dir: Path,
     ) -> tuple[str, float, float, float, int]:
         """(key of the final wav, its seconds, the first render's seconds, rate factor,
         renders made)."""
         calls = 0
         base = cache / f"{job.key}.wav"
         if not base.exists():
-            render_cue(job, lazy, base, store)
+            render_cue(job, lazy, base, store, ref_dir=ref_dir)
             calls += 1
         seconds = wav_seconds(base)
         if (
@@ -702,7 +768,10 @@ class TtsStage:
                 key = fitted_key(job.key, factor)
                 fitted = cache / f"{key}.wav"
                 if not fitted.exists():
-                    render_cue(job, lazy, fitted, store, rate=job.card.voice.rate * factor)
+                    render_cue(
+                        job, lazy, fitted, store, rate=job.card.voice.rate * factor,
+                        ref_dir=ref_dir,
+                    )  # fmt: skip
                     calls += 1
                 return key, wav_seconds(fitted), seconds, factor, calls
         return job.key, seconds, seconds, 1.0, calls
