@@ -449,6 +449,7 @@ def test_real_indextts2_renders_a_clone_line(tmp_path, monkeypatch):
     from fukikae.backends.tts.indextts2 import IndexTts2Synthesizer
 
     monkeypatch.delenv("FUKIKAE_TTS_FAKE_IMPL")
+    monkeypatch.delenv("FUKIKAE_WORKER_CHECKOUT")  # the real checkout and its .venvs
 
     ref = tmp_path / "ref.wav"
     import numpy as np
