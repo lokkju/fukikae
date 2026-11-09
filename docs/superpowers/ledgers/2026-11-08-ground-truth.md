@@ -1,6 +1,6 @@
 # Ground-truth plan: execution ledger
 
-Plan: `docs/superpowers/plans/2026-11-08-ground-truth.md`. Rulings GT1-GT11 are the controller's; this file records the facts Task 7 onwards produced, with their numbers.
+Plan: `docs/superpowers/plans/2026-11-08-ground-truth.md`. Rulings GT1-GT12 are the controller's; this file records the facts Task 7 onwards produced, with their numbers.
 
 ## Task 7: live-action test sets and baselines (BBT en/de/es, Alice in Borderland)
 
@@ -213,3 +213,63 @@ Bazinga's film-scaled labels retimed onto bbt-en with `subalign --speech`: S01E0
 Agreement over frames where both name exactly one speaker (`~/fukikae-ws/bazinga/tools/agree.py`): S01E01 97.7% of 715 s, S01E02 98.4% of 580 s, S01E03 98.5% of 663 s; **98.17% over 1958 s**. Line level (each of our lines against the gold speaker holding most of its time): 1039 of 1058 (98.2%). Name map: leonard_hofstadter Leonard, sheldon_cooper Sheldon, penny Penny, howard_wolowitz Howard, raj_koothrappali Raj, leslie_winkle Lesley, althea Receptionist, kurt Enormous man, instructor Class instructor, doug Doug, waitress Waitress.
 
 The 19 disagreeing lines: one-word cues in fast exchanges whose subtitle display lags the speech into the next speaker's turn ("Done." / "Got it."); runs of repeated short tokens ("Hi." four times) where difflib pairs a cue with the wrong transcript instance; Bazinga's own errors, an apparent speaker boundary one word late (gold gives Sheldon only the word "half" that ends Leonard's line, then gives Leonard "Exactly half.", which the transcript gives Sheldon) and words missing from gold ("Okay.", "Six-thirty."); and Kurt, called "Enormous man" once and "Man" once by the transcript, which is an alias gap, not an alignment error.
+
+## Task 8: pick, profile and held-out verdicts
+
+Run 2026-11-09. Sweep (Step 1) as recorded under Task 7b and in `.superpowers/sdd/2026-11-08-ground-truth/task-8-step1-report.md`; the full tables are reproduced by `scripts/ground-truth/tab.py`. Results doc: `docs/results/2026-11-09-live-action-ground-truth.md`.
+
+### Pick (Step 2)
+
+- Gate sets: bbt-en, bbt-de, bbt-es, kaze, grid, bazinga-tbbt-pal, bazinga-office-pal; BBT counts three times. Film conditions alongside, aib diagnostic (GT8).
+- Literal rule: ct 0.4, joint with `episode_cannot_link` on at 0.50-0.60, 18 clean / 1 merge / 0.857. Next: ct 0.5, centroid or joint with cannot-link on at 0.50-0.60, 17 / 1 / 0.714. Provisional (ct 0.6, joint, cannot-link off, 0.60): 16 / 4 / 0.857.
+- GT12 overrides the literal rule: ct 0.4 against ct 0.5 is a tie (the one character is りん on Kaze, 0.79 at ct 0.6, 0.74-0.80 at ct 0.5, 0.84 at ct 0.4; 0.4 is outside VBx's `Uniform(0.5, 0.8)` tuning range), and ct 0.5 is picked.
+- At ct 0.5, centroid and joint with cannot-link on tie at 17 / 1 / 0.714 for 0.50, 0.55 and 0.60 (both 16 at 0.65). Simpler matcher: centroid. Threshold: 0.6, the top of the plateau and today's value (Task 9's choice in the same situation).
+- **Pick:** `[diarize] clustering_threshold = 0.5`, `[characters] matcher = "centroid"` at `[registry] match_threshold = 0.6`. `[resolve]` holds the tied joint cell: joint, 0.6, `episode_cannot_link = true` (was `false`).
+- **Language variants: none.** en, es, ja (kaze) and ko (grid) have no ct 0.5 cell above the pick. de has one by the letter: joint, cannot-link off, 0.60 gives 2 / 1 / 1.00 against the pick's 2 / 1 / 0.75. The gain is Sheldon's E02 speech (204 s, unassigned under centroid) joining the merged Leonard + Sheldon id; same merge, same failing verdict. It is a joint setting, read only by `registry resolve`, and a `[resolve.lang.de]` table would never be read on the centroid path the pick ships. Not shipped; for the controller to confirm as a ruling.
+
+### Profile (Step 3)
+
+`6bb10c2 feat(profiles): live-action profile from four-language ground truth`: `src/fukikae/profiles/live-action.toml` (PROVISIONAL dropped), `tests/test_profiles.py` (the profile resolves to the pick for every language; the clustering threshold reaches `PyannoteDiarizer`; `[resolve]` gives joint 0.6 with cannot-link on), README's live-action bullet and a cache note (the new clustering value re-runs diarize in existing live-action workspaces). Committed before any held-out run.
+
+### Held-out (Step 4), once, tags `t8-holdout`, `t8-holdout-pal`, `t8-holdout-film`
+
+Workspaces `~/fukikae-ws/t8/ws/<set>-pick`: `cp -al` of the ct 0.5 copy with its `[diarize]` override removed. Under the committed profile the tuning episodes' diarize keys were fresh (only characters stale), and each held-out episode re-diarized at 0.5 (39-42 s; grid E05 78 s, run directly on the existing vocals through `stage_direct.py`, since grid's separate and asr keys predate GT6). Then the characters stage on the tuning episodes in order and the held-out episode last, and `eval identity --from-assignments`. The default profile was held out once in Task 7's `-default` copies (characters stage on the held-out episode only; their tuning registries are Task 7's).
+
+| Set | Held-out | Pick: recurring, clean / merges / fraction, coverage | Verdict | Default |
+|---|---|---|---|---|
+| bbt en | S01E03 | 4, 4 / 0 / 1.00, 47% | pass | 4 / 0 / 1.00 pass |
+| bbt de | S01E03 | 5, 3 / 1 (Leonard + Sheldon) / 0.80, 34% | fail | 3 / 1 / 1.00 fail |
+| bbt es | S01E03 | 4, 4 / 0 / 1.00, 49% | pass | 1 / 1 / 0.50 fail |
+| bazinga-tbbt PAL | S01E05 | 6, 4 / 0 / 0.67, 61% | fail (Howard 0.52, Raj 0.00) | 4 / 0 / 0.67 fail |
+| bazinga-tbbt film | S01E05 | 6, 4 / 0 / 0.67, 67% | fail (Howard 0.49, Raj 0.00) | 4 / 0 / 0.67 fail |
+| bazinga-office PAL | S01E05 | 3, 3 / 0 / 1.00, 39% | pass | 3 / 0 / 1.00 pass |
+| bazinga-office film | S01E05 | 3, 3 / 0 / 1.00, 38% | pass | 3 / 0 / 1.00 pass |
+| grid | S01E05 | 5, 4 / 0 / 0.80, 16% | fail (종이 0.00, no tuning id) | not run |
+| kaze | S01E11 | **pending** (week 3 downloading) | | |
+
+- bbt de: on E03, pyannote at 0.5 splits the leads; Leonard stays on the merged tuning id 1 (0.89) and Sheldon's 152 s go to a new actor (0.01 on a tuning id).
+- bazinga-tbbt: Raj has 2 s in E01 and no tuning id; Leslie (22 s in tuning) holds 0.98. Office: Michael, Jim, Pam recur on E05 (Dwight under 5 s).
+- grid: the provisional profile scored 0.80 on E05 with a 새하 + 어진 merge; the pick scores 0.80 with none.
+- The tune rows that the held-out runs write (pipeline, not harness) match the harness sweep's ct 0.5 centroid 0.60 cells on every set (e.g. bbt de 2 / 1 / 0.75, es 3 / 0 / 0.75, grid 1 / 0 / 0.50).
+
+### Kaze E11, pending
+
+`~/fukikae-ws/t8/ws/kaze-pick` exists with E01-E03's characters stage run at the committed profile (no E11, nothing scored). Follow-up, once, no re-tuning: copy EP011 through the read-only volume (`--group-add 100`, as Task 7b), link it as `Kaze Kaoru - S01E11.mkv`, run the Task 7b onset check against `aligned/S01E11.ass`, then `KAZE_EPS=S01E11 scripts/ground-truth/holdout_run.sh kaze-pick` (diarizes at 0.5 and runs characters) and `scripts/ground-truth/holdout_score.sh ~/fukikae-ws/t8/ws/kaze-pick` (tag `t8-holdout`). Kaze can't show over-merge (one recurring character in tuning).
+
+### Reproducibility
+
+The drivers are committed under `scripts/ground-truth/` (`65df647`), with `~/fukikae-ws` replaced by `$FUKIKAE_WS` (default `~/fukikae-ws`) and the repository path found from each shell script's own location; ruff formatting only otherwise. The repository `tab.py` reproduces `tables-diar.md` byte for byte. sha256 of the workspace originals as run:
+
+```
+ffbbf367c5eb181eb72812e0a7d064976dcad63579993c5e80b7ebb62eba537e  t8/setup.py
+c0324b562ec862807d6bebe42fc243902679fc997c9191db23c3e4331a0687fb  t8/sweep.py
+eaef466448df6db85ab30b67bc29ef85c3f8cdf45509ee73a213b03ebcefecb9  t8/diar_direct.py
+106fa7a3a918399017dc98d07387ee6f0e0031c3e1e131199c28804d14b92d8f  t8/tab.py
+9418cb37203ffacbd8964b2f14ac5273637a4970cbbeb63e52d7957cc254d034  t8/stale.py
+51fd70508d2e9260e5b1341ed3c693c7d871ac85bab6ef9ce7c17c1874470d30  t8/diar.sh
+0519e49fbbbb7fbc032f201c5c5ec614da8c54861c2bd8aeaa06327e1b37c20c  t8/holdout_setup.py
+5189f95327b65a4f90c7a099fd351b141523c02b9aef657210785d14e424fb22  t8/holdout_stale.py
+8a937bbeeb24ea61c4af88d64532b972015f6194f40cc6210294af3617e79f60  t8/stage_direct.py
+cd802666b9e5297884d10efb39254318618c8f0364f4804df8fe7c84dfd2e316  t8/holdout_run.sh
+c32ea2152ba2f68078258914cc5c264c24a0314cf91abe5ca40b0a753f940134  t8/holdout_score.sh
+```
