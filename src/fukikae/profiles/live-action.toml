@@ -13,6 +13,9 @@
 # 0.4 sums to 18 / 1 / 0.857, one character more, all of it りん on Kaze crossing 80%
 # (0.79 -> 0.84) on the thinnest set; 0.4 is outside VBx's tuning range (0.5-0.8), so the
 # controller treats it as a tie and picks 0.5 (Ruling GT12).
+# Held out once after this pick: passes BBT S01E03 en and es (4/4) and Bazinga Office S01E05;
+# fails BBT S01E03 de (0.80, Leonard + Sheldon merged), Bazinga TBBT S01E05 (0.67) and Grid E05
+# (0.80, no merge). Kaze, Kaoru E11 pending.
 [registry]
 min_new_seconds = 20.0
 match_threshold = 0.6
