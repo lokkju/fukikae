@@ -1014,12 +1014,33 @@ def test_a_headline_over_some_characters_says_so():
     assert full.headline_note == ""
 
 
+def test_restricting_the_sample_to_characters_keeps_their_cues():
+    """--characters scores the same cues per character as a full run (the sample is seeded
+    per character), so a stock run can match a clone run's characters."""
+
+    def cue(i, cid):
+        return DubCue(id=f"c{i:04d}", start=i * 3.0, end=i * 3.0 + 2.0, character_id=cid,
+                      extra=None, speaker="x", source_text="s", text="Hello there.", budget=40,
+                      delivery=Delivery(reference=(i * 3.0, i * 3.0 + 2.0)))  # fmt: skip
+
+    cues = [cue(i, 1 + i % 3) for i in range(30)]
+    docs = {"S01E01": DubCues(episode="S01E01", source_language="ja", target_language="en",
+                              path="asr", cues=cues)}  # fmt: skip
+    full = ev.sample_cues(docs, 4, 0)
+    some = ev.restrict(full, [1, 3])
+    assert some == [p for p in full if p[1].character_id in (1, 3)]
+    assert ev.restrict(full, None) == full
+    with pytest.raises(ValueError, match="7"):
+        ev.restrict(full, [1, 7])
+
+
 def test_evaluate_keeps_its_typed_signature():
     """The workspace lock wraps evaluate without hiding its keywords from the type checker."""
     import inspect
 
     params = inspect.signature(ev.evaluate).parameters
-    assert {"backend", "per_character", "seed", "reference_workspace"} <= set(params)
+    wanted = {"backend", "per_character", "seed", "reference_workspace", "characters"}
+    assert wanted <= set(params)
     assert "kw" not in params
     hints = inspect.get_annotations(ev.evaluate, eval_str=True)
     assert hints["return"] is ev.EvalResult
