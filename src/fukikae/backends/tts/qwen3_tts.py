@@ -34,7 +34,8 @@ class Qwen3TtsSynthesizer(WorkerSynthesizer):
     # Characters per second after silence trimming (ruling CD7), from Task 9c's eval tts clone
     # renders in the default icl mode (Japanese clips): median per render 12.3 on Fairy Tail E11
     # (40 renders, 5 cards) and 13.7 on E12 (72 renders, 9 cards; per card 11.8 to 15.3); 13.2
-    # is the render-weighted mean of the two. From German clips (BBT de, 24 renders) it was
+    # is those two medians averaged with weights 40 and 72 (not a median over all renders).
+    # From German clips (BBT de, 24 renders) it was
     # 18.1; in xvector mode 14.8 (E11) and 15.3 (E12).
     speech_cps: ClassVar[dict[str, float]] = {"en": 13.2}
     option_keys: ClassVar[frozenset[str]] = frozenset({"mode"})

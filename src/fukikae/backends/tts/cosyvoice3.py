@@ -34,7 +34,8 @@ class CosyVoice3Synthesizer(WorkerSynthesizer):
     # Characters per second after silence trimming (ruling CD7), from Task 9b fix round 1's
     # eval tts renders (cross-lingual from Japanese clips, no instruction): median per render
     # 16.1 on Fairy Tail E11 (40 renders, 5 cards) and 16.4 on E12 (72 renders, 9 cards); 16.3
-    # is the render-weighted mean. Fairy Tail only; from German clips (BBT de, 24 renders) it
+    # is those two medians averaged with weights 40 and 72 (not a median over all renders).
+    # Fairy Tail only; from German clips (BBT de, 24 renders) it
     # was 15.7 cross-lingual and 13.8 zero-shot.
     speech_cps: ClassVar[dict[str, float]] = {"en": 16.3}
     option_keys: ClassVar[frozenset[str]] = frozenset({"fp16", "mode"})
