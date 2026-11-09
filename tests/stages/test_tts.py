@@ -82,6 +82,7 @@ class FakeSynth(Synthesizer):
     stock_voices: ClassVar = frozenset({"af_heart", "am_adam", "bf_emma", "xf_one", "xm_one"})
     LOG: ClassVar[list[str]] = []
     CALLS: ClassVar[list[tuple[str, str | None, float]]] = []
+    KW: ClassVar[list[dict[str, Any]]] = []  # delivery keywords per call
     DUR: ClassVar[dict[str, float]] = {}
     PAD: ClassVar[tuple[float, float]] = (0.0, 0.0)  # silence before and after, like Kokoro
 
@@ -99,8 +100,12 @@ class FakeSynth(Synthesizer):
     def unload(self) -> None:
         self.LOG.append(f"unload {self.name}")
 
-    def synthesize(self, text: str, voice: Voice, language: str, out: Path, **_kw: Any) -> float:  # noqa: ARG002
+    def synthesize(self, text: str, voice: Voice, language: str, out: Path, **kw: Any) -> float:  # noqa: ARG002
         self.CALLS.append((text, voice.voice, voice.rate))
+        kw.pop("resolve", None)
+        emo = kw.get("emotion_audio")
+        kw["emotion_audio_exists"] = emo is not None and Path(emo).is_file()
+        self.KW.append({"text": text, **kw})
         seconds = self.DUR.get(text, len(text) * 0.06) / voice.rate
         return tone_wav(out, seconds, self.sample_rate, pad=self.PAD)
 
@@ -116,6 +121,7 @@ CLASSES = {"fake": FakeSynth, "fake2": FakeSynth2}
 def fakes(monkeypatch):
     FakeSynth.LOG = []
     FakeSynth.CALLS = []
+    FakeSynth.KW = []
     FakeSynth.DUR = {}
     FakeSynth.PAD = (0.0, 0.0)
     monkeypatch.setattr(loader, "backend_class", lambda _kind, name: CLASSES[name])
@@ -516,12 +522,92 @@ def test_characters_with_only_skipped_cues_get_no_card(ep):
         assert reg.card_for(2, "en") is None
 
 
-def test_emotion_audio_backend_is_refused_as_a_card_error(ep, monkeypatch):
+def _kw(text: str) -> dict[str, Any]:
+    return next(k for k in FakeSynth.KW if k["text"] == text)
+
+
+def test_delivery_passed_per_capability(ep, monkeypatch):
+    """A backend gets what its capabilities allow: the source line's audio as emotion_audio
+    (cut to 07-tts/ref/<cue>.wav), the direction as instruction, never an emotion vector."""
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio", "instruction"}))
     _two_cards(ep)
-    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
-    with pytest.raises(CardError, match="emotion_audio"):
+    cues = [c.model_copy(deep=True) for c in CUES]
+    cues[0].delivery.direction = "shouting"
+    cues[0].delivery.emotion, cues[0].delivery.emotion_confidence = "angry", 0.9
+    _write_cues(ep, cues)
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert c.passed == {
+        "emotion_audio": [3.0, 5.0],
+        "instruction": "shouting",
+        "emotion_strength": 0.8,
+    }
+    assert not c.neutral_only
+    kw = _kw("natsu one")
+    assert kw["emotion_audio_exists"] and kw["emotion_vector"] is None
+    assert kw["instruction"] == "shouting" and kw["emotion_strength"] == 0.8
+    assert Path(kw["emotion_audio"]) == ep.work / "07-tts" / "ref" / "c0001.wav"
+    assert tts.wav_seconds(ep.work / "07-tts" / "ref" / "c0001.wav") == pytest.approx(2.0, abs=0.01)
+    # a cue without a direction still gets its emotion audio
+    assert set({c.cue_id: c for c in _plan(ep).cues}["c0003"].passed) == {
+        "emotion_audio",
+        "emotion_strength",
+    }
+
+
+def test_emotion_strength_zero_passes_nothing(ep, monkeypatch):
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio", "emotion_vector"}))
+    monkeypatch.setattr(FakeSynth, "voice_keys", frozenset({"rate", "emotion_strength"}))
+    _assign(ep, 1, _stock("am_adam") + "emotion_strength = 0.0\n")
+    _assign(ep, 2, _stock("af_heart"))
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert c.passed == {} and c.neutral_only
+    kw = _kw("natsu one")
+    assert kw["emotion_audio"] is None and kw["emotion_vector"] is None
+
+
+def test_duration_backend_gets_target_and_skips_rate_fit(ep, monkeypatch):
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"duration"}))
+    _two_cards(ep)
+    FakeSynth.DUR = {"natsu one": 4.0}  # twice its 2 s slot
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert c.rate_factor == 1.0 and c.passed == {"target_seconds": 2.0}
+    assert len(_calls_for({"natsu one"})) == 1
+    assert _kw("natsu one")["target_seconds"] == 2.0
+
+
+def test_neutral_only_backend_is_reported(ep, monkeypatch, caplog):
+    _two_cards(ep)
+    with caplog.at_level("INFO", logger="fukikae.stages.tts"):
         TtsStage(CFG).run(ep, CFG)
-    assert FakeSynth.LOG == []
+    rendered = [c for c in _plan(ep).cues if c.skipped is None]
+    assert all(c.neutral_only for c in rendered)
+    assert "6 neutral-only" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    with caplog.at_level("INFO", logger="fukikae.stages.tts"):
+        TtsStage(CFG).run(ep, CFG)
+    assert not any(c.neutral_only for c in _plan(ep).cues if c.skipped is None)
+    assert "0 neutral-only" in caplog.text
+
+
+def test_emotion_audio_key_follows_the_source_audio(ep, monkeypatch):
+    """The emotion reference is audio: new vocals under the same span render again."""
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    _two_cards(ep)
+    TtsStage(CFG).run(ep, CFG)
+    first = {c.cue_id: c.key for c in _plan(ep).cues}
+    tone_wav(ep.work / "01-separate" / "vocals.wav", 30.0, 16000, amp=0.1)
+    TtsStage(CFG).run(ep, CFG)
+    second = {c.cue_id: c.key for c in _plan(ep).cues}
+    assert first["c0001"] != second["c0001"]
+
+
+def test_capabilities_for_defaults_to_capabilities():
+    assert FakeSynth.capabilities_for("stock") == FakeSynth.capabilities
 
 
 def test_cue_key_changes_with_model_identity():

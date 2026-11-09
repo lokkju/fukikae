@@ -233,6 +233,10 @@ class Fake:
         if "steps" in options:
             raise CardError(f"fake: unknown option 'steps' (source {source})")
 
+    @classmethod
+    def capabilities_for(cls, source: str) -> frozenset[str]:  # noqa: ARG003
+        return cls.capabilities
+
     def synthesize(
         self,
         text: str,

@@ -106,6 +106,12 @@ class Synthesizer(Backend, Protocol):
         for a card of voice ``source`` when given."""
         ...
 
+    @classmethod
+    def capabilities_for(cls, source: str) -> frozenset[str]:  # noqa: ARG003 - per-source override
+        """The delivery capabilities for a card of voice ``source``; ``capabilities`` unless a
+        backend's sources differ (Qwen3-TTS takes an instruction only when designing)."""
+        return cls.capabilities
+
     def synthesize(
         self,
         text: str,
