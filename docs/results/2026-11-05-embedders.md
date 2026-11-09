@@ -222,7 +222,7 @@ CAM++ on the `en_voxceleb` file scored worst (24% NC on fairytail diarization). 
 - Live action (Grid, thin): `wespeaker` (96% diarization, 93% subtitles against ECAPA's 81% and 82%), on six characters and 85 labeled spans. Flagged thin: the difference is one or two characters (종이 0% to 100%, 새하 51% to 100%) and should be re-checked on a larger live-action set before it drives a default.
 - No profile or default was changed in this task. The ledger ruling for the numbers above is recorded in the report.
 
-Note (2026-11-08): the CAM++ numbers above used the English VoxCeleb model (`3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx`) and are superseded for Chinese by the clip-set rerun with `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`; the anime numbers are not re-measured.
+Note (2026-11-08): the CAM++ numbers above used the English VoxCeleb model (`3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx`) and are superseded for Chinese by the clip-set rerun with `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`; the anime and Grid cells are re-measured with the zh_en model in the next section.
 
 ## CAM++ rerun with the zh_en model (2026-11-08)
 
