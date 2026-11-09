@@ -22,8 +22,8 @@ class IndexTts2Synthesizer(WorkerSynthesizer):
     name: ClassVar[str] = "indextts2"
     extra: ClassVar[str] = "indextts2"
     languages: ClassVar[frozenset[str]] = frozenset(_impl.LANGUAGES)
-    # Peak torch allocation 7.5 GB in fp32 on the first lines (Task 9a spike), plus the CUDA
-    # context and allocator slack.
+    # Peak torch allocation 7.5 GB in fp32 (Task 9a spike); nvidia-smi showed 9.0 GB on GPU 0
+    # during eval tts, CUDA context and allocator included.
     vram_mb: ClassVar[int] = 9500
     sources: ClassVar[frozenset[str]] = frozenset({"clone"})
     voice_keys: ClassVar[frozenset[str]] = frozenset(
@@ -31,9 +31,10 @@ class IndexTts2Synthesizer(WorkerSynthesizer):
     )
     capabilities: ClassVar[frozenset[str]] = frozenset({"emotion_audio"})
     sample_rate: ClassVar[int] = _impl.SAMPLE_RATE
-    # Characters per second after silence trimming (ruling CD7). Provisional: Kokoro's figure
-    # until IndexTTS2's own renders are measured.
-    speech_cps: ClassVar[dict[str, float]] = {"en": 15.5}
+    # Characters per second after silence trimming (ruling CD7), from Task 9a's eval tts clone
+    # renders: median per render 13.8 on Fairy Tail E11 (40 renders, 5 cards) and 14.6 on E12
+    # (72 renders, 9 cards; per card 11.1 to 18.3); 14.3 is the render-weighted mean of the two.
+    speech_cps: ClassVar[dict[str, float]] = {"en": 14.3}
     option_keys: ClassVar[frozenset[str]] = frozenset({"fp16"})
     model: ClassVar[str] = _impl.REPO
     # The model snapshot and the code that runs it: either changing can change a voice.
