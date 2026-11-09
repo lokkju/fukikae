@@ -57,9 +57,9 @@ The rule (Task 9's): most clean characters summed over the gate sets, then fewes
 
 **GT12 overrides the literal rule.** By the rule, ct 0.4 wins on one clean character. The controller treats ct 0.4 against ct 0.5 as a tie and picks ct 0.5. The whole difference between 18 and 17 is りん on Kaze crossing the 80% bar (0.79 at 0.6, 0.74-0.80 at 0.5, 0.84 at 0.4) on the thinnest gate set, with one recurring character and labels that need `--force`. And 0.4 is outside the range VBx was tuned over (its declared search space is `Uniform(0.5, 0.8)`); pyannote accepts the value, but the model was never tuned at it. A tie-break that rests on one character's share on that set shouldn't ship an untuned value. If ct 0.4 is right, held-out data will show it and a later plan can switch; this one doesn't re-tune.
 
-**At ct 0.5**, centroid and joint with cannot-link on tie at 17 / 1 / 0.714 for every matcher threshold from 0.50 to 0.60, and both drop to 16 at 0.65 (The Office PAL loses Dwight). Ties go to the simpler matcher, centroid; 0.6 is the top of the plateau and today's value, as Task 9 chose. Joint with cannot-link off is worse at ct 0.5 (15 / 4 at 0.60): it re-merges the Spanish leads that the lower clustering value split.
+**At ct 0.5**, centroid and joint with cannot-link on tie at 17 / 1 / 0.714 for every matcher threshold from 0.50 to 0.60, and both drop to 16 at 0.65 (The Office PAL loses Dwight). By the controller's tie-break (Ruling GT14), ties go to the simpler matcher, centroid, and 0.6 is the top of the plateau and today's value, as Task 9 chose. Joint with cannot-link off is worse at ct 0.5 (15 / 4 at 0.60): it re-merges the Spanish leads that the lower clustering value split.
 
-**The pick:** pyannote `clustering_threshold = 0.5` in `[diarize]`, the centroid matcher at 0.6 in the characters stage. `[resolve]` keeps the tied joint cell (0.6, `episode_cannot_link = true`) for anyone who runs `fukikae registry resolve` on a live-action workspace; it was `false` before.
+**The pick** (GT12 for the clustering value, GT14 for the matcher and threshold): pyannote `clustering_threshold = 0.5` in `[diarize]`, the centroid matcher at 0.6 in the characters stage. `[resolve]` keeps the tied joint cell (0.6, `episode_cannot_link = true`) for anyone who runs `fukikae registry resolve` on a live-action workspace; it was `false` before. That `[resolve]` cell was never held out: every held-out run below took the centroid path (`fukikae run --to characters`), and its only evidence is the tuning sweep.
 
 Per set at ct 0.5 with centroid at 0.6, against the provisional setting:
 
@@ -75,11 +75,11 @@ Per set at ct 0.5 with centroid at 0.6, against the provisional setting:
 | bazinga-tbbt film (alongside) | 4 / 0 / 1.00 | 4 / 0 / 1.00 |
 | bazinga-office film (alongside) | 4 / 0 / 1.00 | 3 / 0 / 0.75 |
 
-**Spanish is fixed from ct 0.5.** From 0.5 down, pyannote gives Leonard and Sheldon separate speakers in both tuning episodes (E01 0.89/0.70, E02 0.76/0.81 on their modal speakers), and es goes from 1 clean / 3 merges to 3 clean / 0 merges under centroid. Howard then fails on share (0.53).
+**Spanish's leads split from ct 0.5.** From 0.5 down, pyannote gives Leonard and Sheldon separate speakers in both tuning episodes (E01 0.89/0.70, E02 0.76/0.81 on their modal speakers), and es goes from 1 clean / 3 merges to 3 clean / 0 merges under centroid. Howard then fails on share (0.53), so tuning es is still 3 / 0 / 0.75, and the held-out pass below is one episode.
 
 **German's leads stay unseparated at every setting.** E01 keeps both leads on one pyannote speaker even at 0.4 (0.90/0.96), and E02 splits only partly; every matcher cell ends with Leonard and Sheldon on one id; the best de cell is 2 / 1 at all three clustering values. A diagnostic pass with subtitle segmentation (`--segmentation subtitles`, which takes pyannote out of the loop; tag `t8-diag-subtitles`) shows why: on German line segments the two leads land on one id up to matcher threshold 0.65 and separate only at 0.70, where every character's lines scatter and nothing passes. English line segments never put the two on one id. In WeSpeaker space at line length, the German voices for Leonard and Sheldon sit closer than any useful matcher threshold. The merge has a cause beyond diarization, and no swept setting fixes it.
 
-**Grid** drops to 1 / 0 / 0.50 in every ct 0.5 cell and recovers at 0.4; with two recurring characters on 12% coverage, that is one character (새벽 at 0.78).
+**Grid** loses its tuning character to the matcher, not the clustering value. Centroid and joint with cannot-link on give 1 / 0 / 0.50 at every clustering value, 0.6 included (새벽 at 0.78); only joint with cannot-link off reaches 2 / 0 / 1.00, at ct 0.6 and ct 0.4, and it too falls to 1 / 0 / 0.50 at ct 0.5. The provisional profile's 2 of 2 on Grid came from that matcher. With two recurring characters on 12% coverage, it is one character either way.
 
 **Language variants: none ship.** A variant needs 5 points of fraction on its language's sets with no fewer clean characters. en, es, ja and ko have no better ct 0.5 cell than the pick. German's literally does: joint with cannot-link off at 0.60 gives 2 / 1 / 1.00 against the pick's 2 / 1 / 0.75. That gain is Sheldon's E02 speech joining the merged Leonard + Sheldon id instead of staying unassigned; the merge and the failing verdict are the same. It is also a joint setting, which only `registry resolve` runs: a `[resolve.lang.de]` table would never be read on the centroid path the pick ships. I recorded it and shipped no variant.
 
@@ -106,7 +106,28 @@ Each held-out episode ran once after `6bb10c2`: in a hard-linked copy of the ct 
 - **Bazinga TBBT** fails on PAL and film alike, and the default profile fails identically. Six characters recur against four in tuning. Howard keeps only 0.52 (PAL) and 0.49 (film) of his E05 speech on his id, and Raj has no tuning id at all (2 s in E01, too little to recur in tuning) and scores 0.00. Leslie, who has 22 s in tuning, holds 0.98.
 - **Bazinga Office** passes on both conditions: Michael, Jim and Pam recur on E05 (Dwight is under 5 s there), each at 0.88 or above.
 - **Korean (Grid E05)**, scored because the pick differs from the provisional setting: 4 clean, no merge, 0.80. 종이 fails at 0.00; she has 2.3 s and 3.5 s in the tuning pair, too little for a tuning id, and 8.9 s on E05. The provisional profile also scored 0.80 on E05, but with a 새하 + 어진 merge.
-- **Japanese (Kaze E11)** is pending. The tuning registry is already built in `kaze-pick` (E01-E03 at the committed profile; no held-out stage has run), and the follow-up copies E11 through the read-only volume, checks caption onsets as Task 7b did, diarizes it, and runs `scripts/ground-truth/holdout_run.sh kaze-pick` (E11 only, `KAZE_EPS=S01E11`) and `holdout_score.sh` once. With one recurring character in tuning, the E11 verdict can't show over-merge (see Limits).
+- **Japanese (Kaze E11)** is pending. The tuning registry is already built in `kaze-pick` (E01-E03 at the committed profile; no held-out stage has run), and the default profile's tuning registry is Task 7b's in `~/fukikae-ws/kaze-default`. With one recurring character in tuning, the E11 verdict can't show over-merge (see Limits). The follow-up runs these once, from the repository root, with no re-tuning (the source files are mode 0710 for group `users`, hence `--group-add 100`):
+
+```bash
+# 1. Copy EP011 (week 3 must be under complete/tv/, nothing of it under incomplete/)
+docker volume create --driver local --opt type=nfs \
+  --opt o=addr=<nas>,ro,nfsvers=4 \
+  --opt device=:<media-export> fukikae-media-ro
+docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-media-ro:/share:ro alpine:3.20 \
+  sh -c 'C=/share/<kaze-dir>; ls -l "$C"/*Week*03*/Kaze.Kaoru.EP011.*.mkv; du -k "$C"/*Week*03*/Kaze.Kaoru.EP011.*.mkv'
+docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-media-ro:/share:ro \
+  -v ~/fukikae-ws/media:/out alpine:3.20 \
+  sh -c 'set -e; f=$(ls /share/<kaze-dir>/*Week*03*/Kaze.Kaoru.EP011.*.mkv); cp "$f" "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"; chmod 0640 "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"'
+docker volume rm fukikae-media-ro
+# 2. Caption-onset check against ~/fukikae-ws/subs/kaze-kaoru/aligned/S01E11.ass, as Task 7b (pyannote turns and energy VAD)
+# 3. Live-action pick (diarizes E11 at clustering 0.5, then characters), scored once
+KAZE_EPS=S01E11 scripts/ground-truth/holdout_run.sh kaze-pick
+scripts/ground-truth/holdout_score.sh ~/fukikae-ws/t8/ws/kaze-pick
+# 4. Default profile (diarizes E11 at 0.6, then characters against Task 7b's registry), scored once
+mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae \
+  fukikae run ~/fukikae-ws/kaze-default S01E11 --to characters
+scripts/ground-truth/holdout_score.sh ~/fukikae-ws/kaze-default
+```
 
 Summed over the PAL gate sets that have a held-out score (bbt en/de/es, both Bazinga shows, grid), the pick gives 22 clean characters with 1 merge; the default profile, without grid, gives 15 clean with 2 merges where the pick gives 18 with 1. The one remaining merge is German's leads.
 
