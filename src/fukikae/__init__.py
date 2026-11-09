@@ -1,6 +1,11 @@
 """fukikae: automatic English dubbing for foreign-language TV."""
 
-from importlib.metadata import PackageNotFoundError, version
+from fukikae.privacy import disable_telemetry
+
+# First, before any model library loads (ruling CD24): third-party telemetry off.
+disable_telemetry()
+
+from importlib.metadata import PackageNotFoundError, version  # noqa: E402 - after the switches
 
 try:
     __version__ = version("fukikae")
