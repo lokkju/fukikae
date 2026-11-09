@@ -129,3 +129,19 @@ Commits 6009538 and eba6683. Kokoro stock cards, 8 cues per character, seed 0, r
 BBT against the original English track (bbt-en, same timeline): render / original line duration median 1.13, emotion agreement with the original line 0.36, render-to-original-actor similarity 0.09 (24 of 24 cues matched English words).
 Per-card speech rate (CD8), cps median: Kokoro voices 12.2 (af_nicole) to 20.4 (am_puck) across the three sets; the CD8 global 15.5 holds as a median, the spread is real.
 BBT de: only 3 characters on the copy (the leads merge on the German dub, as the live-action profile notes); diarize and characters re-ran on the copy under the current profile before tag, translate and tts; translate left 146 of 334 cues over budget, which is why fit is 0.29.
+
+### Task 8 fix round 1 (e29a7bb): rerun with coverage, WER floor and minimum slot
+
+Ruling CD12 is implemented: `prepare_cue` and `render_cue` in `stages/tts.py` are the one render path; TtsStage and `eval tts` both call them, and a test pins identical audio under the same key.
+Emotion agreement now counts only cues labelled on both sides and becomes a headline only at 50% or more coverage on both sides. Similarity is reported per reference source. Cues with a slot under 1.0 s are left out and counted. BBT matching is within 0.1 s.
+WER floor: the same ASR (faster-whisper large-v3, no VAD) on natural English speech against the named-ASS ground truth `~/fukikae-ws/subs/bbt/labels` (OCR'd release subtitles): BBT on the English track at the sampled cues; Fairy Tail on a fixed 40-clip set from bbt-en S01E01. The floor includes subtitle condensation and OCR errors ("|" for "I").
+
+| set | cues (short left out) | sim (original) | WER / floor | fit | fit within 1.25 | stretch p50 / p90 | cps | emotion: agreement (source / render coverage) |
+|---|---|---|---|---|---|---|---|---|
+| Fairy Tail E11 | 64 (114) | 0.038 | 0.046 / 0.151 | 0.88 | 0.98 | 1.00 / 1.06 | 17.3 | low coverage, SenseVoice (0.17 / 0.03), 0 both-labelled |
+| Fairy Tail E12 | 72 (8) | 0.051 | 0.043 / 0.151 | 0.94 | 1.00 | 1.00 / 1.00 | 16.8 | 0.10 (0.94 / 0.86), 59 cues, emotion2vec |
+| BBT S01E01 de | 24 (85) | 0.099 | 0.010 / 0.102 | 0.21 | 0.67 | 1.18 / 1.52 | 18.2 | 0.47 (0.96 / 0.83), 19 cues |
+
+BBT against the English original: duration ratio 1.28, emotion agreement 0.56 (18 cues; coverage 0.92 / 0.83), similarity to the original actor 0.089, 0 unmatched cues.
+Kokoro takes no delivery; its renders are neutral (E12 65%, BBT 60% of labelled renders), so agreement tracks the neutral share of the source labels.
+The rows from 6009538 and eba6683 stay in the append-only ledger under their older options hashes; the e29a7bb rows supersede them.
