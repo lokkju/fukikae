@@ -165,6 +165,9 @@ class TtsPlanCue(BaseModel):
     skipped: str | None = None
     retry_seed: int | None = None  # the render guard's one retry (ruling CD18)
     suspect: str | None = None  # "long" or "short" when the guard still fails after it
+    # the worker took control markup out of the cue's text, direction or the card (ruling CD20)
+    stripped_markup: bool = False
+    stripped_count: int = 0
 
 
 class TtsPlan(BaseModel):

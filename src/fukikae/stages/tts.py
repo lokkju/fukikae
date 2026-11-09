@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -81,6 +82,8 @@ from fukikae.artifacts import atomic_path, read_json, write_json
 from fukikae.backends import loader
 from fukikae.backends.base import Synthesizer
 from fukikae.backends.identity import identity_key
+from fukikae.backends.tts import worker
+from fukikae.backends.tts.remote import WorkerSynthesizer
 from fukikae.cards.auto import character_spans, ensure_assignments, extras_voices
 from fukikae.cards.card import Card, CardError, validate_for_backend
 from fukikae.cards.stock import check_stock_voice, revision, stock_card
@@ -555,6 +558,18 @@ def render_cue(
             _apply_gain(tmp, gain)
 
 
+def _control_markup(cls: type[Synthesizer]) -> tuple[str, ...] | None:
+    """The backend impl's own control-markup patterns when ``cls`` runs in a worker (None: it
+    doesn't, so the worker's strip never touches it)."""
+    if not issubclass(cls, WorkerSynthesizer):
+        return None
+    try:
+        module = importlib.import_module(f"fukikae.backends.tts.impl_{cls.name}")
+    except ImportError:
+        return ()
+    return tuple(getattr(module, "CONTROL_MARKUP", ()))
+
+
 def expected_seconds(cls: type[Synthesizer], text: str, language: str) -> float:
     """How long ``text`` should take: its characters over the backend's ``speech_cps`` for the
     language (the language's typical rate when it declares none)."""
@@ -830,6 +845,7 @@ class TtsStage:
                         neutral_only=neutral_only(job.passed),
                         retry_seed=guard.retry_seed,
                         suspect=guard.suspect,
+                        **self._stripped(job),
                     )
             finally:
                 lazy.close()
@@ -967,6 +983,26 @@ class TtsStage:
                     calls += 1
                 return key, wav_seconds(fitted), seconds, factor, calls, g
         return g.key, seconds, seconds, 1.0, calls, g
+
+    @staticmethod
+    def _stripped(job: RenderJob) -> dict[str, Any]:
+        """``stripped_markup`` and ``stripped_count`` for the plan: what the worker strips from
+        this cue's request (ruling CD20), worked out here so a cached render says so too."""
+        extra = _control_markup(job.cls)
+        if extra is None:
+            return {}
+        v = job.card.voice
+        req = {
+            "op": "synthesize",
+            "text": job.cue.text,
+            "instruction": job.passed.get("instruction"),
+            "voice": {
+                "references": [{"transcript": r.transcript} for r in v.references],
+                "description": v.description,
+            },
+        }
+        n = worker.markup_stripped(req, extra)
+        return {"stripped_markup": n > 0, "stripped_count": n}
 
     @staticmethod
     def _link(src: Path, dest: Path) -> None:
