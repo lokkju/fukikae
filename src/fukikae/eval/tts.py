@@ -20,7 +20,7 @@ Metrics, per character and overall:
   its card when it has some (``"card"``), else with its three longest diarize turns no other
   speaker overlaps (``"original"``). Across languages the original voice is another actor in another
   language, so stock numbers are low by construction; they are a floor, not a verdict.
-  Each source has its own metric (``speaker_similarity_card``, ``speaker_similarity_original``);
+  Each source has its own metric (``speaker_similarity_references``, ``_card``, ``_original``);
   ``speaker_similarity``, the report's headline, exists only when every sampled character
   shares one source, so the two kinds are never pooled.
 - ``wer``: word error rate of an English faster-whisper large-v3 pass over the render (no VAD,
@@ -443,7 +443,8 @@ def summarize(
 
 
 HEADLINE_METRICS = (
-    "speaker_similarity", "speaker_similarity_card", "speaker_similarity_original", "wer",
+    "speaker_similarity", "speaker_similarity_references", "speaker_similarity_card",
+    "speaker_similarity_original", "wer",
     "wer_floor", "wer_floor_clips", "fit_rate", "fit_budget_rate", "stretch_median",
     "stretch_p90", "cps_median", "cues", "characters", "excluded_short", "emotion_agreement",
     "emotion_cues", "emotion_source_coverage", "emotion_render_coverage", "emotion_low_coverage",
@@ -1119,7 +1120,8 @@ def wav_seconds_16k(path: Path) -> float:
 # ---- output ---------------------------------------------------------------------------------
 
 _COLUMNS = (
-    ("speaker_similarity", "sim"), ("speaker_similarity_card", "sim_card"),
+    ("speaker_similarity", "sim"), ("speaker_similarity_references", "sim_refs"),
+    ("speaker_similarity_card", "sim_card"),
     ("speaker_similarity_original", "sim_orig"), ("wer", "wer"), ("fit_rate", "fit"),
     ("stretch_median", "str50"), ("stretch_p90", "str90"), ("cps_median", "cps"),
     ("emotion_agreement", "emo"), ("emotion_render_coverage", "emo_cov"),

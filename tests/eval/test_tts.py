@@ -895,3 +895,19 @@ def test_stock_similarity_uses_the_selected_references_when_they_exist(tmp_path)
     assert res.exit_code == 0, res.output
     (r,) = read_rows(ledger_path())[0]
     assert r.detail["similarity_source"] == {"1": "references", "2": "references"}
+
+
+def test_references_similarity_reaches_the_row_and_the_table(tmp_path):
+    scores = [
+        _score(cue_id="c1", similarity=0.6, similarity_source="references"),
+        _score(cue_id="c2", character_id=2, similarity=0.1, similarity_source="original"),
+    ]
+    s = ev.summarize(scores, max_speedup=1.25)
+    rows = ev.tts_rows(
+        s, cfg=Config(raw={"series": {"title": "T", "genre": "anime"}}),
+        backend_cfg=BackendConfig("fake", {}), source_language="ja", test_set="t",
+        split="tune", episodes=["S01E11"], tag=None, workspace=tmp_path,
+    )  # fmt: skip
+    assert rows[0].metrics["speaker_similarity_references"] == pytest.approx(0.6)
+    table = ev.format_summary(s, {}, "fake")
+    assert "sim_refs" in table and "0.600" in table
