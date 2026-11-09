@@ -15,7 +15,7 @@ _Run 2026-11-08 and 2026-11-09 on the GPU host (RTX 3090, index 0), branch feat/
 
 **The Big Bang Theory.** The release's English subtitle track is image-based (`dvd_subtitle`), and I OCR'd it: ffmpeg renders one frame per subtitle event and tesseract 5.5 reads it (407, 364 and 379 events on E01-E03; the usual slip is `|` for `I`, which touches no name). The cues keep the disc's own timing. `fukikae eval transcript-align` then puts the speaker names from the bigbangtrans.wordpress.com transcripts onto those cues: 98%, 97% and 97% of cues (96%, 95% and 94% of words) on E01-E03. The aliases are Leslie to Lesley, Dr Gablehouser to Gablehouser, and the buzzer, phone and "Voice" lines to `?`. The English timing scores all three audio tracks, which share the video timeline: auto-label's overlap is 83%/81% (en), 86%/85% (de) and 80%/80% (es) on E01/E02 at an offset of 0.0 to -0.2 s.
 
-**How accurate the transcript aligner is.** Bazinga's gold TBBT S01 labels give an independent check on E01-E03 (Task 7c). I scaled them to film speed (1.04271), retimed them onto our English audio with `subalign --speech` (offset +0.76 to +0.90 s, scale 1.000 to 0.999) and compared speakers frame by frame where both sides name exactly one speaker: **98.17% agreement over 1958 s**, which is about 73% of the three episodes' ~2700 s of dialogue. Line level, 1039 of 1058 of our lines (98.2%) go to the gold speaker holding most of their time. The 19 disagreeing lines are one-word cues whose display runs into the next turn, repeated short tokens ("Hi." four times) matched to the wrong transcript instance, a few slips in Bazinga's own boundaries, and Kurt, whom the transcript calls both "Enormous man" and "Man".
+**How accurate the transcript aligner is.** Bazinga's gold TBBT S01 labels give an independent check on E01-E03 (Task 7c). I scaled them to film speed (1.04271), retimed them onto our English audio with `subalign --speech` (offset +0.76 to +0.90 s, scale 1.000 to 0.999) and compared speakers frame by frame where both sides name exactly one speaker: **98.17% agreement over 1958 s**, which is about 73% of the three episodes' ~2700 s of dialogue. Line level, 1039 of 1058 of our lines (98.2%) go to the gold speaker holding most of their time (`scripts/ground-truth/agree.py` reproduces both figures). The 19 disagreeing lines are one-word cues whose display runs into the next turn, repeated short tokens ("Hi." four times) matched to the wrong transcript instance, a few slips in Bazinga's own boundaries, and Kurt, whom the transcript calls both "Enormous man" and "Man".
 
 **Bazinga.** `fukikae eval bazinga-labels` turns Bazinga's word annotations (revision 96db30ff) into named ASS: consecutive words of one speaker form a turn, a gap over 1.0 s starts a new one, `all`, `multiple_persons` and `unknown` speakers are dropped, and a turn's span comes only from words at confidence 0.9 or above (0.1 marks evenly spaced filler). TBBT keeps 2546-3282 words per episode and The Office 2595-3216. The audio is the PAL DVD's, 4.27% fast and about +0.71 semitone. Each show has two workspaces: `-pal` as shipped, and `-film`, slowed with `asetrate=16000*0.95904` and labels scaled by 1.04271. VAD onsets against turn starts on S01E01 give a median gap of 0.07-0.08 s, a lag within ±0.02 s and drift at most 6e-5 s/s in all four. The two conditions are reported with their own recurring lists: on The Office, Pam has 4.3 s of labelled speech in E02 on PAL and 6.1 s on film; the 5 s bar makes her recurring only on film. I didn't normalise the bar for that, and only the PAL condition enters the pick.
 
@@ -106,7 +106,7 @@ Each held-out episode ran once after `6bb10c2`: in a hard-linked copy of the ct 
 - **Bazinga TBBT** fails on PAL and film alike, and the default profile fails identically. Six characters recur against four in tuning. Howard keeps only 0.52 (PAL) and 0.49 (film) of his E05 speech on his id, and Raj has no tuning id at all (2 s in E01, too little to recur in tuning) and scores 0.00. Leslie, who has 22 s in tuning, holds 0.98.
 - **Bazinga Office** passes on both conditions: Michael, Jim and Pam recur on E05 (Dwight is under 5 s there), each at 0.88 or above.
 - **Korean (Grid E05)**, scored because the pick differs from the provisional setting: 4 clean, no merge, 0.80. 종이 fails at 0.00; she has 2.3 s and 3.5 s in the tuning pair, too little for a tuning id, and 8.9 s on E05. The provisional profile also scored 0.80 on E05, but with a 새하 + 어진 merge.
-- **Japanese (Kaze E11)** is pending. The tuning registry is already built in `kaze-pick` (E01-E03 at the committed profile; no held-out stage has run), and the default profile's tuning registry is Task 7b's in `~/fukikae-ws/kaze-default`. With one recurring character in tuning, the E11 verdict can't show over-merge (see Limits). The follow-up runs these once, from the repository root, with no re-tuning (the source files are mode 0710 for group `users`, hence `--group-add 100`):
+- **Japanese (Kaze E11)** is pending. The tuning registry is already built in `kaze-pick` (E01-E03 at the committed profile; no held-out stage has run), and the default profile's tuning registry is Task 7b's in `~/fukikae-ws/kaze-default`. With one recurring character in tuning, the E11 verdict can't show over-merge (see Limits). The follow-up runs these once, from the repository root, with no re-tuning; the onset check runs after diarization because it needs E11's vocal stem and turns (the source files are mode 0710 for group `users`, hence `--group-add 100`):
 
 ```bash
 # 1. Copy EP011 (week 3 must be under complete/tv/, nothing of it under incomplete/)
@@ -119,14 +119,29 @@ docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-media-ro:/
   -v ~/fukikae-ws/media:/out alpine:3.20 \
   sh -c 'set -e; f=$(ls /share/<kaze-dir>/*Week*03*/Kaze.Kaoru.EP011.*.mkv); cp "$f" "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"; chmod 0640 "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"'
 docker volume rm fukikae-media-ro
-# 2. Caption-onset check against ~/fukikae-ws/subs/kaze-kaoru/aligned/S01E11.ass, as Task 7b (pyannote turns and energy VAD)
-# 3. Live-action pick (diarizes E11 at clustering 0.5, then characters), scored once
+# 2. Live-action pick: diarize E11 at clustering 0.5 and run its characters stage
 KAZE_EPS=S01E11 scripts/ground-truth/holdout_run.sh kaze-pick
+# 3. Caption onsets against speech on E11 (Task 7b measured a +0.24 to +0.31 s lead; record the
+#    medians, and stop if the captions are late or lead by much more than 0.3 s)
+mise -C . exec -- uv run python scripts/ground-truth/kaze_onset.py ~/fukikae-ws/t8/ws/kaze-pick S01E11 \
+  aligned/S01E11.ass Kaze.Kaoru.EP011.web.srt
+# 4. Score the pick once
 scripts/ground-truth/holdout_score.sh ~/fukikae-ws/t8/ws/kaze-pick
-# 4. Default profile (diarizes E11 at 0.6, then characters against Task 7b's registry), scored once
-mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae \
-  fukikae run ~/fukikae-ws/kaze-default S01E11 --to characters
+# 5. Default profile (diarizes E11 at 0.6, then characters against Task 7b's registry), scored once
+mise -C . exec -- uv run fukikae run ~/fukikae-ws/kaze-default S01E11 --to characters
 scripts/ground-truth/holdout_score.sh ~/fukikae-ws/kaze-default
+# 6. Re-export the main JSONL (the sweep files don't change)
+S=(); for s in bbt aib kaze grid renmin shendiao bazinga-tbbt bazinga-office; do S+=(--set "$s"); done
+T=(); for t in t6 t6-fix1b t7-baseline t7c-baseline-pal t7c-baseline-film t8-diag-subtitles t8-holdout \
+  t8-holdout-pal t8-holdout-film t8-diag-aib-ct0.4 t8-diag-aib-ct0.5 t8-diag-aib-ct0.6; do T+=(--tag "$t"); done
+mise -C . exec -- uv run fukikae eval report "${S[@]}" "${T[@]}" \
+  --export docs/results/2026-11-09-live-action-ground-truth.jsonl
+# 7. Put the two kaze rows into the held-out tables of docs/results/2026-11-09-live-action-ground-truth.md
+#    and this ledger, the README's live-action held-out line and the header of
+#    src/fukikae/profiles/live-action.toml (no setting changes), then commit those paths:
+mise -C . exec -- git commit -m "docs(results): Kaze, Kaoru E11 held-out verdict" -- docs/results/2026-11-09-live-action-ground-truth.md \
+  docs/results/2026-11-09-live-action-ground-truth.jsonl docs/superpowers/ledgers/2026-11-08-ground-truth.md \
+  README.md src/fukikae/profiles/live-action.toml
 ```
 
 Summed over the PAL gate sets that have a held-out score (bbt en/de/es, both Bazinga shows, grid), the pick gives 22 clean characters with 1 merge; the default profile, without grid, gives 15 clean with 2 merges where the pick gives 18 with 1. The one remaining merge is German's leads.
@@ -160,4 +175,4 @@ The best non-WeSpeaker embedder, eres2netv2, leads by 0.9 points on renmin and 2
 
 ## Reproducing
 
-The drivers are in `scripts/ground-truth/` (no media or results): `setup.py` makes the hard-linked workspace copies per clustering value, `diar.sh` and `diar_direct.py` re-diarize, `stale.py` checks which stages a copy would re-run, `sweep.py` runs the matcher sweep through the CLI, and `tab.py` renders the tables from the per-run JSON. The held-out steps are `holdout_setup.py`, `holdout_stale.py`, `holdout_run.sh`, `stage_direct.py` and `holdout_score.sh`. They read `FUKIKAE_WS` (default `~/fukikae-ws`); the shell scripts find the repository from their own path. The repository copy of `tab.py` reproduces the sweep tables byte for byte from the workspace's JSON. The exports hold tags `t6`, `t6-fix1b`, `t7-baseline`, `t7c-baseline-{pal,film}`, `t8-sweep-ct{0.4,0.5,0.6}[-pal|-film]`, `t8-diag-aib-ct*`, `t8-diag-subtitles` and `t8-holdout[-pal|-film]`, for sets `bbt`, `aib`, `kaze`, `grid`, `renmin`, `shendiao`, `bazinga-tbbt` and `bazinga-office`; the matrix is `fukikae eval report --stage identity --tag t8-holdout --tag t8-holdout-pal --tag t8-holdout-film --format md`.
+The drivers are in `scripts/ground-truth/` (no media or results): `setup.py` makes the hard-linked workspace copies per clustering value, `diar.sh` and `diar_direct.py` re-diarize, `stale.py` checks which stages a copy would re-run, `sweep.py` runs the matcher sweep through the CLI, and `tab.py` renders the tables from the per-run JSON. Task 7c's aligner check is `agree.py`, which reproduces the 98.17% over 1958 s (line level 1039 of 1058) from our labels and Bazinga's retimed ones, and its film-speed check is `vadcheck.py` (VAD onsets against turn starts; it needs `--with webrtcvad --with 'setuptools<81'`). Kaze's caption-onset check is `kaze_onset.py`. The held-out steps are `holdout_setup.py`, `holdout_stale.py`, `holdout_run.sh`, `stage_direct.py` and `holdout_score.sh`. They read `FUKIKAE_WS` (default `~/fukikae-ws`); the shell scripts find the repository from their own path. The repository copy of `tab.py` reproduces the sweep tables byte for byte from the workspace's JSON. The exports hold tags `t6`, `t6-fix1b`, `t7-baseline`, `t7c-baseline-{pal,film}`, `t8-sweep-ct{0.4,0.5,0.6}[-pal|-film]`, `t8-diag-aib-ct*`, `t8-diag-subtitles` and `t8-holdout[-pal|-film]`, for sets `bbt`, `aib`, `kaze`, `grid`, `renmin`, `shendiao`, `bazinga-tbbt` and `bazinga-office`; the matrix is `fukikae eval report --stage identity --tag t8-holdout --tag t8-holdout-pal --tag t8-holdout-film --format md`.

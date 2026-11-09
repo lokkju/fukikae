@@ -254,7 +254,7 @@ Workspaces `~/fukikae-ws/t8/ws/<set>-pick`: `cp -al` of the ct 0.5 copy with its
 
 ### Kaze E11, pending
 
-`~/fukikae-ws/t8/ws/kaze-pick` exists with E01-E03's characters stage run at the committed profile (no E11, nothing scored); the default profile's tuning registry is Task 7b's in `~/fukikae-ws/kaze-default`. Follow-up, once each, no re-tuning, from the repository root. Kaze can't show over-merge (one recurring character in tuning).
+`~/fukikae-ws/t8/ws/kaze-pick` exists with E01-E03's characters stage run at the committed profile (no E11, nothing scored); the default profile's tuning registry is Task 7b's in `~/fukikae-ws/kaze-default`. Follow-up, once each, no re-tuning, from the repository root; the onset check (step 3) runs after diarization because it needs E11's vocal stem and turns. Kaze can't show over-merge (one recurring character in tuning).
 
 ```bash
 # 1. Copy EP011 (week 3 must be under complete/tv/, nothing of it under incomplete/)
@@ -267,14 +267,29 @@ docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-media-ro:/
   -v ~/fukikae-ws/media:/out alpine:3.20 \
   sh -c 'set -e; f=$(ls /share/<kaze-dir>/*Week*03*/Kaze.Kaoru.EP011.*.mkv); cp "$f" "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"; chmod 0640 "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"'
 docker volume rm fukikae-media-ro
-# 2. Caption-onset check against ~/fukikae-ws/subs/kaze-kaoru/aligned/S01E11.ass, as Task 7b (pyannote turns and energy VAD)
-# 3. Live-action pick (diarizes E11 at clustering 0.5, then characters), scored once
+# 2. Live-action pick: diarize E11 at clustering 0.5 and run its characters stage
 KAZE_EPS=S01E11 scripts/ground-truth/holdout_run.sh kaze-pick
+# 3. Caption onsets against speech on E11 (Task 7b measured a +0.24 to +0.31 s lead; record the
+#    medians, and stop if the captions are late or lead by much more than 0.3 s)
+mise -C . exec -- uv run python scripts/ground-truth/kaze_onset.py ~/fukikae-ws/t8/ws/kaze-pick S01E11 \
+  aligned/S01E11.ass Kaze.Kaoru.EP011.web.srt
+# 4. Score the pick once
 scripts/ground-truth/holdout_score.sh ~/fukikae-ws/t8/ws/kaze-pick
-# 4. Default profile (diarizes E11 at 0.6, then characters against Task 7b's registry), scored once
-mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae \
-  fukikae run ~/fukikae-ws/kaze-default S01E11 --to characters
+# 5. Default profile (diarizes E11 at 0.6, then characters against Task 7b's registry), scored once
+mise -C . exec -- uv run fukikae run ~/fukikae-ws/kaze-default S01E11 --to characters
 scripts/ground-truth/holdout_score.sh ~/fukikae-ws/kaze-default
+# 6. Re-export the main JSONL (the sweep files don't change)
+S=(); for s in bbt aib kaze grid renmin shendiao bazinga-tbbt bazinga-office; do S+=(--set "$s"); done
+T=(); for t in t6 t6-fix1b t7-baseline t7c-baseline-pal t7c-baseline-film t8-diag-subtitles t8-holdout \
+  t8-holdout-pal t8-holdout-film t8-diag-aib-ct0.4 t8-diag-aib-ct0.5 t8-diag-aib-ct0.6; do T+=(--tag "$t"); done
+mise -C . exec -- uv run fukikae eval report "${S[@]}" "${T[@]}" \
+  --export docs/results/2026-11-09-live-action-ground-truth.jsonl
+# 7. Put the two kaze rows into the held-out tables of docs/results/2026-11-09-live-action-ground-truth.md
+#    and this ledger, the README's live-action held-out line and the header of
+#    src/fukikae/profiles/live-action.toml (no setting changes), then commit those paths:
+mise -C . exec -- git commit -m "docs(results): Kaze, Kaoru E11 held-out verdict" -- docs/results/2026-11-09-live-action-ground-truth.md \
+  docs/results/2026-11-09-live-action-ground-truth.jsonl docs/superpowers/ledgers/2026-11-08-ground-truth.md \
+  README.md src/fukikae/profiles/live-action.toml
 ```
 
 ### Reproducibility
