@@ -207,3 +207,32 @@ CosyVoice 3 (Fun-CosyVoice3-0.5B-2512 at 29e01c4e, CosyVoice code 074ca6dc, Matc
 Held-out covers 3 of 5 (E11), 3 of 9 (E12) and 3 of 3 (BBT) characters; the table and rows now say so (`similarity_headline_note`). Against the English original (BBT): duration ratio 1.28 / 1.38 / 1.61, emotion agreement 0.56 / 0.41 / 0.65, similarity to the original actor 0.089 / 0.117 / 0.154 (Kokoro / IndexTTS2 / CosyVoice 3).
 Ledger run_ids: 4333da21 (E12 cosyvoice3), a219b732 (E11 cosyvoice3), 0879aa04, 217d180d, 26d1032f (BBT kokoro, indextts2, cosyvoice3); tag candidates-9b.
 Resources: worker venv 5.4 GB, model 5.1 GB (HF cache on /nvme), about 3.8 GB of VRAM over idle on GPU 0, load 28 s, about 0.6 to 0.8 s of compute per second of speech; a second render with the same seed is byte-identical.
+
+### Task 9c: Qwen3-TTS beside Kokoro, IndexTTS2 and CosyVoice 3
+
+Qwen3-TTS 1.7B Base (`Qwen/Qwen3-TTS-12Hz-1.7B-Base` at fd4b2543, `qwen-tts` 0.1.1 by version and lock hash), bf16 on GPU 0, `[tts.qwen3_tts] mode = "auto"`, which was `icl` (the clips' transcripts and speech codes) for every card here. eval tts on the same copies and settings as Task 9b (8 cues per character, seed 0, deterministic ASR, held-out similarity with the ceiling); the clone cards' reference spans are identical to IndexTTS2's and CosyVoice 3's on all three sets, checked card by card. The rows were rendered at e68e1f3, when the render guard still used a provisional 15.0 cps; the declared 13.2 came after (d847f9b). A second render with the same seed is byte-identical (gpu test).
+
+| set | backend | cues | sim held-out | ceiling | sim refs | WER / median / floor | fit | stretch p90 | cps | emotion agr. | retried / suspect | WER > 0.5 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| FT E11 | kokoro | 64 (8) | -0.027 | 0.682 | 0.001 | 0.046 / 0 / 0.151 | 0.88 | 1.06 | 17.3 | low cov. | 0 / 0 | c0058, c0267, c0337 |
+| FT E11 | indextts2 | 40 (5) | 0.424 | 0.682 | 0.517 | 0.080 / 0 / 0.151 | 0.63 | 1.17 | 13.8 | low cov. | 3 / 1 | c0267 |
+| FT E11 | cosyvoice3 | 40 (5) | 0.428 | 0.682 | 0.478 | 0.080 / 0 / 0.151 | 0.80 | 1.12 | 15.0 | low cov. | 0 / 0 | c0054, c0058, c0267 |
+| FT E11 | qwen3_tts (icl) | 40 (5) | 0.462 | 0.682 | 0.500 | 0.054 / 0 / 0.151 | 0.53 | 1.54 | 12.3 | low cov. | 2 / 2 (c0267, c0304) | c0267 |
+| FT E11 | qwen3_tts (xvector) | 40 (5) | 0.370 | 0.682 | 0.415 | 0.054 / 0 / 0.151 | 0.75 | 1.40 | 14.8 | low cov. | 2 / 0 | c0058, c0126, c0267 |
+| FT E12 | kokoro | 72 (9) | 0.054 | 0.536 | 0.042 | 0.043 / 0 / 0.151 | 0.94 | 1.00 | 16.8 | 0.10 | 0 / 0 | c0196, c0235, c0236, c0284 |
+| FT E12 | indextts2 | 72 (9) | 0.304 | 0.536 | 0.489 | 0.074 / 0 / 0.151 | 0.89 | 1.07 | 14.6 | 0.31 | 1 / 1 | c0160, c0235, c0236, c0284 |
+| FT E12 | cosyvoice3 | 72 (9) | 0.249 | 0.536 | 0.455 | 0.061 / 0 / 0.151 | 0.90 | 1.00 | 16.4 | 0.17 | 0 / 0 | c0160, c0184, c0196, c0235, c0284 |
+| FT E12 | qwen3_tts (icl) | 72 (9) | 0.335 | 0.536 | 0.457 | 0.037 / 0 / 0.151 | 0.89 | 1.01 | 13.7 | 0.21 | 0 / 0 | c0184, c0196, c0235, c0284 |
+| FT E12 | qwen3_tts (xvector) | 72 (9) | 0.309 | 0.536 | 0.431 | 0.035 / 0 / 0.151 | 0.94 | 1.00 | 15.3 | 0.22 | 0 / 0 | c0235, c0284 |
+| BBT de | kokoro | 24 (3) | 0.086 | 0.605 | 0.094 | 0.010 / 0 / 0.102 | 0.21 | 1.52 | 18.2 | 0.47 | 0 / 0 | - |
+| BBT de | indextts2 | 24 (3) | 0.540 | 0.605 | 0.608 | 0.024 / 0 / 0.102 | 0.08 | 1.73 | 17.0 | 0.35 | 0 / 0 | - |
+| BBT de | cosyvoice3 | 24 (3) | 0.444 | 0.605 | 0.544 | 0.021 / 0 / 0.102 | 0.08 | 2.48 | 12.8 | 0.39 | 0 / 0 | - |
+| BBT de | qwen3_tts (icl) | 24 (3) | 0.242 | 0.605 | 0.273 | 0.010 / 0 / 0.102 | 0.17 | 1.74 | 18.1 | 0.40 | 0 / 0 | - |
+| BBT de | qwen3_tts (xvector) | 24 (3) | 0.372 | 0.605 | 0.440 | 0.024 / 0 / 0.102 | 0.17 | 1.80 | 16.6 | 0.24 | 0 / 0 | - |
+
+Held-out covers 3 of 5 (E11), 3 of 9 (E12) and 3 of 3 (BBT) characters, the same characters for every backend. On BBT, icl collapses for two of the three characters (held-out 0.151 and 0.094, against 0.393 and 0.306 in xvector); on Fairy Tail it is the better mode on both episodes. Against the English original (BBT, icl): duration ratio 1.375, emotion agreement 0.58, similarity to the original actor 0.051.
+Ledger run_ids: a3ce5e60 (E11), d89f2158 (E12), 8e1f33eb (BBT), tag candidates-9c; the xvector A/B rows 1c8e91ea, 918cf58f, 21785803, tag candidates-9c-xvector.
+
+Instruction A/B (ruling CD20). The Base model's API takes no instruction; its `generate` accepts `instruct_ids` (the CustomVoice and VoiceDesign models' input). Four English lines, one E11 reference clip (character 3), seed 1234, rendered with no direction and with "angry, shouting", "whispering", "sad, crying" and "happy, excited" (20 renders, `~/fukikae-scratch/t9c/probe`), then scored with emotion2vec, loudness and pitch. Directions changed the render (other samples) but not as intended: angry scored 0.00 to 0.04 on all four lines, "sad, crying" never came out sad (one came out happy at 1.00), "happy, excited" came out happy once, on the same line that was happy with no direction, and "whispering" was 2 to 4 dB quieter on two lines and as loud as the undirected render on the other two. No delivery capability is declared.
+
+Resources: worker venv 6.9 GB on /, model 4.3 GB (HF cache on /nvme), 4.7 GB of VRAM over idle on GPU 0 (nvidia-smi peak 5130 MiB against 470 MiB), load plus two renders 22 s.
