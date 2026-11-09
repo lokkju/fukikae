@@ -748,6 +748,29 @@ def test_device_is_per_backend_then_default_then_the_legacy_key(monkeypatch):
                          GpuSynth)  # fmt: skip
 
 
+def test_a_default_device_outranking_the_legacy_key_is_logged(monkeypatch, caplog):
+    """A workspace that still says `[tts] device` is told when a backend's own default wins."""
+    import logging
+
+    monkeypatch.setattr(tts, "device_string", lambda _cfg: "cuda:0")
+    legacy_cuda = Config(raw={"tts": {"backend": "fake", "device": "cuda"}})
+    with caplog.at_level(logging.INFO, logger="fukikae.stages.tts"):
+        assert tts.synth_device(legacy_cuda, CpuSynth) == "cpu"
+    assert any(
+        "[tts] device" in r.getMessage() and "cpu" in r.getMessage() and r.levelno >= logging.INFO
+        for r in caplog.records
+    )
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="fukikae.stages.tts"):
+        # agreeing with the default, or set per backend, says nothing
+        tts.synth_device(Config(raw={"tts": {"backend": "fake", "device": "cpu"}}), CpuSynth)
+        tts.synth_device(
+            Config(raw={"tts": {"backend": "fake", "device": "cuda", "fake": {"device": "cpu"}}}),
+            CpuSynth,
+        )
+    assert not [r for r in caplog.records if "[tts] device" in r.getMessage()]
+
+
 def test_backend_tables_hold_that_backends_options_outside_device_and_the_key():
     cfg = Config(
         raw={"tts": {"backend": "fake", "speed": 1, "fake2": {"device": "cpu", "fp16": True}}}
