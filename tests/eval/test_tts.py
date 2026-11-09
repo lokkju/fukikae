@@ -795,3 +795,103 @@ def test_stage_and_eval_render_the_same_audio_under_the_same_key(tmp_path):
         assert cached.read_bytes() == render.read_bytes()
         if plan[cue_id].rate_factor == 1.0:
             assert plan[cue_id].key == key
+
+
+# ---- cloning backends (Task 9) ------------------------------------------------------------
+
+
+class FakeClone(FakeSynth):
+    """A cloning-only backend that takes the source line's audio as an emotion reference."""
+
+    name: ClassVar[str] = "fakeclone"
+    sources: ClassVar = frozenset({"clone"})
+    voice_keys: ClassVar = frozenset({"seed", "emotion_strength"})
+    capabilities: ClassVar = frozenset({"emotion_audio"})
+    model_revision = "c1"
+    KW: ClassVar[list[dict[str, Any]]] = []
+
+    def synthesize(self, text: str, voice: Voice, language: str, out: Path, **kw: Any) -> float:  # noqa: ARG002
+        emo = kw.get("emotion_audio")
+        FakeClone.KW.append(
+            {"text": text, "refs": len(voice.references), "emo": emo is not None and emo.is_file()}
+        )
+        seconds = len(text) * 0.1
+        tone_wav(out, seconds, self.sample_rate, freq=250)
+        return seconds
+
+
+def _long_turns(root: Path, *, lucy_seconds: float = 4.0) -> None:
+    """Natsu gets two clean 4 s turns (8 s, a clone); Lucy two of ``lucy_seconds``."""
+    work = Workspace(root).work_dir("S01E11")
+    turns = [
+        Turn(start=0, end=4, speaker="S0"),
+        Turn(start=5, end=5 + lucy_seconds, speaker="S1"),
+        Turn(start=14, end=18, speaker="S0"),
+        Turn(start=20, end=20 + lucy_seconds, speaker="S1"),
+    ]
+    asg = Assignments(
+        episode="S01E11", threshold=0.6,
+        clusters=[
+            ClusterAssignment(cluster="S0", actor_id=1, character_id=1, score=0.9,
+                              clean_seconds=9, status="matched"),
+            ClusterAssignment(cluster="S1", actor_id=2, character_id=2, score=0.9,
+                              clean_seconds=9, status="matched"),
+        ],
+        turns=turns,
+    )  # fmt: skip
+    write_json(work / "05-characters" / "assignments.json", asg)
+    segs = [Segment(start=t.start, end=t.end, text=f"せりふ {t.start:g}") for t in turns]
+    (work / "03-asr").mkdir(parents=True, exist_ok=True)
+    write_json(
+        work / "03-asr" / "transcript.json",
+        Transcript(language="ja", backend="x", word_timing=False, segments=segs),
+    )
+
+
+@pytest.fixture
+def _clone_backend(monkeypatch):
+    FakeClone.KW = []
+    monkeypatch.setitem(CLASSES, ("tts", "fakeclone"), FakeClone)
+
+
+def test_clone_backend_builds_unassigned_clone_cards_from_references(tmp_path, _clone_backend):
+    root = _workspace(tmp_path, emotions=False)
+    _long_turns(root)
+    with Registry(Workspace(root).registry_path) as reg:
+        before = {cid: reg.card_for(cid, "en").card_id for cid in (1, 2)}  # type: ignore[union-attr]
+    res = _invoke(str(root), "--episodes", "S01E11", "--backend", "fakeclone")
+    assert res.exit_code == 0, res.output
+    (r,) = read_rows(ledger_path())[0]
+    assert r.backend == "fakeclone" and r.options["mode"] == "clone"
+    assert r.detail["similarity_source"] == {"1": "references", "2": "references"}
+    # every render had the card's reference clips and the source line's audio
+    assert FakeClone.KW and all(k["refs"] == 2 and k["emo"] for k in FakeClone.KW)
+    store = CardStore(root)
+    cards = [store.get(p.stem) for p in store.root.glob("*.toml")]
+    clones = [c for c in cards if c.voice.backend == "fakeclone"]
+    assert len(clones) == 2 and all(c.voice.source == "clone" for c in clones)
+    assert {(ref.origin or {}).get("episode") for c in clones for ref in c.voice.references} == {
+        "S01E11"
+    }
+    with Registry(Workspace(root).registry_path) as reg:
+        assert {cid: reg.card_for(cid, "en").card_id for cid in (1, 2)} == before  # type: ignore[union-attr]
+
+
+def test_character_without_enough_clean_speech_is_skipped_not_stocked(tmp_path, _clone_backend):
+    root = _workspace(tmp_path, emotions=False)
+    _long_turns(root, lucy_seconds=2.5)  # 5 s of turns, each under 3 s: no clone for Lucy
+    res = _invoke(str(root), "--episodes", "S01E11", "--backend", "fakeclone")
+    assert res.exit_code == 0, res.output
+    (r,) = read_rows(ledger_path())[0]
+    assert r.metrics["characters"] == 1
+    assert {k["text"] for k in FakeClone.KW} == {"natsu one", "natsu two is longer than its slot"}
+    assert any("character 2" in n and "skipped" in n for n in r.detail["notes"])
+
+
+def test_stock_similarity_uses_the_selected_references_when_they_exist(tmp_path):
+    root = _workspace(tmp_path, emotions=False)
+    _long_turns(root)
+    res = _invoke(str(root), "--episodes", "S01E11", "--backend", "fake2")
+    assert res.exit_code == 0, res.output
+    (r,) = read_rows(ledger_path())[0]
+    assert r.detail["similarity_source"] == {"1": "references", "2": "references"}

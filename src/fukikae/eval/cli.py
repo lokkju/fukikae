@@ -121,8 +121,9 @@ def tts_cmd(
     backend: str = typer.Option(
         None,
         "--backend",
-        help="Render with stock cards of this TTS backend (default: each character's "
-        "assigned card).",
+        help="Render with this TTS backend: clone cards from each character's reference "
+        "clips for a cloning backend, else stock cards (default: each character's assigned "
+        "card).",
     ),
     per_character: int = typer.Option(8, "--per-character", min=1, help="Cues per character."),
     seed: int = typer.Option(0, "--seed", help="Seed of the cue sample."),
@@ -229,6 +230,7 @@ def tts_cmd(
                     tag=tag,
                     workspace=ws.root,
                     options=options,
+                    notes=result.notes,
                 )
             return out
 
