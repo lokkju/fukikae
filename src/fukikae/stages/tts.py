@@ -17,8 +17,8 @@ exists, its backend can honor it at the model revision it names, its sidecars ar
 broken card stops the stage, naming the character, before any model loads.
 
 Renders are cached per cue in ``<workspace>/.fukikae/tts-cache/<key>.wav`` and hard-linked (or
-copied) into ``07-tts``. The key (``cue_key``) hashes the card id, the text, the part of the
-delivery record the backend takes, the backend name, its options and its model identity
+copied) into ``07-tts``. The key (``cue_key``) hashes the card id, the text, what the backend
+is passed of the delivery (``passed``), the backend name, its options and its model identity
 (GT6), so swapping one character's card re-renders only that character's cues, and a cached
 key is never rendered again. Each render's leading and trailing silence is trimmed to 30 ms
 (Kokoro pads every line by about 0.3 s, which the rate fit would otherwise count), then
@@ -90,7 +90,6 @@ from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import (
     Assignments,
-    Delivery,
     DubCue,
     DubCues,
     TtsPlan,
@@ -140,20 +139,6 @@ def max_speedup(cfg: Config) -> float:
     return fit_settings(cfg).max_speedup
 
 
-def delivery_inputs(
-    delivery: Delivery, capabilities: frozenset[str] | None, slot: float | None = None
-) -> dict[str, Any]:
-    """The part of a cue's delivery a backend with ``capabilities`` takes (all of it when
-    ``capabilities`` is None), plus the slot for a ``duration`` backend."""
-    d = delivery.model_dump(mode="json")
-    if capabilities is None:
-        return d
-    out = {k: d[k] for cap in sorted(capabilities) for k in _DELIVERY_BY_CAP.get(cap, ())}
-    if "duration" in capabilities and slot is not None:
-        out["target_seconds"] = round(slot, 4)
-    return out
-
-
 def _hash(payload: Any) -> str:
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
@@ -162,21 +147,20 @@ def _hash(payload: Any) -> str:
 def cue_key(
     card_id: str,
     text: str,
-    delivery: Delivery,
+    passed: dict[str, Any],
     backend_cfg: BackendConfig,
     *,
-    capabilities: frozenset[str] | None = None,
     identity: dict[str, Any] | None = None,
-    slot: float | None = None,
     reference_audio: str | None = None,
 ) -> str:
-    """First 16 hex of the sha256 of the card id, text, delivery (only what a backend with
-    ``capabilities`` receives, when given), backend config and model identity, plus the digest
-    of the emotion reference's samples when one is passed."""
+    """First 16 hex of the sha256 of the card id, text, what the backend is passed beyond
+    them (``delivery_passed``: nothing the backend doesn't get counts, so an emotion it is
+    denied or that is dropped keys like no emotion), backend config and model identity, plus
+    the digest of the emotion reference's samples when one is passed."""
     payload: dict[str, Any] = {
         "card": card_id,
         "text": text,
-        "delivery": delivery_inputs(delivery, capabilities, slot),
+        "delivery": passed,
         "backend": backend_cfg.backend,
         "options": backend_cfg.options,
         "identity": identity,
@@ -512,14 +496,7 @@ def prepare_cue(
             raise ValueError(f"{who}: {cls.name} takes emotion_audio, and no vocals were given")
         ref_digest = span_digest(vocals, cast(tuple[float, float], tuple(passed["emotion_audio"])))
     key = cue_key(
-        card_id,
-        cast(str, cue.text),
-        cue.delivery,
-        bc,
-        capabilities=cls.capabilities_for(card.voice.source),
-        identity=ident,
-        slot=slot,
-        reference_audio=ref_digest,
+        card_id, cast(str, cue.text), passed, bc, identity=ident, reference_audio=ref_digest
     )
     return RenderJob(cue, card_id, card, cls, bc, key, slot, passed, vocals)
 

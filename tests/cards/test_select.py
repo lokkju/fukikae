@@ -274,3 +274,13 @@ def test_eligible_references_are_exposed_ranked_and_picks_come_from_them(tmp_pat
     ranked = eligible_references(turns, "A", tr, None, vocals)
     assert [p.start for p in ranked] == [20, 10, 40, 30, 50, 0]  # quietest noise first
     assert pick_references(ranked) == select_references(turns, "A", tr, None, vocals)
+
+
+def test_missing_stems_skip_song_exclusion_with_a_warning(tmp_path, caplog):
+    from fukikae.cards.select import reference_exclusions
+
+    work = tmp_path / "ep"
+    (work / "01-separate").mkdir(parents=True)
+    with caplog.at_level("WARNING", logger="fukikae.cards.select"):
+        assert reference_exclusions(work, None) == []
+    assert "theme songs are not excluded" in caplog.text and "background.wav" in caplog.text
