@@ -127,6 +127,7 @@ class KokoroSynthesizer(Synthesizer):
     kind: ClassVar[str] = "tts"
     languages: ClassVar[frozenset[str]] = frozenset(LANG_CODES)
     devices: ClassVar[frozenset[str]] = frozenset({"cuda", "cpu"})
+    default_device: ClassVar[str | None] = "cpu"  # 82M parameters: real time on the CPU (CD14)
     vram_mb: ClassVar[int] = 1500
     sources: ClassVar[frozenset[str]] = frozenset({"stock", "blend"})
     voice_keys: ClassVar[frozenset[str]] = frozenset({"rate"})

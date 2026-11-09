@@ -51,9 +51,11 @@ crying (``04b-tag/tags.json``, an input when present) passes no emotion audio
 (``emotion_dropped`` in ``passed``).
 
 ``[tts]`` names the backend for automatic and extras cards; its options go to that backend
-only (a card on another backend renders with that backend's defaults). ``device`` is a stage
-setting (``cpu`` or ``cuda``; default cuda when the backend can use it), not an option, and stays
-out of every key: the device doesn't change which voice a card is. ``[tts.gender]``
+only. ``[tts.<backend>]`` holds one backend's own options and its ``device`` (ruling CD14):
+the device is per backend (that table's ``device``, else the backend's ``default_device``,
+Kokoro cpu and the cloning workers cuda, else the legacy ``[tts] device``), so one run can mix
+CPU stock voices and GPU clones; it is never an option and stays out of every key, since the
+device doesn't change which voice a card is. ``[tts.gender]``
 (``male_below``, ``female_above`` in Hz) sets the bands of the automatic gender estimate.
 """
 
@@ -299,30 +301,77 @@ class LazySynth:
 # -- the render path, shared by the stage and `eval tts` (ruling CD12) -------------------------
 
 
+# Keys of a [tts.<backend>] table that place the backend rather than configure it: never
+# options, never in a key (the device doesn't change which voice a card is).
+PLACEMENT_KEYS = ("device", "force_cpu")
+DEVICES = ("cpu", "cuda")
+
+
+def _is_backend_table(key: str, value: Any) -> bool:
+    return isinstance(value, dict) and key not in STAGE_KEYS
+
+
 def stage_settings(cfg: Config) -> tuple[BackendConfig, str | None]:
-    """``[tts]`` as (backend config without the stage keys, device preference)."""
+    """``[tts]`` as (backend config without the stage keys and the ``[tts.<backend>]`` tables,
+    the legacy stage-wide device preference)."""
     bc = cfg.resolve("tts")
     device = bc.options.get("device")
-    if device is not None and device not in ("cpu", "cuda"):
+    if device is not None and device not in DEVICES:
         raise ConfigError(f'[tts] device must be "cpu" or "cuda", not {device!r}')
-    options = {k: v for k, v in bc.options.items() if k not in STAGE_KEYS}
+    options = {
+        k: v for k, v in bc.options.items() if k not in STAGE_KEYS and not _is_backend_table(k, v)
+    }
     return BackendConfig(bc.backend, options), device
 
 
+def backend_table(cfg: Config, backend: str) -> dict[str, Any]:
+    """``[tts.<backend>]``, the workspace's keys over the profile's (read whichever backend
+    ``[tts]`` names, so a workspace that switches backend keeps the profile's table)."""
+    out: dict[str, Any] = {}
+    for source in (cfg.profile_raw, cfg.raw):
+        table = source.get("tts")
+        sub = table.get(backend) if isinstance(table, dict) else None
+        if isinstance(sub, dict):
+            out.update(sub)
+    return out
+
+
 def backend_config(cfg: Config, backend: str) -> BackendConfig:
-    """The config a card on ``backend`` renders with: ``[tts]``'s options when it names that
-    backend, else the backend's defaults."""
+    """The config a card on ``backend`` renders with (ruling CD14): ``[tts]``'s options when
+    it names that backend, with ``[tts.<backend>]``'s (outside ``device`` and ``force_cpu``)
+    over them; a backend ``[tts]`` doesn't name gets only its own table."""
     bc, _ = stage_settings(cfg)
-    return bc if bc.backend == backend else BackendConfig(backend, {})
+    options = dict(bc.options) if bc.backend == backend else {}
+    options.update(
+        {k: v for k, v in backend_table(cfg, backend).items() if k not in PLACEMENT_KEYS}
+    )
+    return BackendConfig(backend, options)
 
 
 def synth_device(cfg: Config, cls: type[Synthesizer]) -> str:
-    """The device ``cls`` renders on: ``[tts] device``, else cuda when it can use it."""
-    _, pref = stage_settings(cfg)
-    want = pref or ("cuda" if "cuda" in cls.devices else "cpu")
+    """The device ``cls`` renders on (ruling CD14): ``[tts.<backend>] device``, else the
+    backend's ``default_device`` (Kokoro cpu, the cloning workers cuda), else the legacy
+    stage-wide ``[tts] device``, else cuda when it can use it. A backend with a
+    ``cpu_refusal`` (IndexTTS2) refuses to land on the CPU, for want of a GPU included,
+    unless ``[tts.<backend>] force_cpu = true``."""
+    _, legacy = stage_settings(cfg)
+    table = backend_table(cfg, cls.name)
+    own = table.get("device")
+    if own is not None and own not in DEVICES:
+        raise ConfigError(f'[tts.{cls.name}] device must be "cpu" or "cuda", not {own!r}')
+    default = getattr(cls, "default_device", None)
+    want = own or default or legacy or ("cuda" if "cuda" in cls.devices else "cpu")
     if want not in cls.devices:
         raise ConfigError(f"[tts] device {want!r}: {cls.name} runs on {sorted(cls.devices)}")
-    return device_string(cfg) if want == "cuda" else "cpu"
+    device = device_string(cfg) if want == "cuda" else "cpu"
+    refusal = getattr(cls, "cpu_refusal", None)
+    if device == "cpu" and refusal and table.get("force_cpu") is not True:
+        why = "is set to the CPU" if want == "cpu" else "found no usable GPU"
+        raise ConfigError(
+            f"{cls.name} {why}: {refusal} Set `force_cpu = true` in [tts.{cls.name}] to run "
+            "it there anyway."
+        )
+    return device
 
 
 def check_card(
