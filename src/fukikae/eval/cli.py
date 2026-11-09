@@ -114,6 +114,104 @@ def _asr_rows(
     return rows
 
 
+@eval_app.command("tts")
+def tts_cmd(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    episodes: str = typer.Option(..., "--episodes", help="Comma-separated, e.g. S01E11,S01E12."),
+    backend: str = typer.Option(
+        None,
+        "--backend",
+        help="Render with stock cards of this TTS backend (default: each character's "
+        "assigned card).",
+    ),
+    per_character: int = typer.Option(8, "--per-character", min=1, help="Cues per character."),
+    seed: int = typer.Option(0, "--seed", help="Seed of the cue sample."),
+    reference_workspace: Path = typer.Option(
+        None,
+        "--reference-workspace",
+        help="Workspace of the original-language track on the same timeline (BBT's English): "
+        "adds duration, emotion and voice against the original line.",
+    ),
+    test_set: str = typer.Option(
+        None, "--set", help="Ledger test-set name (default: the workspace directory's name)."
+    ),
+    tag: str = typer.Option(None, "--tag", help="Free-form ledger tag for this run."),
+    split: str = typer.Option("tune", "--split", help="Ledger split: tune or holdout."),
+    no_ledger: bool = typer.Option(
+        False, "--no-ledger", help="Do not append rows to the results ledger."
+    ),
+    ledger: Path = typer.Option(
+        None,
+        "--ledger",
+        help="Results ledger (default: $FUKIKAE_RESULTS, else "
+        "$XDG_DATA_HOME/fukikae/results.jsonl).",
+    ),
+    no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
+) -> None:
+    """Render a sample of cues per character and score speaker similarity, intelligibility,
+    duration fit, emotion carry-over and per-card speech rate."""
+    from fukikae import runctx
+    from fukikae.errors import user_errors
+    from fukikae.eval import tts as ev
+    from fukikae.eval.identity.cli import write_ledger
+    from fukikae.eval.ledger import SPLITS
+    from fukikae.workspace import Workspace
+
+    if split not in SPLITS:
+        typer.echo(f"error: --split {split!r}: use one of {', '.join(SPLITS)}", err=True)
+        raise typer.Exit(2)
+    runctx.vram_timeout_s = 0 if no_wait else None
+    refs = [e.strip().upper() for e in episodes.split(",") if e.strip()]
+    ws = Workspace(workspace)
+    try:
+        cfg = ws.config
+        result = ev.evaluate(
+            ws.root,
+            refs,
+            backend=backend,
+            per_character=per_character,
+            seed=seed,
+            reference_workspace=reference_workspace,
+        )
+    except user_errors() as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    for note in result.notes:
+        typer.echo(f"note: {note}", err=True)
+    for b, summary in result.summaries.items():
+        typer.echo(ev.format_summary(summary, result.names, b))
+        typer.echo("")
+    if not no_ledger:
+        name = test_set or ws.root.resolve().name
+        options = {
+            "mode": result.mode,
+            "per_character": per_character,
+            "seed": seed,
+            "asr": f"{ev.ASR.backend}:{ev.ASR.options['model']}",
+            "embedder": ev.EMBEDDER.backend,
+            "reference": reference_workspace is not None,
+        }
+
+        def rows() -> list[Any]:
+            out: list[Any] = []
+            for b, summary in result.summaries.items():
+                out += ev.tts_rows(
+                    summary,
+                    cfg=cfg,
+                    backend_cfg=result.backend_cfgs[b],
+                    source_language=result.source_language,
+                    test_set=name,
+                    split=split,
+                    episodes=result.episodes,
+                    tag=tag,
+                    workspace=ws.root,
+                    options=options,
+                )
+            return out
+
+        write_ledger(rows, ledger)
+
+
 @eval_app.command("report")
 def report_cmd(
     ledger: Path = typer.Option(
