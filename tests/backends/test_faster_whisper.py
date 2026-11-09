@@ -104,3 +104,27 @@ def test_unknown_or_bad_decoding_options_are_refused():
         FasterWhisperTranscriber({"temperature": "hot"}, "cpu")
     with pytest.raises(ValueError, match="beam_size"):
         FasterWhisperTranscriber({"beam_size": 0}, "cpu")
+
+
+@pytest.mark.gpu
+def test_two_eval_asr_passes_on_the_same_audio_agree(tmp_path):
+    """Ruling CD16: eval tts's ASR gives the same hypothesis twice. Needs GPU 0;
+    FUKIKAE_TEST_RENDER names a render (one that looped before, ideally)."""
+    import os
+    from pathlib import Path
+
+    from fukikae.eval import tts as ev
+
+    render = os.environ.get("FUKIKAE_TEST_RENDER")
+    if not render:
+        pytest.skip("FUKIKAE_TEST_RENDER not set")
+    src = ev.to_16k(Path(render), tmp_path / "r.16k.wav")
+    hyps = []
+    for _ in range(2):
+        asr = FasterWhisperTranscriber(dict(ev.ASR.options), "cuda:0")
+        asr.load()
+        try:
+            hyps.append(" ".join(s.text for s in asr.transcribe(src, "en").segments))
+        finally:
+            asr.unload()
+    assert hyps[0] == hyps[1] and hyps[0]
