@@ -1,7 +1,7 @@
 """Shared data contract between pipeline stages. Times are float seconds."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -137,3 +137,36 @@ class DubCues(BaseModel):
     target_language: str
     path: Literal["asr", "subs"]
     cues: list[DubCue]
+
+
+class TtsPlanCue(BaseModel):
+    """One cue in ``07-tts/plan.json``. A rendered cue has a ``card_id``, its cache ``key``
+    (of the wav in ``07-tts``), ``seconds`` and ``slot`` (the cue's length); ``rate_factor`` is
+    the speed-up the rate fit asked for (1.0 when none); ``cached`` is true when nothing was
+    rendered for it in this run. ``passed`` is what the backend got beyond the card and the
+    text, and ``neutral_only`` says the backend takes no delivery at all. ``skipped`` says why
+    a cue has no audio (``skip: ...`` or ``error: ...`` from translate, or ``no text``)."""
+
+    cue_id: str
+    character_id: int | None
+    extra: str | None
+    card_id: str | None = None
+    backend: str | None = None
+    key: str | None = None
+    seconds: float | None = None
+    slot: float
+    rate_factor: float = 1.0
+    cached: bool = False
+    passed: dict[str, Any] = {}
+    neutral_only: bool = False
+    skipped: str | None = None
+
+
+class TtsPlan(BaseModel):
+    """The tts stage's artifact, ``07-tts/plan.json``; ``report`` has a line per character the
+    stage gave a card to, or found protected."""
+
+    schema_version: int = 1
+    episode: str
+    cues: list[TtsPlanCue]
+    report: list[str] = []

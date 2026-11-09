@@ -49,6 +49,12 @@ dialogue = [
 sensevoice = [
     "funasr>=1.2",
 ]
+kokoro = [
+    "kokoro>=0.9.4",
+    "misaki[en]",
+    # misaki's English G2P loads this spaCy model and would otherwise try to pip-install it
+    "en-core-web-sm",
+]
 
 [project.entry-points."fukikae.backends.asr"]
 faster_whisper = "fukikae.backends.asr.faster_whisper:FasterWhisperTranscriber"
@@ -77,6 +83,9 @@ fusion = "fukikae.backends.embed.fusion:FusionEmbedder"
 [project.entry-points."fukikae.backends.tag"]
 sensevoice = "fukikae.backends.tag.sensevoice:SenseVoiceTagger"
 emotion2vec = "fukikae.backends.tag.emotion2vec:Emotion2vecTagger"
+
+[project.entry-points."fukikae.backends.tts"]
+kokoro = "fukikae.backends.tts.kokoro:KokoroSynthesizer"
 
 [project.entry-points."fukikae.backends.translate"]
 openai_compat = "fukikae.backends.translate.openai_compat:OpenAICompatTranslator"
@@ -146,4 +155,5 @@ pythonVersion = "3.12"
 typeCheckingMode = "basic"
 
 [tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 dbs = { git = "https://github.com/JusperLee/Dynamic-Band-Splitting.git", rev = "ff526463a58ee0278e7bd05c4b8bce112b743e34" }

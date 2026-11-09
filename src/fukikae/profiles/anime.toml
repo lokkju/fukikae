@@ -42,3 +42,6 @@ revision = "7c41481f57cb95916b40956ab2f0b139b296d974"
 max_speed = 1.25
 source = "auto"
 subs_condense = true
+
+[tts]   # character-cards Task 6: Kokoro stock voices until the cloning backend is chosen (D15)
+backend = "kokoro"

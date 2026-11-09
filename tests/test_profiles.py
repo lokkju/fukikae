@@ -86,8 +86,8 @@ TYPICAL = (
 def test_no_profile_resolves_as_before(tmp_path, text):
     c = _ws(tmp_path, text)
     # The shipped default profile now names embed, diarize and separation (Task 9), and
-    # translate (character-cards Task 4).
-    kinds = ["asr", "align", "lid", "tts"]
+    # translate (character-cards Task 4) and tts (Task 6).
+    kinds = ["asr", "align", "lid"]
     for kind in kinds:
         for lang, pair in ((None, None), ("ko", None), ("ja", "ja-en"), ("ko", "ko-en")):
             want = _old_resolve(c.raw, kind, lang, pair)

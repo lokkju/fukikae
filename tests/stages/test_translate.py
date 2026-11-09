@@ -272,6 +272,20 @@ def test_card_change_changes_translate_key(ep):
 
 
 @pytest.mark.usefixtures("fake")
+def test_style_less_card_leaves_translate_key_alone(ep):
+    """The tts stage auto-assigns stock cards, which carry no [style]; translate reads only
+    [style], so such a card must not make translate run again."""
+    stage = TranslateStage()
+    before, inputs = stage.config_key(CFG, ep), stage.inputs(ep)
+    plain = CardStore(ep.workspace_root).put(
+        parse_card(CARD.format(voice="am_adam").split("[style]")[0])
+    )
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.assign_card(2, "en", plain, "auto", False)
+    assert stage.config_key(CFG, ep) == before and stage.inputs(ep) == inputs
+
+
+@pytest.mark.usefixtures("fake")
 def test_stage_settings_stay_out_of_backend_options(ep):
     cfg = Config(
         source_language="ja",

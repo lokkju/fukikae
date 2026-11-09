@@ -100,7 +100,7 @@ def test_disabled_tag_stage_is_not_in_the_run_list():
     assert "tag" not in [s.name for s in pipeline_stages(Config())]
     on = Config(raw={"tag": {"backend": "sensevoice", "enabled": True}})
     names = [s.name for s in pipeline_stages(on)]
-    assert names[-3:] == ["characters", "tag", "translate"]
+    assert names[-4:] == ["characters", "tag", "translate", "tts"]
 
 
 def test_tag_enabled_defaults_false_and_workspace_overrides_profile():

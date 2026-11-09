@@ -95,8 +95,37 @@ def test_assign_refuses_unknown_card_and_character(tmp_path: Path):
     assert r.exit_code == 1 and "0123456789abcdef" in r.output
     r = invoke("assign", str(ws.root), "Gray", store.put(parse_card(STOCK_CARD)))
     assert r.exit_code == 1 and "Gray" in r.output
+
+
+def test_assign_stock_voice_makes_and_locks_a_stock_card(tmp_path: Path):
+    from fukikae.backends.tts.kokoro import REVISION
+
+    ws, cid, store = setup(tmp_path)
     r = invoke("assign", str(ws.root), "Natsu", "stock:kokoro:af_heart")
-    assert r.exit_code == 1 and "stock" in r.output
+    assert r.exit_code == 0, r.output
+    with Registry(ws.registry_path) as reg:
+        cur = _cur(reg, cid, "en")
+    assert cur.by == "assign" and cur.locked and cur.card_id is not None
+    card = store.get(cur.card_id)
+    assert (card.voice.backend, card.voice.source, card.voice.voice) == (
+        "kokoro",
+        "stock",
+        "af_heart",
+    )
+    assert card.voice.model_revision == REVISION and card.target_language == "en"
+    assert cur.card_id in r.output
+
+
+def test_assign_stock_refuses_unknown_voice_or_backend(tmp_path: Path):
+    ws, cid, _ = setup(tmp_path)
+    r = invoke("assign", str(ws.root), "Natsu", "stock:kokoro:zz_nobody")
+    assert r.exit_code == 1 and "zz_nobody" in r.output
+    r = invoke("assign", str(ws.root), "Natsu", "stock:nosuch:af_heart")
+    assert r.exit_code == 1 and "nosuch" in r.output
+    r = invoke("assign", str(ws.root), "Natsu", "stock:kokoro")
+    assert r.exit_code == 1 and "stock:<backend>:<voice>" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.card_for(cid, "en") is None
 
 
 def test_history_lists_numbered_rows(tmp_path: Path):

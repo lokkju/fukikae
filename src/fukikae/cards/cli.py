@@ -114,7 +114,11 @@ def show(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
 def assign(
     workspace: Path = _WS,
     character: str = _CHAR,
-    ref: str = typer.Argument(..., metavar="CARD", help="A card id in the workspace's store."),
+    ref: str = typer.Argument(
+        ...,
+        metavar="CARD",
+        help="A card id in the workspace's store, or a stock voice: stock:<backend>:<voice>.",
+    ),
     no_lock: bool = typer.Option(False, "--no-lock", help="Leave the assignment unlocked."),
     lang: str | None = _LANG,
 ) -> None:
@@ -122,10 +126,7 @@ def assign(
     with _session(workspace, lang) as (reg, store, language):
         char = reg.character_by_ref(character)
         if ref.startswith("stock:"):
-            raise _fail(
-                f"{ref}: stock voices are not available yet (they arrive with the tts stage); "
-                "assign a card id from the store"
-            )
+            ref = _stock(store, ref, language)
         if not store.has(ref):
             raise _fail(f"card {ref} is not in the card store ({store.root}); nothing was assigned")
         card = store.get(ref)
@@ -137,6 +138,20 @@ def assign(
             )
         a = reg.assign_card(char.id, language, ref, by="assign", locked=not no_lock)
         typer.echo(f"{_label(char)} {language}: card {ref} ({_state(a)}, history row {a.n})")
+
+
+def _stock(store: CardStore, ref: str, language: str) -> str:
+    """Put the card for a ``stock:<backend>:<voice>`` ref in the store; return its id."""
+    from fukikae.backends.loader import BackendUnavailable
+    from fukikae.cards.stock import check_stock_voice, parse_stock_ref, revision, stock_card
+    from fukikae.config import ConfigError
+
+    backend, voice = parse_stock_ref(ref)
+    try:
+        check_stock_voice(backend, voice)
+        return store.put(stock_card(backend, voice, language, revision(backend)))
+    except (ConfigError, BackendUnavailable) as e:
+        raise CardError(f"{ref}: {e}") from e
 
 
 @voices_app.command("history")
