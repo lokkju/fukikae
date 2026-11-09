@@ -22,12 +22,19 @@ class Qwen3TtsSynthesizer(WorkerSynthesizer):
     name: ClassVar[str] = "qwen3_tts"
     extra: ClassVar[str] = "qwen3tts"
     languages: ClassVar[frozenset[str]] = frozenset(_impl.LANGUAGES)
-    vram_mb: ClassVar[int] = 8000
+    # nvidia-smi showed 4.7 GB over the idle card on GPU 0 for a bf16 render (Task 9c), CUDA
+    # context and allocator included; longer prompts and lines add a little.
+    vram_mb: ClassVar[int] = 6000
     sources: ClassVar[frozenset[str]] = frozenset({"clone"})
     voice_keys: ClassVar[frozenset[str]] = frozenset({"seed", "temperature", "top_p"})
     capabilities: ClassVar[frozenset[str]] = frozenset()
     sample_rate: ClassVar[int] = _impl.SAMPLE_RATE
-    speech_cps: ClassVar[dict[str, float]] = {"en": 15.0}
+    # Characters per second after silence trimming (ruling CD7), from Task 9c's eval tts clone
+    # renders in the default icl mode (Japanese clips): median per render 12.3 on Fairy Tail E11
+    # (40 renders, 5 cards) and 13.7 on E12 (72 renders, 9 cards; per card 11.8 to 15.3); 13.2
+    # is the render-weighted mean of the two. From German clips (BBT de, 24 renders) it was
+    # 18.1; in xvector mode 14.8 (E11) and 15.3 (E12).
+    speech_cps: ClassVar[dict[str, float]] = {"en": 13.2}
     option_keys: ClassVar[frozenset[str]] = frozenset({"mode"})
     model: ClassVar[str] = _impl.REPO
     # The model snapshot and the qwen-tts package that runs it: either can change a voice.
