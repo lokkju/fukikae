@@ -267,8 +267,8 @@ def test_normalize_is_a_linear_gain_with_a_true_peak_ceiling(tmp_path):
     assert result["gain_db"] == pytest.approx(-16.0 - before["i"], abs=0.05)
     assert after["i"] == pytest.approx(-16.0, abs=0.5)
     assert after["lra"] == pytest.approx(before["lra"], abs=0.3)  # linear: range kept
-    assert after["tp"] <= -1.0  # the limiter's ceiling
-    assert before["tp"] + result["gain_db"] > -1.0  # without it, the spikes would pass
+    assert after["tp"] <= -1.5  # the limiter's default ceiling
+    assert before["tp"] + result["gain_db"] > -1.5  # without it, the spikes would pass
     rate, _ = wavfile.read(out)
     assert rate == 44100
 

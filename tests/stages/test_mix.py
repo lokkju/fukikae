@@ -177,10 +177,13 @@ def test_mix_protects_songs_and_laughter_and_muxes(ep):
     )
 
     loud = report.loudness
-    assert set(loud) == {"original", "premix", "final"}
+    assert set(loud) == {"original", "premix", "final", "mkv"}
     assert set(loud["final"]) == {"i", "lra", "tp"}
     assert loud["final"]["i"] == pytest.approx(loud["original"]["i"], abs=1.0)
-    assert loud["final"]["tp"] <= -1.0
+    # Headroom for the AAC encode (-1.5 dBTP by default); the muxed dub track is measured too.
+    assert loud["final"]["tp"] <= -1.5
+    assert set(loud["mkv"]) == {"i", "lra", "tp"}
+    assert loud["mkv"]["i"] == pytest.approx(loud["final"]["i"], abs=0.5)
     assert report.gain_db == pytest.approx(loud["original"]["i"] - loud["premix"]["i"], abs=0.05)
     assert report.normalization.startswith("linear")
 
@@ -245,7 +248,9 @@ def test_mix_key_holds_the_settings(ep):
     assert key["settings"]["duck_db"] is None and key["settings"]["protect_bgm"] is False
     assert key["settings"]["detect_songs"] is True
     assert key["target_language"] == "en" and "ffmpeg" in key and "version" in key
-    assert key["limiter_ceiling_db"] == -1.0
+    assert key["settings"]["true_peak_db"] == -1.5
+    cfg = Config(raw={"mix": {"true_peak_db": -2.0}})
+    assert MixStage(cfg, tags=True).config_key(cfg, ep)["settings"]["true_peak_db"] == -2.0
     assert "songs" in key  # the detector's constants
 
 
@@ -264,6 +269,8 @@ def test_mix_settings_take_detector_settings():
 def test_mix_settings_read_and_validated():
     s = mix_settings(Config(raw={"mix": {"duck_db": -18, "protect_bgm": True}}))
     assert s.duck_db == -18 and s.protect_bgm is True and s.fade_ms == 40
+    with pytest.raises(ConfigError, match="true_peak_db"):
+        mix_settings(Config(raw={"mix": {"true_peak_db": 0.5}}))
     with pytest.raises(ConfigError, match="duck_db"):
         mix_settings(Config(raw={"mix": {"duck_db": 3}}))
     with pytest.raises(ConfigError, match="unknown"):

@@ -5,7 +5,7 @@ with the original vocals removed (or ducked) inside removal windows and kept eve
 laughs, screams, songs and lines nobody dubbed still sound like the original. The stage decides
 the windows (``removal_windows``): where a dubbed cue plays, minus laughter spans (both audible)
 and song spans (the original vocals untouched). ``normalize`` then matches the mix's EBU R128
-integrated loudness to the original's (one linear gain, then a true-peak limiter at -1 dBTP),
+integrated loudness to the original's (one linear gain, then a true-peak limiter at -1.5 dBTP),
 ``write_ass`` writes the dub's lines with their speakers, and ``mux`` puts it all in one mkv.
 """
 
@@ -31,7 +31,9 @@ Span = tuple[float, float]
 
 # Dialogue level matching: the dub's gain is clamped to this range (dB).
 DUB_GAIN_RANGE = (-30.0, 12.0)
-TRUE_PEAK_DB = -1.0
+# The limiter's default ceiling: -1.5 dBTP leaves room for the AAC encode, which lifts true peaks
+# (E11's -1.0 dBTP wav measured -0.8 in the mkv).
+TRUE_PEAK_DB = -1.5
 DUB_BITRATE = "192k"
 
 
@@ -43,7 +45,8 @@ class MixSettings:
     a window and up after it. ``match_dialogue``: set the dub's level to the original vocals'
     (one gain for the episode). ``protect_bgm``: treat the tag stage's ``bgm`` spans as songs.
     ``detect_songs``: run the theme-song detector (``fukikae.songs``), with ``songs`` (the
-    ``[mix.songs]`` table) as its settings."""
+    ``[mix.songs]`` table) as its settings. ``true_peak_db``: the true-peak limiter's ceiling,
+    with headroom for the lossy (AAC) dub track."""
 
     keep_original_vocals: bool = True
     duck_db: float | None = None
@@ -51,11 +54,14 @@ class MixSettings:
     match_dialogue: bool = True
     protect_bgm: bool = False
     detect_songs: bool = True
+    true_peak_db: float = TRUE_PEAK_DB
     songs: SongSettings = field(default_factory=SongSettings)
 
     def __post_init__(self) -> None:
         if self.duck_db is not None and not (math.isfinite(self.duck_db) and self.duck_db < 0):
             raise ValueError(f"duck_db must be a negative number of dB, not {self.duck_db!r}")
+        if not (math.isfinite(self.true_peak_db) and self.true_peak_db < 0):
+            raise ValueError(f"true_peak_db must be below 0 dBTP, not {self.true_peak_db!r}")
         if self.fade_ms < 0:
             raise ValueError(f"fade_ms must be >= 0, not {self.fade_ms!r}")
 
@@ -233,11 +239,13 @@ _EBU = {
 }
 
 
-def loudness_stats(path: Path) -> dict[str, float]:
-    """EBU R128 measurements of ``path`` (ffmpeg ``ebur128``): integrated loudness ``i``
-    (LUFS, ``-inf`` for silence), loudness range ``lra`` (LU) and true peak ``tp`` (dBTP)."""
+def loudness_stats(path: Path, stream: str | None = None) -> dict[str, float]:
+    """EBU R128 measurements of ``path`` (ffmpeg ``ebur128``), or of its ``stream`` (a map
+    specifier such as ``0:a:0``): integrated loudness ``i`` (LUFS, ``-inf`` for silence),
+    loudness range ``lra`` (LU) and true peak ``tp`` (dBTP)."""
+    pick = ["-map", stream] if stream else []
     stderr = media.run_ffmpeg_log(
-        ["-i", str(path), "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"]
+        ["-i", str(path), *pick, "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"]
     )
     summary = stderr[stderr.rfind("Summary:") :]
     out: dict[str, float] = {}

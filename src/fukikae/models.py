@@ -235,7 +235,8 @@ class MixReport(BaseModel):
     """What the mix stage did, ``09-mix/report.json``. ``dropped`` maps each fitted cue that
     was not placed, because it falls in a song span, to that span's source. ``loudness`` holds
     the EBU R128 measurements (``i`` LUFS, ``lra`` LU, ``tp`` dBTP) of the original mix, the dub
-    mix before normalization (``premix``) and after (``final``); ``gain_db`` is the one linear
+    mix before normalization (``premix``), after (``final``) and of the dub track in the mkv
+    after the AAC encode (``mkv``); ``gain_db`` is the one linear
     gain applied before the true-peak limiter."""
 
     schema_version: int = 1
