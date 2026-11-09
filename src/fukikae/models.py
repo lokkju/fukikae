@@ -244,6 +244,9 @@ class MixReport(BaseModel):
     songs: list[ProtectedSpan]
     laughter: list[ProtectedSpan]
     dropped: dict[str, str]
+    dropped_by_source: dict[str, int] = {}
+    # The theme-song detector's best window per region, accepted or not, with its scores.
+    song_candidates: list[dict[str, Any]] = []
     placed: int
     removed_seconds: float
     dub_gain_db: float | None

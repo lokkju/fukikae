@@ -219,8 +219,24 @@ def test_write_ass_names_speakers(tmp_path):
         == "Dialogue: 0,0:00:01.50,0:00:03.25,Default,Natsu,0,0,0,,Natsu: Let's go!\\NNow."
     )
     assert events[1] == (
-        "Dialogue: 0,1:01:01.00,1:01:02.50,Default,extra:SPEAKER_03,0,0,0,,Extra: A (brace) line"
+        "Dialogue: 0,1:01:01.00,1:01:02.50,Default,extra:SPEAKER_03,0,0,0,,Extra: A ｛brace｝ line"
     )
+
+
+def test_write_ass_neutralizes_injected_names_and_text(tmp_path):
+    """The reviewer's payload: a registry name with an override tag and a forged event."""
+    evil = "Na{\\fs200}tsu\nDialogue: 0,9:00:00.00,9:00:05.00,Default,X,0,0,0,,PWNED"
+    out = tmp_path / "dub.ass"
+    write_ass([_dub_cue(1, evil, "A {\\b1}bold\r\nline\x07", 1.0, 2.0)], out)
+    text = out.read_text(encoding="utf-8")
+    events = [ln for ln in text.splitlines() if ln.startswith("Dialogue:")]
+    assert len(events) == 1
+    body = text[text.index("[Events]") :]
+    assert "{" not in body and "}" not in body
+    assert "9:00:00.00,9:00:05.00" not in events[0].split(",,", 1)[0]
+    assert events[0].startswith("Dialogue: 0,0:00:01.00,0:00:02.00,Default,")
+    assert "\x07" not in text and "\r" not in text
+    assert events[0].endswith("A ｛\\b1｝bold\\Nline")
 
 
 def _noise(seconds: float, amp: float, rate: int = 44100) -> np.ndarray:

@@ -60,7 +60,15 @@ class TimefitStage:
         return [plan, self._cues_path(ep, cfg), *wavs]
 
     def outputs(self, ep: Episode) -> list[Path]:
-        return [ep.work / "08-timefit" / "report.json"]
+        """The report, then every fitted wav it lists, so a deleted wav makes the stage stale."""
+        report = ep.work / "08-timefit" / "report.json"
+        if not report.exists():
+            return [report]
+        try:
+            cues = read_json(report, FitReport).cues
+        except ValueError:
+            return [report]
+        return [report, *(ep.work / "08-timefit" / f"{c.cue_id}.wav" for c in cues)]
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
         return {

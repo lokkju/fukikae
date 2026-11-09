@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import gcd
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ import numpy as np
 from fukikae import media
 from fukikae.artifacts import atomic_path
 from fukikae.models import DubCue, Tags
+from fukikae.songs import SongSettings
 
 Span = tuple[float, float]
 
@@ -40,7 +42,8 @@ class MixSettings:
     this many dB down instead of removing it. ``fade_ms``: ramp the original voice down before
     a window and up after it. ``match_dialogue``: set the dub's level to the original vocals'
     (one gain for the episode). ``protect_bgm``: treat the tag stage's ``bgm`` spans as songs.
-    ``detect_songs``: run the theme-song detector (``fukikae.songs``)."""
+    ``detect_songs``: run the theme-song detector (``fukikae.songs``), with ``songs`` (the
+    ``[mix.songs]`` table) as its settings."""
 
     keep_original_vocals: bool = True
     duck_db: float | None = None
@@ -48,6 +51,7 @@ class MixSettings:
     match_dialogue: bool = True
     protect_bgm: bool = False
     detect_songs: bool = True
+    songs: SongSettings = field(default_factory=SongSettings)
 
     def __post_init__(self) -> None:
         if self.duck_db is not None and not (math.isfinite(self.duck_db) and self.duck_db < 0):
@@ -310,19 +314,40 @@ def display_speaker(speaker: str) -> str:
     return "Extra" if speaker.startswith("extra:") else speaker
 
 
+def _no_controls(text: str) -> str:
+    return "".join(
+        ch for ch in text if unicodedata.category(ch)[0] != "C" and ch not in "\u2028\u2029"
+    )
+
+
+def _no_overrides(text: str) -> str:
+    """Braces start ASS override tags; full-width ones read the same and do nothing."""
+    return text.replace("{", "\uff5b").replace("}", "\uff5d")
+
+
+def _ass_name(speaker: str) -> str:
+    """A speaker for the ``Name`` field and the ``Speaker:`` prefix: no control characters
+    (a newline would forge an event), no braces, no commas (the field separator)."""
+    return _no_overrides(_no_controls(speaker)).replace(",", " ").strip()
+
+
 def _ass_text(text: str) -> str:
-    text = text.replace("{", "(").replace("}", ")")
-    return re.sub(r"\r?\n", r"\\N", text.strip())
+    """Dialogue text: line breaks become ``\\N``, other control characters go, and braces
+    can't open override tags (names, ASR, translation and subtitles all reach here)."""
+    lines = re.split(r"\r\n|\r|\n|\u2028|\u2029", text.strip())
+    return r"\N".join(_no_overrides(_no_controls(line)) for line in lines)
 
 
 def write_ass(cues: Sequence[DubCue], out: Path) -> None:
     """One ``Dialogue`` event per cue with text, ``Speaker: text``, the speaker also in the
-    event's ``Name`` field."""
+    event's ``Name`` field. A cue's ``start`` and ``end`` are the event's times (the stage
+    passes the span its audio plays). Nothing a name or a line holds can add an event or an
+    override tag."""
     lines = [ASS_HEADER.rstrip("\n")]
     for c in sorted(cues, key=lambda c: (c.start, c.end, c.id)):
         if not c.text:
             continue
-        name = c.speaker.replace(",", " ")
+        name = _ass_name(c.speaker)
         lines.append(
             f"Dialogue: 0,{_ass_time(c.start)},{_ass_time(c.end)},Default,{name},0,0,0,,"
             f"{display_speaker(name)}: {_ass_text(c.text)}"
