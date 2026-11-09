@@ -30,10 +30,13 @@ def _tts_workers() -> list[tuple[str, bool, str]]:
         if not (isinstance(cls, type) and issubclass(cls, WorkerSynthesizer)):
             continue
         inst = cls({}, "cpu")
-        if inst.interpreter().exists():
-            rows.append((f"tts worker: {name}", True, str(inst.venv())))
+        if not inst.interpreter().exists():
+            detail = f"{inst.venv()} not set up: `{inst.setup_hint()}`"
+            rows.append((f"tts worker: {name}", False, detail))
+        elif problem := inst.lock_problem():
+            rows.append((f"tts worker: {name}", False, f"{problem} (lock): `{inst.setup_hint()}`"))
         else:
-            rows.append((f"tts worker: {name}", False, f"not set up: `{inst.setup_hint()}`"))
+            rows.append((f"tts worker: {name}", True, str(inst.venv())))
     return rows
 
 

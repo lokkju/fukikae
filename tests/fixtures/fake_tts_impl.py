@@ -48,7 +48,10 @@ class Impl:
             # the request as the impl saw it, for the test to read back
             import json
 
-            env = {k: os.environ.get(k) for k in ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")}
+            keys = ("CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "HF_HUB_OFFLINE",
+                    "TRANSFORMERS_OFFLINE")  # fmt: skip
+            env: dict = {k: os.environ.get(k) for k in keys}
+            env["names"] = sorted(os.environ)
             with open(req["out"] + ".json", "w", encoding="utf-8") as f:
                 json.dump({**req, "env": env, "device": self.options["device"]}, f)
         print("progress bar on stdout")
@@ -69,3 +72,12 @@ def _tone(path: str, seconds: float, rate: int) -> float:
         w.setframerate(rate)
         w.writeframes(frames)
     return n / rate
+
+
+def fetch() -> None:
+    """The setup step's download, for tests: records that it ran and under what env."""
+    import json
+
+    dest = os.path.join(os.environ["TMPDIR"], "fake-fetch.json")
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump({"offline": os.environ.get("HF_HUB_OFFLINE")}, f)

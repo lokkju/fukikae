@@ -59,6 +59,35 @@ def backends_list() -> None:
         typer.echo(f"{kind}: {', '.join(found) if found else '(none)'}")
 
 
+@backends_app.command("setup")
+def backends_setup(
+    name: str = typer.Argument(..., help="A TTS backend that runs in its own environment."),
+    no_fetch: bool = typer.Option(False, "--no-fetch", help="Sync only; download nothing."),
+) -> None:
+    """Set up a cloning backend's worker environment: `uv sync --locked`, the lock's hash
+    recorded, then its pinned model files downloaded (the only step that downloads)."""
+    import subprocess
+
+    from fukikae.backends.loader import BackendUnavailable, backend_class
+    from fukikae.backends.tts.remote import WorkerSynthesizer
+    from fukikae.config import ConfigError
+
+    try:
+        cls = backend_class("tts", name)
+    except (ConfigError, BackendUnavailable) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    if not (isinstance(cls, type) and issubclass(cls, WorkerSynthesizer)):
+        typer.echo(f"error: {name} runs inside fukikae; nothing to set up", err=True)
+        raise typer.Exit(1)
+    try:
+        cls.setup(fetch=not no_fetch)
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"error: {' '.join(map(str, e.cmd))} exited with {e.returncode}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"{name}: set up in {cls({}, 'cpu').venv()}")
+
+
 @app.command()
 def doctor() -> None:
     """Check ffmpeg, the GPU, the Hugging Face token and installed backends."""

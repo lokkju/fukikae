@@ -33,10 +33,10 @@ To listen, open `out/<episode>.fukikae.mkv` in any player (mpv switches audio wi
 Kokoro runs inside fukikae. The cloning backends run out of process, each in an environment of its own, so their pinned dependencies never meet fukikae's: `workers/<name>/` is a separate uv project (its own Python and lock) and its environment lives in `.venvs/<name>`. fukikae starts the backend as a worker process speaking JSON lines (`fukikae.backends.tts.remote`), on one GPU only (`CUDA_VISIBLE_DEVICES`), and stops and reaps it when the stage ends. `fukikae doctor` lists each worker environment and the command that sets it up. IndexTTS2 (`[tts] backend = "indextts2"`, or a card on it) needs Python 3.11, which uv downloads:
 
 ```bash
-UV_PROJECT_ENVIRONMENT=$PWD/.venvs/indextts2 uv sync --directory workers/indextts2 --frozen
+fukikae backends setup indextts2
 ```
 
-The environment takes about 8 GB; the model and its four auxiliary models (pinned revisions, the Hugging Face cache) about 7 GB, downloaded on first use. IndexTTS2 clones from a card's reference clips and takes the source line's audio as a separate emotion reference, scaled by the card's `emotion_strength`; it has no duration control.
+That runs `uv sync --locked` into `.venvs/indextts2`, records the lock's sha256 there (a worker whose environment came from another lock refuses to start and names this command), then downloads the model and its four auxiliary models at their pinned revisions into the Hugging Face cache. It is the only step that downloads: the worker runs offline, with an allowlisted environment that carries none of the secrets in fukikae's own. The environment takes about 8 GB, the models about 7 GB. IndexTTS2 clones from a card's reference clips and takes the source line's audio as a separate emotion reference, scaled by the card's `emotion_strength`; it has no duration control.
 
 Each TTS backend takes its options and its device from its own table, `[tts.<backend>]` (for example `[tts.indextts2] fp16 = true`). Kokoro runs on the CPU and the cloning backends on the GPU unless that table's `device` says otherwise; the old stage-wide `[tts] device` applies only to a backend that declares no default. IndexTTS2 refuses the CPU (fp32, about 9 GB of RAM, minutes per line) unless `force_cpu = true` is in `[tts.indextts2]`.
 

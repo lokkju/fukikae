@@ -45,10 +45,18 @@ def test_doctor_reports_each_tts_worker_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("FUKIKAE_WORKER_CHECKOUT", str(tmp_path))
     rows = {label: (ok, detail) for label, ok, detail in doctor.doctor()}
     ok, detail = rows["tts worker: wfake"]
-    assert not ok and "uv sync" in detail and ".venvs/wfake" in detail
+    assert not ok and "fukikae backends setup wfake" in detail and ".venvs/wfake" in detail
     py = tmp_path / ".venvs" / "wfake" / "bin" / "python"
     py.parent.mkdir(parents=True)
     py.write_text("")
+    (tmp_path / "workers" / "wfake").mkdir(parents=True)
+    (tmp_path / "workers" / "wfake" / "uv.lock").write_text("version = 1\n")
+    rows = {label: (ok, detail) for label, ok, detail in doctor.doctor()}
+    ok, detail = rows["tts worker: wfake"]
+    assert not ok and "lock" in detail and "fukikae backends setup wfake" in detail
+    from fukikae.backends.tts.remote import record_lock
+
+    record_lock(tmp_path / "workers" / "wfake", tmp_path / ".venvs" / "wfake")
     rows = {label: (ok, detail) for label, ok, detail in doctor.doctor()}
     assert rows["tts worker: wfake"] == (True, str(tmp_path / ".venvs" / "wfake"))
 
