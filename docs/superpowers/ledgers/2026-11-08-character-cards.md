@@ -115,3 +115,17 @@ The premix's own range (10.0, 10.2) passes to the final unchanged; it differs fr
 - CD11: `protect_bgm` defaults to false (SenseVoice BGM under dialogue: 10 E11 lines) and a dubbed cue clears the original vocals over its whole slot; both are recorded in the README as departures from the foundation spec. A slot overlapping an undubbed cue (errored, untranslated, skipped) clears only the dub's played span there.
 - Song detector tightened: an anime negative crossed the energy bar (E13 battle at 611-691 s, score 0.86; E14 384-464 s, 0.54), so a candidate must also be sung: at least 70% of active 40 ms frames of `vocals_16k.wav` periodic (autocorrelation peak >= 0.7 at 80-1000 Hz). Committed settings, `scripts/song_scores.py` on ~/fukikae-ws: FT openings/endings voiced 0.78-0.94 (all accepted), Kaze openings 0.76-0.77 (accepted); negatives E13 middle 0.51 and E14 middle 0.33 (refused by voicing), FT cold opens score 0.15-0.28, BBT en/de and Grid best score 0.23. Settings are `[mix.songs]`; candidates go to `09-mix/report.json` and the run log.
 - Re-mux on the copies: E11 song candidates head 65-147 (0.738, voiced 0.864), tail 1338-1421 (0.900, 0.911), 41 cues dropped (detector 41); E12 head 83-165 (0.725, 0.865), tail 1338-1421 (0.925, 0.883), 0 dropped.
+
+## Task 8: `eval tts` Kokoro baseline (2026-11-09)
+
+Commits 6009538 and eba6683. Kokoro stock cards, 8 cues per character, seed 0, renders at the card's own rate (no rate fit, no stretch), trimmed as the tts stage trims. Similarity is WeSpeaker cosine against the character's three longest clean original turns (stock cards have no references), so these are floors on the scale a clone will be judged on. WER is faster-whisper large-v3 (no VAD) on the render against the cue text, pooled over words.
+
+| set | pair | cues | chars | sim | WER | fit | fit within 1.25 | stretch p50 / p90 | cps median | emotion agreement |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Fairy Tail E11 (t7 copy) | ja-en | 64 | 8 | 0.039 | 0.039 | 0.77 | 0.91 | 1.00 / 1.25 | 16.5 | 0.13 (8 labelled, SenseVoice; it labels 1 of 8 renders) |
+| Fairy Tail E12 (t7 copy) | ja-en | 72 | 9 | 0.045 | 0.046 | 0.93 | 1.00 | 1.00 / 1.00 | 16.7 | 0.13 (67 labelled, emotion2vec; renders 66% neutral) |
+| BBT S01E01 de (t8 copy) | de-en | 24 | 3 | 0.097 | 0.018 | 0.29 | 0.46 | 1.31 / 2.98 | 17.4 | 0.43 (23 labelled) |
+
+BBT against the original English track (bbt-en, same timeline): render / original line duration median 1.13, emotion agreement with the original line 0.36, render-to-original-actor similarity 0.09 (24 of 24 cues matched English words).
+Per-card speech rate (CD8), cps median: Kokoro voices 12.2 (af_nicole) to 20.4 (am_puck) across the three sets; the CD8 global 15.5 holds as a median, the spread is real.
+BBT de: only 3 characters on the copy (the leads merge on the German dub, as the live-action profile notes); diarize and characters re-ran on the copy under the current profile before tag, translate and tts; translate left 146 of 334 cues over budget, which is why fit is 0.29.
