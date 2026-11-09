@@ -236,3 +236,25 @@ Ledger run_ids: a3ce5e60 (E11), d89f2158 (E12), 8e1f33eb (BBT), tag candidates-9
 Instruction A/B (ruling CD20). The Base model's API takes no instruction; its `generate` accepts `instruct_ids` (the CustomVoice and VoiceDesign models' input). Four English lines, one E11 reference clip (character 3), seed 1234, rendered with no direction and with "angry, shouting", "whispering", "sad, crying" and "happy, excited" (20 renders, `~/fukikae-scratch/t9c/probe`), then scored with emotion2vec, loudness and pitch. Directions changed the render (other samples) but not as intended: angry scored 0.00 to 0.04 on all four lines, "sad, crying" never came out sad (one came out happy at 1.00), "happy, excited" came out happy once, on the same line that was happy with no direction, and "whispering" was 2 to 4 dB quieter on two lines and as loud as the undirected render on the other two. No delivery capability is declared.
 
 Resources: worker venv 6.9 GB on /, model 4.3 GB (HF cache on /nvme), 4.7 GB of VRAM over idle on GPU 0 (nvidia-smi peak 5130 MiB against 470 MiB), load plus two renders 22 s.
+
+### Task 9b fix round 1 (ruling CD20)
+
+CosyVoice 3's `instruction` capability is withdrawn (its prompt wording was unverified, and instruct mode replaces the LLM's speaker prompt); its own control tags are stripped by the worker. Every CosyVoice 3 row above was re-run without instructions (only the directed cues re-rendered), tag candidates-9b-fix1; Kokoro on FT E11 was re-run on the clones' five characters (1, 2, 3, 5, 6; `--characters`, same cues per character), tag baseline-9b-fix1.
+
+| set | backend | cues | sim held-out | ceiling | WER / median / floor | fit | stretch p90 | cps | emotion agr. | suspect | WER > 0.5 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| FT E11 | kokoro (clone chars) | 40 (5) | -0.027 | 0.682 | 0.054 / 0 / 0.151 | 0.85 | 1.08 | 16.3 | low cov. | 0 | c0058, c0267, c0337 |
+| FT E11 | indextts2 | 40 (5) | 0.424 | 0.682 | 0.080 / 0 / 0.151 | 0.63 | 1.17 | 13.8 | low cov. | 1 | c0267 |
+| FT E11 | cosyvoice3 | 40 (5) | 0.433 | 0.682 | 0.080 / 0 / 0.151 | 0.88 | 1.04 | 16.1 | low cov. | 0 | c0054, c0058, c0267 |
+| FT E12 | cosyvoice3 | 72 (9) | 0.251 | 0.536 | 0.061 / 0 / 0.151 | 0.90 | 1.00 | 16.4 | 0.17 | 0 | c0160, c0184, c0196, c0235, c0284 |
+| BBT de | cosyvoice3 | 24 (3) | 0.420 | 0.605 | 0.017 / 0 / 0.102 | 0.13 | 2.15 | 15.7 | 0.32 | 0 | - |
+| BBT de | cosyvoice3 zero_shot | 24 (3) | 0.525 | 0.605 | 0.044 / 0 / 0.102 | 0.04 | 2.09 | 13.8 | 0.37 | 0 | c0150, c0252 |
+
+Held-out similarity rests on 3 characters per FT episode (7 clips, about 29 s) and 3 on BBT; E12's 0.251 (CosyVoice 3) against 0.304 (IndexTTS2), or E11's 0.433 against 0.424, is within what three characters can resolve.
+
+Instruction A/B (the same cues with and without the direction; the earlier candidates-9b rows had it): E11 held-out 0.428 with, 0.433 without; E12 0.249 with, 0.251 without, emotion agreement 0.173 both; BBT 0.444 with, 0.420 without, emotion agreement 0.389 with, 0.316 without, but against the English original's emotions 0.647 with, 0.667 without, and the directed renders were much slower (BBT cps 12.8 with, 15.7 without; duration ratio to the English 1.61 with, 1.40 without). No clear help, so it stays withdrawn.
+
+Mode A/B on BBT de (German transcripts): zero_shot raises held-out similarity (0.525 against 0.420, near IndexTTS2's 0.540) but slows the speech (13.8 against 15.7 cps, duration ratio to the English 1.75 against 1.40) and costs intelligibility (WER 0.044 against 0.017, two renders over 0.5). The prompt tokens set the pace: the LLM continues the German speaker's tempo. In the default cross-lingual mode a German-referenced card runs at 15.7 cps, close to the declared rate, so it needs no per-card rate; zero_shot cards would (CD8).
+
+The declared speech rate is now 16.3 cps (FT E11 16.1, E12 16.4, without instructions), measured on Fairy Tail only; the earlier 15.9 included the slower directed renders.
+Ledger run_ids: cc9734e1 (E11 kokoro, 5 characters), b500f419 (E11 cosyvoice3), eded422d (E12 cosyvoice3), 0242d0d4 (BBT cosyvoice3), 8c9be93d (BBT cosyvoice3 zero_shot, tag ab-9b-zero-shot).
