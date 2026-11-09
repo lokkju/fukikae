@@ -101,3 +101,17 @@ E13 also has a 0.86 window at 611 s, mid-episode; the position limit keeps it ou
 | loudnorm mode | dynamic (linear would pass -1 dBTP) | dynamic |
 
 Outputs: `~/fukikae-scratch/t7/e11-ws/.fukikae/episodes/S01E11/out/S01E11.fukikae.mkv` (h264 copied; aac eng dub default; aac jpn; ass eng dub subtitles; original ass eng, forced kept) and `~/fukikae-scratch/t7/e12-ws/.fukikae/episodes/S01E12/out/S01E12.fukikae.mkv` (h264; eng dub default; jpn; the original eng dub track; dub ASS; five original ASS tracks; eight font attachments).
+
+### Task 7 fix round 1 (rulings CD10, CD11)
+
+- CD10, loudness: one linear gain to the original's integrated loudness, then `alimiter` at 4x the rate with a -1 dBTP ceiling (no loudnorm). Subtitles: the dub's ASS is default; every original subtitle track is kept with default and forced cleared; the dub audio is default.
+
+| ebur128 (I LUFS / LRA LU / TP dBTP) | original | premix | final | gain |
+|---|---|---|---|---|
+| E11 | -21.2 / 9.9 / -1.1 | -21.9 / 10.0 / -1.1 | -21.2 / 10.0 / -1.0 | +0.7 dB |
+| E12 | -21.2 / 9.4 / -1.1 | -22.7 / 10.2 / -1.4 | -21.2 / 10.2 / -1.0 | +1.5 dB |
+
+The premix's own range (10.0, 10.2) passes to the final unchanged; it differs from the original's because the dub replaces the voices.
+- CD11: `protect_bgm` defaults to false (SenseVoice BGM under dialogue: 10 E11 lines) and a dubbed cue clears the original vocals over its whole slot; both are recorded in the README as departures from the foundation spec. A slot overlapping an undubbed cue (errored, untranslated, skipped) clears only the dub's played span there.
+- Song detector tightened: an anime negative crossed the energy bar (E13 battle at 611-691 s, score 0.86; E14 384-464 s, 0.54), so a candidate must also be sung: at least 70% of active 40 ms frames of `vocals_16k.wav` periodic (autocorrelation peak >= 0.7 at 80-1000 Hz). Committed settings, `scripts/song_scores.py` on ~/fukikae-ws: FT openings/endings voiced 0.78-0.94 (all accepted), Kaze openings 0.76-0.77 (accepted); negatives E13 middle 0.51 and E14 middle 0.33 (refused by voicing), FT cold opens score 0.15-0.28, BBT en/de and Grid best score 0.23. Settings are `[mix.songs]`; candidates go to `09-mix/report.json` and the run log.
+- Re-mux on the copies: E11 song candidates head 65-147 (0.738, voiced 0.864), tail 1338-1421 (0.900, 0.911), 41 cues dropped (detector 41); E12 head 83-165 (0.725, 0.865), tail 1338-1421 (0.925, 0.883), 0 dropped.
