@@ -54,8 +54,9 @@ max_speed = 1.25
 source = "auto"
 subs_condense = true
 
-[tts]   # character-cards Task 6: Kokoro stock voices until the cloning backend is chosen (D15)
+[tts]   # Kokoro: stock voices (extras, and characters under 6 s of clean speech)
 backend = "kokoro"
+clone_backend = "indextts2"   # D24: the operator's listening verdict (Task 11)
 
 [timefit]   # character-cards Task 7: rate (tts) and time-stretch share max_speedup; then borrowed silence
 max_speedup = 1.25

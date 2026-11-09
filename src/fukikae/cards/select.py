@@ -12,8 +12,11 @@ and demote nothing; unlabelled and low-confidence turns rank by SNR alone. Whene
 reference is scored non-neutral, ``reference_report`` says "references may carry emotion:
 <labels>", and ``clone_card`` records the labels in ``[meta] reference_emotions`` (outside
 the card id), which ``fukikae voices show`` prints. Under ``min_total`` there is no clone.
-Turns overlapping ``exclude`` (``reference_exclusions``: the theme songs the mix stage's
-detector finds on the stems, and the tag stage's singing spans) are never references:
+A turn whose transcript is far sparser than the speaker's usual text rate and sparse in
+absolute terms (``SPARSE_*``: one word over five seconds) is mostly someone else, effort
+sounds or silence, and is no reference either. Turns overlapping ``exclude``
+(``reference_exclusions``: the theme songs the mix stage's detector finds on the stems, and
+the tag stage's singing spans) are never references:
 separated song vocals are clean and loud, so they would otherwise rank first.
 """
 
@@ -221,6 +224,29 @@ def _emotion(tags: Tags | None, start: float, end: float) -> str | None:
     return None if best.label == "neutral" else best.label
 
 
+# A turn whose ASR text is this sparse is mostly someone else's speech, effort sounds or
+# nothing (FT E12: a 5.2 s turn transcribed as one word, "くそ", Task 12): it is no reference
+# when its text rate is under SPARSE_SHARE of the speaker's median rate (over every turn of a
+# second or more with text) and under the absolute floor, characters per second for languages
+# written without spaces, words per second otherwise.
+SPARSE_SHARE = 0.3
+SPARSE_FLOOR_CHARS = 1.0
+SPARSE_FLOOR_WORDS = 0.4
+SPARSE_MIN_TURN_S = 1.0
+
+
+def text_units(text: str, language: str | None) -> int:
+    """Characters (letters and digits) for a language written without spaces, else words."""
+    if language in NO_SPACE_LANGUAGES:
+        return sum(1 for ch in text if ch.isalnum())
+    return len(text.split())
+
+
+def _sparse(rate: float, median: float, language: str | None) -> bool:
+    floor = SPARSE_FLOOR_CHARS if language in NO_SPACE_LANGUAGES else SPARSE_FLOOR_WORDS
+    return rate < floor and rate < SPARSE_SHARE * median
+
+
 def rank_key(p: RefPick) -> tuple[bool, float, float]:
     """The CD5 order: unscored-or-neutral turns first, then by SNR, loudest first."""
     return (p.emotion is not None, -p.snr_db, p.start)
@@ -244,10 +270,19 @@ def eligible_references(
 
     mine = {speaker} if isinstance(speaker, str) else set(speaker)
     others = [t for t in turns if t.speaker not in mine]
+    own = sorted((t for t in turns if t.speaker in mine), key=lambda t: (t.start, t.end))
+    lang = transcript.language
+    rates = [
+        text_units(turn_text(transcript, t.start, t.end), lang) / (t.end - t.start)
+        for t in own
+        if t.end - t.start >= SPARSE_MIN_TURN_S
+    ]
+    rates = [r for r in rates if r > 0]
+    median = float(np.median(rates)) if rates else 0.0
     rate, data = wavfile.read(vocals, mmap=True)
     rate = int(rate)
     eligible: list[RefPick] = []
-    for t in sorted((t for t in turns if t.speaker in mine), key=lambda t: (t.start, t.end)):
+    for t in own:
         start, end = round(t.start, 3), round(t.end, 3)
         if not each[0] <= end - start <= each[1]:
             continue
@@ -257,6 +292,9 @@ def eligible_references(
             continue
         text = turn_text(transcript, start, end)
         if not text:
+            continue
+        if _sparse(text_units(text, lang) / (end - start), median, lang):
+            log.debug("%.2f-%.2f: text too sparse for a reference (%r)", start, end, text)
             continue
         snr = snr_db(_samples(data, rate, start, end), rate)
         eligible.append(RefPick(start, end, text, round(snr, 2), _emotion(tags, start, end)))

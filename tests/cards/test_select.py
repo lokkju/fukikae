@@ -284,3 +284,34 @@ def test_missing_stems_skip_song_exclusion_with_a_warning(tmp_path, caplog):
     with caplog.at_level("WARNING", logger="fukikae.cards.select"):
         assert reference_exclusions(work, None) == []
     assert "theme songs are not excluded" in caplog.text and "background.wav" in caplog.text
+
+
+def test_sparse_turns_are_not_references(tmp_path):
+    """Task 12 (FT E12 character 3): a 5.2 s turn whose ASR text is one word ("くそ") is mostly
+    someone else or no speech at all; a turn far sparser than the speaker's usual text rate,
+    and sparse in absolute terms, is never a reference."""
+    from fukikae.cards.select import eligible_references
+
+    turns = [Turn(start=s, end=s + 5, speaker="A") for s in (0, 10, 20, 30)]
+    vocals = _vocals(tmp_path / "v.wav", [(t.start, t.end, n) for t, n in zip(
+        turns, (0.001, 0.01, 0.01, 0.01), strict=True)])  # fmt: skip
+    texts = ["くそ", "俺の仲間はお前の器じゃないんだぞ", "あいつを倒せばこの眉取れるはずだから",
+             "私のことはいいからさっきのやつ追いなさい"]  # fmt: skip
+    segs = [
+        Segment(start=t.start, end=t.end, text=x, words=[])
+        for t, x in zip(turns, texts, strict=True)
+    ]
+    tr = Transcript(language="ja", backend="x", word_timing=False, segments=segs)
+    ranked = eligible_references(turns, "A", tr, None, vocals)
+    assert sorted(p.start for p in ranked) == [10, 20, 30]  # the cleanest turn, one word: gone
+
+
+def test_sparse_check_needs_the_speaker_rate_too(tmp_path):
+    """A speaker whose every turn is slow keeps them: the floor is relative and absolute."""
+    from fukikae.cards.select import eligible_references
+
+    turns = [Turn(start=s, end=s + 8, speaker="A") for s in (0, 10, 20)]
+    vocals = _vocals(tmp_path / "v.wav", [(t.start, t.end, 0.01) for t in turns])
+    segs = [Segment(start=t.start, end=t.end, text="ねえ", words=[]) for t in turns]
+    tr = Transcript(language="ja", backend="x", word_timing=False, segments=segs)
+    assert len(eligible_references(turns, "A", tr, None, vocals)) == 3

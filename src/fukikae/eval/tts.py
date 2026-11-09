@@ -95,6 +95,7 @@ from fukikae import runctx
 from fukikae.artifacts import atomic_path, read_json
 from fukikae.backends import loader
 from fukikae.backends.identity import identity_key, model_identity
+from fukikae.cards.auto import character_candidates, character_references
 from fukikae.cards.card import Card
 from fukikae.cards.select import (
     RefPick,
@@ -710,71 +711,6 @@ def _stock_cards(
         used.append(voice)
         out[cid] = store.put(stock_card(backend, voice, cfg.target_language, rev))
     return out
-
-
-def character_candidates(
-    ws: Workspace,
-    episodes: Sequence[str],
-    cid: int,
-    exclusions: dict[str, list[tuple[float, float]]] | None = None,
-) -> dict[str, list[RefPick]]:
-    """Per episode, the character's eligible reference turns (``eligible_references``, songs
-    and singing excluded), ranked. ``exclusions`` caches each episode's excluded spans."""
-    from fukikae.cards.select import eligible_references, reference_exclusions
-    from fukikae.stages.mix import mix_settings
-
-    cache = exclusions if exclusions is not None else {}
-    out: dict[str, list[RefPick]] = {}
-    for e in episodes:
-        work = ws.work_dir(e)
-        asg_path = work / "05-characters" / "assignments.json"
-        tr_path = work / "03-asr" / "transcript.json"
-        vocals = work / "01-separate" / "vocals.wav"
-        if not (asg_path.exists() and tr_path.exists() and vocals.exists()):
-            continue
-        asg = read_json(asg_path, Assignments)
-        speakers = {
-            a.cluster
-            for a in asg.clusters
-            if a.character_id == cid and a.status not in ("extra", "review")
-        }
-        if not speakers or not asg.turns:
-            continue
-        tags_path = work / "04b-tag" / "tags.json"
-        tags = read_json(tags_path, Tags) if tags_path.exists() else None
-        if e not in cache:
-            cache[e] = reference_exclusions(work, tags, mix_settings(ws.config).songs)
-        out[e] = eligible_references(
-            asg.turns, speakers, read_json(tr_path, Transcript), tags, vocals, exclude=cache[e]
-        )
-    return out
-
-
-def character_references(
-    ws: Workspace,
-    episodes: Sequence[str],
-    cid: int,
-    exclusions: dict[str, list[tuple[float, float]]] | None = None,
-    candidates: Mapping[str, list[RefPick]] | None = None,
-) -> tuple[str, list[RefPick]] | None:
-    """The character's reference clips (``pick_references`` over ``character_candidates``)
-    in the episode where they add up to the most speech, with that episode; None when no
-    episode has enough."""
-    from fukikae.cards.select import pick_references
-
-    found = (
-        candidates
-        if candidates is not None
-        else character_candidates(ws, episodes, cid, exclusions)
-    )
-    best: tuple[str, list[RefPick]] | None = None
-    for e in episodes:
-        picks = pick_references(found[e]) if e in found else None
-        if picks and (
-            best is None or sum(p.seconds for p in picks) > sum(p.seconds for p in best[1])
-        ):
-            best = (e, picks)
-    return best
 
 
 HELDOUT_COUNT = 3

@@ -43,8 +43,9 @@ max_speed = 1.25
 source = "auto"
 subs_condense = true
 
-[tts]   # character-cards Task 6: Kokoro stock voices until the cloning backend is chosen (D15)
+[tts]   # Kokoro: stock voices (extras, and characters under 6 s of clean speech)
 backend = "kokoro"
+clone_backend = "indextts2"   # D24: the operator's listening verdict (Task 11)
 
 [tts.gender]   # anime voices sit high: a wide unknown band, and unknowns alternate pools
 male_below = 165.0
