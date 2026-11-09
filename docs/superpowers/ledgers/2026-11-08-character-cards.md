@@ -40,3 +40,31 @@ Run 2026-11-08 on a copy of the Fairy Tail workspace (E12, ja audio, Crunchyroll
 - Condensed, for example: "I won't ever do that to you again." to "I won't do that again." (budget 32); "Do you have any idea how many times my potions have saved your ass?!" to "My potions saved your ass plenty times!" (64); "What's the matter?" to "What's up?" (15). One cue came back no shorter than the subtitle and speaks the subtitle line, flagged over budget for time fitting.
 - Speaker against the ASS Name field (354 named spoken cues, 26 names): mapping each name to the label it most often gets, 284 agree (80.2%); each assigned label's most common name covers 221 (62.4%), because the characters stage merges voices (char1 is NEBARU 18, YOUNG MAKAROV 13 and five smaller roles; char2 is WENDY 11, HAPPY 8, NATSU 8, CHARLE 5). At the diarize-cluster level the same measure gives 281/354 (79.4%), so the overlap rule loses nothing against the clustering it reads from. NATSU's 40 lines go mostly to `extra:SPEAKER_14` (26) and ERZA's 20 to `extra:SPEAKER_11` (16): the characters stage left SPEAKER_14 (50 s of clean speech) at `review` and SPEAKER_11 (16 s) at `extra`, so those lines get the extras pool's voice, not a character's. ASR words broke three overlap ties; agreement is 281 with or without them.
 - `nvidia-smi --id=0` showed no process after the run.
+
+## Task 6: tts stage, Kokoro and stock assignment
+
+Run 2026-11-09 on a fresh copy of Task 4's E11 workspace (`~/fukikae-scratch/t6-ft-ws`), never the original, with `[tts] backend = "kokoro"` and `device = "cpu"`. GPU 0 was left to the ground-truth plan; nothing in this run touched a GPU. Kokoro-82M pinned at `hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987`.
+
+- The copy's translate stage was stale only because a missing `glossary.toml` is fingerprinted with its absolute path (`job._fingerprint`), so a copied workspace re-runs translate. Its manifest key was rewritten by hand rather than re-running llama-server on GPU 0. The same was done once more after the card edit below, which kept the `[style]` unchanged.
+- Character 1's card was Task 4's test card with `model_revision = "test"`. The stage refused it before loading anything, naming the character, the card and both revisions. Acting as operator on the copy, I re-pinned the revision with `voices edit`, which kept the style and made card `b072743c85843496` (locked). The refused run had already given characters 2 to 8 their automatic cards.
+
+| Character | Cues | Median F0 (s read) | Estimate | Voice | By |
+|---|---|---|---|---|---|
+| 1 | 83 | 274 Hz (120 s) | f | am_adam | edit (operator) |
+| 2 | 50 | 148 Hz (116 s) | m | am_michael | auto |
+| 3 | 28 | 168 Hz (73 s) | u | af_nicole | auto |
+| 4 | 20 | 255 Hz (44 s) | f | af_sarah | auto |
+| 5 | 56 | 279 Hz (120 s) | f | af_heart | auto |
+| 6 | 21 | 269 Hz (40 s) | f | af_sky | auto |
+| 7 | 52 | 230 Hz (98 s) | f | af_bella | auto |
+| 8 | 53 | 151 Hz (90 s) | m | am_fenrir | auto |
+| extras SPEAKER_00, _02, _09, unknown | 9, 9, 9, 3 | | | af_alloy, am_echo, bf_alice, bm_daniel | extras pool |
+
+| Run | Rendered | From cache | Renders | Wall time |
+|---|---|---|---|---|
+| 1 | 393 | 8 (repeated lines) | 671 (393 + 278 rate fits) | 368 s, CPU (~14.7 cores), 2.5 GB RSS |
+| 2 | 0 | | 0 | "up to date" |
+| 3 (character 2 to `stock:kokoro:bm_george`) | 50, all character 2 | 343 | 86 | 69 s |
+
+- Rate fit: 294 of 393 renders were longer than their cue, and 279 were still longer after the 1.25 cap. Kokoro's English runs well over the Japanese slots: 800.6 s of speech for the episode. That is Task 7's to fit, flag or place whole.
+- Character 1, the cast's loudest voice at a median of 274 Hz, has an F0 that would read as female. Characters 4 to 7 sit between 230 and 279 Hz. Without names or ground truth, nothing here confirms the anime estimates; the thresholds are adult-speech norms.
