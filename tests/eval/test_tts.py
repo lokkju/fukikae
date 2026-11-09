@@ -958,3 +958,57 @@ def test_two_asr_passes_on_the_same_audio_agree(tmp_path):
         finally:
             asr.unload()
     assert hyps[0] == hyps[1]
+
+
+# ---- held-out similarity (ruling CD17) ------------------------------------------------------
+
+
+def _pick(start: float, seconds: float, snr: float, emotion: str | None = None):
+    from fukikae.cards.select import RefPick
+
+    return RefPick(start, start + seconds, "x", snr, emotion)
+
+
+def test_heldout_exemplars_exclude_picks_and_delivery_spans_and_prefer_other_episodes():
+    eligible = {
+        "E1": [_pick(0, 4, 30), _pick(10, 4, 29), _pick(20, 4, 28), _pick(30, 4, 27)],
+        "E2": [_pick(5, 3, 10), _pick(50, 3, 9, "angry"), _pick(60, 3, 12)],
+    }
+    picks = ("E1", [eligible["E1"][0], eligible["E1"][1]])
+    delivery = {"E2": [(59.0, 61.0)]}  # a rendered cue's emotion reference
+    got = ev.heldout_exemplars(eligible, picks, delivery)
+    assert got is not None
+    # E2 first (another episode), its emotion-scored turn last; then E1's best leftover
+    assert [(e, p.start) for e, p in got] == [("E2", 5), ("E2", 50), ("E1", 20)]
+
+
+def test_heldout_exemplars_omitted_under_six_seconds():
+    eligible = {"E1": [_pick(0, 4, 30), _pick(10, 2.5, 29), _pick(20, 3, 28)]}
+    assert ev.heldout_exemplars(eligible, ("E1", [eligible["E1"][0]]), {}) is None
+
+
+def test_heldout_similarity_is_the_clone_headline_with_ceiling_and_counts():
+    common = {"heldout_clips": 3, "heldout_seconds": 9.0, "ceiling": 0.7}
+    clone = [
+        _score(cue_id="c1", similarity=0.6, similarity_source="references", clone=True,
+               similarity_heldout=0.4, **common),
+        _score(cue_id="c2", similarity=0.5, similarity_source="references", clone=True,
+               similarity_heldout=0.3, **common),
+    ]  # fmt: skip
+    s = ev.summarize(clone, max_speedup=1.25)
+    o = s.overall
+    assert o["speaker_similarity_heldout"] == pytest.approx(0.35)
+    assert o["speaker_similarity_references"] == pytest.approx(0.55)  # kept as secondary
+    assert o["speaker_similarity"] == pytest.approx(0.35)  # the headline for clones
+    assert (o["heldout_clips"], o["heldout_seconds"], o["heldout_characters"]) == (3, 9.0, 1)
+    assert o["speaker_similarity_ceiling"] == pytest.approx(0.7)
+    assert s.headline == "heldout"
+    for k in ("speaker_similarity_heldout", "speaker_similarity_ceiling", "heldout_clips",
+              "heldout_seconds"):  # fmt: skip
+        assert k in ev.HEADLINE_METRICS
+    stock = [_score(similarity=0.1, similarity_source="references", similarity_heldout=0.05,
+                    **common)]  # fmt: skip
+    s2 = ev.summarize(stock, max_speedup=1.25)
+    assert s2.overall["speaker_similarity"] == pytest.approx(0.1)
+    assert s2.overall["speaker_similarity_heldout"] == pytest.approx(0.05)
+    assert s2.headline == "references"

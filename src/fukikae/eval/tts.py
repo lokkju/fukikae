@@ -23,6 +23,15 @@ Metrics, per character and overall:
   Each source has its own metric (``speaker_similarity_references``, ``_card``, ``_original``);
   ``speaker_similarity``, the report's headline, exists only when every sampled character
   shares one source, so the two kinds are never pooled.
+- ``speaker_similarity_heldout`` (ruling CD17): the same against held-out exemplars, up to 3
+  eligible turns (``heldout_exemplars``) of the sampled episodes that are neither reference
+  picks nor overlapping any sampled cue's delivery reference (a clone hears that span as its
+  emotion prompt), from an episode other than the references' when there is one; omitted for a
+  character under 6 s of them. ``heldout_clips``, ``heldout_seconds`` and
+  ``speaker_similarity_ceiling`` (the held-out clips against the reference clips: the original
+  actor against himself, the most a render could reach) go with it. For clone renders the
+  headline ``speaker_similarity`` is the held-out figure, since the references are the clone's
+  own prompt; ``speaker_similarity_references`` stays as a secondary metric.
 - ``wer``: word error rate of an English faster-whisper large-v3 pass over the render against
   the cue's text, both normalized by ``fukikae.eval.asr.normalize``; pooled over words, each
   cue's errors capped at its reference words (ruling CD16), with ``wer_median``, the median
@@ -89,7 +98,6 @@ from fukikae.cards.select import (
     clone_card,
     gender_of,
     reference_report,
-    select_references,
     speaker_f0,
 )
 from fukikae.cards.stock import pick_stock, revision, stock_card
@@ -323,6 +331,13 @@ class CueScore:
     ref_similarity: float | None = None
     neutral_only: bool = False  # the backend takes no delivery at all
     ref_matched: bool | None = None  # None: no reference workspace
+    clone: bool = False  # rendered with a clone card
+    # Ruling CD17: against held-out exemplars of the character (constant per character: the
+    # exemplars' count and seconds, and their own similarity to the reference clips)
+    similarity_heldout: float | None = None
+    heldout_clips: int = 0
+    heldout_seconds: float = 0.0
+    ceiling: float | None = None
 
     @property
     def fits(self) -> bool:
@@ -345,6 +360,8 @@ class TtsSummary:
     per_card: dict[str, dict[str, Any]] = field(default_factory=dict)
     similarity_source: dict[int, str] = field(default_factory=dict)
     emotion: dict[str, Any] = field(default_factory=dict)
+    headline: str = ""  # what speaker_similarity is: "heldout", a source name, or ""
+    heldout: dict[int, list[list[Any]]] = field(default_factory=dict)  # [episode, start, end]
 
 
 def _r(x: float) -> float:
@@ -385,8 +402,24 @@ def _metrics(scores: Sequence[CueScore], max_speedup: float) -> dict[str, float]
     for src in sources:
         vals = [s.similarity for s in scores if s.similarity_source == src]
         m[f"speaker_similarity_{src}"] = _r(np.mean([v for v in vals if v is not None]))
-    if len(sources) == 1:  # never pooled across reference kinds
-        m["speaker_similarity"] = m[f"speaker_similarity_{sources[0]}"]
+    held = [s for s in scores if s.similarity_heldout is not None]
+    if held:
+        m["speaker_similarity_heldout"] = _r(
+            np.mean([cast(float, s.similarity_heldout) for s in held])
+        )
+        per_char = {s.character_id: s for s in held}
+        m["heldout_characters"] = len(per_char)
+        m["heldout_clips"] = sum(s.heldout_clips for s in per_char.values())
+        m["heldout_seconds"] = _r(sum(s.heldout_seconds for s in per_char.values()))
+        ceilings = [s.ceiling for s in per_char.values() if s.ceiling is not None]
+        if ceilings:
+            m["speaker_similarity_ceiling"] = _r(np.mean(ceilings))
+    headline = _headline(scores, sources)
+    if headline == "heldout":
+        if held:
+            m["speaker_similarity"] = m["speaker_similarity_heldout"]
+    elif headline:  # never pooled across reference kinds
+        m["speaker_similarity"] = m[f"speaker_similarity_{headline}"]
     words = sum(s.ref_words for s in scores)
     if words:
         m["wer"] = _r(sum(s.errors for s in scores) / words)
@@ -419,6 +452,15 @@ def _metrics(scores: Sequence[CueScore], max_speedup: float) -> dict[str, float]
         if rsim:
             m["ref_speaker_similarity"] = _r(np.mean(rsim))
     return m
+
+
+def _headline(scores: Sequence[CueScore], sources: Sequence[str]) -> str:
+    """What ``speaker_similarity`` reports: for clone renders the held-out exemplars (ruling
+    CD17; the reference clips are the clone's own prompt, so similarity to them leaks), else
+    the one similarity source every render shares; "" when they differ."""
+    if scores and all(s.clone for s in scores):
+        return "heldout"
+    return sources[0] if len(sources) == 1 else ""
 
 
 NEUTRAL_NOTE = (
@@ -460,12 +502,15 @@ def summarize(
         emotion |= {"source_backend": tagger, "render_backend": tagger}
         if scores and all(s.neutral_only for s in scores):
             emotion["note"] = NEUTRAL_NOTE
-    return TtsSummary(per_character, overall, len(scores), per_card, sources, emotion)
+    srcs = sorted({s.similarity_source for s in scores if s.similarity is not None})
+    headline = _headline(scores, srcs)
+    return TtsSummary(per_character, overall, len(scores), per_card, sources, emotion, headline)
 
 
 HEADLINE_METRICS = (
     "speaker_similarity", "speaker_similarity_references", "speaker_similarity_card",
-    "speaker_similarity_original", "wer", "wer_median",
+    "speaker_similarity_original", "speaker_similarity_heldout", "speaker_similarity_ceiling",
+    "heldout_clips", "heldout_seconds", "heldout_characters", "wer", "wer_median",
     "wer_floor", "wer_floor_clips", "fit_rate", "fit_budget_rate", "stretch_median",
     "stretch_p90", "cps_median", "cues", "characters", "excluded_short", "emotion_agreement",
     "emotion_cues", "emotion_source_coverage", "emotion_render_coverage", "emotion_low_coverage",
@@ -498,7 +543,10 @@ def tts_rows(
         "per_character": {str(k): v for k, v in summary.per_character.items()},
         "per_card": summary.per_card,
         "similarity_source": {str(k): v for k, v in summary.similarity_source.items()},
+        "similarity_headline": summary.headline,
     }
+    if summary.heldout:
+        detail["heldout_exemplars"] = {str(k): v for k, v in summary.heldout.items()}
     if summary.emotion:
         detail["emotion"] = summary.emotion
     if notes:
@@ -615,20 +663,19 @@ def _stock_cards(
     return out
 
 
-def character_references(
+def character_candidates(
     ws: Workspace,
     episodes: Sequence[str],
     cid: int,
     exclusions: dict[str, list[tuple[float, float]]] | None = None,
-) -> tuple[str, list[RefPick]] | None:
-    """The character's reference clips (``select_references``, songs and singing excluded) in
-    the episode where they add up to the most speech, with that episode; None when no episode
-    has enough. ``exclusions`` caches each episode's excluded spans."""
-    from fukikae.cards.select import reference_exclusions
+) -> dict[str, list[RefPick]]:
+    """Per episode, the character's eligible reference turns (``eligible_references``, songs
+    and singing excluded), ranked. ``exclusions`` caches each episode's excluded spans."""
+    from fukikae.cards.select import eligible_references, reference_exclusions
     from fukikae.stages.mix import mix_settings
 
     cache = exclusions if exclusions is not None else {}
-    best: tuple[str, list[RefPick]] | None = None
+    out: dict[str, list[RefPick]] = {}
     for e in episodes:
         work = ws.work_dir(e)
         asg_path = work / "05-characters" / "assignments.json"
@@ -648,14 +695,74 @@ def character_references(
         tags = read_json(tags_path, Tags) if tags_path.exists() else None
         if e not in cache:
             cache[e] = reference_exclusions(work, tags, mix_settings(ws.config).songs)
-        picks = select_references(
+        out[e] = eligible_references(
             asg.turns, speakers, read_json(tr_path, Transcript), tags, vocals, exclude=cache[e]
         )
+    return out
+
+
+def character_references(
+    ws: Workspace,
+    episodes: Sequence[str],
+    cid: int,
+    exclusions: dict[str, list[tuple[float, float]]] | None = None,
+    candidates: Mapping[str, list[RefPick]] | None = None,
+) -> tuple[str, list[RefPick]] | None:
+    """The character's reference clips (``pick_references`` over ``character_candidates``)
+    in the episode where they add up to the most speech, with that episode; None when no
+    episode has enough."""
+    from fukikae.cards.select import pick_references
+
+    found = (
+        candidates
+        if candidates is not None
+        else character_candidates(ws, episodes, cid, exclusions)
+    )
+    best: tuple[str, list[RefPick]] | None = None
+    for e in episodes:
+        picks = pick_references(found[e]) if e in found else None
         if picks and (
             best is None or sum(p.seconds for p in picks) > sum(p.seconds for p in best[1])
         ):
             best = (e, picks)
     return best
+
+
+HELDOUT_COUNT = 3
+HELDOUT_MIN_S = 6.0
+
+
+def heldout_exemplars(
+    candidates: Mapping[str, Sequence[RefPick]],
+    references: tuple[str, Sequence[RefPick]],
+    delivery: Mapping[str, Sequence[tuple[float, float]]],
+    *,
+    count: int = HELDOUT_COUNT,
+    min_total: float = HELDOUT_MIN_S,
+) -> list[tuple[str, RefPick]] | None:
+    """Held-out exemplars of a character for speaker similarity (ruling CD17): eligible turns
+    of the sampled episodes (``candidates``) that are not reference picks and overlap no
+    rendered cue's delivery reference (``delivery``, per episode: a clone hears that span as
+    its emotion prompt), episodes other than the references' first, then the CD5 ranking; the
+    top ``count``. None under ``min_total`` seconds."""
+    from fukikae.cards.select import rank_key
+
+    ref_ep, picks = references
+    taken = {(ref_ep, p.start, p.end) for p in picks}
+    pool: list[tuple[str, RefPick]] = []
+    for e, ranked in candidates.items():
+        spans = delivery.get(e, ())
+        for p in ranked:
+            if (e, p.start, p.end) in taken:
+                continue
+            if any(a < p.end and p.start < b for a, b in spans):
+                continue
+            pool.append((e, p))
+    pool.sort(key=lambda x: (x[0] == ref_ep, *rank_key(x[1]), x[0]))
+    chosen = pool[:count]
+    if sum(p.seconds for _, p in chosen) < min_total:
+        return None
+    return chosen
 
 
 def _clone_cards(
@@ -914,9 +1021,16 @@ def evaluate(
                 raise ValueError(f"no sampled character has a {target!r} card")
         cards = {cid: assigned[cid] for cid in chars if cid in assigned}
         mode = "assigned"
-    refs = {
-        cid: character_references(ws, sorted({e for e, c in picked if c.character_id == cid}), cid)
+    exclusions: dict[str, list[tuple[float, float]]] = {}
+    cands = {
+        cid: character_candidates(
+            ws, sorted({e for e, c in picked if c.character_id == cid}), cid, exclusions
+        )
         for cid in sorted({_cid(c) for _, c in picked})
+    }
+    refs = {
+        cid: character_references(ws, sorted(found), cid, candidates=found)
+        for cid, found in cands.items()
     }
     for cid, found in refs.items():
         for line in reference_report(found[1]) if found else []:
@@ -939,6 +1053,24 @@ def evaluate(
         else:
             cards = _stock_cards(ws, cfg, store, backend, picked, assigned)
             mode = "stock"
+
+    # Held-out exemplars (ruling CD17): kept apart from the picks and from every sampled cue's
+    # delivery reference, the same for every backend given the same sample.
+    delivery: dict[str, list[tuple[float, float]]] = {}
+    for e, c in picked:
+        delivery.setdefault(e, []).append(tuple(c.delivery.reference))  # type: ignore[arg-type]
+    heldout: dict[int, list[tuple[str, RefPick]]] = {}
+    for cid, found in refs.items():
+        if found is None or cid not in cards:
+            continue
+        held = heldout_exemplars(cands[cid], found, delivery)
+        if held is None:
+            notes.append(
+                f"character {cid}: under {HELDOUT_MIN_S:g} s of held-out speech, so no held-out "
+                "similarity"
+            )
+        else:
+            heldout[cid] = held
 
     # 1. TTS backend(s).
     renders, bcs, neutral = _render(ws, cfg, store, picked, cards, names)
@@ -1030,20 +1162,38 @@ def evaluate(
             floor = floor_clips(eval_dir / "floor-fixed", subs, vocals, episode=ep)
             floor_desc = f"fixed:{fws.root}:{ep}:{floor_subs}"
 
+    def held_vocals(e: str) -> Path:
+        v16 = ws.work_dir(e) / "01-separate" / "vocals_16k.wav"
+        if not v16.exists():
+            to_16k(ws.work_dir(e) / "01-separate" / "vocals.wav", v16)
+        return v16
+
     gpu = device_string(cfg)
     # 2. WeSpeaker.
     sims: dict[tuple[str, str], float] = {}
+    held_sims: dict[tuple[str, str], float] = {}
+    ceiling: dict[int, float] = {}
     ref_sims: dict[tuple[str, str], float] = {}
     with _model("embed", EMBEDDER, gpu, cfg) as emb:
         ref_vecs: dict[int, np.ndarray] = {}
         for cid, items in ref_spans.items():
             ref_vecs[cid] = np.concatenate([emb.embed(p, [s]) for p, s in items], axis=0)
+        held_vecs: dict[int, np.ndarray] = {}
+        for cid, held in heldout.items():
+            held_vecs[cid] = np.concatenate(
+                [emb.embed(held_vocals(e), [(p.start, p.end)]) for e, p in held], axis=0
+            )
+            if sim_source.get(cid) == "references":
+                # the original actor against himself: the most a render could reach
+                ceiling[cid] = similarity(held_vecs[cid], ref_vecs[cid])
         for r in renders:
             k = (r.episode, r.cue.id)
             vec = emb.embed(small[k], [(0.0, r.seconds)])
             cid = _cid(r.cue)
             if cid in ref_vecs:
                 sims[k] = similarity(vec, ref_vecs[cid])
+            if cid in held_vecs:
+                held_sims[k] = similarity(vec, held_vecs[cid])
             if k in ref_line:
                 orig = emb.embed(ref_vocals[r.episode], [ref_line[k]])
                 ref_sims[k] = similarity(vec, orig)
@@ -1115,6 +1265,11 @@ def evaluate(
                 ref_similarity=ref_sims.get(k),
                 neutral_only=neutral.get(r.backend, False),
                 ref_matched=None if ref_ws is None else line is not None,
+                clone=store.get(r.card_id).voice.source == "clone",
+                similarity_heldout=held_sims.get(k),
+                heldout_clips=len(heldout.get(cid, [])),
+                heldout_seconds=sum(p.seconds for _, p in heldout.get(cid, [])),
+                ceiling=ceiling.get(cid),
             )
         )
     speedup = max_speedup(cfg)
@@ -1122,6 +1277,12 @@ def evaluate(
     for b in sorted(bcs):
         s = summarize([x for x in scores if x.backend == b], speedup, tagger=tagger)
         s.overall["excluded_short"] = excluded
+        mine = {x.character_id for x in scores if x.backend == b}
+        s.heldout = {
+            cid: [[e, p.start, p.end] for e, p in held]
+            for cid, held in sorted(heldout.items())
+            if cid in mine
+        }
         if floor_words:
             s.overall["wer_floor"] = _r(floor_errors / floor_words)
             s.overall["wer_floor_clips"] = len(floor)
@@ -1142,7 +1303,8 @@ def wav_seconds_16k(path: Path) -> float:
 # ---- output ---------------------------------------------------------------------------------
 
 _COLUMNS = (
-    ("speaker_similarity", "sim"), ("speaker_similarity_references", "sim_refs"),
+    ("speaker_similarity", "sim"), ("speaker_similarity_heldout", "sim_held"),
+    ("speaker_similarity_ceiling", "ceiling"), ("speaker_similarity_references", "sim_refs"),
     ("speaker_similarity_card", "sim_card"),
     ("speaker_similarity_original", "sim_orig"), ("wer", "wer"), ("wer_median", "wer50"),
     ("fit_rate", "fit"),
@@ -1173,6 +1335,15 @@ def format_summary(summary: TtsSummary, names: Mapping[int, str], backend: str) 
         + f"  ({summary.overall.get('characters', 0):.0f} characters)"
     )  # fmt: skip
     o = summary.overall
+    if summary.headline:
+        lines.append(f"sim is similarity to the {summary.headline} clips")
+    if "speaker_similarity_heldout" in o:
+        lines.append(
+            f"held-out exemplars: {o['heldout_clips']:.0f} clips, {o['heldout_seconds']:.1f} s "
+            f"over {o['heldout_characters']:.0f} characters; ceiling (held-out vs reference "
+            "clips, the original actor against himself) "
+            f"{o.get('speaker_similarity_ceiling', 0):.3f}"
+        )
     if "wer_floor" in o:
         lines.append(
             f"WER floor (natural speech, same ASR): {o['wer_floor']:.3f} over "
