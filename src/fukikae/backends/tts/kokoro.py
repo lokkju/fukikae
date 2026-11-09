@@ -1,8 +1,8 @@
 """Kokoro-82M (hexgrad), in process: stock voices and weighted blends of them.
 
 The model, its config and the voice tensors come from one pinned snapshot of
-``hexgrad/Kokoro-82M``: the local Hugging Face cache first, a download only when it is missing
-(never under ``HF_HUB_OFFLINE``). Kokoro's own ``KModel``/``KPipeline`` would fetch the newest
+``hexgrad/Kokoro-82M``, from the local Hugging Face cache only; ``fukikae backends setup kokoro``
+downloads it (ruling CD24). Kokoro's own ``KModel``/``KPipeline`` would fetch the newest
 files instead, so they are given paths. A card's ``rate`` is Kokoro's ``speed``. A blend
 (``source = "blend"``) is the weighted mean of its voices' tensors. Kokoro takes no emotion,
 instruction or duration input, so every line renders neutral.
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 REPO = "hexgrad/Kokoro-82M"
 REVISION = "f3ff3571791e39611d31c381e3a41a3af07b4987"
 MODEL_FILE = "kokoro-v1_0.pth"
+_PATTERNS = ["config.json", MODEL_FILE, "voices/*.pt"]
 SAMPLE_RATE = 24000
 
 # Characters per second at speed 1.0 after silence trimming: the median per-line rate over
@@ -159,20 +160,18 @@ class KokoroSynthesizer(Synthesizer):
             )
 
     def _snapshot(self) -> Path:
-        from huggingface_hub import constants, snapshot_download
-        from huggingface_hub.errors import LocalEntryNotFoundError
+        """The pinned snapshot from the local cache only (ruling CD24): a miss raises
+        ``BackendUnavailable`` naming ``fukikae backends setup kokoro``."""
+        from fukikae.backends.local import local_snapshot
 
-        patterns = ["config.json", MODEL_FILE, "voices/*.pt"]
-        try:
-            return Path(
-                snapshot_download(
-                    REPO, revision=REVISION, allow_patterns=patterns, local_files_only=True
-                )
-            )
-        except LocalEntryNotFoundError:
-            if constants.HF_HUB_OFFLINE:
-                raise
-        return Path(snapshot_download(REPO, revision=REVISION, allow_patterns=patterns))
+        return local_snapshot("kokoro", REPO, REVISION, _PATTERNS)
+
+    @classmethod
+    def fetch(cls, options: dict[str, Any] | None = None) -> list[Path]:  # noqa: ARG003
+        """Download the pinned snapshot (``fukikae backends setup kokoro``)."""
+        from fukikae.backends.local import fetch_snapshot
+
+        return [fetch_snapshot(REPO, REVISION, _PATTERNS)]
 
     def load(self) -> None:
         from kokoro import KModel

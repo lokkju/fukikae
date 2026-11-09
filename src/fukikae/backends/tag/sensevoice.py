@@ -106,12 +106,21 @@ class SenseVoiceTagger:
         if self._model is not None:
             return
         from funasr import AutoModel
-        from huggingface_hub import snapshot_download
 
-        path = snapshot_download(self.model, revision=self.revision)
+        from fukikae.backends.local import local_snapshot
+
+        path = str(local_snapshot("sensevoice", self.model, self.revision))  # ruling CD24
         self._model = AutoModel(
             model=path, device=self.device, disable_update=True, disable_pbar=True
         )
+
+    @classmethod
+    def fetch(cls, options: dict[str, Any] | None = None) -> list[Path]:
+        """Download the pinned snapshot (``fukikae backends setup sensevoice``)."""
+        from fukikae.backends.local import fetch_snapshot
+
+        inst = cls(options or {}, "cpu")
+        return [fetch_snapshot(inst.model, inst.revision)]
 
     def unload(self) -> None:
         self._model = None

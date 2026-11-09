@@ -30,7 +30,9 @@ To listen, open `out/<episode>.fukikae.mkv` in any player (mpv switches audio wi
 
 ## Cloning backends
 
-Kokoro runs inside fukikae. The cloning backends run out of process, each in an environment of its own, so their pinned dependencies never meet fukikae's: `workers/<name>/` is a separate uv project (its own Python and lock) and its environment lives in `.venvs/<name>`. fukikae starts the backend as a worker process speaking JSON lines (`fukikae.backends.tts.remote`), on one GPU only (`CUDA_VISIBLE_DEVICES`), and stops and reaps it when the stage ends. `fukikae doctor` lists each worker environment and the command that sets it up. IndexTTS2 (`[tts] backend = "indextts2"`, or a card on it) needs Python 3.11, which uv downloads:
+Kokoro runs inside fukikae. It, the tag models (SenseVoice, emotion2vec) and the managed translator's GGUF load their pinned files from the local Hugging Face cache only; fetch them once with `fukikae backends setup kokoro` (and `sensevoice`, `emotion2vec`, `openai_compat`; `--workspace <dir>` fetches the model that workspace's config names). A run never downloads them, and fukikae turns off pyannote's, Hugging Face's and onnxruntime's telemetry for the whole process.
+
+The cloning backends run out of process, each in an environment of its own, so their pinned dependencies never meet fukikae's: `workers/<name>/` is a separate uv project (its own Python and lock) and its environment lives in `.venvs/<name>`. fukikae starts the backend as a worker process speaking JSON lines (`fukikae.backends.tts.remote`), on one GPU only (`CUDA_VISIBLE_DEVICES`), and stops and reaps it when the stage ends. `fukikae doctor` lists each worker environment and the command that sets it up. IndexTTS2 (`[tts] backend = "indextts2"`, or a card on it) needs Python 3.11, which uv downloads:
 
 ```bash
 fukikae backends setup indextts2
