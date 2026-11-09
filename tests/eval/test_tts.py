@@ -989,6 +989,42 @@ def test_heldout_similarity_is_the_clone_headline_with_ceiling_and_counts():
     assert s2.headline == "references"
 
 
+def test_a_headline_over_some_characters_says_so():
+    """Held-out exemplars exist for only some characters in a single-episode run; the headline
+    names how many it covers, in the summary, the table and the ledger row."""
+    common = {"similarity_source": "references", "clone": True, "heldout_clips": 3,
+              "heldout_seconds": 9.0, "ceiling": 0.7}  # fmt: skip
+    scores = [
+        _score(cue_id="c1", similarity_heldout=0.4, **common),
+        _score(cue_id="c2", character_id=2, card_id="k2", similarity_heldout=None,
+               **{**common, "heldout_clips": 0, "heldout_seconds": 0.0, "ceiling": None}),
+        _score(cue_id="c3", character_id=3, card_id="k3", similarity_heldout=None,
+               **{**common, "heldout_clips": 0, "heldout_seconds": 0.0, "ceiling": None}),
+    ]  # fmt: skip
+    s = ev.summarize(scores, max_speedup=1.25)
+    assert s.headline == "heldout"
+    assert s.headline_note == "held-out similarity covers 1 of 3 characters"
+    assert "held-out similarity covers 1 of 3 characters" in ev.format_summary(s, {}, "fake")
+    (row,) = ev.tts_rows(
+        s, cfg=Config(), backend_cfg=BackendConfig("kokoro", {}), source_language="ja",
+        test_set="t", split="tune", episodes=["S01E01"], tag=None, workspace=Path("/w"),
+    )  # fmt: skip
+    assert row.detail["similarity_headline_note"] == s.headline_note
+    full = ev.summarize([scores[0]], max_speedup=1.25)
+    assert full.headline_note == ""
+
+
+def test_evaluate_keeps_its_typed_signature():
+    """The workspace lock wraps evaluate without hiding its keywords from the type checker."""
+    import inspect
+
+    params = inspect.signature(ev.evaluate).parameters
+    assert {"backend", "per_character", "seed", "reference_workspace"} <= set(params)
+    assert "kw" not in params
+    hints = inspect.get_annotations(ev.evaluate, eval_str=True)
+    assert hints["return"] is ev.EvalResult
+
+
 def test_cues_over_half_wrong_are_listed():
     """Ruling CD18: eval names the renders a listener should check first."""
     scores = [
