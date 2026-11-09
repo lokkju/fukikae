@@ -3,6 +3,7 @@ colour-coded subtitles, all as timed `GroundTruthLine`s, plus the alignment chec
 detected speech."""
 
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
@@ -18,7 +19,7 @@ from fukikae.eval.groundtruth.base import (
     read_cues,
     read_text,
 )
-from fukikae.eval.groundtruth.colour import read_colour
+from fukikae.eval.groundtruth.colour import Anonymous, read_colour
 from fukikae.eval.groundtruth.sdh_prefix import DEFAULT_SOUNDS, read_sdh
 
 Kind = Literal["ass", "sdh", "colour"]
@@ -45,10 +46,14 @@ def read_ground_truth(
     sounds: frozenset[str] = DEFAULT_SOUNDS,
     seen: dict[str, Counter[str]] | None = None,
     hits: Counter[tuple[str, str]] | None = None,
+    colour_names: Mapping[str, str] | None = None,
+    anonymous: Anonymous | None = None,
 ) -> list[GroundTruthLine]:
     """Timed speaker lines from the subtitle file at `path`. Names are canonicalized and run
     through `aliases` for every kind. `episode` labels colours that no name tag identifies
-    (default: the SxxEyy in the file name). `seen`/`hits` collect spellings and alias uses."""
+    (default: the SxxEyy in the file name). `colour_names` is a series colour map and `anonymous`
+    says what to do with colours it lacks (see `read_colour`). `seen`/`hits` collect spellings and
+    alias uses."""
     if kind == "ass":
         return read_ass(read_text(path), aliases, seen, hits)
     namer = Namer(aliases, seen, hits)
@@ -56,5 +61,12 @@ def read_ground_truth(
     if kind == "sdh":
         return read_sdh(cues, namer, sounds)
     if kind == "colour":
-        return read_colour(cues, episode or episode_label(path), namer, sounds)
+        return read_colour(
+            cues,
+            episode or episode_label(path),
+            namer,
+            sounds,
+            colour_names=colour_names,
+            anonymous=anonymous,
+        )
     raise ValueError(f"unknown ground-truth source {kind!r}; use one of {', '.join(KINDS)}")

@@ -57,6 +57,8 @@ class SherpaEmbedder:
     def __init__(self, options: dict[str, Any], device: str) -> None:
         self.file: str = str(options.get("file", self.default_file))
         self.path: str | None = str(options["path"]) if "path" in options else None
+        # The ONNX file's name, for the results ledger's model identity.
+        self.model: str = Path(self.path).name if self.path else self.file
         self.threads: int = int(options.get("threads", 4))
         self.device = device
         self._loaded = False
@@ -96,7 +98,7 @@ class SherpaEmbedder:
 class CampplusEmbedder(SherpaEmbedder):
     name: ClassVar[str] = "campplus"
     dim: ClassVar[int] = 512
-    default_file: ClassVar[str] = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+    default_file: ClassVar[str] = "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
 
 
 class Eres2netv2Embedder(SherpaEmbedder):

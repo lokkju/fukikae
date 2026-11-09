@@ -1,5 +1,9 @@
 """CTC forced alignment of a transcript against audio with per-language wav2vec2 models.
 
+The de and es checkpoints have lowercase letter vocabularies, the English bundle uppercase;
+a character the vocabulary lacks is looked up case-folded (German ß has no token and is
+skipped, so its word is timed from its other letters).
+
 ja and zh models have character vocabularies, so words there are single characters. The
 Korean checkpoint's vocabulary is syllables; its characters are grouped back to the
 transcript's whitespace-separated words.
@@ -23,6 +27,8 @@ MODELS: dict[str, str] = {
     "ja": "jonatasgrosman/wav2vec2-large-xlsr-53-japanese",
     "zh": "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
     "en": "torchaudio:WAV2VEC2_ASR_BASE_960H",
+    "de": "jonatasgrosman/wav2vec2-large-xlsr-53-german",
+    "es": "jonatasgrosman/wav2vec2-large-xlsr-53-spanish",
 }
 _CHAR_LANGS = frozenset({"ja", "zh"})
 _RATE = 16000
@@ -152,6 +158,8 @@ class Wav2Vec2Aligner:
         if language == "en":
             ch = ch.upper()
         tid = self._vocab.get(ch)
+        if tid is None:
+            tid = self._vocab.get(ch.lower())
         if tid is None or tid == self._blank:
             return None
         return int(tid)

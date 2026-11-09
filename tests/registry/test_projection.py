@@ -63,6 +63,25 @@ def test_projection_apply_is_unit_rows_and_checks_dim():
         p.apply(np.ones((1, 5)))
 
 
-def test_series_of_reads_the_workspace_setting():
-    assert series_of(Config()) == "default"
-    assert series_of(Config(raw={"series": "Fairy Tail"})) == "Fairy Tail"
+@pytest.mark.parametrize(
+    ("raw", "want"),
+    [
+        ({"series": {"title": "Fairy Tail", "genre": "anime"}}, "Fairy Tail"),  # table title
+        ({"series": "Fairy Tail"}, "Fairy Tail"),  # the older top-level string
+        ({"series": {"genre": "anime"}}, "default"),  # table without a title
+        ({"series": {"title": ""}}, "default"),  # empty title
+        ({"series": ""}, "default"),  # empty string
+        ({}, "default"),  # no series at all
+    ],
+)
+def test_series_of_reads_the_workspace_setting(raw, want):
+    assert series_of(Config(raw=raw)) == want
+
+
+def test_series_of_ignores_the_defaulted_title(tmp_path):
+    from fukikae.config import load_config
+
+    ws = tmp_path / "grid"
+    ws.mkdir()
+    cfg = load_config(ws, user_config=None)
+    assert cfg.series.title == "grid" and series_of(cfg) == "default"

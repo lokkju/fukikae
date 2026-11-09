@@ -1,6 +1,7 @@
 """`fukikae eval` commands."""
 
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -13,13 +14,34 @@ def asr(
     episode: str = typer.Argument(..., help="Episode file path or SxxEyy code."),
     subtitle_track: int = typer.Option(..., "--subtitle-track", help="Absolute stream index."),
     backend: list[str] = typer.Option(None, "--backend", help="ASR backend; repeat for several."),
+    split: str = typer.Option(
+        "tune", "--split", help="Ledger split of this episode: tune or holdout."
+    ),
+    test_set: str = typer.Option(
+        None, "--set", help="Ledger test-set name (default: the workspace directory's name)."
+    ),
+    tag: str = typer.Option(None, "--tag", help="Free-form ledger tag for this run."),
+    no_ledger: bool = typer.Option(
+        False, "--no-ledger", help="Do not append rows to the results ledger."
+    ),
+    ledger: Path = typer.Option(
+        None,
+        "--ledger",
+        help="Results ledger (default: $FUKIKAE_RESULTS, else "
+        "$XDG_DATA_HOME/fukikae/results.jsonl).",
+    ),
 ) -> None:
     """Score ASR backends by character error rate against a subtitle track."""
     from fukikae.backends.loader import names
     from fukikae.errors import user_errors
     from fukikae.eval import asr as eval_asr
+    from fukikae.eval.identity.cli import write_ledger
+    from fukikae.eval.ledger import SPLITS
     from fukikae.workspace import Workspace
 
+    if split not in SPLITS:
+        typer.echo(f"error: --split {split!r}: use one of {', '.join(SPLITS)}", err=True)
+        raise typer.Exit(2)
     ws = Workspace(workspace)
     try:
         cfg = ws.config
@@ -34,6 +56,118 @@ def asr(
     for s in scores:
         runtime = "cached" if s.runtime_s is None else f"{s.runtime_s:.0f}s"
         typer.echo(f"{s.backend:<20}{s.cer:>8.4f}{runtime:>10}")
+    if not no_ledger:
+        name = test_set or ws.root.resolve().name
+        write_ledger(
+            lambda: _asr_rows(scores, cfg, language, ep.id, name, split, tag, ws.root), ledger
+        )
+
+
+def _asr_rows(
+    scores: list[Any],
+    cfg: Any,
+    language: str,
+    episode_id: str,
+    test_set: str,
+    split: str,
+    tag: str | None,
+    root: Path,
+) -> list[Any]:
+    """One `asr` ledger row per backend. Model, revision and options come from the
+    workspace's resolved ASR config when it names the same backend; another backend ran with
+    its defaults, so it records none."""
+    from fukikae.config import BackendConfig, ConfigError
+    from fukikae.eval.ledger import make_row, model_identity
+
+    try:
+        resolved: BackendConfig | None = cfg.resolve("asr", language)
+    except ConfigError:
+        resolved = None
+    rows = []
+    for s in scores:
+        same = resolved is not None and resolved.backend == s.backend
+        options = dict(resolved.options) if same and resolved is not None else {}
+        model, revision = (
+            model_identity("asr", resolved) if same and resolved is not None else (None, None)
+        )
+        metrics: dict[str, float | int | str] = {"cer": s.cer}
+        if s.runtime_s is not None:
+            metrics["runtime_s"] = s.runtime_s
+        rows.append(
+            make_row(
+                stage="asr",
+                backend=s.backend,
+                model=model,
+                revision=revision,
+                options=options,
+                language=language,
+                genre=cfg.series.genre,
+                series=cfg.series.title,
+                test_set=test_set,
+                split=split,
+                episodes=[episode_id],
+                metrics=metrics,
+                workspace=str(root),
+                tag=tag,
+            )
+        )
+    return rows
+
+
+@eval_app.command("report")
+def report_cmd(
+    ledger: Path = typer.Option(
+        None,
+        "--ledger",
+        help="Results ledger (default: $FUKIKAE_RESULTS, else "
+        "$XDG_DATA_HOME/fukikae/results.jsonl).",
+    ),
+    stage: list[str] = typer.Option(None, "--stage", help="Only this stage; repeat."),
+    backend: list[str] = typer.Option(None, "--backend", help="Only this backend; repeat."),
+    test_set: list[str] = typer.Option(None, "--set", help="Only this test set; repeat."),
+    split: list[str] = typer.Option(None, "--split", help="Only this split; repeat."),
+    tag: list[str] = typer.Option(None, "--tag", help="Only this tag; repeat."),
+    metric: str = typer.Option(
+        None,
+        "--metric",
+        help="Metric shown in each cell (default: asr cer, identity fraction with clean and "
+        "merge counts, embedder nc_overall, tts speaker_similarity).",
+    ),
+    fmt: str = typer.Option("text", "--format", help="text or md."),
+    export: Path = typer.Option(
+        None, "--export", help="Also write the filtered rows to this file as JSONL."
+    ),
+) -> None:
+    """Render the results ledger as a matrix: configurations by language and genre."""
+    from fukikae.eval.ledger import read_rows, row_json
+    from fukikae.eval.report import build_matrix, filter_rows, render
+
+    if fmt not in ("text", "md"):
+        typer.echo(f"error: --format {fmt!r}: use text or md", err=True)
+        raise typer.Exit(2)
+    try:
+        rows, warnings = read_rows(ledger)
+    except OSError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    for w in warnings:
+        typer.echo(f"warning: {w}", err=True)
+    rows = filter_rows(
+        rows,
+        stages=stage or (),
+        backends=backend or (),
+        sets=test_set or (),
+        splits=split or (),
+        tags=tag or (),
+    )
+    if export is not None:
+        export.parent.mkdir(parents=True, exist_ok=True)
+        export.write_text("".join(row_json(r) + "\n" for r in rows), encoding="utf-8")
+        typer.echo(f"exported {len(rows)} rows to {export}", err=True)
+    if not rows:
+        typer.echo("no ledger rows match")
+        return
+    typer.echo(render(build_matrix(rows, metric), "md" if fmt == "md" else "text"))
 
 
 @eval_app.command("sample")
@@ -121,6 +255,12 @@ def auto_label_cmd(
     force: bool = typer.Option(
         False, "--force", help="Score even when the subtitles do not line up with the speech."
     ),
+    colour_anonymous: str = typer.Option(
+        None,
+        "--colour-anonymous",
+        help="With --source colour and a labels-colours.yaml: drop (default), series "
+        "(colour:<name>) or episode (<name>@<episode>) for colours the map lacks.",
+    ),
 ) -> None:
     """Label every clean span from the speaker names, tags or colours in the episodes' subtitles."""
     from fukikae.eval import autolabel
@@ -136,7 +276,7 @@ def auto_label_cmd(
             aliases[src.strip()] = dst.strip()
         result = autolabel.auto_label(
             workspace, refs, out, subtitle_track, min_overlap, aliases,
-            source=source, gt_file=gt_file, force=force,
+            source=source, gt_file=gt_file, force=force, colour_anonymous=colour_anonymous,
         )  # fmt: skip
     except (FileNotFoundError, ValueError, MediaError) as e:
         typer.echo(f"error: {e}", err=True)
@@ -151,6 +291,354 @@ def auto_label_cmd(
             )
     if report:
         typer.echo(autolabel.format_report(result))
+
+
+@eval_app.command("subalign")
+def subalign_cmd(
+    labelled: Path = typer.Argument(..., help="Subtitle file to retime (ASS/SSA, SRT, WebVTT)."),
+    out: Path = typer.Option(..., "--out", help="Where to write the retimed file."),
+    reference: Path = typer.Option(
+        None, "--reference", help="Subtitle file already timed to the target capture."
+    ),
+    speech: Path = typer.Option(
+        None, "--speech", help="Workspace whose diarized speech is the target timeline."
+    ),
+    episode: str = typer.Option(None, "--episode", help="SxxEyy, with --speech."),
+    language: str = typer.Option(
+        None,
+        "--language",
+        help="Text language for anchor matching (default: guessed from the labelled file).",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Write the file even when the fit fails its checks."
+    ),
+) -> None:
+    """Find the offset and linear drift from LABELLED to a reference subtitle file (by text) or
+    to a workspace's detected speech, and write LABELLED retimed to OUT."""
+    import re
+
+    from fukikae.eval.autolabel import speech_turns
+    from fukikae.eval.groundtruth.base import read_cues
+    from fukikae.eval.groundtruth.subalign import (
+        check_fit,
+        fit_to_reference,
+        fit_to_speech,
+        guess_language,
+        retime_file,
+    )
+    from fukikae.workspace import Workspace
+
+    if (reference is None) == (speech is None) or (speech is not None and not episode):
+        typer.echo(
+            "error: give either --reference REF or --speech WORKSPACE --episode SxxEyy", err=True
+        )
+        raise typer.Exit(2)
+    try:
+        cues = read_cues(labelled)
+        if reference is not None:
+            rep = fit_to_reference(cues, read_cues(reference), language or guess_language(cues))
+        else:
+            ws = Workspace(speech)
+            m = re.fullmatch(r"[Ss](\d+)[Ee](\d+)", episode.strip())
+            eid = f"S{int(m[1]):02d}E{int(m[2]):02d}" if m else ws.find_episode(episode).id
+            work = ws.work_dir(eid)
+            if not (work / "04-diarize").is_dir():
+                raise FileNotFoundError(f"{eid}: no diarization under {work / '04-diarize'}")
+            rep = fit_to_speech(cues, speech_turns(work))
+        s = rep.tmap
+        line = f"mode {rep.mode}  scale {s.scale:.6f}  offset {s.offset:+.2f} s  "
+        if rep.mode == "text":
+            share = rep.inliers / rep.anchors if rep.anchors else 0.0
+            line += f"anchors {rep.anchors}  inliers {rep.inliers} ({share:.0%})  "
+            line += f"rms {rep.rms_s:.3f} s  max residual {rep.max_resid_s:.3f} s"
+        else:
+            line += f"cues {rep.anchors}  over speech {rep.inliers}  share {rep.share or 0:.0%}"
+        typer.echo(line)
+        check_fit(rep, force=force)
+        done, clamped = retime_file(labelled, out, rep.tmap)
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"wrote {out}: {done} cues retimed, {clamped} clamped at 0")
+
+
+@eval_app.command("transcript-align")
+def transcript_align_cmd(
+    transcripts: Path = typer.Option(
+        ..., "--transcripts", help="Transcript file or directory (matched by SxxEyy)."
+    ),
+    subtitles: Path = typer.Option(
+        ..., "--subtitles", help="Timed subtitle file or directory (matched by SxxEyy)."
+    ),
+    out: Path = typer.Option(..., "--out", help="Output directory for <SxxEyy>.ass."),
+    episodes: str = typer.Option(..., "--episodes", help="Comma-separated, e.g. S01E01,S01E02."),
+    alias: list[str] = typer.Option(
+        None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
+    ),
+    language: str = typer.Option("en", "--language", help="Language of the subtitle words."),
+) -> None:
+    """Name the cues of timed subtitles from untimed, speaker-named transcripts."""
+    from fukikae.eval.autolabel import gt_path_for
+    from fukikae.eval.groundtruth.base import Namer, load_alias_file, read_cues
+    from fukikae.eval.groundtruth.transcript import (
+        align_transcript,
+        read_transcript,
+        write_named_ass,
+    )
+
+    refs = [e.strip().upper() for e in episodes.split(",") if e.strip()]
+    try:
+        aliases = load_alias_file(out.parent / "labels-aliases.yaml")
+        for item in alias or []:
+            src, sep, dst = item.partition("=")
+            if not sep or not src.strip() or not dst.strip():
+                raise ValueError(f"--alias {item!r}: expected FROM=TO")
+            aliases[src.strip()] = dst.strip()
+        results = []
+        for ref in refs:
+            tr = gt_path_for(transcripts, ref, len(refs))
+            sub = gt_path_for(subtitles, ref, len(refs))
+            res = align_transcript(read_transcript(tr), read_cues(sub), Namer(aliases), language)
+            results.append((ref, res))
+        out.mkdir(parents=True, exist_ok=True)
+        for ref, res in results:
+            write_named_ass(out / f"{ref}.ass", res.named)
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    for ref, res in results:
+        who = ", ".join(f"{n} {c}" for n, c in sorted(res.speakers.items(), key=lambda x: -x[1]))
+        typer.echo(f"{ref}: cues {res.cue_share:.0%}, words {res.word_share:.0%}; {who}")
+
+
+@eval_app.command("bazinga-labels")
+def bazinga_labels_cmd(
+    annotations: list[Path] = typer.Argument(..., help="Bazinga annotation .txt files."),
+    out: Path = typer.Option(..., "--out", help="Output directory for <SxxEyy>.ass."),
+    min_confidence: float = typer.Option(
+        0.9, "--min-confidence", help="Words below this confidence never set a turn's span."
+    ),
+    time_scale: float = typer.Option(
+        1.0, "--time-scale", help="Multiply every time (1.04271 for audio slowed to film speed)."
+    ),
+) -> None:
+    """Named-ASS ground truth from Bazinga's word-level speaker annotations."""
+    from fukikae.eval.groundtruth.bazinga import episode_code, read_words, words_to_turns
+    from fukikae.eval.groundtruth.transcript import write_named_ass
+
+    try:
+        done: dict[str, tuple[Path, Any, Any]] = {}
+        for path in annotations:
+            words = read_words(path)
+            if not words:
+                raise ValueError(f"{path}: no annotation lines")
+            ref = episode_code(words[0].episode)
+            if ref in done:
+                raise ValueError(f"{path} and {done[ref][0]} are both {ref}")
+            lines, stats = words_to_turns(words, min_confidence, time_scale)
+            done[ref] = (path, lines, stats)
+        out.mkdir(parents=True, exist_ok=True)
+        for ref, (_, lines, _) in done.items():
+            write_named_ass(out / f"{ref}.ass", lines)
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    for ref, (_, _, s) in sorted(done.items()):
+        why = ", ".join(f"{k} {v}" for k, v in sorted(s.dropped.items())) or "none"
+        typer.echo(
+            f"{ref}: words kept {s.kept}, dropped {why}; turns {s.turns} "
+            f"({s.turns_dropped} with no confident word dropped); speakers {len(s.speakers)}"
+        )
+
+
+@eval_app.command("colour-map")
+def colour_map_cmd(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    episodes: str = typer.Option(..., "--episodes", help="Comma-separated, e.g. S01E01,S01E02."),
+    gt_file: Path = typer.Option(
+        ..., "--gt-file", help="Colour-caption file, or a directory matched by SxxEyy."
+    ),
+    alias: list[str] = typer.Option(
+        None, "--alias", help="FROM=TO speaker-name alias; repeat. Also labels-aliases.yaml."
+    ),
+    write: bool = typer.Option(False, "--write", help="Write WORKSPACE/labels-colours.yaml."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing labels-colours.yaml."),
+) -> None:
+    """Map each caption colour to a character from the named lines of all the episodes."""
+    from fukikae.eval.autolabel import gt_path_for
+    from fukikae.eval.groundtruth.base import Namer, load_alias_file, read_cues
+    from fukikae.eval.groundtruth.colour import (
+        COLOUR_MAP_FILE,
+        colour_counts,
+        propose_colour_map,
+        write_colour_map,
+    )
+
+    refs = [e.strip().upper() for e in episodes.split(",") if e.strip()]
+    target = workspace / COLOUR_MAP_FILE
+    try:
+        aliases = load_alias_file(workspace / "labels-aliases.yaml")
+        for item in alias or []:
+            src, sep, dst = item.partition("=")
+            if not sep or not src.strip() or not dst.strip():
+                raise ValueError(f"--alias {item!r}: expected FROM=TO")
+            aliases[src.strip()] = dst.strip()
+        if write and target.exists() and not force:
+            raise ValueError(f"{target} exists; --force overwrites it")
+        cues = {ref: read_cues(gt_path_for(gt_file, ref, len(refs))) for ref in refs}
+        counts = colour_counts(cues, Namer(aliases))
+        mapping, conflicts = propose_colour_map(counts)
+        colours = sorted({c for per in counts.values() for c in per})
+        for col in colours:
+            cells = []
+            for ref in refs:
+                c = counts[ref].get(col)
+                if c:
+                    cells.append(f"{ref} " + ", ".join(f"{n} {k}" for n, k in c.most_common()))
+            typer.echo(f"{col}: " + ("; ".join(cells) if cells else "no tagged lines"))
+        typer.echo("map: " + (", ".join(f"{c} -> {n}" for c, n in mapping.items()) or "(empty)"))
+        for line in conflicts:
+            typer.echo(f"conflict: {line}")
+        if write:
+            write_colour_map(target, mapping)
+            typer.echo(f"wrote {target}")
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+
+
+@eval_app.command("embedders")
+def embedders(
+    clipset: Path = typer.Argument(..., help="Clip set: one folder per character."),
+    embedder: list[str] = typer.Option(
+        ..., "--embedder", help="Embed backend to score; repeat for several."
+    ),
+    language: str = typer.Option(..., "--language", help="Language of the clips (ledger column)."),
+    genre: str = typer.Option("live-action", "--genre", help="Ledger genre."),
+    test_set: str = typer.Option(
+        None, "--set", help="Ledger test-set name (default: the clip set directory's name)."
+    ),
+    exclude: list[str] = typer.Option(
+        None, "--exclude", help="Character folder to leave out; repeat for several."
+    ),
+    episode_pattern: str = typer.Option(
+        None,
+        "--episode-pattern",
+        help="Regex whose first group is the episode number in a file name.",
+    ),
+    tag: str = typer.Option(None, "--tag", help="Free-form ledger tag for this run."),
+    no_ledger: bool = typer.Option(
+        False, "--no-ledger", help="Do not append rows to the results ledger."
+    ),
+    ledger: Path = typer.Option(
+        None,
+        "--ledger",
+        help="Results ledger (default: $FUKIKAE_RESULTS, else "
+        "$XDG_DATA_HOME/fukikae/results.jsonl).",
+    ),
+    no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
+) -> None:
+    """Score embedders by nearest-centroid accuracy on a folder-per-character clip set."""
+    from fukikae import runctx
+    from fukikae.backends.loader import names
+    from fukikae.config import BackendConfig, Config
+    from fukikae.errors import user_errors
+    from fukikae.eval import clipset as cs
+    from fukikae.eval.identity.cache import ResidentEmbedder
+    from fukikae.eval.identity.cli import write_ledger
+    from fukikae.eval.identity.metrics import OVERALL
+    from fukikae.eval.ledger import make_row, model_identity
+
+    runctx.vram_timeout_s = 0 if no_wait else None
+    root = clipset.expanduser()
+    try:
+        known = names("embed")
+        for name in embedder:
+            if name not in known:
+                raise ValueError(f"unknown embedder {name!r}; use one of {', '.join(known)}")
+        if not root.is_dir():
+            raise FileNotFoundError(f"clip set {root} is not a directory")
+        clips = cs.scan_clipset(
+            root, episode_pattern or cs.DEFAULT_EPISODE_PATTERN, exclude=exclude or ()
+        )
+        train, test, rule, skipped = cs.split_clips(clips)
+        missing = sum(c.episode is None for c in clips)
+        if missing and rule != "episode":
+            typer.echo(
+                f"warning: {missing} of {len(clips)} clips carry no episode number; the whole "
+                f"set uses the {rule!r} split instead of the episode split",
+                err=True,
+            )
+        if not train or not test:
+            raise ValueError(f"{root}: no character has clips on both sides of the split")
+        cache = root / cs.CACHE_DIR
+        audio = cs.prepare_audio(train + test, cache)
+        name = test_set or root.resolve().name
+        results: list[tuple[Any, dict[str, float]]] = []
+        with ResidentEmbedder(Config(gpu_device=0)) as resident:
+            for emb_name in embedder:
+                cfg = BackendConfig(emb_name, {})
+                ident = cs.cache_identity(cfg)
+                tr = cs.embed_clips(train, audio, cfg, resident, cache, ident)
+                te = cs.embed_clips(test, audio, cfg, resident, cache, ident)
+                results.append((cfg, cs.clipset_accuracy(train, test, tr, te, audio=audio)))
+    except user_errors() as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    scored = sorted({c.character for c in test} - set(skipped))
+    typer.echo(f"{'embedder':<16}{'accuracy':>9}{'chars':>7}{'train':>7}{'test':>6}  split")
+    for cfg, acc in results:
+        typer.echo(
+            f"{cfg.backend:<16}{acc.get(OVERALL, 0.0):>9.3f}{len(acc) - 1 if acc else 0:>7}"
+            f"{len(train):>7}{len(test):>6}  {rule}"
+        )
+    if rule != "episode":
+        typer.echo(
+            "note: folder/half splits cut across a character's folders (e.g. emotions), so "
+            "they also measure robustness to them; check class balance before reading accuracy.",
+            err=True,
+        )
+    if skipped:
+        typer.echo(f"not scored (no clip on one side): {', '.join(skipped)}", err=True)
+    if not no_ledger:
+
+        def rows() -> list[Any]:
+            out = []
+            for cfg, acc in results:
+                model, revision = model_identity("embed", cfg)
+                per_char = {k: round(v, 6) for k, v in acc.items() if k != OVERALL}
+                out.append(
+                    make_row(
+                        stage="embedder",
+                        backend=cfg.backend,
+                        model=model,
+                        revision=revision,
+                        options={**cfg.options, "split_rule": rule},
+                        language=language,
+                        genre=genre,
+                        series=name,
+                        test_set=name,
+                        split="tune",
+                        episodes=[],
+                        metrics={
+                            "nc_overall": acc.get(OVERALL, 0.0),
+                            "characters": len(per_char),
+                            "train_clips": len(train),
+                            "test_clips": len(test),
+                        },
+                        detail={
+                            "per_character": per_char,
+                            "not_scored": skipped,
+                            "excluded": list(exclude or []),
+                            "characters": scored,
+                        },
+                        workspace=str(root.resolve()),
+                        tag=tag,
+                    )
+                )
+            return out
+
+        write_ledger(rows, ledger)
 
 
 def _register_identity() -> None:
