@@ -976,7 +976,38 @@ def floor_clips(
     ]
 
 
-def evaluate(
+@contextlib.contextmanager
+def workspace_lock(root: Path) -> Iterator[None]:
+    """One ``eval tts`` per workspace at a time: an flock on ``.fukikae/eval/tts/.lock``,
+    refused at once (naming the holder) when another run has it."""
+    import fcntl
+    import os
+
+    path = Path(root) / ".fukikae" / "eval" / "tts" / ".lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            holder = os.pread(fd, 64, 0).decode("utf-8", errors="replace").strip() or "?"
+            raise RuntimeError(
+                f"another eval tts runs on {root} (pid {holder}); wait for it to finish"
+            ) from None
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+        yield
+    finally:
+        os.close(fd)
+
+
+def evaluate(root: Path, episodes: Sequence[str], **kw: Any) -> EvalResult:
+    """``_evaluate`` under the workspace's eval lock (``workspace_lock``)."""
+    with workspace_lock(root):
+        return _evaluate(root, episodes, **kw)
+
+
+def _evaluate(
     root: Path,
     episodes: Sequence[str],
     *,
