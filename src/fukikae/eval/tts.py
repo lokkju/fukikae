@@ -304,8 +304,10 @@ def _metrics(scores: Sequence[CueScore], max_speedup: float) -> dict[str, float]
             np.mean([s.render_emotion == s.source_emotion for s in labelled])
         )
         m["emotion_cues"] = len(labelled)
-    if any(s.render_emotion for s in scores):
-        m["render_neutral_share"] = _r(np.mean([s.render_emotion == "neutral" for s in scores]))
+    tagged = [s for s in scores if s.render_emotion]
+    if tagged:
+        m["render_neutral_share"] = _r(np.mean([s.render_emotion == "neutral" for s in tagged]))
+        m["render_labelled"] = len(tagged)
     ref = [s for s in scores if s.ref_seconds]
     if ref:
         m["ref_cues"] = len(ref)
@@ -352,7 +354,7 @@ def summarize(scores: Sequence[CueScore], max_speedup: float) -> TtsSummary:
 HEADLINE_METRICS = (
     "speaker_similarity", "wer", "fit_rate", "fit_budget_rate", "stretch_median",
     "stretch_p90", "cps_median", "cues", "characters", "emotion_agreement", "emotion_cues",
-    "render_neutral_share", "ref_duration_ratio", "ref_emotion_agreement",
+    "render_neutral_share", "render_labelled", "ref_duration_ratio", "ref_emotion_agreement",
     "ref_speaker_similarity", "ref_cues",
 )  # fmt: skip
 
