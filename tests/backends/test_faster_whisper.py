@@ -50,3 +50,57 @@ def test_detects_and_transcribes_korean(clip_ep):
     assert isinstance(t, Transcript)
     assert t.word_timing is False and t.language == "ko" and t.segments
     assert all(s.words is None and s.end > s.start for s in t.segments)
+
+
+class _FakeModel:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def transcribe(self, _samples, **kw):
+        from types import SimpleNamespace
+
+        self.calls.append(kw)
+        seg = SimpleNamespace(start=0.0, end=1.0, text=" hello there ")
+        return iter([seg]), SimpleNamespace(language="en")
+
+
+def _wav(path):
+    import wave
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\x00\x00" * 1600)
+    return path
+
+
+def test_decoding_options_pass_through_and_defaults_stay_whispers(tmp_path):
+    """Ruling CD16: eval sets temperature, beam, conditioning and the hallucination guard;
+    a stage that sets none keeps faster-whisper's defaults (nothing extra is passed)."""
+    audio = _wav(tmp_path / "a.wav")
+    plain = FasterWhisperTranscriber({}, "cpu")
+    plain._model = _FakeModel()
+    plain.transcribe(audio, "en")
+    assert set(plain._model.calls[0]) == {"language", "vad_filter", "word_timestamps"}
+
+    opts = {
+        "temperature": 0.0, "beam_size": 5, "condition_on_previous_text": False,
+        "hallucination_silence_threshold": 2.0,
+    }  # fmt: skip
+    det = FasterWhisperTranscriber(opts, "cpu")
+    det._model = _FakeModel()
+    t = det.transcribe(audio, "en")
+    kw = det._model.calls[0]
+    assert kw["temperature"] == [0.0]  # one temperature: no fallback sampling
+    assert kw["beam_size"] == 5 and kw["condition_on_previous_text"] is False
+    assert kw["hallucination_silence_threshold"] == 2.0
+    assert kw["word_timestamps"] is True  # the guard needs word timing
+    assert t.word_timing is False and t.segments[0].text == "hello there"
+
+
+def test_unknown_or_bad_decoding_options_are_refused():
+    with pytest.raises(ValueError, match="temperature"):
+        FasterWhisperTranscriber({"temperature": "hot"}, "cpu")
+    with pytest.raises(ValueError, match="beam_size"):
+        FasterWhisperTranscriber({"beam_size": 0}, "cpu")

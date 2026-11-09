@@ -23,9 +23,12 @@ Metrics, per character and overall:
   Each source has its own metric (``speaker_similarity_references``, ``_card``, ``_original``);
   ``speaker_similarity``, the report's headline, exists only when every sampled character
   shares one source, so the two kinds are never pooled.
-- ``wer``: word error rate of an English faster-whisper large-v3 pass over the render (no VAD,
-  so short lines are not cut) against the cue's text, both normalized by
-  ``fukikae.eval.asr.normalize``; pooled over words, not averaged over cues. It is read
+- ``wer``: word error rate of an English faster-whisper large-v3 pass over the render against
+  the cue's text, both normalized by ``fukikae.eval.asr.normalize``; pooled over words, each
+  cue's errors capped at its reference words (ruling CD16), with ``wer_median``, the median
+  per-cue WER, beside it. The pass is deterministic (``ASR``: temperature 0 with no fallback,
+  beam 5, no conditioning on earlier text, the hallucination guard; no VAD, so short lines are
+  not cut), so the same renders always score the same. It is read
   against ``wer_floor``, the same ASR on natural English speech against its subtitle text
   (``--floor-subs``): the original track at the sampled cues when there is a reference
   workspace, else a fixed clip set (``--floor-workspace``, ``--floor-episode``). The floor
@@ -99,7 +102,20 @@ from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript, Turn,
 from fukikae.workspace import Workspace
 
 EMBEDDER = BackendConfig("wespeaker", {})
-ASR = BackendConfig("faster_whisper", {"model": "large-v3", "vad_filter": False})
+# Ruling CD16: a deterministic pass. One temperature (no fallback sampling, which is unseeded),
+# beam 5, no conditioning on the previous window, and the hallucination guard (a repetition
+# loop over silence is dropped). No VAD, so short lines are not cut.
+ASR = BackendConfig(
+    "faster_whisper",
+    {
+        "model": "large-v3",
+        "vad_filter": False,
+        "temperature": 0.0,
+        "beam_size": 5,
+        "condition_on_previous_text": False,
+        "hallucination_silence_threshold": 2.0,
+    },
+)
 DEFAULT_TAGGER = "emotion2vec"
 EXEMPLARS = 3
 EXEMPLAR_MIN_S = 1.0
@@ -207,16 +223,19 @@ def similarity(render_vecs: np.ndarray, ref_vecs: np.ndarray) -> float:
 
 
 def word_errors(hyp: str, ref: str, language: str) -> tuple[int, int]:
-    """(substitutions + deletions + insertions, reference words) after normalization."""
+    """(substitutions + deletions + insertions, capped at the reference words; reference words)
+    after normalization. The cap (ruling CD16) keeps one looping hypothesis from outweighing
+    the rest of a pooled WER; an empty reference counts the hypothesis words."""
     import jiwer
 
     h, r = normalize(hyp, language), normalize(ref, language)
     if not r:
         return len(h.split()), 0
+    words = len(r.split())
     if not h:
-        return len(r.split()), len(r.split())
+        return words, words
     out = jiwer.process_words(r, h)
-    return out.substitutions + out.deletions + out.insertions, len(r.split())
+    return min(out.substitutions + out.deletions + out.insertions, words), words
 
 
 def word_error_rate(hyp: str, ref: str, language: str) -> float:
@@ -371,6 +390,7 @@ def _metrics(scores: Sequence[CueScore], max_speedup: float) -> dict[str, float]
     words = sum(s.ref_words for s in scores)
     if words:
         m["wer"] = _r(sum(s.errors for s in scores) / words)
+        m["wer_median"] = _r(np.median([s.errors / s.ref_words for s in scores if s.ref_words]))
     stretch = [s.stretch for s in scores]
     m["fit_rate"] = _r(np.mean([s.fits for s in scores]))
     m["fit_budget_rate"] = _r(np.mean([x <= max_speedup + 1e-9 for x in stretch]))
@@ -445,7 +465,7 @@ def summarize(
 
 HEADLINE_METRICS = (
     "speaker_similarity", "speaker_similarity_references", "speaker_similarity_card",
-    "speaker_similarity_original", "wer",
+    "speaker_similarity_original", "wer", "wer_median",
     "wer_floor", "wer_floor_clips", "fit_rate", "fit_budget_rate", "stretch_median",
     "stretch_p90", "cps_median", "cues", "characters", "excluded_short", "emotion_agreement",
     "emotion_cues", "emotion_source_coverage", "emotion_render_coverage", "emotion_low_coverage",
@@ -1124,7 +1144,8 @@ def wav_seconds_16k(path: Path) -> float:
 _COLUMNS = (
     ("speaker_similarity", "sim"), ("speaker_similarity_references", "sim_refs"),
     ("speaker_similarity_card", "sim_card"),
-    ("speaker_similarity_original", "sim_orig"), ("wer", "wer"), ("fit_rate", "fit"),
+    ("speaker_similarity_original", "sim_orig"), ("wer", "wer"), ("wer_median", "wer50"),
+    ("fit_rate", "fit"),
     ("stretch_median", "str50"), ("stretch_p90", "str90"), ("cps_median", "cps"),
     ("emotion_agreement", "emo"), ("emotion_render_coverage", "emo_cov"),
     ("ref_duration_ratio", "ref_dur"), ("ref_emotion_agreement", "ref_emo"),

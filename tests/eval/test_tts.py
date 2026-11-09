@@ -911,3 +911,50 @@ def test_references_similarity_reaches_the_row_and_the_table(tmp_path):
     assert rows[0].metrics["speaker_similarity_references"] == pytest.approx(0.6)
     table = ev.format_summary(s, {}, "fake")
     assert "sim_refs" in table and "0.600" in table
+
+
+def test_eval_asr_is_deterministic_by_config():
+    """Ruling CD16: one temperature, beam 5, no conditioning, a hallucination guard."""
+    o = ev.ASR.options
+    assert o["temperature"] == 0.0 and o["beam_size"] == 5
+    assert o["condition_on_previous_text"] is False
+    assert o.get("hallucination_silence_threshold") or o.get("vad_filter")
+
+
+def test_per_cue_errors_are_capped_and_median_reported():
+    """Ruling CD16: a looping hypothesis counts at most its cue's reference words, and the
+    median per-cue WER sits beside the pooled one."""
+    assert ev.word_errors("a b c d e f g h i j", "a x", "en") == (2, 2)  # capped at 2
+    scores = [
+        _score(cue_id="c1", errors=0, ref_words=4),
+        _score(cue_id="c2", errors=1, ref_words=4),
+        _score(cue_id="c3", errors=4, ref_words=4),
+    ]
+    s = ev.summarize(scores, max_speedup=1.25)
+    assert s.overall["wer"] == pytest.approx(5 / 12, abs=1e-4)
+    assert s.overall["wer_median"] == pytest.approx(0.25)
+    assert "wer_median" in ev.HEADLINE_METRICS
+
+
+@pytest.mark.gpu
+def test_two_asr_passes_on_the_same_audio_agree(tmp_path):
+    """Ruling CD16: the eval ASR gives the same hypothesis twice. Needs GPU 0 and the
+    whisper extra; FUKIKAE_TEST_RENDER may name a render that looped before."""
+    import os
+
+    from fukikae.backends import loader as ld
+
+    render = os.environ.get("FUKIKAE_TEST_RENDER")
+    if not render:
+        pytest.skip("FUKIKAE_TEST_RENDER not set")
+    src = ev.to_16k(Path(render), tmp_path / "r.16k.wav")
+    hyps = []
+    for _ in range(2):
+        asr = ld.create("asr", ev.ASR, "cuda:0")
+        asr.load()
+        try:
+            tr = asr.transcribe(src, "en")  # pyright: ignore[reportAttributeAccessIssue]
+            hyps.append(" ".join(s.text for s in tr.segments))
+        finally:
+            asr.unload()
+    assert hyps[0] == hyps[1]
