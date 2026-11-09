@@ -338,3 +338,38 @@ def test_restock_repins_only_uncurated_auto_stock_cards(tmp_path: Path):
         assert _cur(reg, gray, "en").card_id == chosen
     r = invoke("restock", str(ws.root))
     assert r.exit_code == 0 and "nothing to restock" in r.output
+
+
+def test_restock_follows_two_successive_revision_bumps(tmp_path: Path, monkeypatch):
+    """Ruling CD9: a restocked card is restocked again at the next revision bump."""
+    from fukikae.backends.tts.kokoro import KokoroSynthesizer
+
+    ws, natsu, store = setup(tmp_path)
+    _auto_stock(ws, store, natsu, "am_adam", "rev0")
+    for rev in ("rev1", "rev2"):
+        monkeypatch.setattr(KokoroSynthesizer, "model_revision", rev)
+        r = invoke("restock", str(ws.root))
+        assert r.exit_code == 0 and "restocked" in r.output, r.output
+        with Registry(ws.registry_path) as reg:
+            cur = _cur(reg, natsu, "en")
+        assert cur.by == "restock" and store.get(cur.card_id).voice.model_revision == rev  # type: ignore[arg-type]
+
+
+def test_restock_never_touches_a_locked_or_operator_assigned_card(tmp_path: Path, monkeypatch):
+    from fukikae.backends.tts.kokoro import KokoroSynthesizer
+
+    ws, natsu, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        lucy = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))[1]
+    restocked = _auto_stock(ws, store, natsu, "am_adam", "rev0")
+    mine = _auto_stock(ws, store, lucy, "af_heart", "rev0")
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(natsu, "en", restocked, by="restock", locked=False)
+        reg.lock_card(natsu, "en", True)
+        reg.assign_card(lucy, "en", mine, by="assign", locked=False)
+    monkeypatch.setattr(KokoroSynthesizer, "model_revision", "rev1")
+    r = invoke("restock", str(ws.root))
+    assert r.exit_code == 0 and "nothing to restock" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert _cur(reg, natsu, "en").card_id == restocked
+        assert _cur(reg, lucy, "en").card_id == mine
