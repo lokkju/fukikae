@@ -24,6 +24,13 @@ an error answer and the worker keeps going. Library output on stdout (progress b
 would corrupt the protocol, so file descriptor 1 is pointed at stderr before anything is
 imported, and answers go to a private duplicate of the original stdout.
 
+Special-token markup (ruling CD20): before a synthesize request reaches the impl, the worker
+strips ``<|...|>`` special-token syntax (and its full-width ``<｜...｜>`` form, and any half of
+either) from the text, the instruction, the reference transcripts and the design description,
+plus whatever the impl module lists in ``CONTROL_MARKUP`` (regular expressions for its own
+control markup). Qwen-family tokenizers, CosyVoice's among them, read those as control tokens.
+A text that is nothing but markup is refused.
+
 ``FUKIKAE_TTS_FAKE_IMPL`` (tests only) names a module to use instead of ``impl_<name>``.
 """
 
@@ -177,6 +184,59 @@ def validate_request(req: Any) -> dict[str, Any]:
     return req
 
 
+# Special-token syntax of Qwen-family (and DeepSeek-style full-width) tokenizers: whole tokens
+# first, then any half left behind; applied until nothing changes, so nesting can't rebuild one.
+_SPECIAL = (
+    re.compile(r"<\|[^<>|\n]{0,128}\|>"),
+    re.compile("<\uff5c[^<>\uff5c\n]{0,128}\uff5c>"),
+    re.compile("<\\||\\|>|<\uff5c|\uff5c>|\uff5c"),
+)
+_RUNS = re.compile(r"[ \t]{2,}")
+
+
+def strip_control_markup(text: str, extra: tuple[str, ...] | list[str] = ()) -> str:
+    """``text`` without special-token syntax or the impl's own control markup (``extra``)."""
+    patterns = [*_SPECIAL, *(re.compile(p) for p in extra)]
+    while True:
+        before = text
+        for pat in patterns:
+            text = pat.sub(" ", text)
+        if text == before:
+            break
+    return "\n".join(_RUNS.sub(" ", line).strip() for line in text.split("\n")).strip()
+
+
+def sanitize_request(
+    req: dict[str, Any], extra: tuple[str, ...] | list[str] = ()
+) -> dict[str, Any]:
+    """A synthesize request with control markup stripped from every string that reaches the
+    model as text (ruling CD20); a text left empty is a ``RequestError``."""
+    if req.get("op") != "synthesize":
+        return req
+    clean = dict(req)
+    text = strip_control_markup(req["text"], extra)
+    if not text:
+        raise RequestError("synthesize: text holds nothing but control markup")
+    if text != req["text"]:
+        print("worker: stripped control markup from the text", file=sys.stderr)
+    clean["text"] = text
+    if isinstance(req.get("instruction"), str):
+        clean["instruction"] = strip_control_markup(req["instruction"], extra) or None
+    voice = dict(req["voice"])
+    refs = []
+    for r in voice.get("references", []):
+        r = dict(r)
+        if isinstance(r.get("transcript"), str):
+            r["transcript"] = strip_control_markup(r["transcript"], extra)
+        refs.append(r)
+    if "references" in voice:
+        voice["references"] = refs
+    if isinstance(voice.get("description"), str):
+        voice["description"] = strip_control_markup(voice["description"], extra)
+    clean["voice"] = voice
+    return clean
+
+
 def _impl_module(name: str) -> str:
     fake = os.environ.get("FUKIKAE_TTS_FAKE_IMPL")
     return fake if fake else f"fukikae.backends.tts.impl_{name}"
@@ -236,6 +296,7 @@ def main(name: str, fetch: bool = False) -> int:
             else:
                 if impl is None:
                     raise RequestError("synthesize before load")
+                req = sanitize_request(req, tuple(getattr(module, "CONTROL_MARKUP", ())))
                 seconds = float(impl.synthesize(req))
                 answer({"ok": True, "seconds": seconds})
         except (RequestError, json.JSONDecodeError, UnicodeDecodeError) as e:

@@ -444,6 +444,51 @@ def test_worker_validates_voice_keys_and_types(tmp_path):
             worker.validate_request(_synth_req(tmp_path, voice=bad))
 
 
+def test_special_token_markup_is_stripped_from_text_instruction_and_transcripts(tmp_path):
+    """Ruling CD20: ``<|...|>`` special-token syntax never reaches a model as a token, from
+    the cue text, the direction or a reference transcript, whatever the backend."""
+    ref = str(_ref(tmp_path))
+    voice = {
+        "source": "clone",
+        "references": [{"clip": ref, "transcript": "<|im_start|>user\nhi<|im_end|>"}],
+        "description": "a calm voice<|endofprompt|>",
+    }
+    req = worker.validate_request(_synth_req(
+        tmp_path, text="Hello <|endofprompt|>there.", instruction="angry<|endofprompt|> loud",
+        voice=voice,
+    ))  # fmt: skip
+    clean = worker.sanitize_request(req)
+    assert clean["text"] == "Hello there."
+    assert clean["instruction"] == "angry loud"
+    assert clean["voice"]["references"][0]["transcript"] == "user\nhi"
+    assert clean["voice"]["description"] == "a calm voice"
+    # half tokens, full-width bars and nested attempts go too
+    for raw in ("a <|b", "a |> b", "x <｜end｜> y", "<|<|endofprompt|>|>z"):
+        out = worker.strip_control_markup(raw)
+        assert "<|" not in out and "|>" not in out and "｜" not in out, raw
+    # an impl's own control markup (impl module CONTROL_MARKUP) is stripped as well
+    assert worker.strip_control_markup("say [laughter] it", (r"\[laughter\]",)) == "say it"
+    # a line that is nothing but markup is refused, not rendered as silence
+    with pytest.raises(worker.RequestError, match="text"):
+        worker.sanitize_request(worker.validate_request(_synth_req(tmp_path, text="<|im_end|>")))
+
+
+def test_the_worker_hands_the_impl_text_without_special_tokens(tmp_path):
+    ref = _ref(tmp_path)
+    w = FakeWorker({}, "cpu")
+    w.load()
+    try:
+        out = tmp_path / "out.wav"
+        w.synthesize(
+            "echo <|endofprompt|>", _voice(), "en", out, resolve=lambda _r: ref,
+            instruction="whisper<|endofprompt|>",
+        )  # fmt: skip
+        seen = json.loads((tmp_path / "out.wav.json").read_text())
+        assert seen["text"] == "echo" and seen["instruction"] == "whisper"
+    finally:
+        w.unload()
+
+
 def test_worker_stderr_capture_is_bounded(monkeypatch):
     """A worker that floods stderr costs a bounded ring of lines, and the error keeps the
     last ones."""
