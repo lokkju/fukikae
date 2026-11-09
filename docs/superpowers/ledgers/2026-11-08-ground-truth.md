@@ -1,6 +1,6 @@
 # Ground-truth plan: execution ledger
 
-Plan: `docs/superpowers/plans/2026-11-08-ground-truth.md`. Rulings GT1-GT7 are the controller's; this file records the facts Task 7 onwards produced, with their numbers.
+Plan: `docs/superpowers/plans/2026-11-08-ground-truth.md`. Rulings GT1-GT11 are the controller's; this file records the facts Task 7 onwards produced, with their numbers.
 
 ## Task 7: live-action test sets and baselines (BBT en/de/es, Alice in Borderland)
 
@@ -78,6 +78,82 @@ Labelled speech per character in the tuning episodes (E01, E02; live-action rows
 Raj recurs nowhere because he has under 5 s in E01 on every track. Ledger option hashes: bbt live-action `ad0ed977`, bbt default `fbfe504c`, aib live-action `c442755e`, aib default `1f881519`. The genre column reads `live-action` in all rows, the default copies included, through `[series] genre`.
 
 On BBT en, live-action and default give identical assignments. On the German and Spanish dubs, both profiles put Leonard and Sheldon (and in es, Howard too) on one id, while nearest-centroid accuracy on the same speech is 96-99%. Correction (Task 7 review): the merge happens in diarization, not at the 0.6 matcher threshold. One pyannote speaker holds 93-97% of both Leonard's and Sheldon's labelled speech in de and es (en splits them, 78% and 82% on two speakers), so the matcher only ever sees one cluster and the two profiles' rows are identical. The 96-99% nearest-centroid accuracy is measured on the labelled spans, not the diarized clusters. Ruling GT9 adds pyannote's clustering threshold to Task 8's sweep.
+
+## Task 7b: Kaze, Kaoru (tuning episodes and the green check; GT11)
+
+Run 2026-11-09 at b60013d, no code change. Per GT11, E11 (held-out) is not copied, diarized or scored here: week 3 was still downloading. It follows when week 3 completes.
+
+### Media
+
+Week 1 (`Kaze Kaoru Week 01`, 1080p web, Japanese subtitles) was complete on the media share. All five .mkv files were fully allocated (`du -k` x 1024 at or above the apparent size: EP001 560,720,896 against 560,242,625 bytes, and likewise for EP002-EP005). I copied EP001, EP002, EP003 and EP005 through the read-only volume `fukikae-media-ro` and removed it afterwards. The files are mode 0710 for uid 3000, group `users`, so the copy container needed `--group-add 100`. The copies are `Kaze Kaoru - S01E01.mkv`, `S01E02`, `S01E03` and `S01E05`, and their sizes match the source. Broadcast number = episode number (EP001 = S01E01). Each is 899.3 s with one audio stream, index 1, AAC, tagged `jpn` ("日本語 [オリジナル]"), so no `audio_track` override. `df -h /`: 100 GB free before the copy, 98 GB after.
+
+E01-E03 ran `--to diarize` (2 min 38 s for E01, extract through diarize). E05 ran `--to separate` only, for the green check, and was never diarized or scored.
+
+### Doubled captions and timing against speech
+
+- The web release's .srt doesn't repeat a caption; it splits one. Each caption is cut at the next x.530 s boundary and continues with the same text (`00:00:08,023 --> 00:00:08,530` and `00:00:08,530 --> 00:00:12,863`, both "そうだねえ　あの２人の話をしようか。"). The first onset is the caption's onset and the union of the two pieces is its display span.
+- `eval subalign --speech` refuses both the .srt and the aligned .ass on E01: share 59% < 60%, at scale 1.001001 (the 1001/1000 candidate) and offset -0.86 s. That fit is noise. At scale 1.0 the share is 0.588 across offsets -0.6 to -0.2 s and 0.587 at 0, so the speech-share objective can't place these captions to better than about half a second, and 1001/1000 wins by 0.0007.
+- So I measured onsets directly. For cues that follow at least 1 s without a caption, with the split pieces joined, I took the lag from cue onset to the nearest rising edge of speech within 1.5 s. Speech came from two detectors: pyannote's turns, and an energy VAD on `vocals_16k.wav`. The .srt and the aligned .ass lead speech by a median of:
+
+  | Episode | gap-led cues | pyannote median (IQR) | energy median (IQR) |
+  |---|---|---|---|
+  | E01 | 20 | +0.25 s (+0.11..+0.44) | +0.28 s (+0.13..+0.41) |
+  | E02 | 35 | +0.27 s (+0.19..+0.61) | +0.24 s (+0.19..+0.50) |
+  | E03 | 35 | +0.31 s (+0.15..+0.52) | +0.26 s (+0.14..+0.49) |
+
+  The unretimed broadcast .ass on E01 lags by -0.28 s (pyannote) and -0.23 s (energy). The auto-label alignment report agrees in direction: best offset -0.3 s on E01, -0.1 s on E02 and 0.0 s on E03, none applied.
+- Verdict: the .srt's first onset is the right one. A repeat's onset would make captions late, and they are early. The captions lead speech by a uniform 0.25-0.3 s, which is over the handoff's 0.2 s bound. I tested whether that matters instead of stopping. With every caption moved +0.25 s (`~/fukikae-ws/subs/kaze-kaoru/diag-shift+0.25/`, scored with `--no-ledger`), the live-action baseline, the ct 0.6 cell and the ct 0.4 cell (centroid, 0.6) give the same verdicts and the same りん shares (0.79, 0.79, 0.84), with coverage within one point. Labels are taken per diarized segment at a 60% overlap, and a quarter-second lead flips none of them. `aligned/` stays the ground truth.
+
+### Green: 真風 or a separate narrator
+
+- Text: E01-E04 green is narration ("そうだねえ　あの２人の話をしようか。", "私は　一体　誰かって？　フフフフフ…"). E05 green has both kinds of line. There is narration in the same persona, with the same wind onomatopoeia and sign-off ("ビョ～　ビョ～と吹いてんのにね～。", "村には　そよそよと穏やかさが戻った。", "続きは　また　風の吹く朝に。"). Then "上々だね。　さて　こちらにも吹くぞ。" leads straight into an on-screen fortune teller tagged （真風） ("（真風）もし　そこのお嬢さん。", "占い師。").
+- Embeddings: WeSpeaker (the workspace's embedder, on CPU), every clip cut from its own episode's Demucs vocal stem. Six E01 narration clips, six E05 narration clips and six E05 on-screen （真風） clips, against the first six yellow (りん) and cyan (直美) cues of at least 2.5 s in each episode as negatives:
+
+  | | E01 narration | E05 narration | E05 （真風） on screen |
+  |---|---|---|---|
+  | E01 narration centroid | 1.000 | 0.907 | 0.821 |
+  | E01 りん / 直美 centroid | 0.165 / 0.197 | 0.215 / 0.242 | 0.251 / 0.222 |
+  | E05 りん / 直美 centroid | 0.321 / 0.326 | 0.353 / 0.333 | 0.297 / 0.382 |
+
+  The mean clip-to-clip cosine is 0.711 within E01 narration, 0.670 between E01 and E05 narration and 0.554 between E01 narration and E05 （真風）. Each E05 clip against the E01 narration centroid scores 0.68-0.85 (narration) and 0.32-0.80 (on screen; five of six at or above 0.61).
+- Decision by the handoff's rule: same voice. Every centroid cosine is above the profile's match threshold of 0.6, and E05's green continues the narrator persona. Green scores as 真風 in every episode, and `aligned/` is used unchanged, so there is no `aligned-gt/`. Clips for the operator to confirm by ear are in `~/fukikae-ws/subs/kaze-kaoru/green/`: `E01-{a,b,c}-narr.wav` (8.00, 12.84, 68.60 s), `E05-{a,b,c}-narr.wav` (202.77, 212.31, 874.92 s) and `E05-{d,e,f}-majikaze.wav` (602.20, 604.77, 629.93 s); the numbers are in `green_cos.txt`.
+
+### Coverage (auto-label, colour map plus （名前） prefixes, GT4)
+
+Every Kaze command passes `--force`. The alignment check gives 65%, 60% and 57% overlap with the best offset at -0.3, -0.1 and 0.0 s, and E03 is under the 0.6 floor. Long display times, not misalignment, as with aib.
+
+| Episode | cue spans | labelled | named lines | labelled speech over diarized speech | furigana events |
+|---|---|---|---|---|---|
+| E01 | 188 | 87 (46%) | 106 | 290 s of 479 s (61%) | 12 |
+| E02 | 167 | 56 (34%) | 62 | 137 s of 436 s (31%) | 8 |
+| E03 | 146 | 63 (43%) | 78 | 202 s of 373 s (54%) | 7 |
+
+- Seconds of labelled cue time over diarized speech, at 5 s or more: E01 真風 113.1, りん 111.5, 直美 22.3, 中村 10.0, 信右衛門 8.5, 之宣 7.1, 安 7.0, 美津 6.6. E02 りん 82.7, 直美 20.1, 信右衛門 13.3, 安 5.6. E03 りん 111.9, 直美 51.9, 真風 13.1, 信右衛門 8.5, 虎太郎 5.4. 真風 has 2.3 s in E02.
+- The harness counts less, because it labels a diarized segment only when one name covers 60% of it. On its count, only りん reaches 5 s in all three episodes (45.3, 27.1 and 31.1 s). 直美 has 3.8 s in E01, 真風 2.1 s in E02 and 信右衛門 2.2 s in E02. **Kaze is flagged thin: 1 recurring character in its tuning episodes by the harness (R6), fewer than 3.** Three characters (りん, 直美, 信右衛門) pass 5 s per episode on the looser cue-over-speech count.
+- Furigana: each of E01-E15 reads to identical labels with and without its `\fscy50` events (155 in all), and no ruby text becomes a line. E06 has a ruby reading りん that happens to equal the name, and it still adds no line. The alias "りん 安" -> `?` dropped 4 lines (E01 3, E02 1).
+
+### Baselines on tuning episodes (tag `t7-baseline`)
+
+Procedure as Task 7. `kaze-default` is a `cp -al` copy with the profile line removed, `registry/` and E01-E03's `05-characters/` deleted, and the characters stage run per episode. Both runs add `--force`. JSON results are in `~/fukikae-ws/kaze/t7b/`.
+
+| Set | Profile | opts | Recurring | Clean | Merges | Fraction | Coverage | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| kaze (ja) | live-action | `fa8fda9f` | 1 | 0 | 0 | 0.00 | 24% | fail |
+| kaze (ja) | default | `07cfff71` | 1 | 0 | 0 | 0.00 | 21% | fail |
+
+りん holds 79% of her speech on one id (live-action: id 3 at 73%, 72% and 94% per episode), just under the 80% bar. Live-action's id 3 is only 65% pure (直美 19%, 真風 8%, 美津 8%). Nearest-centroid accuracy is 61% speech-weighted, and 直美's is 7%: her labelled speech classifies as りん. 真風 is 100% on its own id in both profiles.
+
+### Task 8 Step 1 cells for kaze (tags `t8-sweep-ct{0.6,0.5,0.4}`)
+
+`~/fukikae-ws/t8/ws/kaze-ct{0.6,0.5,0.4}` come from `setup.py`, with kaze added to the t8 drivers (the pre-kaze copies are kept as `*.bak-pre-kaze`). Only diarize was stale at 0.5 and 0.4, and each re-diarization took 32-33 s. Speakers per episode (E01/E02/E03): 9/7/8 at 0.6, 9/6/7 at 0.5, 8/6/8 at 0.4. The flags are `--tune S01E01,S01E02,S01E03 --gt colour --gt-file ~/fukikae-ws/subs/kaze-kaoru/aligned --force --set kaze`. That makes 54 ledger rows, none failed.
+
+| ct | best clean/merges/fraction | cells tied at best | りん share |
+|---|---|---|---|
+| 0.6 | 0/0/0.00 | all 18 | 0.79 everywhere |
+| 0.5 | 0/0/0.00 | all 18 | 0.742, or 0.796 under joint ecl-off at 0.50-0.70 |
+| 0.4 | 1/0/1.00 | all 18 | 0.843 everywhere |
+
+Gate sums over bbt-en/de/es, grid, bazinga-tbbt-pal, bazinga-office-pal and kaze (`~/fukikae-ws/t8/tables-diar.md`; pre-kaze tables in `tables-diar.pre-kaze.md`): ct 0.4 joint ecl-on 0.50-0.60 leads at 18 / 1 / 0.857. ct 0.5 centroid and ecl-on 0.50-0.60 follow at 17 / 1 / 0.714, and the provisional ct 0.6 joint ecl-off 0.60 is at 16 / 4 / 0.857. Kaze adds one clean character at ct 0.4 and none elsewhere, so it alone breaks Step 1's ct 0.5 / ct 0.4 tie. That margin is one character crossing the bar, 0.79 to 0.84.
 
 ## Task 7c: Bazinga English sets and the transcript-aligner check (D18)
 
