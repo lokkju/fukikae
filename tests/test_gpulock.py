@@ -196,3 +196,20 @@ def test_a_process_with_unreadable_environ_is_not_on_every_card(monkeypatch, cap
     assert gpulock._on_card(4242, 0) is False and gpulock._on_card(4242, 1) is True
     monkeypatch.setattr(gpulock, "_read_environ", lambda _pid: [b"CUDA_VISIBLE_DEVICES="])
     assert gpulock._on_card(4242, 0) is False
+
+
+def test_unreadable_environs_are_warned_about_once_per_scan(monkeypatch, caplog):
+    import logging
+
+    def denied(_pid):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(gpulock, "_read_environ", denied)
+    monkeypatch.setattr(gpulock.os, "listdir", lambda _p: ["101", "102", "self"])
+    monkeypatch.setattr(gpulock, "_cmdline", lambda _pid: f"python -m {gpulock.WORKER_MARK} x")
+    monkeypatch.setattr(gpulock, "_ours", lambda _pid, _me: False)
+    with caplog.at_level(logging.WARNING, logger="fukikae.gpulock"):
+        assert gpulock.leftover_jobs(0) == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "101" in warnings[0].getMessage() and "102" in warnings[0].getMessage()

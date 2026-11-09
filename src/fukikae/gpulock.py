@@ -133,12 +133,16 @@ def _ours(pid: int, me: int) -> bool:
     return False
 
 
+_UNREADABLE: list[int] = []  # pids _on_card skipped during the current scan
+
+
 def _on_card(pid: int, index: int) -> bool:
     """Whether ``pid`` can use card ``index``. A process whose environment can't be read
     (another user's) is skipped, with a debug log, rather than taken to be on every card."""
     readable, visible = _cuda_devices(pid)
     if not readable:
         log.debug("leftover scan: cannot read /proc/%d/environ; skipping that process", pid)
+        _UNREADABLE.append(pid)
         return False
     if visible is None:
         return True
@@ -159,6 +163,7 @@ def leftover_jobs(index: int) -> list[tuple[int, str]]:
         pids = sorted(int(p) for p in os.listdir("/proc") if p.isdigit())
     except OSError:
         return out
+    _UNREADABLE.clear()
     for pid in pids:
         cmd = _cmdline(pid)
         if not cmd or not (WORKER_MARK in cmd or ("llama-server" in cmd and LLAMA_MARK in cmd)):
@@ -166,6 +171,13 @@ def leftover_jobs(index: int) -> list[tuple[int, str]]:
         if _ours(pid, me) or not _on_card(pid, index):
             continue
         out.append((pid, cmd))
+    if _UNREADABLE:
+        log.warning(
+            "leftover scan: cannot read the environment of fukikae job(s) %s (another user's?); "
+            "not counted as on GPU %d",
+            ", ".join(map(str, _UNREADABLE)), index,
+        )  # fmt: skip
+        _UNREADABLE.clear()
     return out
 
 
