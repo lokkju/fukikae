@@ -80,13 +80,14 @@ faster-whisper, then the tagger (on the CPU, as the tag stage runs it).
 from __future__ import annotations
 
 import contextlib
+import functools
 import math
 import random
 import shutil
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Concatenate, cast
 
 import numpy as np
 
@@ -375,6 +376,8 @@ class TtsSummary:
     high_wer: list[str] = field(default_factory=list)  # "<episode>:<cue>" over HIGH_WER
     suspect: list[str] = field(default_factory=list)  # "<episode>:<cue> <why>"
     heldout: dict[int, list[list[Any]]] = field(default_factory=dict)  # [episode, start, end]
+    # set when the held-out headline covers only some of the characters rendered
+    headline_note: str = ""
 
 
 def _r(x: float) -> float:
@@ -522,9 +525,13 @@ def summarize(
     headline = _headline(scores, srcs)
     high = [f"{s.episode}:{s.cue_id}" for s in scores if (s.wer or 0.0) > HIGH_WER]
     suspect = [f"{s.episode}:{s.cue_id} {s.suspect}" for s in scores if s.suspect]
+    note = ""
+    covered = int(overall.get("heldout_characters", 0))
+    if headline == "heldout" and covered < len(by_char):
+        note = f"held-out similarity covers {covered} of {len(by_char)} characters"
     return TtsSummary(
         per_character, overall, len(scores), per_card, sources, emotion, headline,
-        high_wer=high, suspect=suspect,
+        high_wer=high, suspect=suspect, headline_note=note,
     )  # fmt: skip
 
 
@@ -567,6 +574,8 @@ def tts_rows(
         "similarity_source": {str(k): v for k, v in summary.similarity_source.items()},
         "similarity_headline": summary.headline,
     }
+    if summary.headline_note:
+        detail["similarity_headline_note"] = summary.headline_note
     if summary.heldout:
         detail["heldout_exemplars"] = {str(k): v for k, v in summary.heldout.items()}
     if summary.high_wer:
@@ -1001,14 +1010,21 @@ def workspace_lock(root: Path) -> Iterator[None]:
         os.close(fd)
 
 
-def evaluate(root: Path, episodes: Sequence[str], **kw: Any) -> EvalResult:
-    """``_evaluate`` under the workspace's eval lock (``workspace_lock``)."""
-    with workspace_lock(root):
-        return _evaluate(root, episodes, **kw)
+def _locked[**P, R](fn: Callable[Concatenate[Path, P], R]) -> Callable[Concatenate[Path, P], R]:
+    """``fn`` run under the workspace's eval lock (``workspace_lock``), its signature kept."""
+
+    @functools.wraps(fn)
+    def run(root: Path, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        with workspace_lock(root):
+            return fn(root, *args, **kwargs)
+
+    return run
 
 
-def _evaluate(
+@_locked
+def evaluate(
     root: Path,
+    /,
     episodes: Sequence[str],
     *,
     backend: str | None = None,
@@ -1400,6 +1416,11 @@ def format_summary(summary: TtsSummary, names: Mapping[int, str], backend: str) 
     o = summary.overall
     if summary.headline:
         lines.append(f"sim is similarity to the {summary.headline} clips")
+    if summary.headline_note:
+        lines.append(
+            f"{summary.headline_note}: the others had no held-out exemplars (the overall "
+            "figure is their mean only)"
+        )
     if "speaker_similarity_heldout" in o:
         lines.append(
             f"held-out exemplars: {o['heldout_clips']:.0f} clips, {o['heldout_seconds']:.1f} s "
