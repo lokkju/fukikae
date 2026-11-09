@@ -30,12 +30,6 @@ What it honours (the class in ``fukikae.backends.tts.cosyvoice3`` declares the s
   ``cross_lingual`` gives the LLM neither (only the flow model sees the prompt), CosyVoice's
   recommendation when the prompt's language differs from the text's. ``auto`` (the default)
   picks ``cross_lingual`` when any reference clip's language differs from the target;
-- ``instruction`` (the translator's delivery direction, at most four words) through CosyVoice's
-  instruct mode, as "Please say a sentence with this delivery: <direction>." after its system
-  prompt. Instruct mode replaces the LLM's prompt with that instruction, so a directed line
-  keeps the speaker only through the flow model, as cross-lingual lines do. CosyVoice's
-  instruction set was trained on a fixed list (dialects, loud, soft, slow, fast, happy, sad,
-  angry); a free-form direction is a request, not a guarantee;
 - no text normalizer: wetext (CosyVoice's default) downloads its grammars from ModelScope,
   unpinned, at every start, so it is not installed and ``load`` refuses one that appears;
   CosyVoice still spells out English numbers with inflect;
@@ -43,9 +37,13 @@ What it honours (the class in ``fukikae.backends.tts.cosyvoice3`` declares the s
   so pitch is kept); ``seed`` (``random``, numpy and torch seeded before each line; 0 when the
   card sets none). Sampling (top-k 25, top-p 0.8, repetition-aware) is the model config's.
 
-There is no emotion audio or emotion vector input, no per-line duration target and no
-continuous emotion strength: ``emotion_strength`` reaches the backend only as the stage's
-gate (0 passes no instruction).
+Every line is neutral: no instruction (CosyVoice's instruct mode was withdrawn under ruling
+CD20: its prompt wording for a free-form direction was unverified, and it replaces the LLM's
+speaker prompt), no emotion audio or vector, no per-line duration target. A request carrying
+an instruction is refused. CosyVoice's own control tokens (``CONTROL_MARKUP``: ``[laughter]``,
+``[breath]``, ``<strong>``, the phoneme tags and the rest of its tokenizer's added tokens) are
+stripped from the text and transcripts by the worker before they reach the model, as the
+``<|...|>`` syntax is for every backend.
 """
 
 from __future__ import annotations
@@ -54,6 +52,8 @@ import hashlib
 import io
 import os
 import random
+import re
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -102,6 +102,41 @@ LANGUAGES = ("en", "zh", "ko", "de", "es", "fr", "it", "ru")
 MODES = ("auto", "zero_shot", "cross_lingual")
 SYSTEM = "You are a helpful assistant."
 END = "<|endofprompt|>"
+# CosyVoice3Tokenizer's added special tokens at the pinned commit outside the <|...|> form the
+# worker strips for every backend (ruling CD20): the event and emphasis tags and the CMU and
+# pinyin phoneme tags, matched exactly (a bracketed word that isn't a token stays).
+_EVENT_TAGS = (
+    "breath", "noise", "laughter", "cough", "clucking", "accent", "quick_breath", "hissing",
+    "sigh", "vocalized-noise", "lipsmack", "mn",
+)  # fmt: skip
+_CMU = (
+    "AA", "AA0", "AA1", "AA2", "AE", "AE0", "AE1", "AE2", "AH", "AH0", "AH1", "AH2", "AO", "AO0",
+    "AO1", "AO2", "AW", "AW0", "AW1", "AW2", "AY", "AY0", "AY1", "AY2", "B", "CH", "D", "DH",
+    "EH", "EH0", "EH1", "EH2", "ER", "ER0", "ER1", "ER2", "EY", "EY0", "EY1", "EY2", "F", "G",
+    "HH", "IH", "IH0", "IH1", "IH2", "IY", "IY0", "IY1", "IY2", "JH", "K", "L", "M", "N", "NG",
+    "OW", "OW0", "OW1", "OW2", "OY", "OY0", "OY1", "OY2", "P", "R", "S", "SH", "T", "TH", "UH",
+    "UH0", "UH1", "UH2", "UW", "UW0", "UW1", "UW2", "V", "W", "Y", "Z", "ZH",
+)  # fmt: skip
+_PINYIN = (
+    "a", "ai", "an", "ang", "ao", "b", "c", "ch", "d", "e", "ei", "en", "eng", "f", "g", "h", "i",
+    "ian", "in", "ing", "iu", "ià", "iàn", "iàng", "iào", "iá", "ián", "iáng", "iáo", "iè", "ié",
+    "iòng", "ióng", "iù", "iú", "iā", "iān", "iāng", "iāo", "iē", "iě", "iōng", "iū", "iǎ", "iǎn",
+    "iǎng", "iǎo", "iǒng", "iǔ", "j", "k", "l", "m", "n", "o", "ong", "ou", "p", "q", "r", "s",
+    "sh", "t", "u", "uang", "ue", "un", "uo", "uà", "uài", "uàn", "uàng", "uá", "uái", "uán",
+    "uáng", "uè", "ué", "uì", "uí", "uò", "uó", "uā", "uāi", "uān", "uāng", "uē", "uě", "uī",
+    "uō", "uǎ", "uǎi", "uǎn", "uǎng", "uǐ", "uǒ", "vè", "w", "x", "y", "z", "zh", "à", "ài", "àn",
+    "àng", "ào", "á", "ái", "án", "áng", "áo", "è", "èi", "èn", "èng", "èr", "é", "éi", "én",
+    "éng", "ér", "ì", "ìn", "ìng", "í", "ín", "íng", "ò", "òng", "òu", "ó", "óng", "óu", "ù",
+    "ùn", "ú", "ún", "ā", "āi", "ān", "āng", "āo", "ē", "ēi", "ēn", "ēng", "ě", "ěi", "ěn", "ěng",
+    "ěr", "ī", "īn", "īng", "ō", "ōng", "ōu", "ū", "ūn", "ǎ", "ǎi", "ǎn", "ǎng", "ǎo", "ǐ", "ǐn",
+    "ǐng", "ǒ", "ǒng", "ǒu", "ǔ", "ǔn", "ǘ", "ǚ", "ǜ",
+)  # fmt: skip
+CONTROL_MARKUP: tuple[str, ...] = (
+    r"</?(?:strong|laughter)>",
+    r"\[(?:"
+    + "|".join(re.escape(t) for t in sorted({*_EVENT_TAGS, *_CMU, *_PINYIN}, key=len, reverse=True))
+    + r")\]",
+)
 
 SETUP = "fukikae backends setup cosyvoice3"
 
@@ -110,11 +145,11 @@ SETUP = "fukikae backends setup cosyvoice3"
 
 
 def tree_digest(root: str) -> str:
-    """sha256 over every file under ``root`` (relative path and content hash, sorted), with
-    ``__pycache__`` left out; a symbolic link anywhere is refused."""
+    """sha256 over every file under ``root`` (relative path and content hash, sorted),
+    bytecode included; a symbolic link anywhere is refused."""
     h = hashlib.sha256()
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        dirnames[:] = sorted(dirnames)
         for d in dirnames:
             if os.path.islink(os.path.join(dirpath, d)):
                 raise RuntimeError(f"{os.path.join(dirpath, d)} is a symbolic link")
@@ -194,10 +229,12 @@ def prompt_plan(refs: list[tuple[str, float, str]]) -> tuple[list[str], str]:
     return clips, " ".join(t for t in texts if t)
 
 
-def instruction_prompt(direction: str) -> str:
-    """CosyVoice 3's instruct prompt for a translator's delivery direction."""
-    words = " ".join(direction.split()).rstrip(".")
-    return f"{SYSTEM} Please say a sentence with this delivery: {words}.{END}"
+def drop_bytecode(root: str) -> None:
+    """Remove every ``__pycache__`` under ``root``: only checked source may be imported."""
+    for dirpath, dirnames, _ in os.walk(root):
+        for d in [d for d in dirnames if d == "__pycache__"]:
+            shutil.rmtree(os.path.join(dirpath, d))
+            dirnames.remove(d)
 
 
 # ---- the worker side -------------------------------------------------------------------------
@@ -219,13 +256,14 @@ def _snapshot() -> str:
 
 def fetch() -> None:
     """The setup step: the pinned code into the environment, then the model snapshot."""
-    import shutil
     import urllib.request
 
     from huggingface_hub import snapshot_download
 
     for name, (repo, commit, package, digest) in CODE.items():
         root = code_root(name)
+        if os.path.isdir(root):
+            drop_bytecode(root)
         if os.path.isdir(root) and _digest_or_none(os.path.join(root, package)) == digest:
             print(f"{name}@{commit[:12]} already in place", file=sys.stderr, flush=True)
             continue
@@ -240,6 +278,7 @@ def fetch() -> None:
         tmp = tempfile.mkdtemp(prefix=f".{name}-", dir=parent)
         try:
             extract_package(data, package, tmp)
+            drop_bytecode(tmp)
             found = tree_digest(os.path.join(tmp, package))
             if found != digest:
                 raise RuntimeError(
@@ -373,11 +412,12 @@ class Impl:
         refs = list(voice.get("references", []))
         if not refs:
             raise ValueError("CosyVoice 3 needs a clone card with reference clips")
+        if req.get("instruction") or req.get("emotion_audio") or req.get("emotion_vector"):
+            raise ValueError("CosyVoice 3 takes no instruction, emotion audio or emotion vector")
         mode = resolve_mode(self.mode, [r.get("language") or "" for r in refs], language)
         if mode == "zero_shot" and not all((r.get("transcript") or "").strip() for r in refs):
             raise ValueError("zero_shot mode needs a transcript for every reference clip")
         spk = self._speaker(refs)
-        instruction = req.get("instruction")
         speed = float(voice.get("rate") or 1.0)
         seed = int(voice.get("seed") or 0)
         random.seed(seed)
@@ -388,13 +428,7 @@ class Impl:
         fe = self.cv.frontend
         chunks = []
         for seg in fe.text_normalize(req["text"], split=True, text_frontend=True):
-            if instruction:
-                mi = fe.frontend_zero_shot(seg, "", "", SAMPLE_RATE, spk)
-                tok, tok_len = fe._extract_text_token(instruction_prompt(instruction))
-                mi["prompt_text"], mi["prompt_text_len"] = tok, tok_len
-                mi.pop("llm_prompt_speech_token", None)
-                mi.pop("llm_prompt_speech_token_len", None)
-            elif mode == "cross_lingual":
+            if mode == "cross_lingual":
                 mi = fe.frontend_cross_lingual(f"{SYSTEM}{END}{seg}", "", SAMPLE_RATE, spk)
             else:
                 mi = fe.frontend_zero_shot(seg, "", "", SAMPLE_RATE, spk)

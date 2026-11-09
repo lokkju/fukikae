@@ -16,8 +16,8 @@ from fukikae.config import ConfigError
 
 class CosyVoice3Synthesizer(WorkerSynthesizer):
     """Fun-CosyVoice3 0.5B (``FunAudioLLM/Fun-CosyVoice3-0.5B-2512``): zero-shot or
-    cross-lingual clone from the card's reference clips, with the translator's delivery
-    direction through instruct mode (``impl_cosyvoice3`` has what it honours and why)."""
+    cross-lingual clone from the card's reference clips, every line neutral
+    (``impl_cosyvoice3`` has what it honours and why)."""
 
     name: ClassVar[str] = "cosyvoice3"
     extra: ClassVar[str] = "cosyvoice3"
@@ -26,8 +26,10 @@ class CosyVoice3Synthesizer(WorkerSynthesizer):
     # probe, fp32), CUDA context and allocator included.
     vram_mb: ClassVar[int] = 4500
     sources: ClassVar[frozenset[str]] = frozenset({"clone"})
-    voice_keys: ClassVar[frozenset[str]] = frozenset({"seed", "rate", "emotion_strength"})
-    capabilities: ClassVar[frozenset[str]] = frozenset({"instruction"})
+    voice_keys: ClassVar[frozenset[str]] = frozenset({"seed", "rate"})
+    # Ruling CD20: no delivery capability without A/B evidence. Instruct mode was withdrawn:
+    # its prompt wording was unverified, and it drops the LLM's speaker prompt (Task 9b fix 1).
+    capabilities: ClassVar[frozenset[str]] = frozenset()
     sample_rate: ClassVar[int] = _impl.SAMPLE_RATE
     # Characters per second after silence trimming (ruling CD7), from Task 9b's eval tts clone
     # renders (cross-lingual from Japanese clips): median per render 15.0 on Fairy Tail E11 (40
