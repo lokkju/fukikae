@@ -9,12 +9,15 @@ the history row's note.
 
 Before the stage's key is computed (``prepare``, called by the job runner) and again in
 ``run``, each character with a cue to speak and no card for the target language gets
-one (``cards.auto.ensure_assignments``: a gender-matched stock voice of the ``[tts]`` backend,
-``by = "auto"``, unlocked; an existing card is never replaced). Cues with no character (extras,
-and clusters the characters stage left for review) speak with a stock voice from the extras
-pools, one per label, fixed by first appearance in the episode. Every card is then checked (it
-exists, its backend can honor it at the model revision it names, its sidecars are present), so a
-broken card stops the stage, naming the character, before any model loads.
+one (``cards.auto.ensure_assignments``, ``by = "auto"``, unlocked; an existing card is never
+replaced): a clone card of ``[tts] clone_backend`` (IndexTTS2 in every profile, D24) from the
+character's reference turns in the workspace's episodes (``cards.auto.workspace_cloning``), or,
+with under 6 s of clean speech or no ``clone_backend``, a gender-matched stock voice of the
+``[tts]`` backend (the F0 estimate skips theme songs and tagged singing). Cues with no
+character (extras, and clusters the characters stage left for review) speak with a stock voice
+from the extras pools, one per label, fixed by first appearance in the episode. Every card is
+then checked (it exists, its backend can honor it at the model revision it names, its sidecars
+are present), so a broken card stops the stage, naming the character, before any model loads.
 
 Renders are cached per cue in ``<workspace>/.fukikae/tts-cache/<key>.wav`` and hard-linked (or
 copied) into ``07-tts``. The key (``cue_key``) hashes the card id, the text, what the backend
@@ -84,7 +87,13 @@ from fukikae.backends.base import Synthesizer
 from fukikae.backends.identity import identity_key
 from fukikae.backends.tts import worker
 from fukikae.backends.tts.remote import WorkerSynthesizer
-from fukikae.cards.auto import character_spans, ensure_assignments, extras_voices
+from fukikae.cards.auto import (
+    character_spans,
+    clone_backend,
+    ensure_assignments,
+    extras_voices,
+    workspace_cloning,
+)
 from fukikae.cards.card import Card, CardError, validate_for_backend
 from fukikae.cards.stock import check_stock_voice, revision, stock_card
 from fukikae.cards.store import CardStore
@@ -107,7 +116,7 @@ _sleep = time.sleep
 
 # Bump when the stage changes what it renders for the same inputs.
 RENDER_VERSION = 2  # 2: leading and trailing silence trimmed (ruling CD7)
-STAGE_KEYS = ("device", "gender")
+STAGE_KEYS = ("device", "gender", "clone_backend")
 # Silence trimming: 10 ms frames quieter than TRIM_DB below the loudest frame are silence;
 # TRIM_KEEP_S of it is kept at each end.
 TRIM_FRAME_S = 0.010
@@ -700,6 +709,17 @@ def tag_events(work: Path) -> list[tuple[float, float, str]]:
     return [(e.start, e.end, e.label) for e in read_json(path, Tags).events]
 
 
+def _song_spans(ep: Episode, cfg: Config) -> list[tuple[float, float]]:
+    """The episode's theme songs and tagged singing (``select.reference_exclusions``)."""
+    from fukikae.cards.select import reference_exclusions
+    from fukikae.models import Tags
+    from fukikae.stages.mix import mix_settings
+
+    tags_path = ep.work / "04b-tag" / "tags.json"
+    tags = read_json(tags_path, Tags) if tags_path.exists() else None
+    return reference_exclusions(ep.work, tags, mix_settings(cfg).songs)
+
+
 class TtsStage:
     name = "tts"
 
@@ -777,6 +797,7 @@ class TtsStage:
                     backends.add(store.get(card).voice.backend)
         return {
             "backend": bc.backend,
+            "clone_backend": clone_backend(cfg),
             "options": bc.options,
             "identity": {b: identity_key("tts", backend_config(cfg, b)) for b in sorted(backends)},
             "max_speedup": max_speedup(cfg),
@@ -960,8 +981,25 @@ class TtsStage:
         spans = character_spans(read_json(asg_path, Assignments)) if asg_path.exists() else {}
         with Registry(Workspace(ep.workspace_root).registry_path) as reg:
             names = {c.id: c.name for c in reg.characters() if c.name}
+            todo = [
+                cid
+                for cid in speaking
+                if (a := reg.card_for(cid, cfg.target_language)) is None or a.card_id is None
+            ]
+            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if todo else None
+            if todo:  # the gender estimate never reads a theme song or tagged singing
+                exclude = _song_spans(ep, cfg)
+                spans = {
+                    cid: [(s, e) for s, e in sp if not any(a < e and s < b for a, b in exclude)]
+                    for cid, sp in spans.items()
+                }
             report = ensure_assignments(
-                reg, store, cfg, {cid: spans.get(cid, []) for cid in speaking}, vocals
+                reg,
+                store,
+                cfg,
+                {cid: spans.get(cid, []) for cid in speaking},
+                vocals,
+                cloning=cloning,
             )
             cards: dict[int, str] = {}
             for cid in speaking:
