@@ -176,3 +176,23 @@ def test_lock_dir_falls_back_when_no_runtime_dir(monkeypatch, tmp_path):
     assert d == tmp_path / f"fukikae-{os.getuid()}"
     assert d.is_dir() and (d.stat().st_mode & 0o777) == 0o700
     assert gpulock.lock_path(3) == d / "fukikae-gpu3.lock"
+
+
+def test_a_process_with_unreadable_environ_is_not_on_every_card(monkeypatch, caplog):
+    """Another user's worker hides its environment; it is skipped (logged), not taken as
+    being on every card. A readable environment without CUDA_VISIBLE_DEVICES sees them all."""
+    import logging
+
+    def denied(_pid):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(gpulock, "_read_environ", denied)
+    with caplog.at_level(logging.DEBUG, logger="fukikae.gpulock"):
+        assert gpulock._on_card(4242, 0) is False
+    assert any("4242" in r.getMessage() for r in caplog.records)
+    monkeypatch.setattr(gpulock, "_read_environ", lambda _pid: [b"PATH=/bin"])
+    assert gpulock._on_card(4242, 0) is True
+    monkeypatch.setattr(gpulock, "_read_environ", lambda _pid: [b"CUDA_VISIBLE_DEVICES=1"])
+    assert gpulock._on_card(4242, 0) is False and gpulock._on_card(4242, 1) is True
+    monkeypatch.setattr(gpulock, "_read_environ", lambda _pid: [b"CUDA_VISIBLE_DEVICES="])
+    assert gpulock._on_card(4242, 0) is False
