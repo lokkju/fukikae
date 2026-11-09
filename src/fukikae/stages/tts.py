@@ -73,7 +73,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import numpy as np
 
@@ -244,6 +244,12 @@ class RenderJob:
     slot: float
     passed: dict[str, Any]
     vocals: Path | None = None  # the emotion_audio source
+
+
+class SynthHandle(Protocol):
+    """What ``render_cue`` renders with: a backend created and loaded on first ``get``."""
+
+    def get(self) -> Synthesizer: ...
 
 
 class LazySynth:
@@ -512,7 +518,7 @@ def prepare_cue(
 
 def render_cue(
     job: RenderJob,
-    synth: LazySynth,
+    synth: SynthHandle,
     dest: Path,
     store: CardStore,
     *,
