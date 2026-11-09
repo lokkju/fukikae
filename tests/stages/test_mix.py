@@ -171,8 +171,13 @@ def test_mix_protects_songs_and_laughter_and_muxes(ep):
         _band(seg(6.05, 6.45), rate, VOICE_HZ) > 0.2 and _band(seg(6.05, 6.45), rate, DUB_HZ) > 0.2
     )
 
-    assert report.loudness["final"] == pytest.approx(report.loudness["original"], abs=1.0)
-    assert report.normalization in ("linear", "dynamic")
+    loud = report.loudness
+    assert set(loud) == {"original", "premix", "final"}
+    assert set(loud["final"]) == {"i", "lra", "tp"}
+    assert loud["final"]["i"] == pytest.approx(loud["original"]["i"], abs=1.0)
+    assert loud["final"]["tp"] <= -1.0
+    assert report.gain_db == pytest.approx(loud["original"]["i"] - loud["premix"]["i"], abs=0.05)
+    assert report.normalization.startswith("linear")
 
     ass = (out / "dub.en.ass").read_text(encoding="utf-8")
     lines = [ln for ln in ass.splitlines() if ln.startswith("Dialogue:")]
@@ -191,7 +196,10 @@ def test_mix_protects_songs_and_laughter_and_muxes(ep):
     )["streams"]
     audio = [s for s in streams if s["codec_type"] == "audio"]
     assert [a["tags"]["language"] for a in audio] == ["eng", "jpn"]
-    assert audio[0]["disposition"]["default"] == 1
+    assert [a["disposition"]["default"] for a in audio] == [1, 0]
+    subs = [s for s in streams if s["codec_type"] == "subtitle"]
+    assert [s["disposition"]["default"] for s in subs] == [1, 0]
+    assert [s["disposition"]["forced"] for s in subs] == [0, 0]
     assert [s["codec_name"] for s in streams if s["codec_type"] == "subtitle"] == ["ass", "subrip"]
 
 
@@ -229,6 +237,7 @@ def test_mix_key_holds_the_settings(ep):
     assert key["settings"]["duck_db"] is None and key["settings"]["protect_bgm"] is False
     assert key["settings"]["detect_songs"] is True
     assert key["target_language"] == "en" and "ffmpeg" in key and "version" in key
+    assert key["limiter_ceiling_db"] == -1.0
     assert "songs" in key  # the detector's constants
 
 

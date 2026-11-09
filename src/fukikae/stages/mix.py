@@ -37,7 +37,7 @@ from fukikae.mix import (
     MixSettings,
     Span,
     build_dub,
-    measure_loudness,
+    loudness_stats,
     mux,
     normalize,
     removal_windows,
@@ -143,7 +143,7 @@ class MixStage:
             "songs": songs.detector_constants(),
             "target_language": cfg.target_language,
             "bitrate": DUB_BITRATE,
-            "true_peak": TRUE_PEAK_DB,
+            "limiter_ceiling_db": TRUE_PEAK_DB,
             "ffmpeg": media.ffmpeg_version(),
             "version": MIX_VERSION,
         }
@@ -215,12 +215,12 @@ class MixStage:
         premix = out_dir / f".premix.{target}.wav"
         try:
             stats = build_dub(background, vocals, placed, windows, s, premix)
-            original = measure_loudness(ep.work / "00-extract" / "audio.wav")
-            before = measure_loudness(premix)
-            result = normalize(premix, original, dub_wav)
+            original = loudness_stats(ep.work / "00-extract" / "audio.wav")
+            result = normalize(premix, original["i"], dub_wav, TRUE_PEAK_DB)
+            before = result["source"]
         finally:
             premix.unlink(missing_ok=True)
-        after = measure_loudness(dub_wav)
+        after = loudness_stats(dub_wav)
         write_ass(spoken, ass)
         mux(ep.source, dub_wav, ass, target, mkv)
         write_json(
@@ -234,11 +234,8 @@ class MixStage:
                 placed=len(placed),
                 removed_seconds=round(sum(b - a for a, b in union(windows)), 3),
                 dub_gain_db=None if stats.dub_gain_db is None else round(stats.dub_gain_db, 2),
-                loudness={
-                    "original": round(original, 2),
-                    "premix": round(before, 2),
-                    "final": round(after, 2),
-                },
-                normalization=str(result.get("normalization_type", "")),
+                loudness={"original": original, "premix": before, "final": after},
+                gain_db=result["gain_db"],
+                normalization=f"linear gain, true-peak limiter at {TRUE_PEAK_DB} dBTP",
             ),
         )

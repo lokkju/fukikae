@@ -5,13 +5,12 @@ with the original vocals removed (or ducked) inside removal windows and kept eve
 laughs, screams, songs and lines nobody dubbed still sound like the original. The stage decides
 the windows (``removal_windows``): where a dubbed cue plays, minus laughter spans (both audible)
 and song spans (the original vocals untouched). ``normalize`` then matches the mix's EBU R128
-integrated loudness to the original's (ffmpeg ``loudnorm``, two passes, linear when it can be),
+integrated loudness to the original's (one linear gain, then a true-peak limiter at -1 dBTP),
 ``write_ass`` writes the dub's lines with their speakers, and ``mux`` puts it all in one mkv.
 """
 
 from __future__ import annotations
 
-import json
 import math
 import re
 from collections.abc import Iterable, Sequence
@@ -217,56 +216,62 @@ def build_dub(
     return MixStats(n / rate, gain_db, float(np.abs(bed).max()) if n else 0.0)
 
 
-# -- loudness ------------------------------------------------------------------------------
+# -- loudness ---------------------------------------------------------------------------
+
+# The limiter runs at this multiple of the sample rate, so it catches inter-sample (true)
+# peaks, not only sample peaks.
+LIMITER_OVERSAMPLE = 4
+
+_EBU = {
+    "i": re.compile(r"Integrated loudness:\s*\n\s*I:\s*(-?[\d.]+|-inf)\s*LUFS"),
+    "lra": re.compile(r"Loudness range:\s*\n\s*LRA:\s*(-?[\d.]+)\s*LU"),
+    "tp": re.compile(r"True peak:\s*\n\s*Peak:\s*(-?[\d.]+|-inf)\s*dBFS"),
+}
 
 
-def _loudnorm_json(stderr: str) -> dict[str, Any]:
-    start, end = stderr.rfind("{"), stderr.rfind("}")
-    if start < 0 or end < start:
-        raise media.MediaError(f"loudnorm printed no measurement:\n{stderr[-2000:]}")
-    return json.loads(stderr[start : end + 1])
-
-
-def _measure(path: Path, target: float = -23.0, lra: float = 7.0) -> dict[str, Any]:
+def loudness_stats(path: Path) -> dict[str, float]:
+    """EBU R128 measurements of ``path`` (ffmpeg ``ebur128``): integrated loudness ``i``
+    (LUFS, ``-inf`` for silence), loudness range ``lra`` (LU) and true peak ``tp`` (dBTP)."""
     stderr = media.run_ffmpeg_log(
-        ["-i", str(path), "-af",
-         f"loudnorm=I={target}:TP={TRUE_PEAK_DB}:LRA={lra}:print_format=json", "-f", "null", "-"]
-    )  # fmt: skip
-    return _loudnorm_json(stderr)
+        ["-i", str(path), "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"]
+    )
+    summary = stderr[stderr.rfind("Summary:") :]
+    out: dict[str, float] = {}
+    for key, pattern in _EBU.items():
+        m = pattern.search(summary)
+        if m is None:
+            raise media.MediaError(f"ebur128 printed no {key} for {path}:\n{stderr[-2000:]}")
+        out[key] = float(m.group(1))
+    return out
 
 
 def measure_loudness(path: Path) -> float:
     """EBU R128 integrated loudness of ``path`` in LUFS (``-inf`` for silence)."""
-    return float(_measure(path)["input_i"])
+    return loudness_stats(path)["i"]
 
 
-def normalize(src: Path, target_lufs: float, out: Path) -> dict[str, Any]:
+def normalize(
+    src: Path, target_lufs: float, out: Path, ceiling_db: float = TRUE_PEAK_DB
+) -> dict[str, Any]:
     """Write ``src`` to ``out`` (16-bit wav at the source's rate) at ``target_lufs`` integrated
-    loudness, true peak at most -1 dBTP: ffmpeg ``loudnorm`` in two passes, linear (one gain)
-    unless the gain would push the true peak over, when loudnorm falls back to dynamic. Returns
-    the second pass's report (``normalization_type``, ``output_i``, ...)."""
+    loudness with one linear gain, so the loudness range is unchanged, then a true-peak limiter
+    at ``ceiling_db`` dBTP (ffmpeg ``alimiter`` at ``LIMITER_OVERSAMPLE`` times the rate, no
+    auto level), which touches only the peaks the gain pushed over (ruling CD10). Returns the
+    gain and the source's measurements."""
     from scipy.io import wavfile
 
     rate, _ = wavfile.read(src, mmap=True)
-    first = _measure(src, target_lufs)
-    measured = float(first["input_i"])
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if not math.isfinite(measured):
-        with atomic_path(out) as tmp:
-            media.run_ffmpeg(["-i", str(src), "-c:a", "pcm_s16le", str(tmp)])
-        return {"normalization_type": "none (silence)", **first}
-    lra = min(50.0, max(7.0, math.ceil(float(first["input_lra"])) + 1.0))
-    spec = (
-        f"loudnorm=I={target_lufs}:TP={TRUE_PEAK_DB}:LRA={lra}"
-        f":measured_I={first['input_i']}:measured_TP={first['input_tp']}"
-        f":measured_LRA={first['input_lra']}:measured_thresh={first['input_thresh']}"
-        f":offset={first['target_offset']}:linear=true:print_format=json"
+    before = loudness_stats(src)
+    gain = target_lufs - before["i"] if math.isfinite(before["i"]) else 0.0
+    limit = 10 ** (ceiling_db / 20)
+    chain = (
+        f"volume={gain:.4f}dB,aresample={rate * LIMITER_OVERSAMPLE},"
+        f"alimiter=limit={limit:.6f}:level=0:attack=1:release=50:asc=0,aresample={rate}"
     )
+    out.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(out) as tmp:
-        stderr = media.run_ffmpeg_log(
-            ["-i", str(src), "-af", spec, "-ar", str(rate), "-c:a", "pcm_s16le", str(tmp)]
-        )
-    return _loudnorm_json(stderr)
+        media.run_ffmpeg(["-i", str(src), "-af", chain, "-c:a", "pcm_s16le", str(tmp)])
+    return {"gain_db": round(gain, 4), "ceiling_db": ceiling_db, "source": before}
 
 
 # -- subtitles -----------------------------------------------------------------------------
@@ -333,9 +338,9 @@ def write_ass(cues: Sequence[DubCue], out: Path) -> None:
 def mux(source: Path, dub: Path, ass: Path, language: str, out: Path) -> None:
     """``out``: the source's video copied, the dub (AAC) as the first and default audio track
     tagged ``language``, every original audio track after it (copied, not default), the dub's
-    ASS as the first subtitle track, then every original subtitle track (copied; mov_text
-    becomes SRT; none default, forced flags kept), and the source's attachments (fonts),
-    chapters and metadata."""
+    ASS as the first and default subtitle track, then every original subtitle track (copied;
+    mov_text becomes SRT; neither default nor forced, ruling CD10), and the source's
+    attachments (fonts), chapters and metadata."""
     probe = media.probe(source)
     lang = media._norm_lang(language) or language  # noqa: SLF001
     args = [
@@ -348,12 +353,12 @@ def mux(source: Path, dub: Path, ass: Path, language: str, out: Path) -> None:
         "-disposition:a:0", "default",
         "-metadata:s:s:0", f"language={lang}",
         "-metadata:s:s:0", f"title=fukikae dub ({language}, speakers)",
-        "-disposition:s:0", "0",
+        "-disposition:s:0", "default",
     ]  # fmt: skip
     for i, _ in enumerate(probe.audio, start=1):
         args += [f"-disposition:a:{i}", "0"]
     for i, t in enumerate(probe.subtitles, start=1):
-        args += [f"-disposition:s:{i}", "forced" if t.forced else "0"]
+        args += [f"-disposition:s:{i}", "0"]
         if t.codec == "mov_text":
             args += [f"-c:s:{i}", "srt"]
     out.parent.mkdir(parents=True, exist_ok=True)

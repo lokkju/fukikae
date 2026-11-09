@@ -10,6 +10,7 @@ from scipy.io import wavfile
 from fukikae.mix import (
     MixSettings,
     build_dub,
+    loudness_stats,
     measure_loudness,
     mux,
     normalize,
@@ -227,18 +228,39 @@ def _noise(seconds: float, amp: float, rate: int = 44100) -> np.ndarray:
     return amp * rng.standard_normal(round(seconds * rate)).clip(-3, 3) / 3
 
 
+def _dynamic(seconds: float, rate: int = 44100) -> np.ndarray:
+    """Noise alternating loud and quiet every 3 s (a loudness range of several LU), with
+    single-sample spikes every 0.5 s that a gain up will push over the ceiling."""
+    rng = np.random.default_rng(2)
+    n = round(seconds * rate)
+    t = np.arange(n) / rate
+    level = np.where((t // 3) % 2 == 0, 0.04, 0.006)
+    x = level * rng.standard_normal(n).clip(-3, 3) / 3
+    x[:: rate // 2] = 0.15
+    return x
+
+
 @pytest.mark.ffmpeg
-def test_normalize_matches_a_target_loudness(tmp_path):
-    src = _stereo(tmp_path / "a.wav", _noise(6, 0.05), 44100)
-    before = measure_loudness(src)
+def test_normalize_is_a_linear_gain_with_a_true_peak_ceiling(tmp_path):
+    src = _stereo(tmp_path / "a.wav", _dynamic(30.0), 44100)
+    before = loudness_stats(src)
     out = tmp_path / "b.wav"
-    result = normalize(src, -20.0, out)
-    after = measure_loudness(out)
-    assert before < -25
-    assert after == pytest.approx(-20.0, abs=0.5)
-    assert result["normalization_type"] in ("linear", "dynamic")
+    result = normalize(src, -16.0, out)
+    after = loudness_stats(out)
+    assert before["i"] < -25 and before["lra"] > 3
+    assert result["gain_db"] == pytest.approx(-16.0 - before["i"], abs=0.05)
+    assert after["i"] == pytest.approx(-16.0, abs=0.5)
+    assert after["lra"] == pytest.approx(before["lra"], abs=0.3)  # linear: range kept
+    assert after["tp"] <= -1.0  # the limiter's ceiling
+    assert before["tp"] + result["gain_db"] > -1.0  # without it, the spikes would pass
     rate, _ = wavfile.read(out)
     assert rate == 44100
+
+
+@pytest.mark.ffmpeg
+def test_measure_loudness_reads_integrated_loudness(tmp_path):
+    src = _stereo(tmp_path / "a.wav", _noise(6, 0.05), 44100)
+    assert measure_loudness(src) == pytest.approx(loudness_stats(src)["i"])
 
 
 def _probe(path: Path) -> list[dict]:
@@ -263,7 +285,7 @@ def source_mkv(tmp_path):
             "-map", "0:v", "-map", "1:a", "-map", "2:s",
             "-c:v", "mpeg4", "-c:a", "aac", "-c:s", "srt",
             "-metadata:s:a:0", "language=jpn", "-metadata:s:s:0", "language=eng",
-            "-disposition:a:0", "default", "-disposition:s:0", "default",
+            "-disposition:a:0", "default", "-disposition:s:0", "default+forced",
             str(made),
         ],
         check=True,
@@ -288,4 +310,7 @@ def test_mux_keeps_original_tracks(tmp_path, source_mkv):
     assert audio[1]["disposition"]["default"] == 0
     assert [s["codec_name"] for s in subs] == ["ass", "subrip"]
     assert [s["tags"]["language"] for s in subs] == ["eng", "eng"]
-    assert all(s["disposition"]["default"] == 0 for s in subs)
+    # The dub's speaker-named track is the default; the originals are kept, neither
+    # default nor forced (ruling CD10).
+    assert [s["disposition"]["default"] for s in subs] == [1, 0]
+    assert [s["disposition"]["forced"] for s in subs] == [0, 0]
