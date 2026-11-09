@@ -1,10 +1,14 @@
 """ffmpeg/ffprobe wrappers. Always argument lists, never a shell string."""
 
 import json
+import logging
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 class MediaError(Exception):
@@ -28,12 +32,15 @@ class SubTrack:
     language: str | None
     title: str | None
     forced: bool
+    cues: int | None = None  # the container's NUMBER_OF_FRAMES statistics tag, when present
+    hearing_impaired: bool = False
 
 
 @dataclass(frozen=True)
 class ProbeResult:
     audio: list[AudioTrack] = field(default_factory=list)
     subtitles: list[SubTrack] = field(default_factory=list)
+    duration: float | None = None  # seconds
 
 
 _ISO1_TO_3 = {
@@ -73,15 +80,32 @@ def probe(path: Path) -> ProbeResult:
         [
             "ffprobe", "-v", "error",
             "-show_entries",
-            "stream=index,codec_type,codec_name,channels:stream_tags=language,title"
-            ":stream_disposition=default,forced",
+            "format=duration"
+            ":stream=index,codec_type,codec_name,channels:stream_tags"
+            ":stream_disposition=default,forced,hearing_impaired",
             "-of", "json",
             str(Path(path).resolve()),
         ]
     )  # fmt: skip
+    return parse_probe(json.loads(proc.stdout))
+
+
+def _count(tags: dict[str, Any]) -> int | None:
+    """The NUMBER_OF_FRAMES statistics tag (mkvmerge writes it, maybe with a language suffix)."""
+    for key, value in tags.items():
+        if key.upper().split("-", 1)[0] == "NUMBER_OF_FRAMES":
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def parse_probe(doc: dict[str, Any]) -> ProbeResult:
+    """ffprobe's JSON (format duration, streams with tags and dispositions) as a ProbeResult."""
     audio: list[AudioTrack] = []
     subs: list[SubTrack] = []
-    for s in json.loads(proc.stdout).get("streams", []):
+    for s in doc.get("streams", []):
         tags = s.get("tags") or {}
         disp = s.get("disposition") or {}
         if s.get("codec_type") == "audio":
@@ -103,9 +127,16 @@ def probe(path: Path) -> ProbeResult:
                     tags.get("language"),
                     tags.get("title"),
                     bool(disp.get("forced")),
+                    cues=_count(tags),
+                    hearing_impaired=bool(disp.get("hearing_impaired")),
                 )  # fmt: skip
             )
-    return ProbeResult(audio=audio, subtitles=subs)
+    raw = (doc.get("format") or {}).get("duration")
+    try:
+        duration: float | None = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    return ProbeResult(audio=audio, subtitles=subs, duration=duration)
 
 
 def choose_audio_track(
@@ -183,9 +214,9 @@ def find_target_subtitles(
     """Subtitles in ``language`` for the subtitle-first path, as (file, None) or (None, track),
     or (None, None) when there are none. In order: ``[subs] file`` (``~`` expanded, relative to
     the source's folder), ``[subs] track`` (a stream index), a sidecar ``<stem>.<lang>.<ext>``
-    (two- or three-letter code; ass, ssa, srt, vtt), then the first non-forced text track of
-    the language whose title doesn't say forced. A configured file or track that isn't there,
-    or names an image track, is a MediaError."""
+    (two- or three-letter code; ass, ssa, srt, vtt), then the embedded dialogue track of the
+    language (``dialogue_track``, ruling CD25: never a forced or signs-and-songs track). A
+    configured file or track that isn't there, or names an image track, is a MediaError."""
     source = Path(source)
     file = configured.get("file")
     if file:
@@ -216,15 +247,65 @@ def find_target_subtitles(
             side = source.with_name(f"{source.stem}.{code}{suffix}")
             if side.is_file():
                 return side, None
-    for t in probe_result.subtitles:
-        if (
-            _norm_lang(t.language) == want
-            and not t.forced
-            and "forced" not in (t.title or "").casefold()
-            and _text_track(t)
+    return None, dialogue_track(probe_result, want)
+
+
+# Ruling CD25: the subtitle path reads dialogue subtitles. A track whose title names signs,
+# songs or forced is never one; a track with fewer than DIALOGUE_MIN_PER_MINUTE cues a minute,
+# or under DIALOGUE_SHARE of the densest track of the language, is signs-and-songs-sized; a
+# forced flag is believed unless the track is dialogue-sized by both measures (FT E11's only
+# English track is flagged forced and carries every line), and a flagged track of unknown size
+# is skipped. Among dialogue tracks a plain one wins over closed captions (CC, SDH, or the
+# hearing_impaired disposition: sound descriptions), then an unflagged one, then stream order.
+NOT_DIALOGUE_TITLE = re.compile(r"\b(signs?|songs?|forced)\b", re.IGNORECASE)
+CAPTIONS_TITLE = re.compile(r"\b(cc|sdh)\b", re.IGNORECASE)
+DIALOGUE_MIN_PER_MINUTE = 3.0
+DIALOGUE_SHARE = 0.4
+
+
+def _per_minute(track: SubTrack, duration: float | None) -> float | None:
+    if track.cues is None or not duration or duration <= 0:
+        return None
+    return track.cues / (duration / 60.0)
+
+
+def dialogue_track(probe_result: ProbeResult, language: str | None) -> SubTrack | None:
+    """The embedded text track of ``language`` (ISO 639-2) that carries the dialogue (ruling
+    CD25), or None when there is none."""
+    tracks = [
+        t for t in probe_result.subtitles if _norm_lang(t.language) == language and _text_track(t)
+    ]
+    rates = {t.index: _per_minute(t, probe_result.duration) for t in tracks}
+    known = [r for r in rates.values() if r is not None]
+    densest = max(known, default=0.0)
+    keep: list[SubTrack] = []
+    for t in tracks:
+        rate = rates[t.index]
+        why = None
+        if NOT_DIALOGUE_TITLE.search(t.title or ""):
+            why = f"its title {t.title!r} says it is not the dialogue"
+        elif rate is not None and (
+            rate < DIALOGUE_MIN_PER_MINUTE or rate < DIALOGUE_SHARE * densest
         ):
-            return None, t
-    return None, None
+            why = f"{t.cues} cues ({rate:.1f} a minute) is too few for dialogue"
+        elif t.forced and rate is None:
+            why = "it is flagged forced and its cue count is unknown"
+        if why is not None:
+            log.info("subtitle track %d (%s): skipped, %s", t.index, t.language, why)
+            continue
+        if t.forced:
+            log.info(
+                "subtitle track %d (%s): flagged forced, but %d cues (%.1f a minute) is "
+                "dialogue, so it counts as a dialogue track", t.index, t.language, t.cues,
+                rate,
+            )  # fmt: skip
+        keep.append(t)
+
+    def captions(t: SubTrack) -> bool:
+        return t.hearing_impaired or bool(CAPTIONS_TITLE.search(t.title or ""))
+
+    keep.sort(key=lambda t: (captions(t), t.forced, tracks.index(t)))
+    return keep[0] if keep else None
 
 
 _FFMPEG_VERSION: str | None = None
