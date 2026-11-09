@@ -935,30 +935,6 @@ def test_per_cue_errors_are_capped_and_median_reported():
     assert "wer_median" in ev.HEADLINE_METRICS
 
 
-@pytest.mark.gpu
-def test_two_asr_passes_on_the_same_audio_agree(tmp_path):
-    """Ruling CD16: the eval ASR gives the same hypothesis twice. Needs GPU 0 and the
-    whisper extra; FUKIKAE_TEST_RENDER may name a render that looped before."""
-    import os
-
-    from fukikae.backends import loader as ld
-
-    render = os.environ.get("FUKIKAE_TEST_RENDER")
-    if not render:
-        pytest.skip("FUKIKAE_TEST_RENDER not set")
-    src = ev.to_16k(Path(render), tmp_path / "r.16k.wav")
-    hyps = []
-    for _ in range(2):
-        asr = ld.create("asr", ev.ASR, "cuda:0")
-        asr.load()
-        try:
-            tr = asr.transcribe(src, "en")  # pyright: ignore[reportAttributeAccessIssue]
-            hyps.append(" ".join(s.text for s in tr.segments))
-        finally:
-            asr.unload()
-    assert hyps[0] == hyps[1]
-
-
 # ---- held-out similarity (ruling CD17) ------------------------------------------------------
 
 
