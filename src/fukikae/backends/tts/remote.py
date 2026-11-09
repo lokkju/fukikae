@@ -274,7 +274,9 @@ class WorkerSynthesizer(Synthesizer):
         """Set the worker environment up: ``uv sync --locked`` into ``.venvs/<extra>``, record
         the lock's hash, then (``fetch``) run the worker's ``--fetch`` step online."""
         inst = cls({}, "cpu")
-        env = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(inst.venv())}
+        # fukikae's own venv and its frozen-sync setting are not the worker's
+        env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_FROZEN")}
+        env["UV_PROJECT_ENVIRONMENT"] = str(inst.venv())
         log.info("syncing %s from %s", inst.venv(), inst.project_dir() / "uv.lock")
         run(["uv", "sync", "--locked", "--directory", str(inst.project_dir())], env=env, check=True)
         record_lock(inst.project_dir(), inst.venv())
