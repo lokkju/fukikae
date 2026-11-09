@@ -90,6 +90,8 @@ kokoro = "fukikae.backends.tts.kokoro:KokoroSynthesizer"
 indextts2 = "fukikae.backends.tts.indextts2:IndexTts2Synthesizer"
 # runs in its own environment, workers/cosyvoice3 (README, "Cloning backends")
 cosyvoice3 = "fukikae.backends.tts.cosyvoice3:CosyVoice3Synthesizer"
+# runs in its own environment, workers/qwen3tts (README, "Cloning backends")
+qwen3_tts = "fukikae.backends.tts.qwen3_tts:Qwen3TtsSynthesizer"
 
 [project.entry-points."fukikae.backends.translate"]
 openai_compat = "fukikae.backends.translate.openai_compat:OpenAICompatTranslator"

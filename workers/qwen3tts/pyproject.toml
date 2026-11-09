@@ -1,0 +1,30 @@
+# The Qwen3-TTS worker environment. A uv project of its own (ruling CD13): qwen-tts pins
+# transformers 4.57.3 and accelerate 1.12.0 exactly, which fukikae's environment can't hold.
+# fukikae starts it as a JSON-lines worker (fukikae.backends.tts.remote) with the venv at
+# <checkout>/.venvs/qwen3tts. The qwen-tts wheel is pinned by version here and by sha256 in the
+# lock; the worker checks the installed version again at every load (impl_qwen3_tts).
+# gradio is overridden away: qwen-tts lists it for its web demo (qwen_tts.cli.demo), which
+# the worker never imports, and it would pull a web stack into an offline worker.
+[project]
+name = "fukikae-worker-qwen3tts"
+version = "0"
+requires-python = "==3.12.*"
+dependencies = [
+    "qwen-tts==0.1.1",
+    "torch==2.8.*",
+    "torchaudio==2.8.*",
+    "huggingface_hub>=0.34,<1",
+]
+
+[tool.uv]
+package = false
+override-dependencies = ["gradio; sys_platform == 'never'"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

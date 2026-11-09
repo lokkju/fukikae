@@ -32,6 +32,7 @@ EXTRAS: dict[str, str] = {
     # (`.venvs/<extra>`, from `workers/<extra>`) is reported at load with the setup command.
     "indextts2": "indextts2",
     "cosyvoice3": "cosyvoice3",
+    "qwen3_tts": "qwen3tts",
 }
 
 
