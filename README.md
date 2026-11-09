@@ -1,6 +1,6 @@
 # fukikae
 
-fukikae automatically dubs foreign-language TV into English. The pipeline extracts audio, separates speech from the background, transcribes, diarizes and builds a registry of recurring characters; translation, synthesis and mixing follow in later stages.
+fukikae automatically dubs foreign-language TV into English. The pipeline extracts audio, separates speech from the background, transcribes, diarizes and builds a registry of recurring characters, then translates, speaks each line with the character's voice card, fits it to its slot, mixes and muxes a dubbed episode.
 
 ## Commands
 
@@ -11,6 +11,20 @@ uv run ruff check && uv run ruff format --check
 uv run pyright
 mise -C . exec -- ffprobe -version   # ffmpeg comes from mise, not the host
 ```
+
+## Stages and artifacts
+
+`fukikae run <workspace> <episode>` runs, in order: extract, separate, language, asr, diarize, characters, tag (when `[tag] enabled`), translate, tts, timefit and mix. Each writes under `<workspace>/.fukikae/episodes/<episode>/`:
+
+- `06-translate/cues.<target>.json`: the lines to dub (translated on the ASR path, the subtitle text on the subtitle path).
+- `07-tts/<cue>.wav` and `plan.json`: one render per spoken cue, silence trimmed, rate-fitted up to `[timefit] max_speedup`.
+- `08-timefit/<cue>.wav` and `report.json`: each render placed in its slot. What the rate fit left is time-stretched (ffmpeg `atempo`, pitch kept; rate and stretch together never exceed `max_speedup`), then up to `borrow_silence_ms` of silence is borrowed after the slot and before it. A line that still doesn't fit plays whole past its slot and is listed under `over`; nothing is cut. `summary` counts stretched, borrowed and over lines.
+- `09-mix/dub.<target>.wav`, `dub.<target>.ass` and `report.json`: the dub track and its subtitles (`Speaker: line`). The original vocals are removed where a dub line plays and kept elsewhere; over songs and laughter they stay untouched. Songs come from a theme-song detector on the separation stems (openings and endings: loud music with near-constant vocals in the first 6 or last 4 minutes), subtitle cues the filter marked as songs, and the tag stage's singing spans; a translated lyric inside a song is not placed, and `dropped` says which source caught it. The dub's level follows the original dialogue's, and the mix's EBU R128 loudness the original mix's (`loudness` in the report).
+- `out/<episode>.fukikae.mkv`: the video copied, the dub as the first and default audio track, every original audio track after it, the dub's ASS subtitles first and the original subtitle tracks after them (none default), language tags set.
+
+`[timefit]` takes `max_speedup` (1.25), `max_slowdown` (0.9; nothing is slowed today) and `borrow_silence_ms` (400). `[mix]` takes `keep_original_vocals` (true), `duck_db` (unset: removed; e.g. -18 keeps a quiet bleed of the original voice under the dub), `fade_ms` (40), `match_dialogue` (true), `protect_bgm` (false: SenseVoice marks BGM under ordinary dialogue) and `detect_songs` (true).
+
+To listen, open `out/<episode>.fukikae.mkv` in any player (mpv switches audio with `#` and subtitles with `j`), or play `09-mix/dub.<target>.wav` against `00-extract/audio.wav`.
 
 ## Profiles
 

@@ -68,3 +68,36 @@ Run 2026-11-09 on a fresh copy of Task 4's E11 workspace (`~/fukikae-scratch/t6-
 
 - Rate fit: 294 of 393 renders were longer than their cue, and 279 were still longer after the 1.25 cap. Kokoro's English runs well over the Japanese slots: 800.6 s of speech for the episode. That is Task 7's to fit, flag or place whole.
 - Character 1, the cast's loudest voice at a median of 274 Hz, has an F0 that would read as female. Characters 4 to 7 sit between 230 and 279 Hz. Without names or ground truth, nothing here confirms the anime estimates; the thresholds are adult-speech norms.
+
+## Task 7: timefit, mix and mux
+
+Run 2026-11-09 on fresh copies, never the originals: `~/fukikae-scratch/t7/e11-ws` (Task 6's E11 workspace, ASR path) and `~/fukikae-scratch/t7/e12-ws` (Task 5's E12 workspace, subtitle path, with `[tag]` sensevoice + emotion2vec and `[tts]` kokoro on cpu added). E11 re-ran translate (CD6/CD7 key change; llama-server on GPU 0), tts (163 renders), timefit and mix in 12 m 21 s. E12 ran tag, translate and tts first; its tts refused character 1's Task 4 test card (`model_revision = "test"`), re-pinned on the copy with `voices edit` as in Task 6 (card `b072743c85843496`), then tts (372 renders), timefit and mix in 9 m. A second `fukikae run` on each: "up to date". GPU 0 empty afterwards.
+
+**Ruling candidate (song fallback):** a theme-song detector on the separation stems (`fukikae.songs`), independent of the tag. A second is song-like when the vocals are on in at least 60% of its 100 ms frames (above -40 dBFS) and the bed is within 3 dB of the vocals or louder. The best 80 s window in the first 360 s and in the last 240 s is a theme when at least 50% of its seconds are song-like; it grows while the next 5 s are 40% song-like, up to 100 s, padded 1 s. A fitted cue whose slot midpoint is in a song span is not placed, and the original vocals stay untouched there. Subtitle song cues (`skip = "song"`) and tag `singing` spans are song spans too; tag `bgm` spans only with `[mix] protect_bgm = true` (default false: on E11, 10 dialogue cues sit in SenseVoice bgm spans outside any song). Chosen over cross-episode OP/ED matching because it needs no other processed episode and found every theme measured.
+
+| Episode | Detector spans (score) | Truth (lyrics or subtitle gap) |
+|---|---|---|
+| FT E11 | 65-147 (0.74), 1338-1421 (0.90) | 66-147, 1338-1420 |
+| FT E12 | 83-165 (0.73), 1338-1421 (0.93) | gap 85-178, gap 1332-1424 |
+| FT E13 (prototype) | 207-287 (0.72), 1339-1420 (0.92) | 210-~300, 1338-1422 |
+| FT E14 (prototype) | 64-149 (0.94), 1334-1414 (0.70) | 64-152, 1335-1421 |
+| Kaze E01-E03 (prototype) | head 0.69-0.80 | opening song 147-231 (E01), 44-119 (E02) |
+| BBT en/de E01-E03, Grid E02/E04/E05 (prototype) | none (best 0.22) | no theme song of that shape |
+
+E13 also has a 0.86 window at 611 s, mid-episode; the position limit keeps it out (unverified what it is).
+
+| | E11 (ASR) | E12 (subs) |
+|---|---|---|
+| Rendered cues | 393 | 354 (3 signs skipped) |
+| Over slot at the card's rate / rate-fitted / still over after the rate fit | 111 / 111 / 94 | 18 / 18 / 15 |
+| Stretched (median, max combined with rate) | 41 (1.0225, 1.25) | 13 (1.0296, 1.25) |
+| Borrowed (seconds) | 63 (9.3 s; max 0.62 s, c0197) | 5 (0.57 s) |
+| Left long | 0 | 1 (c0329, 0.01 s: rate 1.25 used the budget, 0.35 s before, next cue adjacent) |
+| Song spans / cues dropped | detector 65-147, 1338-1421 / 41 (all 16 opening and 25 ending lyric lines, c0015-c0030, c0368-c0392; the lines either side kept) | detector 83-165, 1338-1421 / 0 (the release subtitles neither theme) |
+| Laughter spans kept (tag) | 17.5-22.5, 327.5-332.5, 1167.5-1172.5 | 65-72.5, 652.5-660 |
+| Dub gain to the original dialogue level | -3.30 dB | -3.83 dB |
+| Loudness original / premix / final (LUFS) | -21.25 / -21.96 / -21.27 | -21.28 / -22.71 / -21.25 |
+| LRA original / final | 9.9 / 9.1 | 9.6 / 9.6 |
+| loudnorm mode | dynamic (linear would pass -1 dBTP) | dynamic |
+
+Outputs: `~/fukikae-scratch/t7/e11-ws/.fukikae/episodes/S01E11/out/S01E11.fukikae.mkv` (h264 copied; aac eng dub default; aac jpn; ass eng dub subtitles; original ass eng, forced kept) and `~/fukikae-scratch/t7/e12-ws/.fukikae/episodes/S01E12/out/S01E12.fukikae.mkv` (h264; eng dub default; jpn; the original eng dub track; dub ASS; five original ASS tracks; eight font attachments).
