@@ -26,7 +26,9 @@ class Qwen3TtsSynthesizer(WorkerSynthesizer):
     # context and allocator included; longer prompts and lines add a little.
     vram_mb: ClassVar[int] = 6000
     sources: ClassVar[frozenset[str]] = frozenset({"clone"})
-    voice_keys: ClassVar[frozenset[str]] = frozenset({"seed", "temperature", "top_p"})
+    voice_keys: ClassVar[frozenset[str]] = frozenset(
+        {"seed", "temperature", "top_p", "qwen3_tts_mode"}
+    )
     capabilities: ClassVar[frozenset[str]] = frozenset()
     sample_rate: ClassVar[int] = _impl.SAMPLE_RATE
     # Characters per second after silence trimming (ruling CD7), from Task 9c's eval tts clone

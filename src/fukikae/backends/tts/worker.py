@@ -92,7 +92,7 @@ _VOICE_KEYS = frozenset(
     {
         "backend", "model_revision", "source", "seed", "temperature", "top_p", "rate",
         "pitch_semitones", "emotion_strength", "voice", "voices", "references", "latent",
-        "description", "blend", "options", "post",
+        "description", "blend", "options", "post", "qwen3_tts_mode", "cosyvoice3_mode",
     }
 )  # fmt: skip
 SEED_MAX = 2**32 - 1  # numpy's seed range

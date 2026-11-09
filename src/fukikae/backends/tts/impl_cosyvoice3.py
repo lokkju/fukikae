@@ -198,6 +198,17 @@ def code_root(name: str, prefix: str | None = None) -> str:
     return os.path.join(prefix or sys.prefix, "fukikae-code", f"{name}-{commit[:12]}")
 
 
+def card_mode(card_mode: str | None, stage_mode: str | None) -> str:
+    """The mode to resolve: the card's own (``cosyvoice3_mode``, ruling CD21) unless it is at its
+    default ``cross_lingual``, then the stage's ``[tts.cosyvoice3] mode`` when it sets one."""
+    card_mode = card_mode or "cross_lingual"
+    if card_mode not in MODES:
+        raise ValueError(f"cosyvoice3 mode must be one of {', '.join(MODES)}, not {card_mode!r}")
+    if card_mode == "cross_lingual" and stage_mode:
+        return stage_mode
+    return card_mode
+
+
 def resolve_mode(mode: str, reference_languages: list[str], target: str) -> str:
     """``zero_shot`` or ``cross_lingual``: ``auto`` is cross-lingual when any reference clip's
     language (when known) differs from the target language."""
@@ -320,13 +331,14 @@ class Impl:
 
     def __init__(self) -> None:
         self.cv: Any = None
-        self.mode = "auto"
+        self.mode: str | None = None
         self._speakers: dict[tuple[str, ...], str] = {}
         self._tmp: tempfile.TemporaryDirectory[str] | None = None
 
     def load(self, options: dict[str, Any], device: str) -> None:
-        self.mode = str(options.get("mode", "auto"))
-        resolve_mode(self.mode, [], "en")  # rejects an unknown mode before the model loads
+        self.mode = str(options["mode"]) if options.get("mode") else None  # the fallback
+        if self.mode is not None:
+            resolve_mode(self.mode, [], "en")  # rejects an unknown mode before the model loads
         roots = check_code()
         model_dir = _snapshot()
         sys.dont_write_bytecode = True  # keep the checked code tree as it was fetched
@@ -414,7 +426,11 @@ class Impl:
             raise ValueError("CosyVoice 3 needs a clone card with reference clips")
         if req.get("instruction") or req.get("emotion_audio") or req.get("emotion_vector"):
             raise ValueError("CosyVoice 3 takes no instruction, emotion audio or emotion vector")
-        mode = resolve_mode(self.mode, [r.get("language") or "" for r in refs], language)
+        mode = resolve_mode(
+            card_mode(voice.get("cosyvoice3_mode"), self.mode),
+            [r.get("language") or "" for r in refs],
+            language,
+        )
         if mode == "zero_shot" and not all((r.get("transcript") or "").strip() for r in refs):
             raise ValueError("zero_shot mode needs a transcript for every reference clip")
         spk = self._speaker(refs)

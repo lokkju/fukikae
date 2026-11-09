@@ -78,6 +78,8 @@ _VOICE_KEYS = frozenset(
         "options",
         "post",
         "fingerprint",
+        "qwen3_tts_mode",
+        "cosyvoice3_mode",
     }
 )
 _REFERENCE_KEYS = frozenset({"clip", "transcript", "language", "origin"})
@@ -92,6 +94,14 @@ STYLE_TEXT_CAP = 300  # register, address, tics and any other free-text key
 STYLE_CAPS = {"notes": 1000}
 CATCHPHRASES_CAP = 20
 CATCHPHRASE_SIDE_CAP = 80
+
+# Per-card clone modes (ruling CD21): the field, its values, and its frozen default (CD1). The
+# worker impls take the same names; the stage-wide ``[tts.<backend>] mode`` is only the
+# fallback for a card at the default.
+MODE_FIELDS = {
+    "qwen3_tts_mode": ("icl", "xvector", "auto"),
+    "cosyvoice3_mode": ("cross_lingual", "zero_shot"),
+}
 
 # [voice] keys a backend must list in ``voice_keys`` to accept a non-default value. The
 # source's own field is covered by ``sources``; options are the backend's validate_options;
@@ -109,6 +119,7 @@ _BACKEND_VOICE_KEYS = (
     "latent",
     "description",
     "blend",
+    *MODE_FIELDS,
 )
 
 
@@ -151,6 +162,8 @@ class Voice:
     options: dict[str, Any] = field(default_factory=dict)
     post: dict[str, Any] = field(default_factory=dict)
     fingerprint: Fingerprint | None = None
+    qwen3_tts_mode: str = "auto"
+    cosyvoice3_mode: str = "cross_lingual"
 
 
 @dataclass(frozen=True)
@@ -335,6 +348,12 @@ def _parse_voice(raw: Any) -> Voice:
     for key in ("voice", "description"):
         if key in t:
             kw[key] = _str(t[key], key, where)
+    for key, modes in MODE_FIELDS.items():
+        if key in t:
+            mode = _str(t[key], key, where)
+            if mode not in modes:
+                raise CardError(f"[voice] {key} must be one of {', '.join(modes)}, not {mode!r}")
+            kw[key] = mode
     if "latent" in t:
         kw["latent"] = _sha_ref(t["latent"], "latent", where)
     if "voices" in t:
@@ -434,7 +453,7 @@ def _voice_dict(v: Voice, *, fingerprint: bool, identity: bool = False) -> dict[
         "model_revision": _nfc(v.model_revision),
         "source": v.source,
     }
-    for key in ("seed", "voice", "latent", "description"):
+    for key in ("seed", "voice", "latent", "description", *MODE_FIELDS):
         value = getattr(v, key)
         if value != getattr(_VOICE_DEFAULTS, key):
             d[key] = _nfc(value) if isinstance(value, str) else value

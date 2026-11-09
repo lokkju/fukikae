@@ -87,6 +87,17 @@ SETUP = "fukikae backends setup qwen3_tts"
 # ---- pure helpers (also used in fukikae's environment, by the tests) -----------------------
 
 
+def card_mode(card_mode: str | None, stage_mode: str | None) -> str:
+    """The mode to resolve: the card's own (``qwen3_tts_mode``, ruling CD21) unless it is at its
+    default ``auto``, then the stage's ``[tts.qwen3_tts] mode`` when it sets one, else ``auto``."""
+    card_mode = card_mode or "auto"
+    if card_mode not in MODES:
+        raise ValueError(f"qwen3_tts mode must be one of {', '.join(MODES)}, not {card_mode!r}")
+    if card_mode == "auto" and stage_mode:
+        return stage_mode
+    return card_mode
+
+
 def resolve_mode(mode: str, transcripts: list[str]) -> str:
     """``icl`` or ``xvector``: ``auto`` is ``icl`` when every clip has a transcript."""
     if mode not in MODES:
@@ -171,12 +182,12 @@ class Impl:
 
     def __init__(self) -> None:
         self.tts: Any = None
-        self.mode = "auto"
+        self.mode: str | None = None
         self._prompts: dict[tuple[str, ...], Any] = {}
 
     def load(self, options: dict[str, Any], device: str) -> None:
-        self.mode = str(options.get("mode", "auto"))
-        if self.mode not in MODES:
+        self.mode = str(options["mode"]) if options.get("mode") else None  # the fallback
+        if self.mode is not None and self.mode not in MODES:
             raise ValueError(f"qwen3_tts mode must be one of {', '.join(MODES)}")
         check_code()
         model_dir = _snapshot()
@@ -251,7 +262,10 @@ class Impl:
         refs = list(voice.get("references", []))
         if not refs:
             raise ValueError("Qwen3-TTS needs a clone card with reference clips")
-        mode = resolve_mode(self.mode, [r.get("transcript") or "" for r in refs])
+        mode = resolve_mode(
+            card_mode(voice.get("qwen3_tts_mode"), self.mode),
+            [r.get("transcript") or "" for r in refs],
+        )
         prompt = self._prompt(refs, mode)
         gen: dict[str, Any] = {}
         if voice.get("temperature") is not None:
