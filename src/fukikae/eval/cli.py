@@ -246,6 +246,30 @@ def tts_cmd(
         write_ledger(rows, ledger)
 
 
+@eval_app.command("tts-ab")
+def tts_ab_cmd(
+    spec: Path = typer.Argument(..., help="Pack spec (TOML): seed, [[set]] tables."),
+    out: Path = typer.Option(..., "-o", "--out", help="New or empty folder for the pack."),
+    no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
+) -> None:
+    """Build a blind A/B listening pack of the TTS candidates (the D15 checkpoint): per cue the
+    original line and each candidate under a shuffled letter, a scene per set with
+    [set.scene], index.html, README.txt, verdict.toml and the separate key.toml."""
+    from fukikae import runctx
+    from fukikae.errors import user_errors
+    from fukikae.eval import ab
+
+    runctx.vram_timeout_s = 0 if no_wait else None
+    try:
+        pack, notes = ab.build_pack(ab.load_spec(spec), out.expanduser(), log=typer.echo)
+    except (*user_errors(), FileExistsError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    for note in notes:
+        typer.echo(f"note: {note}", err=True)
+    typer.echo(f"pack: {pack}")
+
+
 @eval_app.command("report")
 def report_cmd(
     ledger: Path = typer.Option(

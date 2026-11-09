@@ -656,6 +656,40 @@ def render_guarded(
     return GuardedRender(key, again, calls, seed, still)
 
 
+def render_for_slot(
+    job: RenderJob,
+    lazy: LazySynth,
+    cache: Path,
+    store: CardStore,
+    speedup: float,
+    ref_dir: Path | None,
+) -> tuple[str, float, float, float, int, GuardedRender]:
+    """The stage's render of ``job`` for its slot: the guarded render, then, when it runs over
+    the slot and the backend takes a rate, one render faster by up to ``speedup`` (the rate
+    fit). Returns (key of the final wav, its seconds, the guarded render's seconds, rate
+    factor, renders made, the guarded render). The tts stage and ``eval tts-ab`` share it."""
+    g = render_guarded(job, lazy, cache, store, ref_dir=ref_dir)
+    calls, seconds = g.calls, g.seconds
+    if (
+        job.slot > 0
+        and seconds > job.slot
+        and "rate" in job.cls.voice_keys
+        and "duration" not in job.cls.capabilities
+    ):
+        factor = round(min(seconds / job.slot, speedup), 4)
+        if factor > 1.0:
+            key = fitted_key(g.key, factor)
+            fitted = cache / f"{key}.wav"
+            if not fitted.exists():
+                render_cue(
+                    job, lazy, fitted, store, rate=job.card.voice.rate * factor,
+                    ref_dir=ref_dir, seed=g.retry_seed,
+                )  # fmt: skip
+                calls += 1
+            return key, wav_seconds(fitted), seconds, factor, calls, g
+    return g.key, seconds, seconds, 1.0, calls, g
+
+
 def tag_events(work: Path) -> list[tuple[float, float, str]]:
     """The tag stage's event spans for an episode work dir (none when it didn't run)."""
     from fukikae.models import Tags
@@ -967,28 +1001,7 @@ class TtsStage:
         speedup: float,
         ref_dir: Path,
     ) -> tuple[str, float, float, float, int, GuardedRender]:
-        """(key of the final wav, its seconds, the guarded render's seconds, rate factor,
-        renders made, the guarded render)."""
-        g = render_guarded(job, lazy, cache, store, ref_dir=ref_dir)
-        calls, seconds = g.calls, g.seconds
-        if (
-            job.slot > 0
-            and seconds > job.slot
-            and "rate" in job.cls.voice_keys
-            and "duration" not in job.cls.capabilities
-        ):
-            factor = round(min(seconds / job.slot, speedup), 4)
-            if factor > 1.0:
-                key = fitted_key(g.key, factor)
-                fitted = cache / f"{key}.wav"
-                if not fitted.exists():
-                    render_cue(
-                        job, lazy, fitted, store, rate=job.card.voice.rate * factor,
-                        ref_dir=ref_dir, seed=g.retry_seed,
-                    )  # fmt: skip
-                    calls += 1
-                return key, wav_seconds(fitted), seconds, factor, calls, g
-        return g.key, seconds, seconds, 1.0, calls, g
+        return render_for_slot(job, lazy, cache, store, speedup, ref_dir)
 
     @staticmethod
     def _stripped(job: RenderJob) -> dict[str, Any]:
