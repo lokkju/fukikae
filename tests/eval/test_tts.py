@@ -1023,3 +1023,33 @@ def test_cues_over_half_wrong_are_listed():
     s = ev.summarize(scores, max_speedup=1.25)
     assert s.high_wer == ["S01E01:c2"]
     assert s.overall["high_wer_cues"] == 1
+
+
+def test_one_eval_tts_per_workspace_at_a_time(tmp_path):
+    """Two eval tts runs on one workspace would share renders and append duplicate rows."""
+    import subprocess
+    import sys
+
+    root = tmp_path / "ws"
+    (root / ".fukikae").mkdir(parents=True)
+    code = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from fukikae.eval.tts import workspace_lock\n"
+        "with workspace_lock(Path(sys.argv[1])):\n"
+        "    print('locked', flush=True); time.sleep(10)\n"
+    )
+    holder = subprocess.Popen([sys.executable, "-c", code, str(root)], stdout=subprocess.PIPE,
+                              text=True)  # fmt: skip
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "locked"
+        with (
+            pytest.raises(RuntimeError, match=rf"another eval tts.*pid {holder.pid}"),
+            ev.workspace_lock(root),
+        ):
+            pass
+    finally:
+        holder.kill()
+        holder.wait()
+    with ev.workspace_lock(root):
+        pass

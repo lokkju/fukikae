@@ -293,6 +293,23 @@ def report_cmd(
     typer.echo(render(build_matrix(rows, metric), "md" if fmt == "md" else "text"))
 
 
+@eval_app.command("retract")
+def retract_cmd(
+    run_id: str = typer.Argument(..., help="The run_id of the ledger row to retract."),
+    reason: str = typer.Option(..., "--reason", help="Why the row is wrong (kept in the ledger)."),
+    ledger: Path = typer.Option(None, "--ledger", help="Ledger file (default: the user ledger)."),
+) -> None:
+    """Retract a ledger row: append a record that hides it from `eval report`; the row stays."""
+    from fukikae.eval.ledger import retract
+
+    try:
+        path = retract(run_id, reason, ledger)
+    except (ValueError, OSError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    typer.echo(f"retracted {run_id} in {path}")
+
+
 @eval_app.command("sample")
 def sample(
     workspace: Path = typer.Argument(..., help="Workspace directory."),

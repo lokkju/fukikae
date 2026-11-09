@@ -12,6 +12,11 @@ through this version drops them). `SCHEMA` goes up only for a breaking change, a
 keep reading every older schema, upgrading old rows in `_parse`. Lines are split on "\n"
 alone: rows are written with ``ensure_ascii=False``, so U+2028 and its kin can appear raw
 inside a row.
+
+Retraction: a row is never edited or deleted. ``retract`` appends a retraction record,
+``{"schema", "run_id", "date", "retracts": <run_id>, "reason"}``, and ``read_rows`` leaves the
+retracted row out (``include_retracted`` keeps it). The record is additive under GT2: a reader
+that predates it skips the line with a warning, as for any line that is not a row.
 """
 
 from __future__ import annotations
@@ -206,12 +211,48 @@ def _parse(obj: Any) -> LedgerRow | str:
     return LedgerRow(**{**known, "schema": SCHEMA})
 
 
-def read_rows(path: Path | None = None) -> tuple[list[LedgerRow], list[str]]:
-    """Every readable row, and a warning per skipped line (``results.jsonl:7: not JSON,
+def retract(run_id: str, reason: str, path: Path | None = None) -> Path:
+    """Append a retraction record for the row ``run_id`` (which must be in the ledger)."""
+    if not reason.strip():
+        raise ValueError("a retraction needs a reason")
+    rows, _ = read_rows(path, include_retracted=True)
+    if run_id not in {r.run_id for r in rows}:
+        raise ValueError(f"no ledger row has run_id {run_id!r}")
+    record = {
+        "schema": SCHEMA,
+        "run_id": uuid.uuid4().hex,
+        "date": datetime.now(UTC).isoformat(timespec="seconds"),
+        "retracts": run_id,
+        "reason": reason.strip(),
+    }
+    target = ledger_path(path)
+    with target.open("a+b") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0, os.SEEK_END)
+            data = json.dumps(record, ensure_ascii=False) + "\n"
+            if f.tell() > 0:
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    data = "\n" + data
+            f.write(data.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+    return target
+
+
+def read_rows(
+    path: Path | None = None, *, include_retracted: bool = False
+) -> tuple[list[LedgerRow], list[str]]:
+    """Every readable row that no retraction record names (all of them with
+    ``include_retracted``), and a warning per skipped line (``results.jsonl:7: not JSON,
     skipped``). A missing ledger has no rows."""
     target = ledger_path(path)
     rows: list[LedgerRow] = []
     warnings: list[str] = []
+    retracted: set[str] = set()
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
@@ -224,9 +265,14 @@ def read_rows(path: Path | None = None) -> tuple[list[LedgerRow], list[str]]:
         except json.JSONDecodeError:
             warnings.append(f"{target.name}:{n}: not JSON, skipped")
             continue
+        if isinstance(obj, dict) and isinstance(obj.get("retracts"), str):
+            retracted.add(obj["retracts"])
+            continue
         parsed = _parse(obj)
         if isinstance(parsed, str):
             warnings.append(f"{target.name}:{n}: {parsed}, skipped")
         else:
             rows.append(parsed)
+    if not include_retracted:
+        rows = [r for r in rows if r.run_id not in retracted]
     return rows, warnings
