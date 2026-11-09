@@ -51,7 +51,8 @@ from fukikae.cards.card import CardError
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.cues import assign_subtitle_speakers, build_asr_cues, is_marked, windows
-from fukikae.gpu import device_string, free_mb, gpu_processes, wait_for_vram
+from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript
 from fukikae.registry.store import Registry
 from fukikae.stages.language import LanguageResult
@@ -419,31 +420,24 @@ class TranslateStage:
             backend = create("translate", BackendConfig(bc.backend, options), device)
             # Only a managed server takes GPU memory here; an external endpoint takes none.
             managed = getattr(backend, "mode", "managed") == "managed"
-            if device.startswith("cuda") and managed:
-                leftover = [
-                    (pid, name) for pid, name in gpu_processes(cfg.gpu_device) if "llama" in name
-                ]
-                if leftover:
-                    listed = ", ".join(f"pid {pid} ({name})" for pid, name in leftover)
-                    raise RuntimeError(
-                        f"GPU {cfg.gpu_device} already runs {listed}, probably left over from an "
-                        "earlier run; stop it (`kill <pid>`) and run again"
+            # Ruling CD15: a managed server holds the card's lock from before the VRAM check
+            # until it is stopped; the lock's scan names a llama-server left by a dead run.
+            with gpu_job(cfg.gpu_device, device if managed else "cpu", "translate llama-server"):
+                if device.startswith("cuda") and managed and backend.vram_mb > 0:
+                    wait_for_vram(
+                        cfg.gpu_device,
+                        backend.vram_mb,
+                        runctx.vram_timeout_s,
+                        query=free_mb,
+                        sleep=_sleep,
                     )
-            if device.startswith("cuda") and managed and backend.vram_mb > 0:
-                wait_for_vram(
-                    cfg.gpu_device,
-                    backend.vram_mb,
-                    runctx.vram_timeout_s,
-                    query=free_mb,
-                    sleep=_sleep,
-                )
-            try:
-                backend.load()
-                self._translate_all(
-                    cast(Translator, backend), todo, styles, glossary, src, target, mode
-                )
-            finally:
-                backend.unload()
+                try:
+                    backend.load()
+                    self._translate_all(
+                        cast(Translator, backend), todo, styles, glossary, src, target, mode
+                    )
+                finally:
+                    backend.unload()
         if subs:
             self._keep_subtitle_lines(todo)
         for c in spoken:

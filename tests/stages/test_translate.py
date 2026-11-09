@@ -610,10 +610,31 @@ def test_empty_catchphrase_targets_are_not_sent(ep):
 @pytest.mark.usefixtures("fake")
 def test_leftover_llama_server_on_the_gpu_is_named(ep, monkeypatch):
     monkeypatch.setattr(translate, "device_string", lambda _cfg: "cuda:0")
-    monkeypatch.setattr(translate, "gpu_processes", lambda _dev: [(4242, "llama-server")])
-    with pytest.raises(RuntimeError, match="4242.*llama-server"):
+    from fukikae import gpulock
+
+    leftover = [(4242, "llama-server -m m.gguf --api-key-file /tmp/fukikae-llama-key-x")]
+    monkeypatch.setattr(gpulock, "leftover_jobs", lambda _index: leftover)
+    with pytest.raises(gpulock.GpuBusy, match="4242.*llama-server"):
         TranslateStage().run(ep, CFG)
     assert FakeTranslator.LOG == []  # never loaded
+    assert gpulock.held_fds() == ()
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_managed_server_holds_the_gpu_lock(ep, monkeypatch):
+    """Ruling CD15: the lock is held from before the VRAM check until the server unloads."""
+    from fukikae import gpulock
+
+    monkeypatch.setattr(translate, "device_string", lambda _cfg: "cuda:0")
+    monkeypatch.setattr(translate, "free_mb", lambda _d: 99999)
+    held: list[tuple[int, ...]] = []
+    real_load = FakeTranslator.load
+    monkeypatch.setattr(
+        FakeTranslator, "load", lambda self: (held.append(gpulock.held_fds()), real_load(self))
+    )
+    TranslateStage().run(ep, CFG)
+    assert held and held[0]
+    assert gpulock.held_fds() == ()
 
 
 FIXTURE = Path(__file__).resolve().parent.parent / "fixtures" / "fake_llama_server.py"

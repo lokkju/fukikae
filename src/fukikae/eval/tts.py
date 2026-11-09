@@ -94,6 +94,7 @@ from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config
 from fukikae.eval.asr import normalize
 from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript, Turn, Word
 from fukikae.workspace import Workspace
 
@@ -523,13 +524,14 @@ class EvalResult:
 @contextlib.contextmanager
 def _model(kind: str, bc: BackendConfig, device: str, cfg: Config) -> Iterator[Any]:
     inst = loader.create(kind, bc, device)
-    if device.startswith("cuda"):
-        wait_for_vram(cfg.gpu_device, inst.vram_mb, runctx.vram_timeout_s, query=free_mb)
-    try:
-        inst.load()
-        yield inst
-    finally:
-        inst.unload()
+    with gpu_job(cfg.gpu_device, device, f"eval tts {kind}"):  # ruling CD15
+        if device.startswith("cuda"):
+            wait_for_vram(cfg.gpu_device, inst.vram_mb, runctx.vram_timeout_s, query=free_mb)
+        try:
+            inst.load()
+            yield inst
+        finally:
+            inst.unload()
 
 
 def _cues(ws: Workspace, episodes: Sequence[str], target: str) -> dict[str, DubCues]:

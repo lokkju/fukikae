@@ -11,14 +11,16 @@ Python < 3.12 and exact torch, transformers and numpy pins. Set one up with::
 
 ``<checkout>`` is the repository this module was loaded from, or ``FUKIKAE_WORKER_CHECKOUT``.
 
-Lifecycle. ``load`` refuses to start when another fukikae TTS worker already runs on the same
-GPU (a leftover from a run that died), starts the worker with ``CUDA_VISIBLE_DEVICES`` set to
-that one card (numbered as nvidia-smi does), checks the protocol version (``hello``) and sends
-``load``. The VRAM check comes before ``load`` (the tts stage's ``LazySynth``, from
-``vram_mb``). ``unload`` asks the worker to unload, closes its stdin, waits ``stop_wait_s``,
-then terminates and kills it, and always reaps it; a timeout, a protocol error or the worker's
-death does the same at once. On Linux the worker also gets SIGTERM if fukikae itself dies
-(``PR_SET_PDEATHSIG``), and a finalizer reaps it if the object is dropped without ``unload``.
+Lifecycle. On a GPU, ``load`` first takes the card's lock (``fukikae.gpulock``, ruling CD15),
+which waits for another fukikae GPU job and refuses when a leftover worker or llama-server from
+a run that died still runs there; the worker inherits the lock's descriptor. It starts the
+worker with ``CUDA_VISIBLE_DEVICES`` set to that one card (numbered as nvidia-smi does), checks
+the protocol version (``hello``) and sends ``load``. The VRAM check comes before ``load`` (the
+tts stage's ``LazySynth``, from ``vram_mb``). ``unload`` asks the worker to unload, closes its
+stdin, waits ``stop_wait_s``, then terminates and kills it, and always reaps it; a timeout, a
+protocol error or the worker's death does the same at once. On Linux the worker also gets
+SIGTERM if fukikae itself dies (``PR_SET_PDEATHSIG``), and a finalizer reaps it if the object
+is dropped without ``unload``.
 
 Trust. The worker's answers are parsed as JSON objects of at most ``MAX_ANSWER`` bytes; any
 other output is a protocol error. Nothing the worker says is used as a path or a command: the
@@ -52,7 +54,7 @@ from fukikae.backends.base import Synthesizer
 from fukikae.backends.loader import BackendUnavailable
 from fukikae.cards.card import CardError
 from fukikae.config import ConfigError
-from fukikae.gpu import gpu_processes
+from fukikae.gpulock import gpu_lock, held_fds
 
 if TYPE_CHECKING:
     from fukikae.cards.card import Voice
@@ -90,19 +92,6 @@ def nvml_index(device: str) -> int:
         ids = [int(p) for p in visible.split(",") if p.strip()]
         return ids[n]
     return n
-
-
-def _cmdline(pid: int) -> str:
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            return f.read().replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
-    except OSError:
-        return ""
-
-
-def leftover_workers(gpu: int) -> list[tuple[int, str]]:
-    """(pid, command line) of fukikae TTS workers holding ``gpu`` (an NVML index)."""
-    return [(pid, cmd) for pid, _ in gpu_processes(gpu) if WORKER_MODULE in (cmd := _cmdline(pid))]
 
 
 def _reap(proc: subprocess.Popen[bytes]) -> None:
@@ -152,6 +141,7 @@ class WorkerSynthesizer(Synthesizer):
         self._cwd: Path | None = None
         self._buf = b""
         self._finalizer: weakref.finalize[Any, Any] | None = None
+        self._lock = contextlib.ExitStack()
 
     @classmethod
     def validate_options(cls, options: dict[str, Any], source: str | None = None) -> None:
@@ -205,13 +195,9 @@ class WorkerSynthesizer(Synthesizer):
         env["PYTHONUNBUFFERED"] = "1"
         if self.device.startswith("cuda"):
             gpu = nvml_index(self.device)
-            found = leftover_workers(gpu)
-            if found:
-                listed = ", ".join(f"pid {pid} ({cmd})" for pid, cmd in found)
-                raise BackendError(
-                    f"GPU {gpu} already runs a fukikae TTS worker: {listed}, probably left over "
-                    "from an earlier run; stop it (`kill <pid>`) and run again"
-                )
+            # Ruling CD15: the card's lock, held until the worker is reaped (the worker gets
+            # the descriptor too); taking it names a leftover worker or llama-server.
+            self._lock.enter_context(gpu_lock(gpu, f"tts worker {self.name}"))
             env["CUDA_VISIBLE_DEVICES"] = str(gpu)
             env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
             worker_device = "cuda:0"
@@ -231,6 +217,7 @@ class WorkerSynthesizer(Synthesizer):
                 env=env,
                 cwd=self._cwd,
                 bufsize=0,
+                pass_fds=held_fds(),
                 preexec_fn=_die_with_parent if sys.platform.startswith("linux") else None,  # noqa: PLW1509
             )
         except OSError as e:
@@ -292,6 +279,7 @@ class WorkerSynthesizer(Synthesizer):
         if self._cwd is not None:
             shutil.rmtree(self._cwd, ignore_errors=True)
             self._cwd = None
+        self._lock.close()
 
     # -- the protocol -----------------------------------------------------------------------
 

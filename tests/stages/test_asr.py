@@ -228,3 +228,18 @@ def test_eval_out_dir_gets_its_own_manifest_record(ep):
     assert load_manifest(ep).stages["asr"] == pipeline  # eval left it alone
     assert run_stages(ep, cfg, [AsrStage(backend="fa", out_dir="eval/asr-fa")]) == []
     assert run_stages(ep, cfg, [AsrStage()]) == []
+
+
+@pytest.mark.usefixtures("fakes")
+def test_asr_on_cuda_holds_the_gpu_lock(monkeypatch, ep):
+    """Ruling CD15."""
+    from fukikae import gpulock
+
+    monkeypatch.setattr(asr, "device_string", lambda _cfg: "cuda:0")
+    monkeypatch.setattr(asr, "free_mb", lambda _d: 99999)
+    held: list[Any] = []
+    monkeypatch.setattr(FakeAsr, "load", lambda _self: held.append(gpulock.held_fds()))
+    FakeAsr.timed = True
+    AsrStage().run(ep, _cfg(asr={"backend": "fake"}))
+    assert held and held[0]
+    assert gpulock.held_fds() == ()
