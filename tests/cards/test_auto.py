@@ -254,3 +254,35 @@ def test_character_spans_leave_out_extras_and_review():
         ],
     )  # fmt: skip
     assert character_spans(asg) == {1: [(0.0, 1.0), (2.0, 3.0)]}
+
+
+def test_gender_reads_the_20th_percentile_so_shouting_does_not_lift_it(tmp_path: Path):
+    """A male voice shouting most of the time: the median reads female, the low end doesn't."""
+    x = np.concatenate([harmonic(300, 7), harmonic(125, 3)])
+    path = write_wav(tmp_path / "shout.wav", x)
+    assert estimate_gender(path, [(0.0, 10.0)]) == "m"
+
+
+def test_gender_thresholds_come_from_config(vocals: Path):
+    assert estimate_gender(vocals, [(6.0, 10.0)], female_above=300.0) == "u"
+    assert auto.gender_thresholds(CFG) == (165.0, 180.0)
+    band = Config(raw={"tts": {"backend": "kokoro", "gender": {"female_above": 300.0}}})
+    assert auto.gender_thresholds(band) == (165.0, 300.0)
+
+
+def test_anime_profile_has_a_wide_unknown_band():
+    from fukikae.config import load_profile
+
+    g = load_profile("anime")["tts"]["gender"]
+    assert g["male_below"] == 165.0 and g["female_above"] == 300.0
+
+
+def test_ensure_assignments_uses_the_configured_band(tmp_path: Path, vocals: Path):
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    band = Config(raw={"tts": {"backend": "kokoro", "gender": {"female_above": 300.0}}})
+    (line,) = ensure_assignments(reg, store, band, {a: [(6.0, 10.0)]}, vocals)
+    assert "gender estimate u" in line and "F0 2" in line
+    cur = reg.card_for(a, "en")
+    assert cur is not None and cur.note == line.split(": ", 1)[1]
+    reg.close()

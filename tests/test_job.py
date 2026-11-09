@@ -172,3 +172,25 @@ def test_external_source_fingerprinted_by_stat(ep, cfg):
     ep.source.write_bytes(b"media, longer")
     assert cache_key(S({}), ep, cfg) != k1
     assert not (ep.workspace_root / ".fukikae").exists()
+
+
+def test_missing_optional_input_key_does_not_depend_on_the_workspace_path(tmp_path, cfg):
+    """A copied or moved workspace isn't stale because an optional input (glossary.toml) is
+    absent: the missing file is named relative to the workspace (ruling CD6)."""
+
+    class S(FakeA):
+        def inputs(self, ep):
+            return [ep.workspace_root / "glossary.toml", ep.work / "maybe.json"]
+
+    keys = []
+    for name in ("one", "two"):
+        root = tmp_path / name / "ws"
+        ep = Episode(
+            source=tmp_path / "s.mkv", id="e1", work=root / ".fukikae" / "episodes" / "e1",
+            workspace_root=root,
+        )  # fmt: skip
+        keys.append(cache_key(S({}), ep, cfg))
+    assert keys[0] == keys[1]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "glossary.toml").write_text("[terms]\n")
+    assert cache_key(S({}), ep, cfg) != keys[1]

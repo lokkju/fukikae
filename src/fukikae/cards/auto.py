@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fukikae.cards.select import gender_of, median_f0
+from fukikae.cards.select import FEMALE_ABOVE, MALE_BELOW, gender_of, speaker_f0
 from fukikae.cards.stock import check_stock_voice, pick_stock, revision, stock_card
 from fukikae.cards.store import CardStore
 from fukikae.registry.store import ProtectedAssignmentError
@@ -29,6 +29,7 @@ __all__ = [
     "character_spans",
     "ensure_assignments",
     "extras_voices",
+    "gender_thresholds",
     "tts_backend",
 ]
 
@@ -38,6 +39,28 @@ UNKNOWN_EXTRA = "unknown"
 def tts_backend(cfg: Config) -> str:
     """The ``[tts]`` backend: the one automatic cards and extras are made for."""
     return cfg.resolve("tts").backend
+
+
+def gender_thresholds(cfg: Config) -> tuple[float, float]:
+    """(male_below, female_above) in Hz from ``[tts] gender``, the workspace's over the
+    profile's; F0 between them is an unknown gender."""
+    from fukikae.config import ConfigError
+
+    g: dict = {}
+    for source in (cfg.profile_raw, cfg.raw):
+        table = source.get("tts")
+        if isinstance(table, dict) and isinstance(table.get("gender"), dict):
+            g = {**g, **table["gender"]}
+    unknown = sorted(set(g) - {"male_below", "female_above"})
+    if unknown:
+        raise ConfigError(f"unknown key(s) in [tts] gender: {', '.join(unknown)}")
+    lo, hi = g.get("male_below", MALE_BELOW), g.get("female_above", FEMALE_ABOVE)
+    for v in (lo, hi):
+        if isinstance(v, bool) or not isinstance(v, int | float):
+            raise ConfigError(f"[tts] gender thresholds must be numbers (Hz), not {v!r}")
+    if lo > hi:
+        raise ConfigError(f"[tts] gender male_below ({lo}) is above female_above ({hi})")
+    return float(lo), float(hi)
 
 
 def character_spans(asg: Assignments) -> dict[int, list[tuple[float, float]]]:
@@ -92,30 +115,29 @@ def ensure_assignments(
         return []
     backend = tts_backend(cfg)
     rev = revision(backend)
+    male_below, female_above = gender_thresholds(cfg)
     used = _stock_voices_in_use(reg, store, backend, language)
     todo.sort(key=lambda item: (-sum(e - s for s, e in item[1]), item[0]))
     lines: list[str] = []
     for cid, spans in todo:
-        f0, seconds = median_f0(vocals, spans)
-        gender = gender_of(f0)
+        f0, seconds = speaker_f0(vocals, spans)
+        gender = gender_of(f0, male_below, female_above)
         voice = pick_stock(backend, language, gender, used)
         check_stock_voice(backend, voice)
         new = store.put(stock_card(backend, voice, language, rev))
         estimate = (
-            f"gender estimate {gender}, median F0 {f0:.0f} Hz over {seconds:.1f} s"
+            f"gender estimate {gender}, F0 {f0:.0f} Hz (20th percentile) over {seconds:.1f} s"
             if f0 is not None
             else f"gender estimate u, too little voiced speech in {seconds:.1f} s"
         )
+        note = f"stock {backend}:{voice}, card {new} ({estimate}); auto and unlocked"
         try:
-            reg.assign_card(cid, language, new, by="auto", locked=False)
+            reg.assign_card(cid, language, new, by="auto", locked=False, note=note)
         except ProtectedAssignmentError as e:
             lines.append(f"character {_label(reg, cid)}: kept its card ({e})")
             continue
         used.append(voice)
-        lines.append(
-            f"character {_label(reg, cid)}: stock {backend}:{voice}, card {new} ({estimate}); "
-            "auto and unlocked"
-        )
+        lines.append(f"character {_label(reg, cid)}: {note}")
     return lines
 
 

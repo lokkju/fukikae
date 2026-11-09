@@ -13,8 +13,11 @@ FRAME_S = 0.040
 HOP_S = 0.020
 F0_MIN = 70.0
 F0_MAX = 400.0
+# Defaults; a profile can widen the unknown band between them ([tts] gender, the anime one does).
 MALE_BELOW = 165.0
 FEMALE_ABOVE = 180.0
+# The F0 percentile read: shouting lifts the median, the low end of a voice moves less.
+F0_PERCENTILE = 20
 # A frame is voiced when its normalized autocorrelation peak reaches this.
 VOICED_PEAK = 0.5
 # Frames quieter than this fraction of the loudest decile of the speaker's frames are skipped.
@@ -56,8 +59,9 @@ def _frames(x: np.ndarray, rate: int) -> np.ndarray:
     return x[idx]
 
 
-def median_f0(vocals: Path, spans: list[tuple[float, float]]) -> tuple[float | None, float]:
-    """(median F0 in Hz over the voiced frames, or None when too few are voiced; seconds read).
+def speaker_f0(vocals: Path, spans: list[tuple[float, float]]) -> tuple[float | None, float]:
+    """(20th-percentile F0 in Hz over the voiced frames, or None when too few are voiced;
+    seconds read).
 
     Autocorrelation per 40 ms frame (20 ms hop) between 70 and 400 Hz. The shortest lag whose
     peak is within 90% of the best is taken, which keeps a strong subharmonic from halving F0.
@@ -91,20 +95,27 @@ def median_f0(vocals: Path, spans: list[tuple[float, float]]) -> tuple[float | N
         return None, seconds
     window, best = window[voiced], best[voiced]
     lag = lo + np.argmax(window >= 0.9 * best[:, None], axis=1)
-    return float(np.median(rate / lag)), seconds
+    return float(np.percentile(rate / lag, F0_PERCENTILE)), seconds
 
 
-def gender_of(f0: float | None) -> Literal["f", "m", "u"]:
+def gender_of(
+    f0: float | None, male_below: float = MALE_BELOW, female_above: float = FEMALE_ABOVE
+) -> Literal["f", "m", "u"]:
     if f0 is None:
         return "u"
-    if f0 < MALE_BELOW:
+    if f0 < male_below:
         return "m"
-    if f0 > FEMALE_ABOVE:
+    if f0 > female_above:
         return "f"
     return "u"
 
 
-def estimate_gender(vocals: Path, spans: list[tuple[float, float]]) -> Literal["f", "m", "u"]:
-    """``m`` under 165 Hz median F0, ``f`` over 180 Hz, else (or with too little voiced
-    speech) ``u``."""
-    return gender_of(median_f0(vocals, spans)[0])
+def estimate_gender(
+    vocals: Path,
+    spans: list[tuple[float, float]],
+    male_below: float = MALE_BELOW,
+    female_above: float = FEMALE_ABOVE,
+) -> Literal["f", "m", "u"]:
+    """``m`` under ``male_below`` (165 Hz) 20th-percentile F0, ``f`` over ``female_above``
+    (180 Hz), else (or with too little voiced speech) ``u``."""
+    return gender_of(speaker_f0(vocals, spans)[0], male_below, female_above)

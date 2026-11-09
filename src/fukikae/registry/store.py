@@ -23,11 +23,11 @@ SCHEMA_VERSION = 2
 
 # `by` values of an assignment; `import:<pack title>` is the one with a suffix. `migrated`
 # (the schema-1 voice note) and `lock`/`unlock` rows are written by the registry itself.
-ASSIGNED_BY = frozenset({"auto", "assign", "revert", "edit", "derive"})
+ASSIGNED_BY = frozenset({"auto", "assign", "revert", "edit", "derive", "restock"})
 # Operator actions (ruling CD2): a card they chose is never replaced by `auto` or an import
 # unless the caller passes override (an import the operator confirmed with --replace). An
 # imported card is never replaced by `auto` without override either (CD3).
-OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive"})
+OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive", "restock"})
 _LOCK_BY = frozenset({"lock", "unlock"})
 _CARD_ID = re.compile(r"[0-9a-f]{16}")
 
@@ -657,11 +657,12 @@ class Registry:
         by: str,
         locked: bool,
         override: bool = False,
+        note: str | None = None,
     ) -> CardAssignment:
         """Make ``card_id`` the character's card for ``target_language``, recorded in history.
 
-        ``by`` is one of auto, assign, revert, edit, derive, or ``import:<pack title>``. Other
-        target languages are never touched. Raises KeyError for an unknown character.
+        ``by`` is one of auto, assign, revert, edit, derive, restock, or ``import:<pack title>``.
+        Other target languages are never touched. Raises KeyError for an unknown character.
         ``auto`` and imports refuse (ProtectedAssignmentError) to replace a card that is
         locked or was chosen by an operator action, unless ``override`` (ruling CD2); ``auto``
         also refuses to replace an imported card, which a later import may replace (CD3).
@@ -694,7 +695,7 @@ class Registry:
                         f"character {character_id}'s {target_language!r} card {cur.card_id} is "
                         f"{why} ({cur.chosen_by}); {by} does not replace it without override"
                     )
-            return self._append(con, character_id, target_language, card_id, by, locked)
+            return self._append(con, character_id, target_language, card_id, by, locked, note)
 
     def revert_card(
         self, character_id: int, target_language: str, to: int | None

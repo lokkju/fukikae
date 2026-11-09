@@ -289,3 +289,52 @@ def test_registry_merge_reports_the_card_that_lost(tmp_path: Path):
     r = runner.invoke(app, ["registry", "merge", str(ws.root), "1", str(a2)])
     assert r.exit_code == 0, r.output
     assert "a" * 16 in r.output and "b" * 16 in r.output and "stays in history" in r.output
+
+
+def _auto_stock(ws: Workspace, store: CardStore, cid: int, voice: str, rev: str) -> str:
+    from fukikae.cards.stock import stock_card
+
+    card = store.put(stock_card("kokoro", voice, "en", rev))
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", card, by="auto", locked=False, note="gender estimate f")
+    return card
+
+
+def test_show_prints_the_assignment_note(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    _auto_stock(ws, store, cid, "af_heart", "old")
+    r = invoke("show", str(ws.root), "Natsu")
+    assert r.exit_code == 0 and "gender estimate f" in r.output
+
+
+def test_restock_repins_only_uncurated_auto_stock_cards(tmp_path: Path):
+    from fukikae.backends.tts.kokoro import REVISION
+
+    ws, natsu, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        lucy = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))[1]
+        gray = reg.create_actor_with_character(np.array([1.0, 1.0], dtype=np.float32))[1]
+    old = _auto_stock(ws, store, natsu, "am_adam", "old")
+    locked = _auto_stock(ws, store, lucy, "af_heart", "old")
+    chosen = _auto_stock(ws, store, gray, "am_puck", "old")
+    with Registry(ws.registry_path) as reg:
+        reg.lock_card(lucy, "en", True)
+        reg.assign_card(gray, "en", chosen, by="assign", locked=False)
+
+    r = invoke("restock", str(ws.root), "--dry-run")
+    assert r.exit_code == 0, r.output
+    assert "am_adam" in r.output and "af_heart" not in r.output and "am_puck" not in r.output
+    with Registry(ws.registry_path) as reg:
+        assert _cur(reg, natsu, "en").card_id == old
+
+    r = invoke("restock", str(ws.root))
+    assert r.exit_code == 0, r.output
+    with Registry(ws.registry_path) as reg:
+        cur = _cur(reg, natsu, "en")
+        assert cur.card_id != old and cur.by == "restock" and not cur.locked
+        assert store.get(cur.card_id).voice.model_revision == REVISION  # type: ignore[arg-type]
+        assert store.get(cur.card_id).voice.voice == "am_adam"  # type: ignore[arg-type]
+        assert _cur(reg, lucy, "en").card_id == locked
+        assert _cur(reg, gray, "en").card_id == chosen
+    r = invoke("restock", str(ws.root))
+    assert r.exit_code == 0 and "nothing to restock" in r.output
