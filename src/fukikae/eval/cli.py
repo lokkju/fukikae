@@ -578,7 +578,7 @@ def embedders(
         with ResidentEmbedder(Config(gpu_device=0)) as resident:
             for emb_name in embedder:
                 cfg = BackendConfig(emb_name, {})
-                ident = "|".join(str(x) for x in model_identity("embed", cfg))
+                ident = cs.cache_identity(cfg)
                 tr = cs.embed_clips(train, audio, cfg, resident, cache, ident)
                 te = cs.embed_clips(test, audio, cfg, resident, cache, ident)
                 results.append((cfg, cs.clipset_accuracy(train, test, tr, te, audio=audio)))
