@@ -106,6 +106,8 @@ def show(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
             typer.echo(f"{language}: no card")
             return
         typer.echo(f"{language}: card {a.card_id} ({a.by}, {_state(a)}, history row {a.n})")
+        if a.note:
+            typer.echo(f"note: {a.note}")
         typer.echo("")
         typer.echo(dump_card(store.get(a.card_id)), nl=False)
 
@@ -152,6 +154,58 @@ def _stock(store: CardStore, ref: str, language: str) -> str:
         return store.put(stock_card(backend, voice, language, revision(backend)))
     except (ConfigError, BackendUnavailable) as e:
         raise CardError(f"{ref}: {e}") from e
+
+
+@voices_app.command("restock")
+def restock(
+    workspace: Path = _WS,
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="List what would change; change nothing."
+    ),
+    lang: str | None = _LANG,
+) -> None:
+    """Re-pin automatic stock cards to the revision their backend renders with now: same voice,
+    a new card, assigned by `restock` (unlocked). A curated card (locked, or chosen by an
+    operator or an import) is never touched."""
+    from fukikae.backends.loader import BackendUnavailable
+    from fukikae.cards.stock import revision, stock_card
+    from fukikae.config import ConfigError
+
+    with _session(workspace, lang) as (reg, store, language):
+        changed = 0
+        for char in reg.characters():
+            a = reg.card_for(char.id, language)
+            if a is None or a.card_id is None or a.locked or a.chosen_by != "auto":
+                continue
+            if not store.has(a.card_id):
+                continue
+            v = store.get(a.card_id).voice
+            if v.source != "stock" or not v.voice:
+                continue
+            try:
+                rev = revision(v.backend)
+            except (CardError, ConfigError, BackendUnavailable) as e:
+                typer.echo(f"{_label(char)}: card {a.card_id} left alone ({e})")
+                continue
+            if v.model_revision == rev:
+                continue
+            new = stock_card(v.backend, v.voice, language, rev)
+            what = (
+                f"{_label(char)} {language}: {v.backend}:{v.voice} from revision "
+                f"{v.model_revision!r} to {rev!r}"
+            )
+            changed += 1
+            if dry_run:
+                typer.echo(f"would restock {what}")
+                continue
+            new_id = store.put(new)
+            n = reg.assign_card(
+                char.id, language, new_id, by="restock", locked=False,
+                note=f"restocked from card {a.card_id}",
+            ).n  # fmt: skip
+            typer.echo(f"restocked {what}: card {new_id} (history row {n})")
+        if not changed:
+            typer.echo("nothing to restock")
 
 
 @voices_app.command("history")

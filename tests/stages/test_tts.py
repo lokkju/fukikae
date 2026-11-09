@@ -19,6 +19,7 @@ from fukikae.models import (
     DubCue,
     DubCues,
     TtsPlan,
+    TtsRun,
     Turn,
 )
 from fukikae.registry.store import Registry
@@ -51,15 +52,18 @@ language = "ja"
 """
 
 
-def tone_wav(path: Path, seconds: float, rate: int, amp: float = 0.25) -> float:
+def tone_wav(
+    path: Path, seconds: float, rate: int, amp: float = 0.25, pad: tuple[float, float] = (0, 0)
+) -> float:
     n = max(1, round(seconds * rate))
     x = amp * np.sin(2 * np.pi * 440 * np.arange(n) / rate)
+    x = np.concatenate([np.zeros(round(pad[0] * rate)), x, np.zeros(round(pad[1] * rate))])
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes((x * 32767).astype("<i2").tobytes())
-    return n / rate
+    return len(x) / rate
 
 
 class FakeSynth(Synthesizer):
@@ -79,6 +83,7 @@ class FakeSynth(Synthesizer):
     LOG: ClassVar[list[str]] = []
     CALLS: ClassVar[list[tuple[str, str | None, float]]] = []
     DUR: ClassVar[dict[str, float]] = {}
+    PAD: ClassVar[tuple[float, float]] = (0.0, 0.0)  # silence before and after, like Kokoro
 
     def __init__(self, options: dict[str, Any], device: str) -> None:
         self.options = options
@@ -97,7 +102,7 @@ class FakeSynth(Synthesizer):
     def synthesize(self, text: str, voice: Voice, language: str, out: Path, **_kw: Any) -> float:  # noqa: ARG002
         self.CALLS.append((text, voice.voice, voice.rate))
         seconds = self.DUR.get(text, len(text) * 0.06) / voice.rate
-        return tone_wav(out, seconds, self.sample_rate)
+        return tone_wav(out, seconds, self.sample_rate, pad=self.PAD)
 
 
 class FakeSynth2(FakeSynth):
@@ -112,6 +117,7 @@ def fakes(monkeypatch):
     FakeSynth.LOG = []
     FakeSynth.CALLS = []
     FakeSynth.DUR = {}
+    FakeSynth.PAD = (0.0, 0.0)
     monkeypatch.setattr(loader, "backend_class", lambda _kind, name: CLASSES[name])
     monkeypatch.setattr(
         loader, "create", lambda _kind, bc, dev: CLASSES[bc.backend](bc.options, dev)
@@ -214,6 +220,10 @@ def _plan(ep: Episode) -> TtsPlan:
     return read_json(ep.work / "07-tts" / "plan.json", TtsPlan)
 
 
+def _run(ep: Episode) -> TtsRun:
+    return read_json(ep.work / "07-tts" / "run.json", TtsRun)
+
+
 def _calls_for(texts: set[str]) -> list[str]:
     return [t for t, _, _ in FakeSynth.CALLS if t in texts]
 
@@ -241,8 +251,10 @@ def test_renders_each_spoken_cue_and_links_it_from_the_cache(ep):
         assert out.is_file() and c.key is not None
         assert out.stat().st_ino == (cache / f"{c.key}.wav").stat().st_ino
         assert c.seconds == pytest.approx(len(texts[c.cue_id]) * 0.06, abs=1e-3)
-        assert c.slot == pytest.approx(2.0) and c.rate_factor == 1.0 and not c.cached
+        assert c.slot == pytest.approx(2.0) and c.rate_factor == 1.0
+        assert c.rendered_seconds == c.seconds
         assert c.neutral_only and c.passed == {}
+    assert _run(ep).cached == [] and sorted(_run(ep).rendered) == [c.cue_id for c in rendered]
     assert by_id["c0001"].character_id == 1 and by_id["c0001"].backend == "fake"
     assert FakeSynth.LOG == ["load fake", "unload fake"]
 
@@ -268,7 +280,7 @@ def test_second_run_renders_nothing_and_loads_nothing(ep):
     FakeSynth.LOG.clear()
     TtsStage(CFG).run(ep, CFG)
     assert FakeSynth.CALLS == [] and FakeSynth.LOG == []
-    assert all(c.cached for c in _plan(ep).cues if c.skipped is None)
+    assert _run(ep).rendered == [] and len(_run(ep).cached) == 6
 
 
 def test_swapping_one_card_rerenders_only_that_character(ep):
@@ -285,8 +297,8 @@ def test_swapping_one_card_rerenders_only_that_character(ep):
     assert _calls_for(LUCY) == [] and _calls_for(EXTRAS) == []
     assert len(FakeSynth.CALLS) == 2
     by_id = {c.cue_id: c for c in _plan(ep).cues}
-    assert by_id["c0001"].card_id == new and not by_id["c0001"].cached
-    assert by_id["c0002"].cached
+    assert by_id["c0001"].card_id == new
+    assert sorted(_run(ep).rendered) == ["c0001", "c0003"] and "c0002" in _run(ep).cached
 
 
 def test_auto_assigns_a_character_without_a_card(ep):
@@ -299,7 +311,12 @@ def test_auto_assigns_a_character_without_a_card(ep):
     card = CardStore(ep.workspace_root).get(cur.card_id)  # type: ignore[arg-type]
     assert card.voice.backend == "fake" and card.voice.source == "stock"
     assert {c.cue_id: c.card_id for c in _plan(ep).cues}["c0002"] == cur.card_id
-    assert any("Lucy" in line for line in _plan(ep).report)
+    assert any("Lucy" in line for line in _run(ep).report)
+    log = (ep.work / "07-tts" / "assignments.log").read_text()
+    assert "Lucy" in log and cur.card_id in log
+    assert cur.note is not None and "gender estimate" in cur.note
+    TtsStage(CFG).run(ep, CFG)  # nothing new to assign: the log only grows when something is
+    assert (ep.work / "07-tts" / "assignments.log").read_text() == log
 
 
 def test_missing_sidecar_fails_before_loading(ep):
@@ -369,7 +386,8 @@ def test_rate_fit_rerenders_once_within_max_speedup(ep):
     TtsStage(CFG).run(ep, CFG)  # both renders cached
     assert FakeSynth.CALLS == []
     c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
-    assert c.cached and c.rate_factor == pytest.approx(1.25)
+    assert "c0001" in _run(ep).cached and c.rate_factor == pytest.approx(1.25)
+    assert c.rendered_seconds == pytest.approx(4.0, abs=1e-3)
 
 
 def test_rate_fit_follows_the_timefit_max_speedup(ep):
@@ -455,3 +473,66 @@ def test_pipeline_runs_tts_after_translate():
 
     names = [s.name for s in pipeline_stages(Config(raw={"tts": {"backend": "kokoro"}}))]
     assert names[-2:] == ["translate", "tts"]
+
+
+def test_render_padding_is_trimmed_before_caching_and_the_rate_fit(ep):
+    """Ruling CD7: Kokoro pads each render with silence; the fit must measure speech only."""
+    _two_cards(ep)
+    FakeSynth.PAD = (0.3, 0.45)
+    FakeSynth.DUR = {"natsu one": 1.9}  # fits its 2 s slot once the padding is gone
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert c.rate_factor == 1.0 and len([t for t, _, _ in FakeSynth.CALLS if t == "natsu one"]) == 1
+    assert c.seconds == pytest.approx(1.9 + 2 * tts.TRIM_KEEP_S, abs=0.02)
+
+
+def test_trim_keeps_a_silent_render_whole(tmp_path):
+    path = tmp_path / "s.wav"
+    tone_wav(path, 0.5, 8000, amp=0.0)
+    tts.trim_silence(path)
+    assert tts.wav_seconds(path) == pytest.approx(0.5, abs=1e-3)
+
+
+def test_two_runs_with_identical_audio_leave_plan_byte_identical(ep):
+    TtsStage(CFG).run(ep, CFG)  # auto-assigns both characters
+    first = (ep.work / "07-tts" / "plan.json").read_bytes()
+    TtsStage(CFG).run(ep, CFG)
+    assert (ep.work / "07-tts" / "plan.json").read_bytes() == first
+
+
+def test_a_run_that_only_auto_assigns_is_up_to_date_next_time(ep):
+    from fukikae.job import run_stages
+
+    stage = TtsStage(CFG)
+    assert run_stages(ep, CFG, [stage]) == ["tts"]
+    assert run_stages(ep, CFG, [stage]) == []
+
+
+def test_characters_with_only_skipped_cues_get_no_card(ep):
+    _assign(ep, 1, _stock("am_adam"))
+    _write_cues(ep, [CUES[0], CUES[4]])  # Lucy's only cue is a skipped song
+    TtsStage(CFG).run(ep, CFG)
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        assert reg.card_for(2, "en") is None
+
+
+def test_emotion_audio_backend_is_refused_as_a_card_error(ep, monkeypatch):
+    _two_cards(ep)
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    with pytest.raises(CardError, match="emotion_audio"):
+        TtsStage(CFG).run(ep, CFG)
+    assert FakeSynth.LOG == []
+
+
+def test_cue_key_changes_with_model_identity():
+    bc = BackendConfig("kokoro", {})
+    d = Delivery(reference=(1.0, 2.0))
+
+    def key(identity):
+        return cue_key(
+            "0123456789abcdef", "Hi.", d, bc, capabilities=frozenset(), identity=identity
+        )
+
+    base = key({"model": "hexgrad/Kokoro-82M", "revision": "a"})
+    assert key({"model": "hexgrad/Kokoro-82M", "revision": "b"}) != base
+    assert key({"model": "other/model", "revision": "a"}) != base

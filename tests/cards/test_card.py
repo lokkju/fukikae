@@ -216,6 +216,7 @@ class Fake:
     voice_keys: ClassVar[frozenset[str]] = frozenset({"rate"})
     capabilities: ClassVar[frozenset[str]] = frozenset()
     sample_rate: ClassVar[int] = 24000
+    speech_cps: ClassVar[dict[str, float]] = {}
     model_revision: str = "1.0"
 
     def __init__(self, options: dict[str, Any], device: str) -> None:

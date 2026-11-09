@@ -23,6 +23,14 @@ class Stage(Protocol):
     def run(self, ep: Episode, cfg: Config) -> None: ...
 
 
+def _prepare(stage: Stage, ep: Episode, cfg: Config) -> None:
+    """A stage may define ``prepare(ep, cfg)``: registry work that decides its inputs (the
+    tts stage's automatic cards), run before its key is computed."""
+    prepare = getattr(stage, "prepare", None)
+    if prepare is not None:
+        prepare(ep, cfg)
+
+
 class StageRecord(BaseModel):
     key: str
     status: Literal["done", "failed"]
@@ -101,6 +109,11 @@ class _HashCache:
 def _fingerprint(path: Path, ep: Episode, cache: _HashCache) -> str:
     resolved = path.resolve()
     if not resolved.exists():
+        # Named relative to the workspace (ruling CD6), so a copied or moved workspace isn't
+        # stale because an optional input such as glossary.toml is absent.
+        root = ep.workspace_root.resolve()
+        if resolved.is_relative_to(root):
+            return f"missing:<workspace>/{resolved.relative_to(root).as_posix()}"
         return f"missing:{resolved}"
     if resolved.is_dir():
         parts = [
@@ -150,6 +163,7 @@ def run_stages(
     ran: list[str] = []
     try:
         for i, stage in enumerate(stages[:stop]):
+            _prepare(stage, ep, cfg)
             key = _cache_key(stage, ep, cfg, cache)
             record = manifest.stages.get(stage.name)
             stale = (

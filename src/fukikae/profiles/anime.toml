@@ -45,3 +45,7 @@ subs_condense = true
 
 [tts]   # character-cards Task 6: Kokoro stock voices until the cloning backend is chosen (D15)
 backend = "kokoro"
+
+[tts.gender]   # anime voices sit high: a wide unknown band, and unknowns alternate pools
+male_below = 165.0
+female_above = 300.0

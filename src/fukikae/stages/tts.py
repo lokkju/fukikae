@@ -1,9 +1,14 @@
 """TTS stage: one wav per spoken cue, from the speaking character's card.
 
 Reads ``06-translate/cues.<target>.json``, ``01-separate/vocals.wav`` and the card of every
-character with a cue; writes ``07-tts/<cue-id>.wav`` and ``07-tts/plan.json`` (a ``TtsPlan``).
+character with a cue; writes ``07-tts/<cue-id>.wav`` and ``07-tts/plan.json`` (a ``TtsPlan``,
+which holds nothing that depends on the run, so the same audio gives the same bytes). What a run
+did (renders, cache hits, cards it assigned) goes to ``07-tts/run.json``, which is not an
+output; each automatic assignment is also appended to ``07-tts/assignments.log`` and kept as
+the history row's note.
 
-Before anything renders, each character with a cue and no card for the target language gets
+Before the stage's key is computed (``prepare``, called by the job runner) and again in
+``run``, each character with a cue to speak and no card for the target language gets
 one (``cards.auto.ensure_assignments``: a gender-matched stock voice of the ``[tts]`` backend,
 ``by = "auto"``, unlocked; an existing card is never replaced). Cues with no character (extras,
 and clusters the characters stage left for review) speak with a stock voice from the extras
@@ -15,7 +20,9 @@ Renders are cached per cue in ``<workspace>/.fukikae/tts-cache/<key>.wav`` and h
 copied) into ``07-tts``. The key (``cue_key``) hashes the card id, the text, the part of the
 delivery record the backend takes, the backend name, its options and its model identity
 (GT6), so swapping one character's card re-renders only that character's cues, and a cached
-key is never rendered again. ``[voice.post] gain_db`` is applied before caching. Cues with
+key is never rendered again. Each render's leading and trailing silence is trimmed to 30 ms
+(Kokoro pads every line by about 0.3 s, which the rate fit would otherwise count), then
+``[voice.post] gain_db`` is applied, both before caching. Cues with
 ``skip``, ``error`` or no text are listed in the plan and not rendered. Cues are grouped by
 their card's backend; each backend loads once (only when something isn't cached), renders and
 unloads before the next.
@@ -29,7 +36,8 @@ target length instead.
 ``[tts]`` names the backend for automatic and extras cards; its options go to that backend
 only (a card on another backend renders with that backend's defaults). ``device`` is a stage
 setting (``cpu`` or ``cuda``; default cuda when the backend can use it), not an option, and stays
-out of every key: the device doesn't change which voice a card is.
+out of every key: the device doesn't change which voice a card is. ``[tts.gender]``
+(``male_below``, ``female_above`` in Hz) sets the bands of the automatic gender estimate.
 """
 
 from __future__ import annotations
@@ -42,6 +50,7 @@ import os
 import shutil
 import time
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -58,7 +67,15 @@ from fukikae.cards.stock import check_stock_voice, revision, stock_card
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
-from fukikae.models import Assignments, Delivery, DubCue, DubCues, TtsPlan, TtsPlanCue
+from fukikae.models import (
+    Assignments,
+    Delivery,
+    DubCue,
+    DubCues,
+    TtsPlan,
+    TtsPlanCue,
+    TtsRun,
+)
 from fukikae.registry.store import Registry
 from fukikae.workspace import Episode, Workspace
 
@@ -66,8 +83,13 @@ log = logging.getLogger(__name__)
 _sleep = time.sleep
 
 # Bump when the stage changes what it renders for the same inputs.
-RENDER_VERSION = 1
-STAGE_KEYS = ("device",)
+RENDER_VERSION = 2  # 2: leading and trailing silence trimmed (ruling CD7)
+STAGE_KEYS = ("device", "gender")
+# Silence trimming: 10 ms frames quieter than TRIM_DB below the loudest frame are silence;
+# TRIM_KEEP_S of it is kept at each end.
+TRIM_FRAME_S = 0.010
+TRIM_DB = 40.0
+TRIM_KEEP_S = 0.030
 DEFAULT_MAX_SPEEDUP = 1.25
 DELIVERY_CAPS = frozenset({"emotion_audio", "emotion_vector", "instruction"})
 # The delivery fields each capability hands the backend.
@@ -145,6 +167,31 @@ def wav_seconds(path: Path) -> float:
     return len(data) / rate
 
 
+def trim_silence(path: Path) -> None:
+    """Cut leading and trailing silence from the wav in place, keeping ``TRIM_KEEP_S`` at each
+    end and the sample format as written. A render with no sound is left whole."""
+    from scipy.io import wavfile
+
+    rate, data = wavfile.read(path)
+    x = data.astype(np.float64)
+    if x.ndim > 1:
+        x = x.mean(axis=1)
+    n = max(1, int(TRIM_FRAME_S * rate))
+    frames = len(x) // n
+    if frames == 0:
+        return
+    rms = np.sqrt((x[: frames * n].reshape(frames, n) ** 2).mean(axis=1))
+    loudest = rms.max()
+    if loudest <= 0:
+        return
+    loud = np.flatnonzero(rms >= loudest * 10 ** (-TRIM_DB / 20))
+    keep = int(TRIM_KEEP_S * rate)
+    start = max(0, loud[0] * n - keep)
+    end = min(len(x), (loud[-1] + 1) * n + keep)
+    if start > 0 or end < len(x):
+        wavfile.write(path, rate, data[start:end])
+
+
 def _apply_gain(path: Path, gain_db: float) -> None:
     """Scale the wav in place by ``gain_db``, written as float32 so nothing clips."""
     from scipy.io import wavfile
@@ -201,6 +248,7 @@ class TtsStage:
     def __init__(self, cfg: Config | None = None) -> None:
         # The CLI's resolved config; inputs() gets none of its own.
         self.cfg = cfg
+        self._prepared: list[str] = []
 
     # -- configuration -------------------------------------------------------------------
 
@@ -244,6 +292,19 @@ class TtsStage:
         return out
 
     # -- Stage protocol --------------------------------------------------------------------
+
+    def prepare(self, ep: Episode, cfg: Config) -> None:
+        """Give characters without a card theirs before the stage's key is computed (the job
+        runner calls this first), so the key the run records already holds the automatic
+        cards and the next run with the same audio is up to date."""
+        path = self._cues_path(ep, cfg)
+        if not path.exists():
+            return
+        cues = read_json(path, DubCues).cues
+        store = CardStore(ep.workspace_root)
+        self._prepared += self._assign(
+            ep, cfg, cues, store, ep.work / "01-separate" / "vocals.wav"
+        )[2]
 
     def inputs(self, ep: Episode) -> list[Path]:
         cfg = self._config(ep)
@@ -296,8 +357,8 @@ class TtsStage:
         speedup = max_speedup(cfg)
 
         cards, names, report = self._assign(ep, cfg, cues, store, vocals)
-        for line in report:
-            log.info("tts: %s", line)
+        report = self._prepared + report
+        self._prepared = []
         extra_cards = self._extra_cards(cues, cfg, store, default_bc.backend)
 
         def who(c: DubCue) -> str:
@@ -352,13 +413,18 @@ class TtsStage:
         out_dir.mkdir(parents=True, exist_ok=True)
         done: dict[str, TtsPlanCue] = {}
         rendered = 0
+        fresh: list[str] = []
         for backend in sorted(jobs):
             cls = jobs[backend][0].cls
             lazy = _Lazy(self._backend_cfg(cfg, backend), self._device(cfg, cls, device_pref), cfg)
             try:
                 for job in jobs[backend]:
-                    key, seconds, factor, calls = self._render(job, lazy, cache, store, speedup)
+                    key, seconds, first, factor, calls = self._render(
+                        job, lazy, cache, store, speedup
+                    )
                     rendered += calls
+                    if calls:
+                        fresh.append(job.cue.id)
                     self._link(cache / f"{key}.wav", out_dir / f"{job.cue.id}.wav")
                     done[job.cue.id] = TtsPlanCue(
                         cue_id=job.cue.id,
@@ -368,9 +434,9 @@ class TtsStage:
                         backend=backend,
                         key=key,
                         seconds=round(seconds, 4),
+                        rendered_seconds=round(first, 4),
                         slot=round(job.slot, 4),
                         rate_factor=factor,
-                        cached=calls == 0,
                         passed=job.passed,
                         neutral_only=not (cls.capabilities & DELIVERY_CAPS),
                     )
@@ -394,12 +460,24 @@ class TtsStage:
         for stale in out_dir.glob("*.wav"):
             if stale.stem not in done:
                 stale.unlink()
-        write_json(out_dir / "plan.json", TtsPlan(episode=ep.id, cues=plan, report=report))
+        write_json(out_dir / "plan.json", TtsPlan(episode=ep.id, cues=plan))
+        cached = [cid for cid in done if cid not in fresh]
+        write_json(
+            out_dir / "run.json",
+            TtsRun(
+                episode=ep.id,
+                finished=datetime.now(UTC).isoformat(timespec="seconds"),
+                renders=rendered,
+                rendered=fresh,
+                cached=cached,
+                report=report,
+            ),
+        )
         log.info(
             "tts: %d cues, %d renders, %d from the cache, %d not rendered",
             len(cues),
             rendered,
-            sum(1 for p in done.values() if p.cached),
+            len(cached),
             len(cues) - len(done),
         )
 
@@ -415,13 +493,16 @@ class TtsStage:
             return "no text"
         return None
 
-    @staticmethod
+    @classmethod
     def _assign(
-        ep: Episode, cfg: Config, cues: list[DubCue], store: CardStore, vocals: Path
+        cls, ep: Episode, cfg: Config, cues: list[DubCue], store: CardStore, vocals: Path
     ) -> tuple[dict[int, str], dict[int, str], list[str]]:
         """(character -> card id, character -> name, report lines), after giving every
-        speaking character without a card one."""
-        speaking = sorted({c.character_id for c in cues if c.character_id is not None and c.text})
+        character with a cue to speak (not all skipped or errored) and no card one. New lines
+        are appended to ``07-tts/assignments.log``."""
+        speaking = sorted(
+            {c.character_id for c in cues if c.character_id is not None and cls._skipped(c) is None}
+        )
         if not speaking:
             return {}, {}, []
         asg_path = ep.work / "05-characters" / "assignments.json"
@@ -436,6 +517,14 @@ class TtsStage:
                 a = reg.card_for(cid, cfg.target_language)
                 if a is not None and a.card_id is not None:
                     cards[cid] = a.card_id
+        if report:
+            log_path = ep.work / "07-tts" / "assignments.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(UTC).isoformat(timespec="seconds")
+            with log_path.open("a", encoding="utf-8") as f:
+                for line in report:
+                    log.info("tts: %s", line)
+                    f.write(f"{stamp} {ep.id} {cfg.target_language}: {line}\n")
         return cards, names, report
 
     @staticmethod
@@ -492,7 +581,7 @@ class TtsStage:
         if not loader.supports(cls, target):
             raise CardError(f"{who}: card {card_id}: {backend} does not speak {target!r}; {fix}")
         if "emotion_audio" in cls.capabilities:
-            raise ConfigError(
+            raise CardError(
                 f"{who}: card {card_id}: the tts stage does not pass emotion_audio yet "
                 "(it arrives with the cloning backends)"
             )
@@ -534,8 +623,9 @@ class TtsStage:
 
     def _render(
         self, job: _Job, lazy: _Lazy, cache: Path, store: CardStore, speedup: float
-    ) -> tuple[str, float, float, int]:
-        """(key of the final wav, its seconds, rate factor, renders made)."""
+    ) -> tuple[str, float, float, float, int]:
+        """(key of the final wav, its seconds, the first render's seconds, rate factor,
+        renders made)."""
         calls = 0
         base = cache / f"{job.key}.wav"
         if not base.exists():
@@ -556,8 +646,8 @@ class TtsStage:
                     voice = replace(job.card.voice, rate=job.card.voice.rate * factor)
                     self._synth(lazy, job, voice, fitted, store)
                     calls += 1
-                return key, wav_seconds(fitted), factor, calls
-        return job.key, seconds, 1.0, calls
+                return key, wav_seconds(fitted), seconds, factor, calls
+        return job.key, seconds, seconds, 1.0, calls
 
     @staticmethod
     def _synth(lazy: _Lazy, job: _Job, voice: Any, dest: Path, store: CardStore) -> None:
@@ -574,6 +664,7 @@ class TtsStage:
                 emotion_strength=p.get("emotion_strength", job.card.voice.emotion_strength),
                 target_seconds=p.get("target_seconds"),
             )
+            trim_silence(tmp)
             gain = float(job.card.voice.post.get("gain_db", 0.0))
             if gain:
                 _apply_gain(tmp, gain)

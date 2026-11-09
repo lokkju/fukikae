@@ -141,11 +141,13 @@ class DubCues(BaseModel):
 
 class TtsPlanCue(BaseModel):
     """One cue in ``07-tts/plan.json``. A rendered cue has a ``card_id``, its cache ``key``
-    (of the wav in ``07-tts``), ``seconds`` and ``slot`` (the cue's length); ``rate_factor`` is
-    the speed-up the rate fit asked for (1.0 when none); ``cached`` is true when nothing was
-    rendered for it in this run. ``passed`` is what the backend got beyond the card and the
-    text, and ``neutral_only`` says the backend takes no delivery at all. ``skipped`` says why
-    a cue has no audio (``skip: ...`` or ``error: ...`` from translate, or ``no text``)."""
+    (of the wav in ``07-tts``), ``seconds`` (that wav's length, silence trimmed) and ``slot``
+    (the cue's length); ``rendered_seconds`` is the render at the card's own rate, before any
+    rate fit, and ``rate_factor`` the speed-up the fit asked for (1.0 when none). ``passed`` is
+    what the backend got beyond the card and the text, and ``neutral_only`` says the backend
+    takes no delivery at all. ``skipped`` says why a cue has no audio (``skip: ...`` or
+    ``error: ...`` from translate, or ``no text``). Nothing here depends on the run that wrote
+    it, so the same audio always gives the same file."""
 
     cue_id: str
     character_id: int | None
@@ -154,19 +156,31 @@ class TtsPlanCue(BaseModel):
     backend: str | None = None
     key: str | None = None
     seconds: float | None = None
+    rendered_seconds: float | None = None
     slot: float
     rate_factor: float = 1.0
-    cached: bool = False
     passed: dict[str, Any] = {}
     neutral_only: bool = False
     skipped: str | None = None
 
 
 class TtsPlan(BaseModel):
-    """The tts stage's artifact, ``07-tts/plan.json``; ``report`` has a line per character the
-    stage gave a card to, or found protected."""
+    """The tts stage's artifact, ``07-tts/plan.json``."""
 
     schema_version: int = 1
     episode: str
     cues: list[TtsPlanCue]
+
+
+class TtsRun(BaseModel):
+    """What one tts run did, ``07-tts/run.json``; not a stage output, so nothing downstream
+    depends on it. ``report`` holds the lines of the cards this run assigned (they are also
+    appended to ``07-tts/assignments.log`` and kept as history notes)."""
+
+    schema_version: int = 1
+    episode: str
+    finished: str
+    renders: int
+    rendered: list[str]
+    cached: list[str]
     report: list[str] = []
