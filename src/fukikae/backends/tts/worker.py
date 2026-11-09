@@ -80,9 +80,41 @@ def _number(value: Any, key: str, lo: float, hi: float) -> float:
     return x
 
 
+# The card's [voice] fields as the client sends them (``remote.voice_payload``).
+_VOICE_KEYS = frozenset(
+    {
+        "backend", "model_revision", "source", "seed", "temperature", "top_p", "rate",
+        "pitch_semitones", "emotion_strength", "voice", "voices", "references", "latent",
+        "description", "blend", "options", "post",
+    }
+)  # fmt: skip
+SEED_MAX = 2**32 - 1  # numpy's seed range
+
+
+def _optional_number(raw: dict[str, Any], key: str, lo: float, hi: float, *, lo_open: bool) -> None:
+    value = raw.get(key)
+    if value is None:
+        return
+    x = _number(value, f"voice.{key}", lo, hi)
+    if lo_open and x <= lo:
+        raise RequestError(f"voice.{key} must be over {lo:g}, got {value!r}")
+
+
 def _voice(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise RequestError("voice must be an object")
+    unknown = set(raw) - _VOICE_KEYS
+    if unknown:
+        raise RequestError(f"voice: unknown keys {sorted(unknown)}")
+    seed = raw.get("seed")
+    if seed is not None and (
+        isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= SEED_MAX
+    ):
+        raise RequestError(f"voice.seed must be an integer in [0, {SEED_MAX}], got {seed!r}")
+    _optional_number(raw, "temperature", 0.0, 5.0, lo_open=True)
+    _optional_number(raw, "top_p", 0.0, 1.0, lo_open=True)
+    _optional_number(raw, "rate", 0.0, 4.0, lo_open=True)
+    _optional_number(raw, "emotion_strength", 0.0, 1.0, lo_open=False)
     refs = raw.get("references", [])
     if not isinstance(refs, list):
         raise RequestError("voice.references must be a list")
