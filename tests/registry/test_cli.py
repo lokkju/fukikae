@@ -68,3 +68,72 @@ def test_rematch_needs_earlier_stages(tmp_path):
     r = runner.invoke(app, ["registry", "rematch", str(ws.root), str(src)])
     assert r.exit_code == 1
     assert "earlier stages not done" in r.output
+
+
+def _alias_ws(tmp_path):
+    import numpy as np
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    ws = Workspace(root)
+    with Registry(ws.registry_path) as reg:
+        for _ in range(2):
+            reg.create_actor_with_character(np.array([1.0, 0.0], dtype=np.float32))
+    return ws
+
+
+def test_registry_alias_sets_lists_and_removes(tmp_path):
+    ws = _alias_ws(tmp_path)
+    r = runner.invoke(app, ["registry", "alias", str(ws.root), "1", "NATSU"])
+    assert r.exit_code == 0, r.output
+    assert "natsu" in r.output
+    r = runner.invoke(app, ["registry", "alias", str(ws.root)])
+    assert r.exit_code == 0, r.output
+    assert "natsu\t1\toperator" in r.output
+    r = runner.invoke(app, ["registry", "show", str(ws.root), "1"])
+    assert r.exit_code == 0, r.output
+    assert "aliases: natsu (operator)" in r.output
+    r = runner.invoke(app, ["registry", "alias", str(ws.root), "1", "Natsu", "--remove"])
+    assert r.exit_code == 0, r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.aliases() == []
+
+
+def test_registry_alias_refuses_multi_names(tmp_path):
+    ws = _alias_ws(tmp_path)
+    for name in ("NATSU/ZEREF", "MAKAROV/WRAITH", "ALL", ""):
+        r = runner.invoke(app, ["registry", "alias", str(ws.root), "1", name])
+        assert r.exit_code == 1, (name, r.output)
+    with Registry(ws.registry_path) as reg:
+        assert reg.aliases() == []
+
+
+def test_registry_alias_takes_a_possession_name_as_its_own(tmp_path):
+    ws = _alias_ws(tmp_path)  # D29 #12
+    r = runner.invoke(app, ["registry", "alias", str(ws.root), "2", "MAKAROV(WRAITH)"])
+    assert r.exit_code == 0, r.output
+    with Registry(ws.registry_path) as reg:
+        assert [(a.alias, a.character_id) for a in reg.aliases()] == [("makarov (wraith)", 2)]
+
+
+def test_registry_alias_needs_replace_over_another_operator_alias(tmp_path):
+    ws = _alias_ws(tmp_path)
+    assert runner.invoke(app, ["registry", "alias", str(ws.root), "1", "HAPPY"]).exit_code == 0
+    r = runner.invoke(app, ["registry", "alias", str(ws.root), "2", "HAPPY"])
+    assert r.exit_code == 1 and "--replace" in r.output
+    r = runner.invoke(app, ["registry", "alias", str(ws.root), "2", "HAPPY", "--remove"])
+    assert r.exit_code == 1 and "character 1" in r.output  # not this character's alias
+    r = runner.invoke(app, ["registry", "alias", str(ws.root), "2", "HAPPY", "--replace"])
+    assert r.exit_code == 0, r.output
+    with Registry(ws.registry_path) as reg:
+        assert [(a.alias, a.character_id) for a in reg.aliases()] == [("happy", 2)]
+
+
+def test_registry_rename_records_the_operator_and_warns_on_a_held_key(tmp_path):
+    ws = _alias_ws(tmp_path)
+    assert runner.invoke(app, ["registry", "alias", str(ws.root), "1", "ERZA"]).exit_code == 0
+    r = runner.invoke(app, ["registry", "rename", str(ws.root), "2", "Erza"])
+    assert r.exit_code == 0, r.output
+    assert "character 1" in r.output
+    r = runner.invoke(app, ["registry", "show", str(ws.root), "2"])
+    assert "Erza (name by operator)" in r.output
