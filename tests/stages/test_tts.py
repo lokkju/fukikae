@@ -913,3 +913,10 @@ def test_rate_factors_are_quantized_to_five_hundredths():
     assert q(1.1, 1.25) == pytest.approx(1.1)
     assert q(1.24, 1.25) == pytest.approx(1.25)
     assert q(1.3, 1.33) == pytest.approx(1.3) and q(1.31, 1.33) == pytest.approx(1.33)
+
+
+def test_the_retry_seed_wraps_at_32_bits():
+    """B5: the CD18 retry renders with seed + 1, modulo 2^32."""
+    assert tts.retry_seed(2**32 - 1) == 0
+    assert tts.retry_seed(None) == 1
+    assert tts.retry_seed(41) == 42
