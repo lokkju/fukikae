@@ -328,3 +328,46 @@ Fingerprints are not recorded at assignment (`voices verify --record` does it). 
 - 0 suspect renders.
 
 Results doc: `docs/results/2026-11-09-character-cards.md`.
+
+## Performance task (D26, 2026-11-10)
+
+Measured on copies of the Fairy Tail workspace (`~/fukikae-scratch/perf/ft`), GPU 0 (RTX 3090; it runs at a 200 W limit, and the clock drops to 800-900 MHz in IndexTTS2's diffusion decoder).
+
+**Where IndexTTS2's time goes.** 12 E14 lines in fp32: the GPT's sampling 1.85 s a line (bound by kernel launches: 35% SM busy, and beams 3 or 1 cost the same), the diffusion decoder 1.55 s (25 steps over the 15 s prompt plus the line, compute-bound under the power limit), BigVGAN 0.15 s. Every option tried, 12 lines each, seconds a line: fp32 3.9; fp16 4.0; beams 1 3.9; tf32 3.4; torch.compile 8.4 (it recompiles per line length); fp16+tf32 with 4 threads 4.2; `accel` (IndexTTS2's flash-attention and CUDA-graph GPT engine, flash-attn 2.8.3 from its prebuilt wheel) 3.3, and with fp16 and tf32 2.2 at steady state; two workers sharing the GPU 10% more lines an hour. IndexTTS2 takes one line per call (its decoder caches are sized for batch 1), so there is no batching. The stage already keeps one worker per backend for the whole episode. DeepSpeed is not in the locked environment.
+
+**Quality gate (eval tts, deterministic ASR, held-out similarity; same cues, tags and cards).**
+
+| run | episode | held-out sim | WER | median WER | suspect | fit | cps |
+|---|---|---|---|---|---|---|---|
+| fp32 (before), `91a2d375` | E13 | 0.389 | 0.104 | 0 | 0 | 0.81 | 13.2 |
+| fp32 (before), `63604187` | E14 | 0.449 | 0.104 | 0 | 0 | 0.75 | 13.2 |
+| tf32, `b39eb263` | E13 | 0.400 | 0.100 | 0 | 0 | 0.81 | 12.7 |
+| tf32, `f40b6b7e` | E14 | 0.451 | 0.081 | 0 | 0 | 0.75 | 12.8 |
+| fp16+accel+tf32, `c37c5a10` | E13 | 0.366 | 0.095 | 0 | 0 | 0.63 | 11.8 |
+| fp16+accel+tf32, `a461efed` | E14 | 0.428 | 0.130 | 0.091 | 0 | 0.65 | 13.1 |
+| accel, `28c1a37e` | E13 | 0.383 | 0.095 | 0 | 0 | 0.63 | 11.8 |
+| fp16+tf32, `bd02a3ab` | E13 | 0.410 | 0.119 | 0 | 0 | 0.78 | 12.9 |
+
+tf32 passes and is on in the profiles (`[tts.indextts2] tf32 = true`, in every render's key). `accel` fails: held-out similarity -0.024 (E13) and -0.021 (E14), median WER +0.09 on E14, and slower speech (fit 0.81 to 0.63). Its engine samples at the temperature only, without top-p, top-k, beams or the repetition penalty. It was reverted, and the worker lock is unchanged. fp16 passes on E13 but is slower here, so it stays off.
+
+**Rate estimate.** A backend that takes a rate renders each cue once at the rate its estimate needs: the text over the card's measured characters a second (the median of its earlier renders once three are in, else the backend's `speech_cps`). One more render follows only on a miss of over 10%. IndexTTS2 takes no rate, so none of its renders were ever rate fits: its extra renders are the CD18 guard retries (5 to 6 an episode). This applies only to Kokoro's stock and extras lines. E13 had 8 estimated cues, 6 of them re-rendered; E14 had 2, with none re-rendered. No saving on this series.
+
+**Tag on the GPU.** SenseVoice and emotion2vec default to cuda under the GPU lock, with the CPU as the fallback. On the same turns, GPU against CPU: identical events, and identical emotion labels on 467/467 (E13) and 441/441 (E14) turns. The largest confidence difference is 0.006, with no turn crossing 0.5. SenseVoice takes 45 s against 200 s, emotion2vec 10 s against 108 s, using 1.0 and 1.4 GB of VRAM (peak reserved).
+
+**Several episodes.** `fukikae run <ws> S01E13 S01E14` runs E13's timefit and mix (01:16:56-01:18:34) beside E14's extract and separate.
+
+**Per-stage minutes, before (Task 12, sequential) and after (`--from extract`, both episodes in one run, empty tts cache).**
+
+| stage | E13 before | E13 after | E14 before | E14 after |
+|---|---|---|---|---|
+| separate | 2.44 | 2.15 | 2.38 | 2.20 |
+| asr | 1.42 | 2.07 | 1.33 | 0.83 |
+| diarize | 0.56 | 0.56 | 0.58 | 0.56 |
+| tag | 5.35 | 0.88 | 5.12 | 0.88 |
+| translate | 0.14 | 0.13 | 0.25 | 0.25 |
+| tts | 13.77 | 13.53 | 22.13 | 19.30 |
+| timefit | 0.04 | 0.06 | 0.07 | 0.06 |
+| mix | 1.39 | 1.57 | 1.48 | 1.43 |
+| sum | 25.2 | 21.0 | 33.4 | 25.6 |
+
+The two episodes took 45.0 min of wall time, against 58.5 min of stage time before. E13's rerun spoke 199 lines with IndexTTS2, against 168 before, because the characters stage now matches against a registry that holds E11 to E14. That is why its tts time barely moved. E14 rendered the same 329 renders 13% faster. The target of 5 to 10 min an episode is not reached: IndexTTS2 alone is 19 min for E14's 320 lines. What remains is model settings outside the options (diffusion steps, the 15 s prompt), `accel` with its sampling restored (a change in the pinned indextts code), or the GPU's power limit.
