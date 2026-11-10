@@ -617,9 +617,9 @@ def _named_episode(
     line per turn, assignments with these refined turns and clusters, and, with ``names``,
     a used names.json with those lines (start, end, key, inner) and ``excluded`` spans."""
     from fukikae.artifacts import write_json
-    from fukikae.models import Segment, Transcript
+    from fukikae.models import Diarization, Segment, Transcript
     from fukikae.names.inputs import names_path
-    from fukikae.names.models import NamedLine, NamesResult
+    from fukikae.names.models import LabelInfo, NamedLine, NamesResult
     from fukikae.names.normalize import NameClass
     from fukikae.workspace import Workspace
     from tests.cards.test_select import _vocals
@@ -652,12 +652,19 @@ def _named_episode(
             for i, (a, b, k, inner) in enumerate(names)
         ]  # fmt: skip
         names_path(work).parent.mkdir(parents=True, exist_ok=True)
+        refined = [Turn(start=a, end=b, speaker=s) for a, b, s, _ in turns]
+        write_json(names_path(work).parent / "turns.json", Diarization(backend="x", turns=refined))
+        labels = {
+            c["cluster"]: LabelInfo(parent=c["cluster"].split("~")[0], key=c.get("name"),
+                                    display=None, cls="named" if c.get("name") else "remainder")
+            for c in clusters
+        }  # fmt: skip
         write_json(
             names_path(work),
             NamesResult(
                 episode=episode, used=True, verdict="full", reason=None,
                 source={"how": "target"}, offset_s=0.0, coverage={}, lines=lines, hidden=[],
-                pieces=[], labels={}, unvoiced=[], excluded=list(excluded),
+                pieces=[], labels=labels, unvoiced=[], excluded=list(excluded),
                 dropped_row_seconds=0.0, suggestions=[],
             ),
         )  # fmt: skip
@@ -828,7 +835,8 @@ def test_auto_card_with_stale_references_is_repicked(tmp_path: Path, vocals: Pat
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 1, [(NAMED_EP, 20.0, 25.0), (NAMED_EP, 30.0, 35.0)])
     stale = stale_cards(ws, reg, store, [1], "en")
-    assert [(r["start"], r["names"]) for r in stale[1]] == [(20.0, []), (30.0, ["wendy"])]
+    # 20-25 is Natsu's unnamed remainder: unnamed speech never makes a card stale
+    assert [(r["start"], r["names"]) for r in stale[1]] == [(30.0, ["wendy"])]
     lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
                                cloning=_cloning_ws(ws), stale=stale)  # fmt: skip
     cur = reg.card_for(1, "en")
@@ -856,11 +864,13 @@ def test_assigned_imported_or_locked_card_is_flagged_not_repicked(tmp_path, voca
     old = _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)],
                       by="auto" if locked else by, locked=locked)  # fmt: skip
     stale = stale_cards(ws, reg, store, [1], "en")
+    flags: list[str] = []
     lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
-                               cloning=_cloning_ws(ws), stale=stale)  # fmt: skip
+                               cloning=_cloning_ws(ws), stale=stale, flags=flags)  # fmt: skip
     cur = reg.card_for(1, "en")
     assert cur is not None and cur.card_id == old and len(reg.card_history(1, "en")) == 1
-    (line,) = lines
+    assert lines == []  # nothing changed: the flag goes to flags, never to the report
+    (line,) = flags
     assert "voices clone" in line and "wendy" in line
     reg.close()
 
@@ -900,17 +910,206 @@ def test_a_stale_card_without_confirmed_picks_gets_a_stock_voice(tmp_path: Path,
     reg.close()
 
 
-def test_stale_references_use_90_percent_containment():
+def test_stale_references_need_10_percent_under_someone_elses_names():
     from fukikae.cards.auto import stale_references
     from fukikae.cards.card import Card, Reference, Voice
 
     refs = tuple(
         Reference(clip="0" * 64 + ".wav", transcript="x", language="ja",
                   origin={"episode": e, "start": a, "end": b})
-        for e, a, b in [("E1", 0.0, 10.0), ("E1", 0.0, 10.5), ("E1", 20.0, 30.0), ("E2", 0, 9)]
+        for e, a, b in [("E1", 0.0, 10.0), ("E1", 10.0, 20.0), ("E1", 20.0, 30.0), ("E2", 0, 9)]
     )  # fmt: skip
     card = Card(target_language="en", voice=Voice(backend="clonefake", model_revision="r",
                 source="clone", seed=1, references=refs))  # fmt: skip
-    got = stale_references(card, {"E1": [(0.0, 5.0), (5.0, 9.5)]})
-    # 0-10 is 95% inside (two touching turns), 0-10.5 is 90.5%, 20-30 none; E2 used no names
-    assert [(r["start"], r["end"], r["inside"]) for r in got] == [(20.0, 30.0, 0.0)]
+    got = stale_references(card, {"E1": [(9.1, 11.0), (21.0, 22.0)]})
+    # 0-10 has 9% under another's names, 10-20 10%, 20-30 10%; E2 used no names
+    assert [(r["start"], r["end"], r["overlap"]) for r in got] == [(10.0, 20.0, 0.1),
+                                                                   (20.0, 30.0, 0.1)]  # fmt: skip
+
+
+# -- Task 9 review: the controller's ruling on stale references, and the names guard ----------
+
+# Character 3 speaks only in S9, an unnamed remainder of the names-used episode (24 s, loud):
+# no name is said over it.
+REMAINDER_TURNS = [*NATSU_TURNS, *((float(s), s + 8.0, "S9", 0.001) for s in (60, 70, 80))]
+REMAINDER_CLUSTERS = [*NATSU_CLUSTERS, {"cluster": "S9", "character_id": 3}]
+
+
+def _ws_remainder(tmp_path: Path, turns=REMAINDER_TURNS, names=NATSU_NAMES):
+    from fukikae.workspace import Workspace
+
+    reg, ids = _registry(tmp_path, 3)
+    _named_episode(tmp_path / "ws", NAMED_EP, turns, REMAINDER_CLUSTERS, names=names,
+                   excluded=[(40.0, 45.0)])  # fmt: skip
+    return reg, ids, Workspace(tmp_path / "ws")
+
+
+def test_unnamed_speech_never_makes_a_card_stale(tmp_path: Path):
+    """The reviewer's q2b: character 3's clone from its unnamed remainder keeps its clone."""
+    from fukikae.cards.auto import stale_cards
+
+    reg, _, ws = _ws_remainder(tmp_path)
+    vocals = write_wav(tmp_path / "vocals.wav", harmonic(200, 120))
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 3, [(NAMED_EP, 60.0, 68.0), (NAMED_EP, 70.0, 78.0)])
+    assert stale_cards(ws, reg, store, [3], "en") == {}
+    assert ensure_assignments(reg, store, CFG, {3: [(60.0, 88.0)]}, vocals,
+                              cloning=_cloning_ws(ws), stale={}) == []  # fmt: skip
+    assert reg.card_for(3, "en").card_id == old  # type: ignore[union-attr]
+    reg.close()
+
+
+def test_a_stale_card_without_name_confirmed_turns_re_picks_from_its_own_speech(tmp_path: Path):
+    """Character 3's card was cloned from Wendy's named turn; it has no name-confirmed turns,
+    so the re-pick takes its own acoustic speech (the S9 remainder) before a stock voice, and
+    says the references are not name-confirmed. A second run is a no-op."""
+    from fukikae.cards.auto import REPICK_NOTE, stale_cards
+
+    reg, _, ws = _ws_remainder(tmp_path)
+    vocals = write_wav(tmp_path / "vocals.wav", harmonic(200, 120))
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 3, [(NAMED_EP, 30.0, 35.0)])
+    stale = stale_cards(ws, reg, store, [3], "en")
+    assert [r["names"] for r in stale[3]] == [["wendy"]]
+    cloning = _cloning_ws(ws)
+    (line,) = ensure_assignments(reg, store, CFG, {3: [(60.0, 88.0)]}, vocals,
+                                 cloning=cloning, stale=stale)  # fmt: skip
+    cur = reg.card_for(3, "en")
+    assert cur is not None and cur.card_id != old and (cur.note or "").startswith(REPICK_NOTE)
+    card = store.get(cur.card_id or "")
+    assert card.voice.source == "clone"
+    assert all(_inside_o(r.origin, [(60, 68), (70, 78), (80, 88)]) for r in card.voice.references)
+    assert "references are not name-confirmed" in line
+    # second run: the new card is not stale, nothing to do
+    assert stale_cards(ws, reg, store, [3], "en") == {}
+    assert ensure_assignments(reg, store, CFG, {3: [(60.0, 88.0)]}, vocals, cloning=cloning,
+                              stale={}) == []  # fmt: skip
+    assert len(reg.card_history(3, "en")) == 2
+    reg.close()
+
+
+def test_acoustic_candidates_leave_out_turns_under_other_names(tmp_path: Path):
+    """A remainder turn with 10% or more of it under another key's line is no candidate; one
+    under 10% still is."""
+    from fukikae.cards.auto import character_candidates
+
+    names = [*NATSU_NAMES, (67.0, 69.0, "wendy", False), (79.5, 80.5, "lucy", False)]
+    reg, _, ws = _ws_remainder(tmp_path, names=names)
+    got = character_candidates(ws, [NAMED_EP], 3, acoustic=True)[NAMED_EP]
+    # 60-68 has 1 s (12.5%) of Wendy; 80-88 0.5 s (6%) of Lucy
+    assert sorted((p.start, p.end) for p in got) == [(70.0, 78.0), (80.0, 88.0)]
+    assert character_candidates(ws, [NAMED_EP], 3) == {}  # no name-confirmed turns
+    reg.close()
+
+
+def test_confirmed_spans_leave_out_inner_voice_and_multi_spans(tmp_path: Path):
+    from fukikae.cards.auto import confirmed_spans
+
+    reg, _, ws = _ws_named(tmp_path)
+    assert confirmed_spans(ws, 1) == {NAMED_EP: [(0.0, 5.0), (10.0, 15.0), (50.0, 55.0)]}
+    reg.close()
+
+
+def test_a_lock_kept_turn_is_never_stale_for_its_character(tmp_path: Path):
+    """The operator locked character 1 onto S0~wendy's speech: its names say Wendy, but a
+    lock keeps speech whatever the names say, so a reference there isn't stale."""
+    from fukikae.cards.auto import stale_cards
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 3)
+    locked = {"cluster": "S0~wendy", "character_id": 1, "name": "wendy", "source": "lock"}
+    clusters = [*NATSU_CLUSTERS[:2], locked]
+    _named_episode(tmp_path / "ws", NAMED_EP, NATSU_TURNS, clusters, names=NATSU_NAMES)
+    ws = Workspace(tmp_path / "ws")
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)])
+    assert stale_cards(ws, reg, store, [1], "en") == {}
+    reg.close()
+
+
+def _stale_pair(ws, how: str) -> None:
+    """Make the names-used episode's assignments older than its names: other refined turns,
+    or a names label its clusters don't cover."""
+    from fukikae.artifacts import read_json, write_json
+    from fukikae.models import Diarization
+    from fukikae.names.inputs import names_path
+    from fukikae.names.models import LabelInfo, NamesResult
+
+    work = ws.work_dir(NAMED_EP)
+    if how == "turns":
+        path = names_path(work).parent / "turns.json"
+        d = read_json(path, Diarization)
+        extra = Turn(start=90, end=95, speaker="S0~lucy")
+        write_json(path, d.model_copy(update={"turns": [*d.turns, extra]}))
+    else:
+        n = read_json(names_path(work), NamesResult)
+        labels = {**n.labels, "S0~lucy": LabelInfo(parent="S0", key="lucy", display="Lucy",
+                                                  cls="named")}  # fmt: skip
+        write_json(names_path(work), n.model_copy(update={"labels": labels}))
+
+
+@pytest.mark.parametrize("how", ["turns", "labels"])
+def test_an_episode_whose_assignments_are_older_than_its_names_is_skipped(tmp_path, how):
+    """The stale pair: names.json and turns.json from a newer names run than assignments.json.
+    Its name decisions are stale, so neither stale detection nor candidates read it, and the
+    report says why and what to run."""
+    from fukikae.cards.auto import character_candidates, character_references, stale_cards
+
+    reg, _, ws = _ws_named(tmp_path)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)])
+    assert stale_cards(ws, reg, store, [1], "en")  # stale while the pair agrees
+    _stale_pair(ws, how)
+    notes: list[str] = []
+    assert stale_cards(ws, reg, store, [1], "en", notes=notes) == {}
+    (note,) = notes
+    assert note.startswith(f"{NAMED_EP}: its assignments.json is older than its names")
+    assert f"fukikae run <ws> {NAMED_EP} --from characters" in note
+    assert character_candidates(ws, [NAMED_EP], 1) == {}
+    assert character_candidates(ws, [NAMED_EP], 1, acoustic=True) == {}
+    assert character_references(ws, [NAMED_EP], 1) is None
+    reg.close()
+
+
+def test_stale_cards_read_each_episode_once(tmp_path: Path, monkeypatch):
+    import fukikae.artifacts as artifacts
+    from fukikae.cards.auto import stale_cards
+
+    reg, ids, ws = _ws_named(tmp_path)
+    store = CardStore(ws.root)
+    for cid in ids:
+        _auto_clone(reg, store, cid, [(NAMED_EP, 30.0, 35.0)])
+    reads: list[str] = []
+    real = artifacts.read_json
+
+    def counting(path, model):
+        reads.append(Path(path).name)
+        return real(path, model)
+
+    monkeypatch.setattr(artifacts, "read_json", counting)
+    stale_cards(ws, reg, store, ids, "en")
+    assert reads.count("assignments.json") == 1 and reads.count("names.json") == 1
+
+
+def test_a_stale_card_kept_while_the_clone_backend_is_unusable(tmp_path: Path, vocals: Path):
+    """Stale and unusable: the automatic card stays, and the flag says why and how to fix it;
+    nothing is reported as changed."""
+    from fukikae.cards.auto import stale_cards
+
+    reg, _, ws = _ws_named(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)])
+    stale = stale_cards(ws, reg, store, [1], "en")
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
+                               cloning=_unusable(), stale=stale, flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
+    (flag,) = flags
+    assert "kept until the clone backend" in flag and "no worker environment" in flag
+    assert "fukikae backends setup" in flag
+    flags.clear()
+    assert ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals, cloning=None,
+                              stale=stale, flags=flags) == []  # fmt: skip
+    (flag,) = flags
+    assert "no [tts] clone_backend is set" in flag and "can run" not in flag
+    reg.close()

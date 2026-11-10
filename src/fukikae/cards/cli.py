@@ -126,33 +126,43 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
     """List every character with its card for the target language, then each clone card
     cloned from turns the subtitle names now give someone else (D29 #4): the next tts run
     re-picks an automatic one; a curated or imported one stays until `voices clone`."""
-    from fukikae.cards.auto import AUTOMATIC_BY, replace_refusal, stale_cards
+    from fukikae.cards.auto import AUTOMATIC_BY, repick_blocker, replace_refusal, stale_cards
 
     with _session(workspace, lang) as (reg, store, language):
-        _echo(f"character\tname\t{language} card\tby\tstate")
+        _echo(f"character	name	{language} card	by	state")
         chars = reg.characters()
         for c in chars:
             a = reg.card_for(c.id, language)
             if a is None:
-                _echo(f"{c.id}\t{c.name or '-'}\t-\t-\t-")
+                _echo(f"{c.id}	{c.name or '-'}	-	-	-")
             else:
-                _echo(f"{c.id}\t{c.name or '-'}\t{a.card_id}\t{a.by}\t{_state(a)}")
-        stale = stale_cards(Workspace(workspace), reg, store, [c.id for c in chars], language)
+                _echo(f"{c.id}	{c.name or '-'}	{a.card_id}	{a.by}	{_state(a)}")
+        ws = Workspace(workspace)
+        notes: list[str] = []
+        stale = stale_cards(ws, reg, store, [c.id for c in chars], language, notes=notes)
+        blocker: list[str | None] = []  # worked out once, only for an automatic stale card
         for c in chars:
             refs = stale.get(c.id)
             a = reg.card_for(c.id, language)
             if not refs or a is None:
                 continue
             said = sorted({k for r in refs for k in r.get("names") or []})
-            now = f"now named {', '.join(k.upper() for k in said)}" if said else "now unnamed"
-            fix = (
-                "the next tts run re-picks it"
-                if a.chosen_by in AUTOMATIC_BY and replace_refusal(a, "auto") is None
-                else "`fukikae voices clone` replaces it"
-            )
+            now = f"now named {', '.join(k.upper() for k in said)}" if said else "now named"
+            if a.chosen_by in AUTOMATIC_BY and replace_refusal(a, "auto") is None:
+                if not blocker:
+                    blocker.append(repick_blocker(ws.config))
+                fix = (
+                    "the next tts run re-picks it"
+                    if blocker[0] is None
+                    else f"kept while {blocker[0]}; `fukikae voices clone` replaces it"
+                )
+            else:
+                fix = "`fukikae voices clone` replaces it"
             _echo(
                 f"character {_label(c)}'s card ({a.chosen_by}) was cloned from turns {now}; {fix}"
             )
+        for note in notes:
+            _echo(note)
 
 
 def _modes(card: Card) -> list[tuple[str, str, tuple[str, ...], bool]]:
