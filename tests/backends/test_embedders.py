@@ -10,7 +10,7 @@ from fukikae.config import BackendConfig
 NEW = {
     "wespeaker": ("fukikae.backends.embed.wespeaker", "WespeakerEmbedder", 256, "pyannote"),
     "wavlm_sv": ("fukikae.backends.embed.wavlm_sv", "WavlmSvEmbedder", 512, "wavlm"),
-    "campplus": ("fukikae.backends.embed.sherpa", "CampplusEmbedder", 512, "sherpa"),
+    "campplus": ("fukikae.backends.embed.sherpa", "CampplusEmbedder", 192, "sherpa"),
     "eres2netv2": ("fukikae.backends.embed.sherpa", "Eres2netv2Embedder", 192, "sherpa"),
     "titanet": ("fukikae.backends.embed.sherpa", "TitanetEmbedder", 192, "sherpa"),
 }
@@ -261,9 +261,10 @@ def test_real_model_separates_speakers_on_fairytail_e12(name):
     _, lines = _ground_truth(ws, eid, eid, "ass", None, 1, None, {"NABARU": "NEBARU"})
     segs = [s for s in segments(ws, eid, "diarization", lines) if s.label][:60]
     assert len({s.label for s in segs}) >= 2
-    mod, cls, dim, _ = NEW[name]
+    mod, cls, _, _ = NEW[name]
     device = "cpu" if NEW[name][3] == "sherpa" else "cuda:0"
     e = getattr(importlib.import_module(mod), cls)({}, device)
+    dim = e.dim  # B16: what the embedder declares, which the real model must give
     e.load()
     try:
         audio = ws.work_dir(eid) / "01-separate" / "vocals_16k.wav"
