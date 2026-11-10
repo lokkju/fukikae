@@ -71,8 +71,8 @@ import numpy as np
 from fukikae.artifacts import read_json, write_json
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.models import Assignments, ClusterAssignment, Diarization
-from fukikae.names.inputs import identity_inputs, names_path
-from fukikae.names.models import NamesResult
+from fukikae.names.inputs import identity_inputs, names_path, names_report_path
+from fukikae.names.models import KeyDecision, KeyHow, NamesReport, NamesResult
 from fukikae.registry.matching import (
     ClusterEvidence,
     centroid_tops,
@@ -116,6 +116,7 @@ def resolve_names(
     pinned: dict[str, ClusterAssignment],
     parent_tops: Tops,
     own_pins: dict[str, ClusterAssignment] | None = None,
+    decisions: list[KeyDecision] | None = None,
 ) -> tuple[dict[str, ClusterAssignment], list[str]]:
     """Characters for every named sub-cluster of a names-used episode, in the order the module
     docstring gives, and the report lines (locks kept, disagreements with acoustics, ambiguous
@@ -127,7 +128,10 @@ def resolve_names(
     remainder label in ``pinned`` (the remainder path's pins), else the sub-cluster's own pin
     in ``own_pins`` (inherited only from a voice-sourced assignment, `pin(voice_only=True)`,
     so never from its own earlier name or lock decision), else ``parent_tops``, each parent
-    cluster's best (actor, score) over all its rows."""
+    cluster's best (actor, score) over all its rows.
+
+    ``decisions`` (when given) gets one `KeyDecision` per key, most named speech first: how
+    the key went, for `fukikae names show`."""
     threshold = cfg.registry.match_threshold
     min_new = cfg.names.min_new_seconds
     language = (result.source or {}).get("language")
@@ -172,6 +176,7 @@ def resolve_names(
     order = sorted(by_key, key=lambda k: (-key_seconds[k], k))
     out: dict[str, ClusterAssignment] = {}
     report: list[str] = []
+    went_by: dict[str, tuple[KeyHow, int | None]] = {}  # key -> (how, character)
 
     def assign(label: str, status: str, actor_id: int | None, cid: int | None, source: str):
         info = named[label]
@@ -216,11 +221,13 @@ def resolve_names(
             c = reg.character_for_key(k)
         except ValueError as e:
             report.append(f"{k!r} ({key_seconds[k]:.1f} s) left to acoustics: {e}")
+            went_by[k] = ("ambiguous", None)
             continue
         if c is None:
             unknown.append(k)
             continue
         taken.add(c.id)
+        went_by[k] = ("known", c.id)
         for lb in free:
             assign(lb, "matched", c.actor_id, c.id, "name")
     # 3. role labels and short keys are extras
@@ -228,6 +235,7 @@ def resolve_names(
     for k in unknown:
         role = any(named[lb].cls == "role" for lb in by_key[k])
         if role or key_seconds[k] < min_new:
+            went_by[k] = ("extra", None)
             for lb in by_key[k]:
                 if lb not in out:
                     assign(lb, "extra", None, None, "name")
@@ -276,6 +284,7 @@ def resolve_names(
                     f"{on_char[cid]:.1f} s named speech here, of {key_seconds[k]:.1f} s for the key"
                 )
                 chars[cid] = next(c for c in reg.characters() if c.id == cid)
+                went_by[k] = ("renamed", cid)
                 for lb in labels:
                     assign(lb, "matched", chars[cid].actor_id, cid, "name")
                 continue
@@ -286,6 +295,7 @@ def resolve_names(
         actors[aid] = next(a for a in reg.actors() if a.id == aid)
         chars[cid] = next(c for c in reg.characters() if c.id == cid)
         taken.add(cid)
+        went_by[k] = ("created", cid)
         for lb in labels:
             assign(lb, "new", aid, cid, "name")
     # disagreements, one line per key: reported, never acted on. Extras have no character to
@@ -317,6 +327,24 @@ def resolve_names(
             f"{k!r} -> {describe(cid)}; acoustics disagree on {total:.1f} s of its "
             f"{key_seconds[k]:.1f} s: {listed}"
         )
+    if decisions is not None:
+        for k in order:
+            locked = {
+                lb: a.character_id
+                for lb in by_key[k]
+                if (a := out.get(lb)) is not None and a.source == "lock"
+            }
+            unlocked = [lb for lb in by_key[k] if lb not in locked]
+            went, cid = went_by.get(k, ("lock", None))
+            if not unlocked and went != "ambiguous":  # every sub-cluster stayed with a lock
+                keepers = set(locked.values())
+                went, cid = "lock", keepers.pop() if len(keepers) == 1 else None
+            shown = next((d for lb in by_key[k] if (d := named[lb].display)), None)
+            decisions.append(
+                KeyDecision(key=k, how=went, character_id=cid, display=shown,
+                            seconds=round(key_seconds[k], 3), labels=sorted(by_key[k]),
+                            locked=locked)
+            )  # fmt: skip
     return out, report
 
 
@@ -361,6 +389,12 @@ class CharactersStage:
 
     def outputs(self, ep: Episode) -> list[Path]:
         return [ep.work / "05-characters" / "assignments.json"]
+
+    @staticmethod
+    def report_path(ep: Episode) -> Path:
+        """``names-report.json`` beside the assignments: how each name key went (not an
+        output, so it never enters a key)."""
+        return names_report_path(ep.work)
 
     @staticmethod
     def _language(ep: Episode, cfg: Config) -> str | None:
@@ -415,6 +449,10 @@ class CharactersStage:
             names = None
         (assignments_path,) = self.outputs(ep)
         assignments_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path = self.report_path(ep)
+        report_path.unlink(missing_ok=True)  # only a run that used names writes one
+        decisions: list[KeyDecision] = []
+        report: list[str] = []
         turns = read_json(turns_path, Diarization)
         threshold = cfg.registry.match_threshold
 
@@ -524,6 +562,7 @@ class CharactersStage:
                     path_pins,
                     parent_tops,
                     own_pins={k: v for k, v in voice_pins.items() if k in named},
+                    decisions=decisions,
                 )
                 for line in report:
                     log.info("characters %s: %s", ep.id, line)
@@ -585,3 +624,5 @@ class CharactersStage:
                 turns=turns.turns,
             ),
         )
+        if names is not None:
+            write_json(report_path, NamesReport(episode=ep.id, keys=decisions, lines=report))
