@@ -1142,3 +1142,29 @@ def test_floor_clips_are_never_reused_stale(tmp_path):
     tone_wav(vocals, 10.0, 16000, freq=880.0)
     ((third, _),) = ev.floor_clips(out, longer, vocals, episode="E1", slots=[(1.0, 4.0)])
     assert third != second
+
+
+def test_pooled_wer_skips_cues_whose_reference_is_empty():
+    """B11: a cue whose reference normalizes to nothing has no words to cap its errors at
+    (CD16); it stays out of the pooled WER instead of adding its hypothesis words."""
+    scores = [
+        _score(cue_id="c1", errors=1, ref_words=4),
+        _score(cue_id="c2", errors=9, ref_words=0),  # a laugh rendered as nine words
+    ]
+    assert ev.summarize(scores, max_speedup=1.25).overall["wer"] == pytest.approx(0.25)
+
+
+def test_heldout_headline_and_ceiling_are_both_per_character():
+    """B12: the ceiling is one figure per character, so the held-out headline is too: a
+    character with many sampled cues doesn't outweigh the others."""
+    common = {"heldout_clips": 3, "heldout_seconds": 9.0, "similarity_source": "references",
+              "clone": True}  # fmt: skip
+    scores = [
+        _score(cue_id="a1", character_id=1, similarity_heldout=0.6, ceiling=0.8, **common),
+        _score(cue_id="a2", character_id=1, similarity_heldout=0.6, ceiling=0.8, **common),
+        _score(cue_id="a3", character_id=1, similarity_heldout=0.6, ceiling=0.8, **common),
+        _score(cue_id="b1", character_id=2, similarity_heldout=0.2, ceiling=0.4, **common),
+    ]
+    o = ev.summarize(scores, max_speedup=1.25).overall
+    assert o["speaker_similarity_heldout"] == pytest.approx(0.4)  # (0.6 + 0.2) / 2
+    assert o["speaker_similarity_ceiling"] == pytest.approx(0.6)

@@ -26,8 +26,9 @@ Metrics, per character and overall:
 - ``speaker_similarity_heldout`` (ruling CD17): the same against held-out exemplars, up to 3
   eligible turns (``heldout_exemplars``) of the sampled episodes that are neither reference
   picks nor overlapping any sampled cue's delivery reference (a clone hears that span as its
-  emotion prompt), from an episode other than the references' when there is one; omitted for a
-  character under 6 s of them. ``heldout_clips``, ``heldout_seconds`` and
+  emotion prompt) or the rendered card's own reference origins, from an episode other than the
+  references' when there is one; omitted for a character under 6 s of them. Overall it is a
+  mean over characters, as the ceiling is. ``heldout_clips``, ``heldout_seconds`` and
   ``speaker_similarity_ceiling`` (the held-out clips against the reference clips: the original
   actor against himself, the most a render could reach) go with it. For clone renders the
   headline ``speaker_similarity`` is the held-out figure, since the references are the clone's
@@ -436,9 +437,12 @@ def _metrics(scores: Sequence[CueScore], max_speedup: float) -> dict[str, float]
         m[f"speaker_similarity_{src}"] = _r(np.mean([v for v in vals if v is not None]))
     held = [s for s in scores if s.similarity_heldout is not None]
     if held:
-        m["speaker_similarity_heldout"] = _r(
-            np.mean([cast(float, s.similarity_heldout) for s in held])
-        )
+        # per character, like the ceiling (B12): each character's cues averaged first, so one
+        # with many sampled cues doesn't outweigh the rest
+        by_char: dict[int | None, list[float]] = {}
+        for s in held:
+            by_char.setdefault(s.character_id, []).append(cast(float, s.similarity_heldout))
+        m["speaker_similarity_heldout"] = _r(np.mean([np.mean(v) for v in by_char.values()]))
         per_char = {s.character_id: s for s in held}
         m["heldout_characters"] = len(per_char)
         m["heldout_clips"] = sum(s.heldout_clips for s in per_char.values())
@@ -454,7 +458,8 @@ def _metrics(scores: Sequence[CueScore], max_speedup: float) -> dict[str, float]
         m["speaker_similarity"] = m[f"speaker_similarity_{headline}"]
     words = sum(s.ref_words for s in scores)
     if words:
-        m["wer"] = _r(sum(s.errors for s in scores) / words)
+        # a cue whose reference normalizes to nothing has no words to cap at (CD16, B11)
+        m["wer"] = _r(sum(s.errors for s in scores if s.ref_words) / words)
         m["wer_median"] = _r(np.median([s.errors / s.ref_words for s in scores if s.ref_words]))
     m["high_wer_cues"] = sum(1 for s in scores if (s.wer or 0.0) > HIGH_WER)
     m["retried_cues"] = sum(1 for s in scores if s.retry_seed is not None)
@@ -1410,7 +1415,8 @@ def format_summary(summary: TtsSummary, names: Mapping[int, str], backend: str) 
     if "speaker_similarity_heldout" in o:
         lines.append(
             f"held-out exemplars: {o['heldout_clips']:.0f} clips, {o['heldout_seconds']:.1f} s "
-            f"over {o['heldout_characters']:.0f} characters; ceiling (held-out vs reference "
+            f"over {o['heldout_characters']:.0f} characters; held-out similarity and ceiling "
+            "are both means over characters; ceiling (held-out vs reference "
             "clips, the original actor against himself) "
             f"{o.get('speaker_similarity_ceiling', 0):.3f}"
         )
