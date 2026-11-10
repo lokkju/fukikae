@@ -563,12 +563,15 @@ def prepare_cue(
     vocals: Path | None = None,
     events: Sequence[tuple[float, float, str]] = (),
 ) -> RenderJob:
-    """The render job of one cue with ``card_id``: the card checked (``check_card``, unless
-    ``checked`` holds its result), its backend config, the cache key and the delivery passed.
-    ``identity`` is the backend's ``identity_key``, looked up when not given. ``vocals`` (the
-    episode's separated vocals) is needed when the backend takes ``emotion_audio``."""
+    """The render job of one cue with ``card_id``: the card checked (``check_card`` with the
+    config's ``[tts] engines``, unless ``checked`` holds its result), its backend config, the
+    cache key and the delivery passed. ``identity`` is the backend's ``identity_key``, looked up
+    when not given. ``vocals`` (the episode's separated vocals) is needed when the backend takes
+    ``emotion_audio``."""
     card, cls = (
-        checked if checked is not None else check_card(store, card_id, who, cfg.target_language)
+        checked
+        if checked is not None
+        else check_card(store, card_id, who, cfg.target_language, tts_engines(cfg))
     )
     bc = backend_config(cfg, cls.name)
     ident = identity if identity is not None else identity_key("tts", bc)
