@@ -1,6 +1,6 @@
 # Live-action ground truth: test sets, profile pick and held-out verdicts
 
-_Run 2026-11-08 and 2026-11-09 on ml-01 (RTX 3090, index 0), branch feat/ground-truth. The sweep used tuning episodes only. The live-action profile was committed in `6bb10c2` before any held-out episode was scored, and each held-out episode was scored once after that, with nothing re-tuned (Ruling R18). Recurring means 5 s of labelled speech per episode compared (R6); a set passes when 90% of its recurring characters keep 80% of their speech on one id and no two share a modal id. Ledger rows (658, exported with `fukikae eval report --export`; the tags are listed under "Reproducing"): `docs/results/2026-11-09-live-action-ground-truth.jsonl` holds the baselines, diagnostics, held-out and clip-set rows (172), and `2026-11-09-live-action-ground-truth-sweep-ct{0.4,0.5,0.6}.jsonl` the sweep, 162 rows per clustering value, split to stay under the repository's 500 KB file limit. Kaze, Kaoru's held-out E11 is still downloading and is **pending**; it gets scored once, with the profile committed here, in a follow-up._
+_Run 2026-11-08 and 2026-11-09 on ml-01 (RTX 3090, index 0), branch feat/ground-truth. The sweep used tuning episodes only. The live-action profile was committed in `6bb10c2` before any held-out episode was scored, and each held-out episode was scored once after that, with nothing re-tuned (Ruling R18). Recurring means 5 s of labelled speech per episode compared (R6); a set passes when 90% of its recurring characters keep 80% of their speech on one id and no two share a modal id. Ledger rows (662, exported with `fukikae eval report --export`; the tags are listed under "Reproducing"): `docs/results/2026-11-09-live-action-ground-truth.jsonl` holds the baselines, diagnostics, held-out and clip-set rows (176), and `2026-11-09-live-action-ground-truth-sweep-ct{0.4,0.5,0.6}.jsonl` the sweep, 162 rows per clustering value, split to stay under the repository's 500 KB file limit. Kaze, Kaoru's held-out E11 finished downloading later and was scored once on 2026-11-10, with the profile committed here (follow-up under GT15)._
 
 ## Test sets and how each label set was made
 
@@ -9,7 +9,7 @@ _Run 2026-11-08 and 2026-11-09 on ml-01 (RTX 3090, index 0), branch feat/ground-
 | `bbt` (en, de, es) | en, de, es | bigbangtrans transcripts aligned to the Blu-ray's English subtitles | S01E01-E02 | S01E03 | 4 on each track |
 | `bazinga-tbbt` (PAL, film) | en | Bazinga gold speakers, word-level | S01E01-E03 | S01E05 | 4 |
 | `bazinga-office` (PAL, film) | en | Bazinga gold speakers, word-level | S01E01-E03 | S01E05 | 3 on PAL, 4 on film |
-| `kaze` (風、薫る) | ja | ARIB colour captions plus （名前） prefixes, retimed to the WEB-DL | S01E01-E03 | S01E11 (pending) | 1, thin |
+| `kaze` (風、薫る) | ja | ARIB colour captions plus （名前） prefixes, retimed to the WEB-DL | S01E01-E03 | S01E11 | 1, thin |
 | `grid` | ko | Korean CC speaker prefixes | S01E02, S01E04 | S01E05 | 2, thin |
 | `aib` (Alice in Borderland) | ja | Netflix Japanese SDH prefixes | S01E01-E02 | not scored | 2, thin, diagnostic only (GT8) |
 
@@ -97,7 +97,7 @@ Each held-out episode ran once after `6bb10c2`: in a hard-linked copy of the ct 
 | en | bazinga-office PAL S01E05 | 3 / 0 / 1.00 | 3 / 0 / 1.00 | **pass** |
 | en | bazinga-office film S01E05 (alongside) | 3 / 0 / 1.00 | 3 / 0 / 1.00 | pass |
 | ko | grid S01E05 | 4 / 0 / 0.80 (5 recurring) | not run | **fail** |
-| ja | kaze S01E11 | pending | pending | pending |
+| ja | kaze S01E11 | 1 / 1 (りん + 直美) / 0.50 (2 recurring) | 1 / 1 / 0.50 | **fail** |
 | ja | aib | not held out (GT8) | | |
 
 - **English (BBT)** passes: every lead holds 92-100% on its tuning id, coverage 47%.
@@ -106,7 +106,7 @@ Each held-out episode ran once after `6bb10c2`: in a hard-linked copy of the ct 
 - **Bazinga TBBT** fails on PAL and film alike, and the default profile fails identically. Six characters recur against four in tuning. Howard keeps only 0.52 (PAL) and 0.49 (film) of his E05 speech on his id, and Raj has no tuning id at all (2 s in E01, too little to recur in tuning) and scores 0.00. Leslie, who has 22 s in tuning, holds 0.98.
 - **Bazinga Office** passes on both conditions: Michael, Jim and Pam recur on E05 (Dwight is under 5 s there), each at 0.88 or above.
 - **Korean (Grid E05)**, scored because the pick differs from the provisional setting: 4 clean, no merge, 0.80. 종이 fails at 0.00; she has 2.3 s and 3.5 s in the tuning pair, too little for a tuning id, and 8.9 s on E05. The provisional profile also scored 0.80 on E05, but with a 새하 + 어진 merge.
-- **Japanese (Kaze E11)** is pending. The tuning registry is already built in `kaze-pick` (E01-E03 at the committed profile; no held-out stage has run), and the default profile's tuning registry is Task 7b's in `~/fukikae-ws/kaze-default`. With one recurring character in tuning, the E11 verdict can't show over-merge (see Limits). The follow-up runs these once, from the repository root, with no re-tuning; the onset check runs after diarization because it needs E11's vocal stem and turns (the source files are mode 0710 for group `users`, hence `--group-add 100`):
+- **Japanese (Kaze E11)** fails on both profiles, on the merge the Limits section predicted. 直美 recurs on E11 (8.6 s against りん's 43 s), and all of her speech lands on りん's tuning id 3, which counts as passing for her alone, while りん keeps 0.76 there (0.73 under the default profile), under the bar. Id 3 is 73% りん and 19% 直美 on E11, and 4.4 s more of りん went to a new id. Coverage is 17%. I scored it once on 2026-11-10, after week 3 completed, with nothing re-tuned. The retimed captions reproduce byte for byte from `eval subalign` (144 anchors, 100% inliers, offset -0.55 s, scale 1.000033, rms 11 ms, max residual 19 ms), and lead speech on E11 by a median +0.41 s (pyannote, 20 gap-led cues matched) and +0.38 s (energy VAD, 22 matched), IQR about +0.13 to +0.60 s; that is about 0.1 s more than E01-E03's 0.24-0.31 s on a thin count, and I didn't treat it as the step-3 stop. The commands, run once each from the repository root (the source files are mode 0710 for group `users`, hence `--group-add 100`):
 
 ```bash
 # 1. Copy EP011 (week 3 must be under complete/tv/, nothing of it under incomplete/)
@@ -144,7 +144,7 @@ mise -C . exec -- git commit -m "docs(results): Kaze, Kaoru E11 held-out verdict
   README.md src/fukikae/profiles/live-action.toml
 ```
 
-Summed over the PAL gate sets that have a held-out score (bbt en/de/es, both Bazinga shows, grid), the pick gives 22 clean characters with 1 merge; the default profile, without grid, gives 15 clean with 2 merges where the pick gives 18 with 1. The one remaining merge is German's leads.
+Summed over the PAL gate sets that have a held-out score (bbt en/de/es, both Bazinga shows, grid) and Kaze, the pick gives 23 clean characters with 2 merges; the default profile, without grid, gives 16 clean with 3 merges where the pick gives 19 with 2. The pick's two merges are German's leads and Kaze's りん + 直美.
 
 ## Clip-set embedder results
 
@@ -164,14 +164,14 @@ The best non-WeSpeaker embedder, eres2netv2, leads by 0.9 points on renmin and 2
 
 ## Limits
 
-- **Kaze can't detect over-merge.** It has one recurring character (りん) in its tuning episodes, and the bar measures each character's share on its own modal id; with nobody to merge with, a profile that put the whole cast on one id would still pass Kaze. 直美's nearest-centroid accuracy is 7% (her speech classifies as りん); expect a merge if a later episode makes her recurring. Kaze's whole contribution to the pick is one character's share (0.79 to 0.84), which is why GT12 treats it as noise.
+- **Kaze's tuning can't detect over-merge.** It has one recurring character (りん) in its tuning episodes, and the bar measures each character's share on its own modal id; with nobody to merge with, a profile that put the whole cast on one id would still pass Kaze. 直美's nearest-centroid accuracy is 7% (her speech classifies as りん); held out on E11, where she recurs, she merges into りん's id under both profiles. Kaze's whole contribution to the pick is one character's share (0.79 to 0.84), which is why GT12 treats it as noise.
 - **BBT is one show counted in three languages**, three of the seven gate sets, and its labels are English-timed: the dubs are scored on the English subtitle timeline, which auto-label's overlap (80-86%) shows fits them. The English labels come from OCR'd image subtitles aligned to fan transcripts; the Bazinga check puts that at 98.2% speaker agreement on the 73% of dialogue both sides label.
 - **German stays merged.** No clustering value or matcher in the sweep separates Leonard and Sheldon on the German dub; the subtitle-segmentation diagnostic says the two dubbing voices sit too close in WeSpeaker space at line length. Fixing it needs something this plan didn't sweep (another embedder, or visual cues).
 - **SDH names skew towards off-screen speech.** Netflix and Korean CC tag a speaker when the picture doesn't show who is talking, and labelled speech over-represents voice-over and off-screen lines (aib, grid). Colour covers only Kaze's main cast, and unmapped (white) lines are out of the bar.
 - **Thin sets.** Kaze (1 recurring), Grid (2) and aib (2) are flagged thin; one character decides each. Held-out recurring sets are larger than tuning ones (TBBT 6 against 4, Grid 5 against 2), and a character with no tuning id fails by construction (Raj, 종이).
 - **Bazinga PAL against film.** The Dwight split that separates the conditions in places (kept on PAL and split on film under the provisional profile) is diarization variance, not pitch: no TBBT number moves between conditions, and the one Office difference goes the opposite way from a pitch penalty. The 5 s bar is wall-clock time, and the PAL audio, 4% shorter, can drop a character below it (Pam in Office E02).
-- **Kaze timing.** The retimed captions lead speech by 0.24-0.31 s; a +0.25 s shift changes no verdict, but the leading edge of each label is early.
-- **Alice in Borderland** is out of the evidence (GT8); Japanese live action rests on Kaze alone until E11 is scored.
+- **Kaze timing.** The retimed captions lead speech by 0.24-0.31 s on E01-E03 and about 0.4 s on E11; a +0.25 s shift on the tuning episodes changes no verdict, but the leading edge of each label is early.
+- **Alice in Borderland** is out of the evidence (GT8); Japanese live action rests on Kaze alone.
 
 ## Reproducing
 

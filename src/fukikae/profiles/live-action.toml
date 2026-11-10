@@ -15,7 +15,7 @@
 # controller treats it as a tie and picks 0.5 (Ruling GT12).
 # Held out once after this pick: passes BBT S01E03 en and es (4/4) and Bazinga Office S01E05;
 # fails BBT S01E03 de (0.80, Leonard + Sheldon merged), Bazinga TBBT S01E05 (0.67) and Grid E05
-# (0.80, no merge). Kaze, Kaoru E11 pending.
+# (0.80, no merge) and Kaze, Kaoru E11 (0.50, りん + 直美 merged).
 [registry]
 min_new_seconds = 20.0
 match_threshold = 0.6
