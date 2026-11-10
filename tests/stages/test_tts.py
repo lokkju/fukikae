@@ -1,6 +1,8 @@
+import shutil
 import wave
 from pathlib import Path
-from typing import Any, ClassVar
+from types import SimpleNamespace
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import pytest
@@ -1118,3 +1120,53 @@ def test_a_run_json_written_before_flags_loads(ep):
     }), encoding="utf-8")  # fmt: skip
     got = read_json(path, TtsRun)
     assert got.flags == [] and got.report == ["a line"] and got.rate_refits == 0
+
+
+def test_jobs_render_grouped_by_card_in_cue_order_within_each(ep):
+    """D28: a backend's jobs render one card at a time (cards in order of first appearance,
+    each card's cues in cue order), so a cloning backend conditions on each speaker once."""
+    _two_cards(ep)
+    FakeSynth.DUR = {"natsu one": 0.5, "lucy one": 0.7, "natsu two": 0.9}
+    TtsStage(CFG).run(ep, CFG)
+    assert [t for t, _, _ in FakeSynth.CALLS] == [
+        "natsu one", "natsu two", "lucy one", "extra line", "extra again", "review line",
+    ]  # fmt: skip
+    plan = _plan(ep)
+    assert [c.cue_id for c in plan.cues] == [c.id for c in CUES]  # the plan stays in cue order
+    by_id = {c.cue_id: c for c in plan.cues}
+    for cue_id, seconds in (("c0001", 0.5), ("c0002", 0.7), ("c0003", 0.9)):
+        assert by_id[cue_id].seconds == pytest.approx(seconds, abs=1e-3)
+        assert tts.wav_seconds(ep.work / "07-tts" / f"{cue_id}.wav") == pytest.approx(
+            seconds, abs=1e-3
+        )
+    run = _run(ep)
+    spoken = [c.cue_id for c in plan.cues if c.skipped is None]
+    assert run.rendered == spoken  # run.json lists cues in cue order, not render order
+    FakeSynth.CALLS.clear()
+    TtsStage(CFG).run(ep, CFG)
+    assert _run(ep).cached == spoken
+
+
+def test_render_order_is_stable_and_keeps_every_job():
+    jobs = cast(list[tts.RenderJob], [SimpleNamespace(card_id=c) for c in "babcab"])
+    # identity, not ==: equal namespaces would hide a reordering within a card
+    assert [id(j) for j in tts.render_order(jobs)] == [id(jobs[i]) for i in (0, 2, 5, 1, 4, 3)]
+
+
+def test_grouping_leaves_each_cards_rate_estimate_unchanged(ep, monkeypatch):
+    """SpeechRates keeps its renders per card, and grouping keeps each card's cues in cue
+    order, so interleaving another card's cues changes no estimate, factor or key."""
+    natsu = [_cue(i, 1, f"natsu {i} " + "x" * (8 + i)) for i in (1, 3, 5, 7, 9)]
+    lucy = [_cue(i, 2, f"lucy {i} " + "y" * (6 + i)) for i in (2, 4, 6, 8)]
+    monkeypatch.setattr(FakeSynth, "speech_cps", {"en": 30.0}, raising=False)
+    FakeSynth.DUR = {c.text: len(c.text) / 10.0 for c in natsu + lucy if c.text}
+    _two_cards(ep)
+    _write_cues(ep, natsu)
+    TtsStage(CFG).run(ep, CFG)
+    alone = {c.cue_id: (c.key, c.rate_factor) for c in _plan(ep).cues}
+    shutil.rmtree(ep.workspace_root / ".fukikae" / "tts-cache")
+    _write_cues(ep, sorted(natsu + lucy, key=lambda c: c.start))
+    TtsStage(CFG).run(ep, CFG)
+    mixed = {c.cue_id: (c.key, c.rate_factor) for c in _plan(ep).cues}
+    assert {k: mixed[k] for k in alone} == alone
+    assert any(f > 1.0 for _, f in alone.values())  # the estimate did move a factor
