@@ -28,16 +28,26 @@ is passed of the delivery (``passed``), the backend name, its options and its mo
 (GT6), so swapping one character's card re-renders only that character's cues, and a cached
 key is never rendered again. Each render's leading and trailing silence is trimmed to 30 ms
 (Kokoro pads every line by about 0.3 s, which the rate fit would otherwise count), then
-``[voice.post] gain_db`` is applied, both before caching. Cues with
-``skip``, ``error`` or no text are listed in the plan and not rendered. Cues are grouped by
-their card's backend; each backend loads once (only when something isn't cached), renders and
-unloads before the next.
+``[voice.post] gain_db`` is applied, both before caching.
 
-Rate fit: when a render is longer than its cue and the backend honors ``rate``, it is rendered
-once more at ``rate * min(seconds / slot, max_speedup)``, cached under a key derived from the
-first and the factor. ``max_speedup`` is ``[timefit] max_speedup`` (default 1.25), the budget
-rate and time-stretch share. A backend with the ``duration`` capability gets the slot as its
-target length instead.
+Pause cap (ruling D33): what plays is the cached render with every internal pause (silence
+between speech, by the trim's frames and threshold) longer than ``[tts] max_pause_ms`` (default
+200) cut down to it, from the pause's middle with an 8 ms crossfade; a line holding "..." or
+"\u2026" takes ``max_pause_ms_ellipsis`` (500) instead, and ``max_pause_ms = 0`` turns the cap
+off. It is a post-pass on the cached render, never in the render's key: the capped wav is
+cached beside it under ``capped_key`` (the render's key, the cap and ``PAUSE_VERSION``), so a
+new cap re-derives every wav without rendering, and the stage key holds the caps only while
+they are on. The rate fit, the speech rate estimate and the plan's ``seconds`` measure the
+capped wav (the one that plays); the render guards measure the render. Cues with ``skip``,
+``error`` or no text are listed in the plan and not rendered. Cues are grouped by their card's
+backend; each backend loads once (only when something isn't cached), renders and unloads before
+the next.
+
+Rate fit: when a render (pauses capped) is longer than its cue and the backend honors ``rate``,
+it is rendered once more at ``rate * min(seconds / slot, max_speedup)``, cached under a key
+derived from the first and the factor. ``max_speedup`` is ``[timefit] max_speedup`` (default
+1.25), the budget rate and time-stretch share. A backend with the ``duration`` capability gets
+the slot as its target length instead.
 
 Delivery: each cue passes what ``capabilities_for(card.voice.source)`` allows, scaled by the
 card's ``emotion_strength``: ``emotion_audio`` (the cue's ``delivery.reference`` span cut from
@@ -123,7 +133,17 @@ _sleep = time.sleep
 
 # Bump when the stage changes what it renders for the same inputs.
 RENDER_VERSION = 2  # 2: leading and trailing silence trimmed (ruling CD7)
-STAGE_KEYS = ("device", "gender", "clone_backend", "engines")
+# Internal-pause cap (ruling D33): a silence between speech longer than [tts] max_pause_ms
+# (a line with an ellipsis: max_pause_ms_ellipsis) is cut down to it from its middle, the two
+# kept edges crossfaded over PAUSE_XFADE_S. 0 turns it off. Silence is the trim's (TRIM_FRAME_S
+# frames TRIM_DB below the loudest).
+PAUSE_KEYS = ("max_pause_ms", "max_pause_ms_ellipsis")
+PAUSE_DEFAULTS = (200, 500)
+PAUSE_MIN_MS = 20
+PAUSE_XFADE_S = 0.008
+PAUSE_VERSION = 1
+ELLIPSES = ("...", "\u2026")
+STAGE_KEYS = ("device", "gender", "clone_backend", "engines", *PAUSE_KEYS)
 # Silence trimming: 10 ms frames quieter than TRIM_DB below the loudest frame are silence;
 # TRIM_KEEP_S of it is kept at each end.
 TRIM_FRAME_S = 0.010
@@ -210,29 +230,138 @@ def wav_seconds(path: Path) -> float:
     return len(data) / rate
 
 
-def trim_silence(path: Path) -> None:
-    """Cut leading and trailing silence from the wav in place, keeping ``TRIM_KEEP_S`` at each
-    end and the sample format as written. A render with no sound is left whole."""
-    from scipy.io import wavfile
-
-    rate, data = wavfile.read(path)
+def _loud_frames(data: np.ndarray, rate: int) -> tuple[np.ndarray, int] | None:
+    """Which ``TRIM_FRAME_S`` frames of the (mono mix of the) samples are sound, no quieter
+    than ``TRIM_DB`` below the loudest, and the frame length in samples; None when there is
+    no whole frame or no sound."""
     x = data.astype(np.float64)
     if x.ndim > 1:
         x = x.mean(axis=1)
     n = max(1, int(TRIM_FRAME_S * rate))
     frames = len(x) // n
     if frames == 0:
-        return
+        return None
     rms = np.sqrt((x[: frames * n].reshape(frames, n) ** 2).mean(axis=1))
     loudest = rms.max()
     if loudest <= 0:
+        return None
+    return rms >= loudest * 10 ** (-TRIM_DB / 20), n
+
+
+def trim_silence(path: Path) -> None:
+    """Cut leading and trailing silence from the wav in place, keeping ``TRIM_KEEP_S`` at each
+    end and the sample format as written. A render with no sound is left whole."""
+    from scipy.io import wavfile
+
+    rate, data = wavfile.read(path)
+    found = _loud_frames(data, rate)
+    if found is None:
         return
-    loud = np.flatnonzero(rms >= loudest * 10 ** (-TRIM_DB / 20))
+    loud = np.flatnonzero(found[0])
+    n = found[1]
+    x = data
     keep = int(TRIM_KEEP_S * rate)
     start = max(0, loud[0] * n - keep)
     end = min(len(x), (loud[-1] + 1) * n + keep)
     if start > 0 or end < len(x):
         wavfile.write(path, rate, data[start:end])
+
+
+def cap_pauses(data: np.ndarray, rate: int, max_ms: int) -> tuple[np.ndarray, int]:
+    """The samples with every internal pause (silent frames between the first and last sound,
+    as ``trim_silence`` finds them) longer than ``max_ms`` cut down to ``max_ms``, and the
+    number of samples removed. Each cut takes the pause's middle: its first half is kept, then
+    a ``PAUSE_XFADE_S`` linear crossfade into the last half, so the speech's decay and the next
+    onset are untouched and the join doesn't click. Leading and trailing silence, the sample
+    format and the channels are kept; with ``max_ms`` 0, nothing to cut or no sound, ``data``
+    is returned as it is."""
+    found = _loud_frames(data, rate) if max_ms > 0 else None
+    if found is None:
+        return data, 0
+    mask, n = found
+    loud = np.flatnonzero(mask)
+    inner = mask[loud[0] : loud[-1] + 1].astype(np.int8)
+    edges = np.diff(np.concatenate([[1], inner, [1]]))
+    keep = round(max_ms * rate / 1000)
+    head = keep // 2
+    fade = max(1, min(round(PAUSE_XFADE_S * rate), keep - head))
+    pieces: list[np.ndarray] = []
+    pos = removed = 0
+    for a, b in zip(np.flatnonzero(edges == -1), np.flatnonzero(edges == 1), strict=True):
+        start, end = (loud[0] + a) * n, (loud[0] + b) * n
+        if end - start <= keep:
+            continue
+        tail = end - (keep - head)  # where the kept last part of the pause starts
+        w = np.linspace(0.0, 1.0, fade + 2)[1:-1]
+        if data.ndim > 1:
+            w = w[:, None]
+        mixed = (1 - w) * data[start + head : start + head + fade] + w * data[tail : tail + fade]
+        if np.issubdtype(data.dtype, np.integer):
+            info = np.iinfo(data.dtype)
+            mixed = np.clip(np.rint(mixed), info.min, info.max)
+        pieces += [data[pos : start + head], mixed.astype(data.dtype)]
+        pos = tail + fade
+        removed += end - start - keep
+    if not removed:
+        return data, 0
+    pieces.append(data[pos:])
+    return np.concatenate(pieces), removed
+
+
+def pause_caps(cfg: Config) -> tuple[int, int]:
+    """``[tts] max_pause_ms`` and ``max_pause_ms_ellipsis`` (ruling D33), the workspace's over
+    the profile's; 200 and 500 when unset. Each is 0 (no cap) or whole milliseconds of at
+    least ``PAUSE_MIN_MS``."""
+    options = cfg.resolve("tts").options
+    out: list[int] = []
+    for key, default in zip(PAUSE_KEYS, PAUSE_DEFAULTS, strict=True):
+        value = options.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or 0 < value < PAUSE_MIN_MS:
+            raise ConfigError(
+                f"[tts] {key} must be 0 (no cap) or whole milliseconds of at least "
+                f"{PAUSE_MIN_MS}, not {value!r}"
+            )
+        if value < 0:
+            raise ConfigError(f"[tts] {key} must not be negative, not {value!r}")
+        out.append(value)
+    return out[0], out[1]
+
+
+def pause_cap_ms(caps: tuple[int, int], text: str) -> int:
+    """The cap for a line: the ellipsis cap when it holds "..." or "\u2026", else the plain
+    one; 0 (no cap) everywhere when the plain cap is 0."""
+    plain, ellipsis = caps
+    if plain == 0:
+        return 0
+    return ellipsis if any(e in text for e in ELLIPSES) else plain
+
+
+def capped_key(key: str, max_ms: int) -> str:
+    """The cache key of render ``key`` with its pauses capped at ``max_ms``; ``key`` itself
+    when there is no cap."""
+    if max_ms <= 0:
+        return key
+    return _hash({"render": key, "max_pause_ms": max_ms, "pause_version": PAUSE_VERSION})
+
+
+def capped(job: RenderJob, cache: Path, key: str) -> tuple[str, float]:
+    """The key and seconds of the wav that plays for render ``key`` in ``cache``: the render
+    with its pauses capped at ``job.max_pause_ms``, derived from it (cheaply, never rendered
+    again) and cached under ``capped_key`` the first time; with nothing to cut, a link to the
+    render."""
+    from scipy.io import wavfile
+
+    out = capped_key(key, job.max_pause_ms)
+    path = cache / f"{out}.wav"
+    if out != key and not path.exists():
+        rate, data = wavfile.read(cache / f"{key}.wav")
+        trimmed, removed = cap_pauses(data, rate, job.max_pause_ms)
+        if removed:
+            with atomic_path(path) as tmp:
+                wavfile.write(tmp, rate, trimmed)
+        else:
+            TtsStage._link(cache / f"{key}.wav", path)
+    return out, wav_seconds(path)
 
 
 def _apply_gain(path: Path, gain_db: float) -> None:
@@ -260,6 +389,7 @@ class RenderJob:
     slot: float
     passed: dict[str, Any]
     vocals: Path | None = None  # the emotion_audio source
+    max_pause_ms: int = 0  # the internal-pause cap on what plays (D33); 0: none
 
 
 class SynthHandle(Protocol):
@@ -591,7 +721,8 @@ def prepare_cue(
     key = cue_key(
         card_id, cast(str, cue.text), passed, bc, identity=ident, reference_audio=ref_digest
     )
-    return RenderJob(cue, card_id, card, cls, bc, key, slot, passed, vocals)
+    cap = pause_cap_ms(pause_caps(cfg), cast(str, cue.text))
+    return RenderJob(cue, card_id, card, cls, bc, key, slot, passed, vocals, cap)
 
 
 def render_cue(
@@ -823,7 +954,8 @@ def render_for_slot(
     fits = job.slot > 0 and "rate" in job.cls.voice_keys and "duration" not in job.cls.capabilities
     if not fits:
         g = render_guarded(job, lazy, cache, store, ref_dir=ref_dir)
-        return g.key, g.seconds, g.seconds, 1.0, g.calls, g
+        key, seconds = capped(job, cache, g.key)
+        return key, seconds, seconds, 1.0, g.calls, g
     rates = rates if rates is not None else SpeechRates()
     estimate = rates.seconds(job)
     first = (
@@ -832,7 +964,8 @@ def render_for_slot(
     if first > 1.0:
         rates.estimated += 1
     g = render_guarded(job, lazy, cache, store, ref_dir=ref_dir, factor=first)
-    calls, seconds = g.calls, g.seconds
+    calls = g.calls
+    played, seconds = capped(job, cache, g.key)
     if g.suspect is None:
         rates.observe(job, seconds, first)
     needed = first * seconds / job.slot
@@ -846,12 +979,13 @@ def render_for_slot(
         factor = max(1.0, needed)
     factor = quantize_factor(factor, speedup)
     if factor == first:
-        return g.key, seconds, seconds, first, calls, g
+        return played, seconds, seconds, first, calls, g
     if first > 1.0:
         rates.refits += 1
     if factor == 1.0:
         again = render_guarded(job, lazy, cache, store, ref_dir=ref_dir)
-        return again.key, again.seconds, seconds, 1.0, calls + again.calls, again
+        key, again_s = capped(job, cache, again.key)
+        return key, again_s, seconds, 1.0, calls + again.calls, again
     key = fitted_key(g.key, factor)
     fitted = cache / f"{key}.wav"
     if not fitted.exists():
@@ -860,7 +994,8 @@ def render_for_slot(
             ref_dir=ref_dir, seed=g.retry_seed,
         )  # fmt: skip
         calls += 1
-    return key, wav_seconds(fitted), seconds, factor, calls, g
+    key, fitted_s = capped(job, cache, key)
+    return key, fitted_s, seconds, factor, calls, g
 
 
 def tag_events(work: Path) -> list[tuple[float, float, str]]:
@@ -882,6 +1017,15 @@ def _song_spans(ep: Episode, cfg: Config) -> list[tuple[float, float]]:
     tags_path = ep.work / "04b-tag" / "tags.json"
     tags = read_json(tags_path, Tags) if tags_path.exists() else None
     return reference_exclusions(ep.work, tags, mix_settings(cfg).songs)
+
+
+def pause_key(cfg: Config) -> dict[str, Any]:
+    """The pause cap's part of the stage key: nothing while it is off, so turning it off keys
+    the stage as before it existed."""
+    caps = pause_caps(cfg)
+    if caps[0] == 0:
+        return {}
+    return {"pauses": {**dict(zip(PAUSE_KEYS, caps, strict=True)), "version": PAUSE_VERSION}}
 
 
 class TtsStage:
@@ -975,6 +1119,7 @@ class TtsStage:
                 for b in sorted(backends)
             },
             "max_speedup": max_speedup(cfg),
+            **pause_key(cfg),
             "cards": {str(k): v for k, v in sorted(cards.items())},
             "extras": extras_voices(cues, cfg) if cues else {},
             "version": RENDER_VERSION,

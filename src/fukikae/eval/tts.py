@@ -2,13 +2,12 @@
 
 A sample of each character's translated cues (``sample_cues``; extras, skipped, errored and
 empty cues, and slots under ``--min-slot``, default 1.0 s, left out and counted as
-``excluded_short``) is rendered with the character's card at the card's own rate, with no
-rate fit and no time-stretch, through the tts stage's own ``prepare_cue`` and ``render_cue``
-(ruling CD12), so check, key, delivery, trim and gain are the stage's (a render already in
-``.fukikae/tts-cache`` is copied, not made again). Renders live in
-``<ws>/.fukikae/eval/tts/<backend>-<revision>/`` as ``<episode>-<cue-id>.<key>.wav``: the
-key in the name means a swapped card or changed text renders again instead of reusing a stale
-file.
+``excluded_short``) is rendered with the character's card at the card's own rate, with no rate
+fit and no time-stretch, through the tts stage's own ``prepare_cue`` and ``render_cue`` (ruling
+CD12), so check, key, delivery, trim, gain and the pause cap are the stage's (a render already
+in ``.fukikae/tts-cache`` is copied, not made again). Renders live in
+``<ws>/.fukikae/eval/tts/<backend>-<revision>/`` as ``<episode>-<cue-id>.<key>.wav``: the key
+in the name means a swapped card or changed text renders again instead of reusing a stale file.
 
 Metrics, per character and overall:
 
@@ -811,6 +810,7 @@ def _render(
         DELIVERY_CAPS,
         LazySynth,
         backend_config,
+        capped,
         check_card,
         prepare_cue,
         render_guarded,
@@ -852,13 +852,14 @@ def _render(
                 )  # fmt: skip
                 # the stage's cache and render guards (ruling CD18), then a copy named by key
                 g = render_guarded(job, lazy, cache, store, ref_dir=folder / "ref" / e)
-                dest = folder / f"{e}-{c.id}.{g.key}.wav"
+                key, seconds = capped(job, cache, g.key)  # what the stage plays (D33)
+                dest = folder / f"{e}-{c.id}.{key}.wav"
                 if not dest.exists():
                     with atomic_path(dest) as tmp:
-                        shutil.copyfile(cache / f"{g.key}.wav", tmp)
+                        shutil.copyfile(cache / f"{key}.wav", tmp)
                 out.append(
                     RenderedCue(
-                        e, c, dest, g.seconds, card_ref, b, _voice_name(job.card),
+                        e, c, dest, seconds, card_ref, b, _voice_name(job.card),
                         g.retry_seed, g.suspect,
                     )
                 )  # fmt: skip
