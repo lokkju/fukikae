@@ -102,3 +102,20 @@ def test_identity_uses_the_backend_instances_pinned_revision(monkeypatch):
     monkeypatch.setattr(loader, "backend_class", lambda _k, _n: Pinned)
     got = identity_key("tag", BackendConfig("x", {}))
     assert got == {"model": "org/m", "revision": "abc123"}
+
+
+def test_a_worker_backends_revision_includes_its_lock_digest(monkeypatch, tmp_path):
+    """B3: a worker environment bump (a new workers/<extra>/uv.lock) changes the identity, so
+    renders made in the old environment are not reused; the card pin (model_revision) stays."""
+    from fukikae.backends.tts.indextts2 import IndexTts2Synthesizer
+
+    lock = tmp_path / "workers" / IndexTts2Synthesizer.extra / "uv.lock"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("version = 1\n")
+    monkeypatch.setenv("FUKIKAE_WORKER_CHECKOUT", str(tmp_path))
+    bc = BackendConfig("indextts2", {})
+    first = identity_key("tts", bc)
+    assert first["revision"].startswith(IndexTts2Synthesizer.revision + "+lock:")
+    lock.write_text("version = 2\n")
+    assert identity_key("tts", bc)["revision"] != first["revision"]
+    assert IndexTts2Synthesizer.model_revision == IndexTts2Synthesizer.revision
