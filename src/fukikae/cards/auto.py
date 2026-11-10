@@ -33,6 +33,18 @@ refined clusters (the same turns as ``04c-names/turns.json``, and every names la
 clusters; `checked_names`, the guard ``registry resolve`` applies too). One whose names were
 refined after its characters stage ran is skipped, with a report line, until that stage
 reruns. Without names nothing here changes.
+
+The clone floor (D32): a clone wants 2 clips and 10 s of reference speech (``select``'s
+``FLOOR_CLIPS`` and ``FLOOR_S``). Episodes whose picks reach it are preferred over ones with
+more seconds that don't; when none does, the one closest to it (`_floor_key`). A character
+whose best picks fall short still gets a clone from them (6 s is still the minimum for any
+clone), and the clone is flagged for review. An
+automatic clone card under the floor (`below_floor`; curated and imported cards are never
+judged) is re-picked like a stale one when the current rules give picks that beat it
+(`_floor_key`: reaching the floor, then clips up to 2, then seconds); otherwise, or when it is
+locked, it is kept and flagged in the tts run's flags, ``fukikae voices list`` and ``fukikae
+names show`` (`floor_lines`), naming the shortfall and pointing at ``fukikae voices clone``.
+It never falls back to a stock voice or another character's card.
 """
 
 from __future__ import annotations
@@ -42,7 +54,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fukikae.cards.select import FEMALE_ABOVE, MALE_BELOW, gender_of, speaker_f0
+from fukikae.cards.select import (
+    FEMALE_ABOVE,
+    FLOOR_CLIPS,
+    FOREIGN_MAX,
+    MALE_BELOW,
+    floor_shortfall,
+    gender_of,
+    meets_floor,
+    share_inside,
+    speaker_f0,
+)
 from fukikae.cards.stock import check_stock_voice, pick_stock, revision, stock_card
 from fukikae.cards.store import CardStore
 from fukikae.registry.store import AUTOMATIC_BY, ProtectedAssignmentError, replace_refusal
@@ -60,11 +82,14 @@ if TYPE_CHECKING:
 __all__ = [
     "AUTOMATIC_BY",
     "FALLBACK_BY",
+    "FLOOR_NOTE",
     "REPICK_NOTE",
     "STALE_OVERLAP",
     "CharacterRefs",
     "Cloning",
     "ProtectedAssignmentError",
+    "Shortfall",
+    "below_floor",
     "character_candidates",
     "character_references",
     "character_spans",
@@ -73,6 +98,9 @@ __all__ = [
     "confirmed_labels",
     "ensure_assignments",
     "extras_voices",
+    "find_references",
+    "floor_lines",
+    "floor_suffix",
     "foreign_spans",
     "gender_thresholds",
     "key_owner",
@@ -87,15 +115,18 @@ __all__ = [
 UNKNOWN_EXTRA = "unknown"
 FALLBACK_BY = "auto-fallback"  # a stock stand-in while the clone backend can't run here
 MIN_CLONE_S = 6.0  # the spec's minimum of clean speech for a clone (pick_references' default)
-STALE_OVERLAP = 0.1  # this share of a reference under someone else's names makes it stale
+STALE_OVERLAP = FOREIGN_MAX  # this share of a reference under someone else's names: stale
 REPICK_NOTE = "re-picked: references not name-confirmed"
+FLOOR_NOTE = "re-picked: below the clone floor"
+FLOOR_FIX = "`fukikae voices clone` with a better clip replaces it"
 
 
 @dataclass(frozen=True)
 class CharacterRefs:
-    """What a character's turns offer a clone: ``seconds`` of eligible reference speech in
-    the episode that has the most, and the picks there (with that episode and its vocals),
-    or no picks under the minimum."""
+    """What a character's turns offer a clone: the picks (with their episode and its vocals)
+    and ``seconds``, the eligible reference speech of the picked episode in the tier the picks
+    come from (name-confirmed or acoustic); with no picks (under the minimum), ``seconds`` is
+    the most any episode offers in either tier."""
 
     seconds: float
     picks: list[RefPick] | None = None
@@ -115,6 +146,91 @@ class Cloning:
     source_language: str
     references: Callable[[int], CharacterRefs]
     unavailable: str | None = None  # why the backend can't run here: stock for everyone
+
+
+@dataclass(frozen=True)
+class Shortfall:
+    """An automatic clone card under the clone floor (D32 #2): its id and its clips' lengths
+    in seconds (from each reference's origin)."""
+
+    card_id: str
+    clips: tuple[float, ...]
+
+    @property
+    def phrase(self) -> str:
+        return floor_shortfall(self.clips) or ""
+
+
+def _floor_key(clips: Sequence[float]) -> tuple[bool, int, float]:
+    """How good a set of clips is against the floor: reaching it, then clips up to
+    `FLOOR_CLIPS`, then seconds. A re-pick must beat the current card on this."""
+    return (
+        floor_shortfall(clips) is None,
+        min(len(clips), FLOOR_CLIPS),
+        round(sum(clips), 2),
+    )
+
+
+def _better(found: CharacterRefs | None, short: Shortfall) -> bool:
+    """Whether ``found``'s picks beat the card's clips (`_floor_key`)."""
+    if found is None or not found.picks:
+        return False
+    return _floor_key([p.seconds for p in found.picks]) > _floor_key(short.clips)
+
+
+def clip_lengths(card: Card) -> tuple[float, ...] | None:
+    """The card's reference lengths in seconds, from their origins; None when a reference has
+    no usable origin (the floor can't be judged)."""
+    out: list[float] = []
+    for ref in card.voice.references:
+        o = ref.origin or {}
+        start, end = o.get("start"), o.get("end")
+        if not isinstance(start, int | float) or not isinstance(end, int | float):
+            return None
+        out.append(float(end) - float(start))
+    return tuple(out)
+
+
+def below_floor(
+    reg: Registry, store: CardStore, characters: Iterable[int], language: str
+) -> dict[int, Shortfall]:
+    """Character -> its ``language`` card's `Shortfall`, for the characters whose card is an
+    automatic clone card (``auto``, ``auto-fallback`` or ``restock``, locked or not) under the
+    clone floor. Curated and imported cards are the operator's choice and never listed."""
+    from fukikae.cards.card import CardError
+
+    out: dict[int, Shortfall] = {}
+    for cid in characters:
+        a = reg.card_for(cid, language)
+        if a is None or a.card_id is None or a.chosen_by not in AUTOMATIC_BY:
+            continue
+        if not store.has(a.card_id):
+            continue
+        try:
+            card = store.get(a.card_id)
+        except CardError:
+            continue  # stale_cards and the tts stage's checks name a card that can't be read
+        if card.voice.source != "clone" or not card.voice.references:
+            continue
+        clips = clip_lengths(card)
+        if clips is not None and floor_shortfall(clips) is not None:
+            out[cid] = Shortfall(a.card_id, clips)
+    return out
+
+
+def floor_suffix(short: Mapping[int, Shortfall] | None, cid: int) -> str:
+    """What a kept stale card's line appends when the card is under the clone floor too (its
+    floor line is not printed separately); empty otherwise."""
+    sf = (short or {}).get(cid)
+    return f"; below the clone floor ({sf.phrase})" if sf is not None else ""
+
+
+def _floor_flag(reg: Registry, cid: int, card: str, phrase: str, why: str | None = None) -> str:
+    """The flag for a clone card under the floor that stays: no better pick, or ``why``."""
+    head = f"character {_label(reg, cid)}: clone card {card} is below the clone floor ({phrase})"
+    if why is None:
+        return f"{head} and no better reference pick exists; kept, flagged for review: {FLOOR_FIX}"
+    return f"{head}; {why}: {FLOOR_FIX}"
 
 
 def clone_backend(cfg: Config) -> str | None:
@@ -223,6 +339,7 @@ def ensure_assignments(
     *,
     cloning: Cloning | None = None,
     stale: Mapping[int, Sequence[dict]] | None = None,
+    short: Mapping[int, Shortfall] | None = None,
     flags: list[str] | None = None,
 ) -> list[str]:
     """Give every character in ``character_spans`` without a ``cfg.target_language`` card
@@ -239,12 +356,19 @@ def ensure_assignments(
     stock voice, so a character whose speech the names gave to others stops speaking in their
     voice. A curated or imported card, and an automatic one while no clone can be made, is
     only flagged (D29 #4): the flag lines go to ``flags`` (when given), never to the returned
-    lines, because they change nothing and would repeat on every run."""
+    lines, because they change nothing and would repeat on every run.
+
+    ``short`` (`below_floor`) lists automatic clone cards under the clone floor (D32). An
+    unlocked one is re-picked the same way (noted `FLOOR_NOTE`) when ``cloning`` gives picks
+    that beat it (`_floor_key`); otherwise, or when locked, it is kept and flagged, never
+    replaced by a stock voice. A new clone card under the floor is made, from the best picks
+    there are, and flagged too."""
     language = cfg.target_language
     usable = cloning is not None and cloning.unavailable is None
     todo = []
     fallbacks: set[int] = set()
     repick: dict[int, str] = {}  # character -> its current card id
+    floor: dict[int, Shortfall] = {}  # characters re-picked for the clone floor
     lines: list[str] = []
     flagged = flags if flags is not None else []
     for cid, spans in character_spans.items():
@@ -257,11 +381,12 @@ def ensure_assignments(
             fallbacks.add(cid)
         elif refs:
             where = _where(refs)
+            also = floor_suffix(short, cid)
             if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
                 flagged.append(
                     f"character {_label(reg, cid)}'s card {a.card_id} ({a.chosen_by}"
                     f"{', locked' if a.locked else ''}) was cloned from turns the subtitles "
-                    f"now name otherwise: {where}; `fukikae voices clone` replaces it"
+                    f"now name otherwise: {where}; `fukikae voices clone` replaces it{also}"
                 )
             elif usable:
                 todo.append((cid, spans))
@@ -271,7 +396,7 @@ def ensure_assignments(
                     f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns the "
                     f"subtitles now name otherwise ({where}); kept, because no [tts] "
                     "clone_backend is set to re-pick it with: set one, or replace it with "
-                    "`fukikae voices clone` or `fukikae voices assign`"
+                    f"`fukikae voices clone` or `fukikae voices assign`{also}"
                 )
             else:
                 name = cloning.backend.name
@@ -279,8 +404,29 @@ def ensure_assignments(
                     f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns the "
                     f"subtitles now name otherwise ({where}); kept until the clone backend "
                     f"{name} can run ({cloning.unavailable}; `fukikae backends setup {name}`), "
-                    "and the next tts run then re-picks it"
+                    f"and the next tts run then re-picks it{also}"
                 )
+        elif cid in (short or {}):
+            sf = (short or {})[cid]
+            refusal = replace_refusal(a, "auto")
+            if refusal is not None:
+                flagged.append(_floor_flag(reg, cid, sf.card_id, sf.phrase, f"kept: {refusal}"))
+            elif usable:
+                todo.append((cid, spans))
+                floor[cid] = sf
+            elif cloning is None:
+                flagged.append(_floor_flag(
+                    reg, cid, sf.card_id, sf.phrase,
+                    "kept, because no [tts] clone_backend is set to re-pick it with",
+                ))  # fmt: skip
+            else:
+                name = cloning.backend.name
+                flagged.append(_floor_flag(
+                    reg, cid, sf.card_id, sf.phrase,
+                    f"kept until the clone backend {name} can run ({cloning.unavailable}; "
+                    f"`fukikae backends setup {name}`), when the next tts run re-picks it if "
+                    "a better pick exists",
+                ))  # fmt: skip
     if not todo:
         return lines
     backend = tts_backend(cfg)
@@ -294,8 +440,16 @@ def ensure_assignments(
         by = "auto"
         if cid in fallbacks and not (found is not None and found.picks):
             continue  # still too little speech: the stand-in stays until a clone can be made
+        if cid in floor and not _better(found, floor[cid]):
+            sf = floor[cid]
+            flagged.append(_floor_flag(reg, cid, sf.card_id, sf.phrase))
+            continue  # the best picks there are: kept, flagged (never a stock voice)
+        below: str | None = None
         if found is not None and found.picks:
             new, note = _clone(cloning, found, store, language)  # type: ignore[arg-type]
+            below = floor_shortfall([p.seconds for p in found.picks])
+            if below is not None:
+                note += f"; below the clone floor ({below})"
             if cid in fallbacks:
                 note += "; replaces the stock fallback made while the clone backend couldn't run"
         else:
@@ -327,6 +481,8 @@ def ensure_assignments(
             if new == repick[cid]:
                 continue
             note = f"{REPICK_NOTE} ({_where((stale or {})[cid])}); {note}"
+        elif cid in floor:
+            note = f"{FLOOR_NOTE} ({floor[cid].phrase}); {note}"
         try:
             reg.assign_card(cid, language, new, by=by, locked=False, note=note)
         except ProtectedAssignmentError as e:
@@ -335,6 +491,8 @@ def ensure_assignments(
         if voice is not None:
             used.append(voice)
         lines.append(f"character {_label(reg, cid)}: {note}")
+        if below is not None:
+            flagged.append(_floor_flag(reg, cid, new, below))
     return lines
 
 
@@ -637,21 +795,73 @@ def character_candidates(
             speakers = own
         if not speakers or not a.assignments.turns:
             continue
+        work = ws.work_dir(e)
         if e not in cache:
-            cache[e] = reference_exclusions(ws.work_dir(e), a.tags, mix_settings(ws.config).songs)
+            songs = mix_settings(ws.config).songs
+            key = (str(work), repr(songs), _stamp(*_exclusion_files(work)))
+            if key not in _EXCLUSIONS_MEMO:
+                _remember(_EXCLUSIONS_MEMO, key, reference_exclusions(work, a.tags, songs))
+            cache[e] = list(_EXCLUSIONS_MEMO[key])
         exclude = cache[e]
-        turns = a.assignments.turns
         if a.names is not None:
             exclude = [*exclude, *((float(x), float(y)) for x, y in a.names.excluded)]
-            turns = [
-                t
-                for t in turns
-                if t.speaker not in speakers or _inside(t.start, t.end, foreign) < STALE_OVERLAP
-            ]
-        out[e] = eligible_references(
-            turns, speakers, a.transcript, a.tags, a.vocals, exclude=exclude
-        )
+        key = (
+            str(work), tuple(sorted(speakers)), tuple(exclude), tuple(foreign),
+            _stamp(*_candidate_files(work)),
+        )  # fmt: skip
+        if key not in _CANDIDATES_MEMO:
+            _remember(_CANDIDATES_MEMO, key, eligible_references(
+                a.assignments.turns, speakers, a.transcript, a.tags, a.vocals, exclude=exclude,
+                foreign=foreign,
+            ))  # fmt: skip
+        out[e] = list(_CANDIDATES_MEMO[key])
     return out
+
+
+# Per process (a `fukikae run` of several episodes, or one CLI command): each episode's
+# reference candidates and song exclusions, keyed by everything they're made from (the
+# registry's part already resolved into speakers and foreign spans) and the files' mtimes
+# and sizes, so every tts run of the batch and every character asks the files once (D32
+# review: a flagged character with no better pick is looked up again on each run).
+_CANDIDATES_MEMO: dict[tuple, list[RefPick]] = {}
+_EXCLUSIONS_MEMO: dict[tuple, list[tuple[float, float]]] = {}
+_MEMO_MAX = 4096
+
+
+def _remember(memo: dict, key: tuple, value: list) -> None:
+    if len(memo) >= _MEMO_MAX:
+        memo.clear()
+    memo[key] = value
+
+
+def _stamp(*paths: Path) -> tuple[tuple[str, int, int], ...]:
+    """Each file's (path, mtime in ns, size); -1s for a missing one."""
+    out = []
+    for p in paths:
+        try:
+            st = p.stat()
+        except OSError:
+            out.append((str(p), -1, -1))
+        else:
+            out.append((str(p), st.st_mtime_ns, st.st_size))
+    return tuple(out)
+
+
+def _candidate_files(work: Path) -> tuple[Path, ...]:
+    return (
+        work / "05-characters" / "assignments.json",
+        work / "03-asr" / "transcript.json",
+        work / "04b-tag" / "tags.json",
+        work / "01-separate" / "vocals.wav",
+    )
+
+
+def _exclusion_files(work: Path) -> tuple[Path, ...]:
+    sep = work / "01-separate"
+    return (
+        sep / "background.wav", sep / "vocals.wav", sep / "vocals_16k.wav",
+        work / "04b-tag" / "tags.json",
+    )  # fmt: skip
 
 
 def _best(
@@ -664,11 +874,27 @@ def _best(
         if allowed is not None and e not in allowed:
             continue
         picks = pick_references(found[e]) if e in found else None
-        if picks and (
-            best is None or sum(p.seconds for p in picks) > sum(p.seconds for p in best[1])
-        ):
+        if picks and (best is None or _episode_key(picks) > _episode_key(best[1])):
             best = (e, picks)
     return best
+
+
+def _episode_key(picks: Sequence[RefPick]) -> tuple[bool, int, float]:
+    """An episode's picks rank by reaching the clone floor (D32). Among episodes that reach
+    it, by the seconds picked before any floor filling: the picks up to the first scored
+    non-neutral one taken past `MIN_CLONE_S`, which are the picks the rule before D32 made, so
+    filling an episode with non-neutral turns never moves a character that already reached
+    the floor to it. Below the floor, by how close the picks come (`_floor_key`: clips up to
+    2, then seconds)."""
+    if not meets_floor(picks):
+        _, clips, seconds = _floor_key([p.seconds for p in picks])
+        return False, clips, seconds
+    used = 0.0
+    for p in picks:
+        if p.emotion is not None and used >= MIN_CLONE_S:
+            break
+        used += p.seconds
+    return True, 0, used
 
 
 def character_references(
@@ -744,15 +970,7 @@ def _all_episodes(ws: Workspace) -> list[str]:
     return sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
 
 
-def _inside(start: float, end: float, spans: Sequence[tuple[float, float]]) -> float:
-    """The share of ``start``-``end`` inside the union of ``spans``."""
-    covered, edge = 0.0, start
-    for a, b in sorted(spans):
-        a, b = max(a, edge), min(b, end)
-        if b > a:
-            covered += b - a
-            edge = b
-    return covered / (end - start) if end > start else 1.0
+_inside = share_inside
 
 
 def stale_references(
@@ -928,35 +1146,95 @@ def workspace_cloning(root: Path, cfg: Config, current: str) -> Cloning | None:
         )
 
     def references(cid: int) -> CharacterRefs:
-        candidates = character_candidates(ws, episodes, cid, exclusions, loaded)
-        named = {e for e, a in loaded.items() if a is not None and a.names is not None}
-        tiers = [candidates]
+        return find_references(ws, episodes, cid, fallback, loaded, exclusions)
+
+    return Cloning(backend=cls, source_language=fallback, references=references)
+
+
+def find_references(
+    ws: Workspace,
+    episodes: Sequence[str],
+    cid: int,
+    fallback: str | None = None,
+    loaded: dict[str, EpisodeArtifacts | None] | None = None,
+    exclusions: dict[str, list[tuple[float, float]]] | None = None,
+) -> CharacterRefs:
+    """What the character's turns in ``episodes`` offer a clone (`CharacterRefs`): the
+    name-confirmed tier first, the acoustic one only when that gives no picks
+    (`character_references`). Reads no backend, so the CLI can ask it too. ``fallback`` is
+    the picks' language when their episode's transcript has none; ``loaded`` and
+    ``exclusions`` cache what each episode's files give, across characters."""
+    loaded = loaded if loaded is not None else {}
+    exclusions = exclusions if exclusions is not None else {}
+    candidates = character_candidates(ws, episodes, cid, exclusions, loaded)
+    named = {e for e, a in loaded.items() if a is not None and a.names is not None}
+    tiers = [candidates]
+    best = character_references(ws, episodes, cid, candidates=candidates, named=named, acoustic={})
+    if best is None:  # the acoustic tier is read only when confirmed turns give no picks
+        acoustic = {
+            **{e: c for e, c in candidates.items() if e not in named},
+            **character_candidates(
+                ws, [e for e in episodes if e in named], cid, exclusions, loaded,
+                acoustic=True,
+            ),
+        }  # fmt: skip
+        tiers.append(acoustic)
         best = character_references(
-            ws, episodes, cid, candidates=candidates, named=named, acoustic={}
+            ws, episodes, cid, candidates={}, named=named, acoustic=acoustic
         )
-        if best is None:  # the acoustic tier is read only when confirmed turns give no picks
-            acoustic = {
-                **{e: c for e, c in candidates.items() if e not in named},
-                **character_candidates(
-                    ws, [e for e in episodes if e in named], cid, exclusions, loaded,
-                    acoustic=True,
-                ),
-            }  # fmt: skip
-            tiers.append(acoustic)
-            best = character_references(
-                ws, episodes, cid, candidates={}, named=named, acoustic=acoustic
-            )
+    if best is None:
         seconds = max(
             (sum(p.seconds for p in c) for tier in tiers for c in tier.values()), default=0.0
         )
-        if best is None:
-            return CharacterRefs(seconds=round(seconds, 3), names_used=bool(named))
-        e, picks, confirmed = best
-        arts = loaded.get(e)
-        language = (arts.transcript.language if arts else None) or fallback
-        vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
-        return CharacterRefs(
-            round(seconds, 3), picks, e, vocals, language, confirmed, names_used=bool(named)
-        )
+        return CharacterRefs(seconds=round(seconds, 3), names_used=bool(named))
+    e, picks, confirmed = best
+    pool = candidates if confirmed else tiers[-1]
+    seconds = sum(p.seconds for p in pool.get(e, []))
+    arts = loaded.get(e)
+    language = (arts.transcript.language if arts else None) or fallback
+    vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
+    return CharacterRefs(
+        round(seconds, 3), picks, e, vocals, language, confirmed, names_used=bool(named)
+    )
 
-    return Cloning(backend=cls, source_language=fallback, references=references)
+
+def floor_lines(
+    ws: Workspace, reg: Registry, store: CardStore, characters: Iterable[int], language: str
+) -> list[str]:
+    """One line per automatic clone card under the clone floor (`below_floor`, D32) for
+    `voices list` and `names show`: whether the next tts run re-picks it (unlocked, a better
+    pick exists, cloning can run here) or it stays flagged for review."""
+    short = below_floor(reg, store, characters, language)
+    if not short:
+        return []
+    loaded: dict[str, EpisodeArtifacts | None] = {}
+    exclusions: dict[str, list[tuple[float, float]]] = {}
+    episodes = _all_episodes(ws)
+    blocker: list[str | None] = []
+    out: list[str] = []
+    for cid in sorted(short):
+        sf = short[cid]
+        a = reg.card_for(cid, language)
+        assert a is not None
+        head = (
+            f"character {_label(reg, cid)}'s card {sf.card_id} ({a.chosen_by}"
+            f"{', locked' if a.locked else ''}) is below the clone floor ({sf.phrase})"
+        )
+        refusal = replace_refusal(a, "auto")
+        if refusal is not None:
+            out.append(f"{head}; kept: {refusal}: {FLOOR_FIX}")
+            continue
+        found = find_references(ws, episodes, cid, None, loaded, exclusions)
+        if not _better(found, sf):
+            out.append(f"{head}; no better reference pick exists; flagged for review: {FLOOR_FIX}")
+            continue
+        picks = found.picks or []
+        n = len(picks)
+        better = f"{n} clip{'' if n == 1 else 's'}, {sum(p.seconds for p in picks):.1f} s"
+        if not blocker:
+            blocker.append(repick_blocker(ws.config))
+        if blocker[0] is None:
+            out.append(f"{head}; the next tts run re-picks it ({better})")
+        else:
+            out.append(f"{head}; a better pick exists ({better}), kept while {blocker[0]}")
+    return out

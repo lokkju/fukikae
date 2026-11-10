@@ -1048,3 +1048,66 @@ def test_voices_clone_refuses_an_engine_as_backend(tmp_path: Path):
     assert r.exit_code == 1 and "[tts] engines" in r.output
     with Registry(ws.registry_path) as reg:
         assert reg.card_for(cid, "en") is None
+
+
+def test_list_flags_automatic_clone_cards_under_the_floor(tmp_path: Path, monkeypatch):
+    """D32: `voices list` names an automatic clone card under the clone floor and says
+    whether the next tts run re-picks it (a better pick exists) or it stays flagged."""
+    from tests.cards.test_auto import (
+        FLOOR_CLUSTERS,
+        FLOOR_EP,
+        FLOOR_NAMES,
+        FLOOR_TURNS,
+        _auto_clone,
+        _named_episode,
+    )  # fmt: skip
+
+    ws, mak, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        _, other = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))
+        clusters = [{**c, "character_id": mak if c["character_id"] == 1 else other}
+                    for c in FLOOR_CLUSTERS]  # fmt: skip
+        _named_episode(ws.root, FLOOR_EP, FLOOR_TURNS, clusters, names=FLOOR_NAMES)
+        _auto_clone(reg, store, mak, [(FLOOR_EP, 0.0, 6.3)])
+        card = _auto_clone(reg, store, other, [(FLOOR_EP, 20.0, 25.0)])
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 0, r.output
+    one, two = [ln for ln in r.output.splitlines() if "below the clone floor" in ln]
+    assert one.startswith(f"character {mak} (Natsu)'s card") and one.endswith(
+        "the next tts run re-picks it (2 clips, 10.8 s)"
+    )
+    assert two == (
+        f"character {other}'s card {card} (auto) is below the clone floor (1 clip and 5.0 s, "
+        "under the floor of 2 clips and 10 s); no better reference pick exists; flagged for "
+        "review: `fukikae voices clone` with a better clip replaces it"
+    )
+
+
+def test_list_appends_the_floor_to_a_kept_stale_cards_line(tmp_path: Path):
+    """A locked automatic card both stale and under the clone floor: one line, the stale one,
+    with the shortfall appended."""
+    from tests.cards.test_auto import (
+        NAMED_EP,
+        NATSU_CLUSTERS,
+        NATSU_NAMES,
+        NATSU_TURNS,
+        _auto_clone,
+        _named_episode,
+    )  # fmt: skip
+
+    ws, natsu, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        _, other = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))
+        clusters = [{**c, "character_id": natsu if c["character_id"] == 1 else other}
+                    for c in NATSU_CLUSTERS]  # fmt: skip
+        _named_episode(ws.root, NAMED_EP, NATSU_TURNS, clusters, names=NATSU_NAMES)
+        _auto_clone(reg, store, natsu, [(NAMED_EP, 30.0, 35.0)], locked=True)
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 0, r.output
+    (line,) = [ln for ln in r.output.splitlines() if "clone floor" in ln or "cloned from" in ln]
+    assert line == (
+        f"character {natsu} (Natsu)'s card (auto) was cloned from turns now named WENDY; "
+        "`fukikae voices clone` replaces it; below the clone floor (1 clip and 5.0 s, under "
+        "the floor of 2 clips and 10 s)"
+    )
