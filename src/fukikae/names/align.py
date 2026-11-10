@@ -1,14 +1,26 @@
-"""The subtitle/speech alignment check: how much of the lines' time overlaps detected speech,
-and the global offset that best lines them up. Moved from `eval.groundtruth.base` (R1); works
-on any frozen dataclass with `start` and `end` (eval's `GroundTruthLine`, the names stage's
-lines)."""
+"""Subtitle lines against diarize turns.
 
+The alignment check (how much of the lines' time overlaps detected speech, and the global
+offset that best lines them up) moved from `eval.groundtruth.base` (R1) and works on any frozen
+dataclass with `start` and `end`. `attribute` gives each diarize turn the name key that covers
+it, cutting the few turns that hold two names; `refine_clusters` moves the diarize stage's
+embedding rows onto the refined `<cluster>~<slug>` labels without re-embedding, dropping rows
+that cross a cut (D29), so the names stage stays CPU-only."""
+
+import hashlib
+import re
+from collections import Counter, defaultdict
+from collections.abc import Collection
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
 import numpy as np
 
+from fukikae.artifacts import atomic_path
 from fukikae.models import Turn
+from fukikae.names.models import LabelInfo, NamedLine, Piece
+from fukikae.names.normalize import NameClass
 
 MIN_SHARE = 0.6
 MIN_GAIN = 0.1
@@ -107,3 +119,280 @@ def check_alignment[L: TimedLine](
         off = rep.best_offset_s
         return [replace(ln, start=ln.start - off, end=ln.end - off) for ln in lines], rep, True
     return lines, rep, False
+
+
+# ---- attribution: named lines onto diarize turns ----
+
+TURN_SHARE = 0.6  # one key covering this share of a turn names it
+CUT_SIDE_S = 0.5  # each side of a cut covers at least this much of the turn
+MIN_PIECE_S = 0.3  # a shorter piece joins its longer neighbour
+UNVOICED_S = 0.2  # a named line with less turn under it is unvoiced
+CONTAIN = 0.9  # an embedding row this much inside one piece moves to it
+
+
+def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+    return max(0.0, min(a1, b1) - max(a0, b0))
+
+
+def _slug(key: str) -> str | None:
+    if not key.isascii():
+        return None
+    return re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-") or None
+
+
+def label_for(cluster: str, key: str, *, hashed: bool = False) -> str:
+    """`<cluster>~<slug>`: the key's `[a-z0-9-]` slug when it is ASCII (and has one), else `n`
+    plus the first 8 hex digits of sha256(key). `hashed` forces the second form, for keys
+    whose slugs collide."""
+    slug = None if hashed else _slug(key)
+    if slug is None:
+        slug = "n" + hashlib.sha256(key.encode()).hexdigest()[:8]
+    return f"{cluster}~{slug}"
+
+
+def _assign_lines(turns: list[Turn], lines: list[NamedLine]) -> dict[int, list[NamedLine]]:
+    """Turn index -> the lines attributed to it. A line counts for every turn it overlaps,
+    except a turn that overlaps another turn the line covers more (ties go to the earlier
+    turn): when two turns overlap, a line covering both names only one."""
+    by_turn: dict[int, list[NamedLine]] = defaultdict(list)
+    for ln in lines:
+        hits = [
+            (i, _overlap(ln.start, ln.end, t.start, t.end))
+            for i, t in enumerate(turns)
+            if t.start < ln.end and ln.start < t.end
+        ]
+        hits = [(i, ov) for i, ov in hits if ov > 0]
+        for i, ov in hits:
+            ti = turns[i]
+            beaten = any(
+                (ov2 > ov or (ov2 == ov and j < i))
+                and turns[j].start < ti.end
+                and ti.start < turns[j].end
+                for j, ov2 in hits
+                if j != i
+            )
+            if not beaten:
+                by_turn[i].append(ln)
+    return by_turn
+
+
+def _cut(
+    t: Turn, lines: list[NamedLine], keys: set[str], min_piece_s: float
+) -> list[tuple[float, float, str | None]]:
+    """(start, end, key) pieces of a turn cut between consecutive lines of different keys
+    (or a multi line, whose stretch is unnamed), at the midpoint of the gap between them or
+    where they touch. A piece under `min_piece_s` joins its longer neighbour."""
+    segs: list[tuple[float, float, str | None]] = []
+    for ln in sorted(lines, key=lambda x: (x.start, x.end)):
+        if ln.cls is NameClass.MULTI:
+            key = None
+        elif ln.key in keys:
+            key = ln.key
+        else:
+            continue
+        a, b = max(ln.start, t.start), min(ln.end, t.end)
+        if b <= a:
+            continue
+        if segs and segs[-1][2] == key:
+            segs[-1] = (segs[-1][0], max(segs[-1][1], b), key)
+        else:
+            segs.append((a, b, key))
+    pieces: list[list] = []
+    for k, (a, b, key) in enumerate(segs):
+        start = t.start if k == 0 else (segs[k - 1][1] + a) / 2
+        end = t.end if k == len(segs) - 1 else (b + segs[k + 1][0]) / 2
+        pieces.append([round(start, 6), round(end, 6), key])
+    while len(pieces) > 1:
+        short = [k for k, p in enumerate(pieces) if p[1] - p[0] < min_piece_s - 1e-9]
+        if not short:
+            break
+        k = min(short, key=lambda k: pieces[k][1] - pieces[k][0])
+        left = pieces[k - 1] if k > 0 else None
+        right = pieces[k + 1] if k + 1 < len(pieces) else None
+        into = (
+            k - 1
+            if right is None or (left is not None and left[1] - left[0] >= right[1] - right[0])
+            else k + 1
+        )
+        lo, hi = sorted((k, into))
+        keep = pieces[into][2]
+        pieces[lo : hi + 1] = [[pieces[lo][0], pieces[hi][1], keep]]
+        # neighbours with the same key are one piece
+        merged: list[list] = []
+        for p in pieces:
+            if merged and merged[-1][2] == p[2]:
+                merged[-1][1] = p[1]
+            else:
+                merged.append(p)
+        pieces = merged
+    return [(p[0], p[1], p[2]) for p in pieces]
+
+
+def attribute(
+    turns: list[Turn],
+    lines: list[NamedLine],
+    *,
+    turn_share: float = TURN_SHARE,
+    cut_side_s: float = CUT_SIDE_S,
+    min_piece_s: float = MIN_PIECE_S,
+    hidden: Collection[int] = (),
+) -> tuple[list[Piece], list[int]]:
+    """Pieces covering every turn, in the turns' order, and the ids of unvoiced lines (named
+    or role lines with under UNVOICED_S of turn under them).
+
+    A turn where two or more keys each cover at least `cut_side_s` and together reach
+    `turn_share` of it is cut between them; otherwise a key covering `turn_share` of it names
+    the whole turn; otherwise it is the cluster's unnamed remainder. Named and role lines count
+    for their key (inner-voice lines too); multi lines and `hidden` ids name nothing and are
+    never a side of a cut. Keys whose slugs collide get hashed labels."""
+    hidden = set(hidden)
+    keyed = [ln for ln in lines if ln.key is not None and ln.id not in hidden]
+    slugs: dict[str, set[str]] = defaultdict(set)
+    for k in {ln.key for ln in keyed if ln.key is not None}:
+        slugs[_slug(k) or ""].add(k)
+    clash = {k for s, ks in slugs.items() if s and len(ks) > 1 for k in ks}
+    by_turn = _assign_lines(turns, lines)
+    pieces: list[Piece] = []
+    for i, t in enumerate(turns):
+        mine = by_turn.get(i, [])
+        dur = t.end - t.start
+        cover: dict[str, float] = defaultdict(float)
+        for ln in mine:
+            if ln.key is not None and ln.id not in hidden and ln.cls is not NameClass.MULTI:
+                cover[ln.key] += _overlap(ln.start, ln.end, t.start, t.end)
+        sides = {k for k, s in cover.items() if s >= cut_side_s - 1e-9}
+        spans: list[tuple[float, float, str | None]]
+        if len(sides) >= 2 and sum(cover[k] for k in sides) >= turn_share * dur - 1e-9:
+            usable = [ln for ln in mine if ln.id not in hidden]
+            spans = _cut(t, usable, sides, min_piece_s)
+        else:
+            best = max(cover, key=lambda k: (cover[k], k), default=None)
+            named = best is not None and dur > 0 and cover[best] >= turn_share * dur - 1e-9
+            spans = [(t.start, t.end, best if named else None)]
+        for a, b, key in spans:
+            ids = sorted(ln.id for ln in mine if _overlap(ln.start, ln.end, a, b) > 0)
+            label = t.speaker if key is None else label_for(t.speaker, key, hashed=key in clash)
+            pieces.append(
+                Piece(start=a, end=b, cluster=t.speaker, label=label, key=key, line_ids=ids)
+            )
+    unvoiced = [ln.id for ln in keyed if _voiced(ln, turns) < UNVOICED_S - 1e-9]
+    return pieces, sorted(unvoiced)
+
+
+def _voiced(ln: NamedLine, turns: list[Turn]) -> float:
+    """Seconds of the line under the union of the turns."""
+    spans = sorted(
+        (max(ln.start, t.start), min(ln.end, t.end))
+        for t in turns
+        if t.start < ln.end and ln.start < t.end
+    )
+    total, reach = 0.0, ln.start
+    for a, b in spans:
+        a = max(a, reach)
+        if b > a:
+            total += b - a
+            reach = b
+    return total
+
+
+def refined_turns(pieces: list[Piece]) -> list[Turn]:
+    """The refined diarization: one turn per piece, labelled with the piece's label."""
+    return [Turn(start=p.start, end=p.end, speaker=p.label) for p in pieces]
+
+
+def label_infos(pieces: list[Piece], lines: list[NamedLine]) -> dict[str, LabelInfo]:
+    """Each refined label's parent cluster, key, display form and class, in first-appearance
+    order. The display form is the key's most common one among the lines."""
+    displays: dict[str, Counter[str]] = defaultdict(Counter)
+    classes: dict[str, NameClass] = {}
+    for ln in lines:
+        if ln.key is not None:
+            if ln.display:
+                displays[ln.key][ln.display] += 1
+            if ln.cls is NameClass.NAMED or ln.key not in classes:
+                classes[ln.key] = ln.cls
+    out: dict[str, LabelInfo] = {}
+    for p in pieces:
+        if p.label in out:
+            continue
+        if p.key is None:
+            out[p.label] = LabelInfo(parent=p.cluster, key=None, display=None, cls="remainder")
+            continue
+        common = displays[p.key].most_common(1)
+        cls = "role" if classes.get(p.key) is NameClass.ROLE else "named"
+        out[p.label] = LabelInfo(
+            parent=p.cluster, key=p.key, display=common[0][0] if common else p.key, cls=cls
+        )
+    return out
+
+
+def excluded_spans(lines: list[NamedLine]) -> list[tuple[float, float]]:
+    """Inner-voice and multi lines' spans, in start order: never clone references."""
+    return sorted((ln.start, ln.end) for ln in lines if ln.inner or ln.cls is NameClass.MULTI)
+
+
+def refine_clusters(
+    clusters_npz: Path,
+    pieces: list[Piece],
+    turns_out: list[Turn],
+    out: Path,
+    *,
+    contain: float = CONTAIN,
+) -> float:
+    """Write the refined `clusters.npz` in the diarize stage's format and return the seconds of
+    embedding rows dropped. A row (a clean span of one of its cluster's turns) at least
+    `contain` inside one of that cluster's pieces moves to the piece's label; a row across a cut
+    is dropped (nothing is re-embedded, D29). Labels are in first-appearance order of
+    `turns_out`; `clean_seconds` per label is recomputed over `turns_out`, and rows stay
+    longest first."""
+    from fukikae.stages.diarize import clean_spans
+
+    by_cluster: dict[str, list[Piece]] = defaultdict(list)
+    for p in pieces:
+        by_cluster[p.cluster].append(p)
+    labels: list[str] = []
+    for t in turns_out:
+        if t.speaker not in labels:
+            labels.append(t.speaker)
+    rows: dict[str, list[tuple[float, float, np.ndarray]]] = defaultdict(list)
+    dropped = 0.0
+    with np.load(clusters_npz) as z:
+        src_labels = [str(x) for x in z["labels"]]
+        dim = next((int(z[f"{lb}/embeddings"].shape[1]) for lb in src_labels), 0)
+        for lb in src_labels:
+            emb = z[f"{lb}/embeddings"]
+            spans = z[f"{lb}/spans"]
+            for vec, (s, e) in zip(emb, spans, strict=True):
+                s, e = float(s), float(e)
+                best = max(
+                    by_cluster.get(lb, []),
+                    key=lambda p: _overlap(s, e, p.start, p.end),
+                    default=None,
+                )
+                if (
+                    best is not None
+                    and _overlap(s, e, best.start, best.end) >= contain * (e - s) - 1e-9
+                ):
+                    rows[best.label].append((s, e, vec))
+                else:
+                    dropped += e - s
+    arrays: dict[str, Any] = {"labels": np.array(labels, dtype=str)}
+    for lb in labels:
+        kept = sorted(rows.get(lb, []), key=lambda r: r[1] - r[0], reverse=True)
+        n = len(kept)
+        arrays[f"{lb}/embeddings"] = (
+            np.stack([r[2] for r in kept]).astype(np.float32)
+            if kept
+            else np.zeros((0, dim), dtype=np.float32)
+        )
+        arrays[f"{lb}/spans"] = np.array([(r[0], r[1]) for r in kept], dtype=np.float64).reshape(
+            n, 2
+        )
+        clean = clean_spans(turns_out, lb)
+        arrays[f"{lb}/clean_seconds"] = np.array(
+            float(sum(e - s for s, e in clean)), dtype=np.float64
+        )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_path(out) as tmp:
+        np.savez(tmp, **arrays)
+    return round(dropped, 6)
