@@ -48,8 +48,12 @@ creates a character, named by subtitles. Locked actors, operator names and opera
 beat subtitle names; a sub-cluster whose acoustics point at another character is reported,
 never acted on. A named sub-cluster's acoustics are its parent cluster's (the remainder's pin,
 else its own pin from an acoustic assignment, else the parent's match), never its own earlier
-name or lock decision. A key two characters answer to at the same rank takes the remainder
-path. The unnamed remainder of each cluster goes through the pin and match path above,
+name or lock decision, except that a label's own pin to a locked actor or locked character
+counts first whatever its source (the manual fallback: split, rename, lock). Every pin the
+remainder path takes is acoustic: only a voice-sourced earlier assignment carries over, so a
+name or lock decision never returns as a pin once names stop being used (off, held out, no
+named track). A key two characters answer to at the same rank takes the remainder path.
+The unnamed remainder of each cluster goes through the pin and match path above,
 judged, like the parents, against one snapshot of the actors taken before this episode's
 named exemplars (plus the characters names created here); a character named sub-clusters
 took never sends a remainder to ``review``. A remainder left with no embedding rows of its
@@ -99,7 +103,6 @@ from fukikae.workspace import Episode, Workspace
 log = logging.getLogger(__name__)
 STAGE_MATCHERS = ("centroid", "lda")
 RENAME_SHARE = 0.6  # D29 #3, both directions
-NAMES_MIN_NEW_S = 5.0  # D29 #5; `[names] min_new_seconds` overrides it
 
 Tops = dict[str, tuple[int, float] | None]
 
@@ -126,6 +129,7 @@ def resolve_names(
     parent_tops: Tops,
     own_pins: dict[str, ClusterAssignment] | None = None,
     decisions: list[KeyDecision] | None = None,
+    locked_pins: dict[str, ClusterAssignment] | None = None,
 ) -> tuple[dict[str, ClusterAssignment], list[str]]:
     """Characters for every named sub-cluster of a names-used episode, in the order the module
     docstring gives, and the report lines (locks kept, disagreements with acoustics, ambiguous
@@ -137,7 +141,10 @@ def resolve_names(
     remainder label in ``pinned`` (the remainder path's pins), else the sub-cluster's own pin
     in ``own_pins`` (inherited only from a voice-sourced assignment, `pin(voice_only=True)`,
     so never from its own earlier name or lock decision), else ``parent_tops``, each parent
-    cluster's best (actor, score) over all its rows.
+    cluster's best (actor, score) over all its rows. Before all of these, the label's own pin
+    from ``locked_pins`` (any source: a name, lock or hand-edited assignment) counts when it is
+    to a locked actor or a locked character, so an operator's split, rename and lock of a named
+    sub-cluster is kept on the next run.
 
     ``decisions`` (when given) gets one `KeyDecision` per key, most named speech first: how
     the key went, for `fukikae names show`."""
@@ -160,7 +167,14 @@ def resolve_names(
 
     def acoustic(label: str) -> tuple[int, int | None, str] | None:
         """The (actor, character, how) the label's acoustics give: its parent's pin, else its
-        own voice-sourced pin, else its parent cluster's match at the threshold."""
+        own voice-sourced pin, else its parent cluster's match at the threshold; first of all,
+        its own pin of any source when that is to a locked actor or character."""
+        mine = (locked_pins or {}).get(label)
+        if mine is not None and mine.actor_id in actors:
+            cid = mine.character_id or first_char.get(mine.actor_id)
+            c = chars.get(cid) if cid is not None else None
+            if actors[mine.actor_id].locked or (c is not None and c.locked):
+                return mine.actor_id, cid, "pin"
         parent = named[label].parent
         p = pinned.get(parent) if parent not in named else None
         if p is None:
@@ -475,13 +489,17 @@ class CharactersStage:
         if not self.rematch and assignments_path.exists():
             previous = read_json(assignments_path, Assignments)
         fresh = previous is None or previous.turns is None
+        # Pins are acoustic: only voice-sourced assignments carry over, so a name or lock
+        # decision never comes back as an acoustic pin once names stop being used (off, held
+        # out, no named track). ``own_pins`` (any source) is only for a named label's check
+        # of its own pin to a locked actor or character, the manual fallback.
         pinned: dict[str, ClusterAssignment] = {}
-        voice_pins: dict[str, ClusterAssignment] = {}
+        any_pins: dict[str, ClusterAssignment] = {}
         if previous is not None and previous.turns is not None:
             prev_turns = Diarization(backend=turns.backend, turns=previous.turns)
-            pinned = pin(previous, prev_turns, turns)
+            pinned = pin(previous, prev_turns, turns, voice_only=True)
             if keyed:
-                voice_pins = pin(previous, prev_turns, turns, voice_only=True)
+                any_pins = pin(previous, prev_turns, turns)
 
         result: dict[str, ClusterAssignment] = {}
         with Registry(Workspace(ep.workspace_root).registry_path) as reg, reg.transaction():
@@ -491,7 +509,7 @@ class CharactersStage:
             known = {a.id for a in reg.actors()}
             # A pin to an actor that no longer exists (deleted by hand) is matched afresh.
             pinned = {k: v for k, v in pinned.items() if v.actor_id in known}
-            voice_pins = {k: v for k, v in voice_pins.items() if v.actor_id in known}
+            any_pins = {k: v for k, v in any_pins.items() if v.actor_id in known}
             # The characters this episode's keys answer to; a key several answer to is ambiguous
             # and its sub-clusters take the remainder path (pin, else acoustic match), so every
             # character it might mean is spared too.
@@ -510,8 +528,7 @@ class CharactersStage:
             # Named sub-clusters take their character from their names, never from a pin; the
             # remainders' pins (and an ambiguous key's, from acoustic decisions only) claim
             # actors against acoustic matches.
-            path_pins = {k: v for k, v in pinned.items() if k not in keyed}
-            path_pins.update({k: v for k, v in voice_pins.items() if k in keyed and k not in named})
+            path_pins = {k: v for k, v in pinned.items() if k not in named}
             claimed = {v.actor_id for v in path_pins.values() if v.actor_id is not None}
             if fresh:  # never before this run's keys had their say on the characters they name
                 reg.prune_actors([a for a in orphans if a not in answering])
@@ -572,7 +589,8 @@ class CharactersStage:
                     rows,
                     path_pins,
                     parent_tops,
-                    own_pins={k: v for k, v in voice_pins.items() if k in named},
+                    own_pins={k: v for k, v in pinned.items() if k in named},
+                    locked_pins={k: v for k, v in any_pins.items() if k in named},
                     decisions=decisions,
                 )
                 for line in report:
