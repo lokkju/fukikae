@@ -23,9 +23,10 @@ What it honours (ruling recorded in the character-cards ledger, Task 9a):
 - ``seed`` (``torch.manual_seed`` before each line; 0 when the card sets none, so a render is
   reproducible), ``temperature`` and ``top_p`` (IndexTTS2's defaults, 0.8 and 0.8, when unset).
 
-Fast inference (D26): ``fp16`` (the GPT in half precision) and ``tf32`` (TF32 matmuls and
-convolutions on Ampere and later, for the diffusion decoder) are stage options in
-``[tts.indextts2]``, in the render cache key since each changes the audio; the profiles turn
+Fast inference (D26): ``fp16`` (the GPT in half precision) and ``tf32`` (TF32 matmuls on
+Ampere and later, which speeds up the diffusion decoder; cuDNN convolutions use TF32 by torch's
+default either way) are stage options in ``[tts.indextts2]``, in each render's cache key and
+the tts stage key since each changes the audio; the profiles turn
 ``tf32`` on. Measured on Fairy Tail E14 on GPU 0 (RTX 3090 at a 200 W limit), 12 lines: fp32
 3.9 s a line, tf32 3.4 s, fp16 4.0 s (the GPT is bound by kernel launches, and fp16 adds casts).
 Not offered: IndexTTS2's ``use_accel`` engine (flash-attention and CUDA graphs, 2.2 s a line)
@@ -132,10 +133,11 @@ def installed_code_revision() -> str | None:
 
 
 def _set_tf32(enabled: bool) -> None:
+    """TF32 for CUDA matmuls. cuDNN convolutions already use TF32 by torch's default
+    (``torch.backends.cudnn.allow_tf32`` is True), so only matmuls change."""
     import torch
 
     torch.backends.cuda.matmul.allow_tf32 = enabled
-    torch.backends.cudnn.allow_tf32 = enabled
 
 
 class Impl:
@@ -159,7 +161,7 @@ class Impl:
             snap = _snapshot(repo, rev, files)
             aux[key] = snap if key in ("w2v_bert", "bigvgan") else os.path.join(snap, files[0])
         gpu = device != "cpu"
-        if options.get("tf32") and gpu:  # off: torch's own defaults, untouched
+        if options.get("tf32") and gpu:  # off: torch's defaults (fp32 matmuls), untouched
             _set_tf32(True)
         from indextts.infer_v2 import IndexTTS2  # pyright: ignore[reportMissingImports]
 
