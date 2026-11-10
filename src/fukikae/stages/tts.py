@@ -619,6 +619,11 @@ def suspect_reason(seconds: float, expected: float) -> str | None:
     return None
 
 
+def retry_seed(seed: int | None) -> int:
+    """The render guard's retry seed (ruling CD18): the card's seed plus one, modulo 2^32."""
+    return ((seed or 0) + 1) % 2**32
+
+
 def retry_key(key: str, seed: int) -> str:
     return _hash({"render": key, "retry_seed": seed})
 
@@ -669,7 +674,7 @@ def render_guarded(
             "with; marked suspect", job.cue.id, why, seconds, expected, job.cls.name,
         )  # fmt: skip
         return GuardedRender(first, seconds, calls, None, why)
-    seed = (job.card.voice.seed or 0) + 1
+    seed = retry_seed(job.card.voice.seed)
     key = retry_key(first, seed)
     path = cache / f"{key}.wav"
     if not path.exists():

@@ -130,6 +130,10 @@ _BACKEND_VOICE_KEYS = (
 )
 
 
+# Seeds reach torch and numpy, whose seeds are 32-bit (B5).
+SEED_MAX = 2**32 - 1
+
+
 class CardError(Exception):
     """A card that can't be parsed, stored, found or honored by its backend."""
 
@@ -351,8 +355,8 @@ def _parse_voice(raw: Any) -> Voice:
 
     if "seed" in t:
         kw["seed"] = _int(t["seed"], "seed", where)
-        if kw["seed"] < 0:
-            raise CardError(f"[voice] seed must be >= 0, got {kw['seed']}")
+        if not 0 <= kw["seed"] <= SEED_MAX:
+            raise CardError(f"[voice] seed must be 0 to {SEED_MAX} (32 bits), got {kw['seed']}")
     ranges: dict[str, dict[str, Any]] = {
         "temperature": {"lo": 0.0, "lo_open": True},
         "top_p": {"lo": 0.0, "lo_open": True, "hi": 1.0},

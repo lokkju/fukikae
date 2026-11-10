@@ -750,3 +750,11 @@ def test_style_key_names_are_validated(key: str):
 def test_style_accepts_snake_case_keys():
     c = parse_card(STOCK_CARD + '\n[style]\nverbal_tics = "dattebayo"\n')
     assert c.style == {"verbal_tics": "dattebayo"}
+
+
+def test_seed_must_fit_in_32_bits():
+    """B5: torch and numpy seeds are 32-bit; a larger one would wrap or fail in a worker."""
+    ok = _variant('voice = "af_heart"', 'voice = "af_heart"\nseed = 4294967295')
+    assert ok.voice.seed == 2**32 - 1
+    with pytest.raises(CardError, match="seed"):
+        _variant('voice = "af_heart"', 'voice = "af_heart"\nseed = 4294967296')
