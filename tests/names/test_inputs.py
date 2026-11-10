@@ -95,3 +95,13 @@ def test_a_names_verdict_is_still_refused_first(tmp_path: Path):
     _holdout_names(work, "full")
     with pytest.raises(HeldOutNamesError, match="names verdict 'full'"):
         check_held_out(work, "S01E14")
+
+
+def test_verdict_none_says_it_read_the_subtitles_not_their_names(tmp_path: Path):
+    """No named track was found, so no names were read; the subtitles were."""
+    work = _work(tmp_path, [{"cluster": "S0"}])
+    _holdout_names(work, "none")
+    with pytest.raises(HeldOutNamesError) as e:
+        check_held_out(work, "S01E14")
+    assert "read its subtitles (verdict none)" in str(e.value)
+    assert "subtitle names" not in str(e.value)
