@@ -8,9 +8,12 @@ embedding rows onto the refined `<cluster>~<slug>` labels without re-embedding, 
 that cross a cut (D29), so the names stage stays CPU-only."""
 
 import hashlib
+import itertools
 import re
+import unicodedata
+import zipfile
 from collections import Counter, defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
@@ -135,15 +138,18 @@ def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
 
 
 def _slug(key: str) -> str | None:
-    if not key.isascii():
+    """`[a-z0-9-]` from the key once accents are stripped (NFKD, combining marks dropped, so
+    `chloé` is `chloe`), or None when what is left isn't ASCII or has no letter or digit."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", key) if not unicodedata.combining(c))
+    if not plain.isascii():
         return None
-    return re.sub(r"[^a-z0-9]+", "-", key.lower()).strip("-") or None
+    return re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-") or None
 
 
 def label_for(cluster: str, key: str, *, hashed: bool = False) -> str:
-    """`<cluster>~<slug>`: the key's `[a-z0-9-]` slug when it is ASCII (and has one), else `n`
-    plus the first 8 hex digits of sha256(key). `hashed` forces the second form, for keys
-    whose slugs collide."""
+    """`<cluster>~<slug>`: the key's `[a-z0-9-]` slug when it has one, else `n` plus the first
+    8 hex digits of sha256(key). `hashed` forces the second form, for keys whose slugs collide
+    within one cluster."""
     slug = None if hashed else _slug(key)
     if slug is None:
         slug = "n" + hashlib.sha256(key.encode()).hexdigest()[:8]
@@ -176,14 +182,32 @@ def _assign_lines(turns: list[Turn], lines: list[NamedLine]) -> dict[int, list[N
     return by_turn
 
 
+def _union_length(spans: list[tuple[float, float]]) -> float:
+    total, reach = 0.0, float("-inf")
+    for a, b in sorted(spans):
+        a = max(a, reach)
+        if b > a:
+            total += b - a
+            reach = b
+    return total
+
+
+_GAP = "\0gap"  # an elementary stretch no line covers
+
+
 def _cut(
     t: Turn, lines: list[NamedLine], keys: set[str], min_piece_s: float
 ) -> list[tuple[float, float, str | None]]:
-    """(start, end, key) pieces of a turn cut between consecutive lines of different keys
-    (or a multi line, whose stretch is unnamed), at the midpoint of the gap between them or
-    where they touch. A piece under `min_piece_s` joins its longer neighbour."""
+    """(start, end, key) pieces of a turn cut between lines of different keys. The turn is split
+    at every line boundary: a stretch one key's lines alone cover takes that key; a stretch a
+    multi line covers, or lines of two keys cover at once (a line nested in another key's, or
+    the overlap of two), is unnamed. A stretch no line covers goes to its neighbours: to the
+    one piece when both sides have the same key, else split at its midpoint (the midpoint of
+    the furthest end reached so far and the next line's start); at the turn's ends it joins
+    the first or last piece. So cuts are monotonic and every keyed piece overlaps a line of its
+    key. A piece under `min_piece_s` then joins its longer neighbour."""
     segs: list[tuple[float, float, str | None]] = []
-    for ln in sorted(lines, key=lambda x: (x.start, x.end)):
+    for ln in lines:
         if ln.cls is NameClass.MULTI:
             key = None
         elif ln.key in keys:
@@ -191,17 +215,36 @@ def _cut(
         else:
             continue
         a, b = max(ln.start, t.start), min(ln.end, t.end)
-        if b <= a:
-            continue
-        if segs and segs[-1][2] == key:
-            segs[-1] = (segs[-1][0], max(segs[-1][1], b), key)
-        else:
+        if b > a:
             segs.append((a, b, key))
+    bounds = sorted({t.start, t.end, *(x for a, b, _ in segs for x in (a, b))})
+    runs: list[list] = []
+    for a, b in itertools.pairwise(bounds):
+        active = {k for s0, s1, k in segs if s0 < b and a < s1}
+        lab: str | None = _GAP if not active else (next(iter(active)) if len(active) == 1 else None)
+        if runs and runs[-1][2] == lab:
+            runs[-1][1] = b
+        else:
+            runs.append([a, b, lab])
     pieces: list[list] = []
-    for k, (a, b, key) in enumerate(segs):
-        start = t.start if k == 0 else (segs[k - 1][1] + a) / 2
-        end = t.end if k == len(segs) - 1 else (b + segs[k + 1][0]) / 2
-        pieces.append([round(start, 6), round(end, 6), key])
+    for k, (a, b, lab) in enumerate(runs):
+        if lab != _GAP:
+            pieces.append([a, b, lab])
+            continue
+        left = pieces[-1] if pieces else None
+        right = runs[k + 1] if k + 1 < len(runs) else None  # never a gap: runs alternate
+        if left is None and right is None:
+            pieces.append([a, b, None])
+        elif left is None:
+            assert right is not None
+            right[0] = a
+        elif right is None or right[2] == left[2]:
+            left[1] = b
+        else:
+            mid = round((a + b) / 2, 6)
+            left[1] = mid
+            right[0] = mid
+    pieces = _merge_same(pieces)
     while len(pieces) > 1:
         short = [k for k, p in enumerate(pieces) if p[1] - p[0] < min_piece_s - 1e-9]
         if not short:
@@ -217,15 +260,19 @@ def _cut(
         lo, hi = sorted((k, into))
         keep = pieces[into][2]
         pieces[lo : hi + 1] = [[pieces[lo][0], pieces[hi][1], keep]]
-        # neighbours with the same key are one piece
-        merged: list[list] = []
-        for p in pieces:
-            if merged and merged[-1][2] == p[2]:
-                merged[-1][1] = p[1]
-            else:
-                merged.append(p)
-        pieces = merged
+        pieces = _merge_same(pieces)
     return [(p[0], p[1], p[2]) for p in pieces]
+
+
+def _merge_same(pieces: list[list]) -> list[list]:
+    """Neighbours with the same key are one piece."""
+    merged: list[list] = []
+    for p in pieces:
+        if merged and merged[-1][2] == p[2]:
+            merged[-1][1] = p[1]
+        else:
+            merged.append(p)
+    return merged
 
 
 def attribute(
@@ -242,41 +289,64 @@ def attribute(
 
     A turn where two or more keys each cover at least `cut_side_s` and together reach
     `turn_share` of it is cut between them; otherwise a key covering `turn_share` of it names
-    the whole turn; otherwise it is the cluster's unnamed remainder. Named and role lines count
-    for their key (inner-voice lines too); multi lines and `hidden` ids name nothing and are
-    never a side of a cut. Keys whose slugs collide get hashed labels."""
+    the whole turn; otherwise it is the cluster's unnamed remainder. A key's cover is the union
+    of its lines' spans within the turn. Named and role lines count for their key (inner-voice
+    lines too); multi lines name nothing and are never a side of a cut. `hidden` ids are left
+    out altogether: they name nothing, cut nothing, and are in no piece's `line_ids`. Keys whose
+    slugs collide within one cluster get hashed labels."""
     hidden = set(hidden)
-    keyed = [ln for ln in lines if ln.key is not None and ln.id not in hidden]
-    slugs: dict[str, set[str]] = defaultdict(set)
-    for k in {ln.key for ln in keyed if ln.key is not None}:
-        slugs[_slug(k) or ""].add(k)
-    clash = {k for s, ks in slugs.items() if s and len(ks) > 1 for k in ks}
-    by_turn = _assign_lines(turns, lines)
-    pieces: list[Piece] = []
+    visible = [ln for ln in lines if ln.id not in hidden]
+    keyed = [ln for ln in visible if ln.key is not None]
+    by_turn = _assign_lines(turns, visible)
+    staged: list[tuple[Turn, float, float, str | None, list[int]]] = []
     for i, t in enumerate(turns):
         mine = by_turn.get(i, [])
         dur = t.end - t.start
-        cover: dict[str, float] = defaultdict(float)
+        spans_by_key: dict[str, list[tuple[float, float]]] = defaultdict(list)
         for ln in mine:
-            if ln.key is not None and ln.id not in hidden and ln.cls is not NameClass.MULTI:
-                cover[ln.key] += _overlap(ln.start, ln.end, t.start, t.end)
+            if ln.key is not None and ln.cls is not NameClass.MULTI:
+                a, b = max(ln.start, t.start), min(ln.end, t.end)
+                if b > a:
+                    spans_by_key[ln.key].append((a, b))
+        cover = {k: _union_length(v) for k, v in spans_by_key.items()}
         sides = {k for k, s in cover.items() if s >= cut_side_s - 1e-9}
         spans: list[tuple[float, float, str | None]]
         if len(sides) >= 2 and sum(cover[k] for k in sides) >= turn_share * dur - 1e-9:
-            usable = [ln for ln in mine if ln.id not in hidden]
-            spans = _cut(t, usable, sides, min_piece_s)
+            spans = _cut(t, mine, sides, min_piece_s)
         else:
             best = max(cover, key=lambda k: (cover[k], k), default=None)
             named = best is not None and dur > 0 and cover[best] >= turn_share * dur - 1e-9
             spans = [(t.start, t.end, best if named else None)]
         for a, b, key in spans:
             ids = sorted(ln.id for ln in mine if _overlap(ln.start, ln.end, a, b) > 0)
-            label = t.speaker if key is None else label_for(t.speaker, key, hashed=key in clash)
-            pieces.append(
-                Piece(start=a, end=b, cluster=t.speaker, label=label, key=key, line_ids=ids)
-            )
+            staged.append((t, a, b, key, ids))
+    clash = _slug_clashes((t.speaker, key) for t, _, _, key, _ in staged if key is not None)
+    pieces = [
+        Piece(
+            start=a,
+            end=b,
+            cluster=t.speaker,
+            label=t.speaker
+            if key is None
+            else label_for(t.speaker, key, hashed=(t.speaker, key) in clash),
+            key=key,
+            line_ids=ids,
+        )
+        for t, a, b, key, ids in staged
+    ]
     unvoiced = [ln.id for ln in keyed if _voiced(ln, turns) < UNVOICED_S - 1e-9]
     return pieces, sorted(unvoiced)
+
+
+def _slug_clashes(pairs: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
+    """The (cluster, key) pairs whose key shares its slug with another key of the same cluster:
+    judged per cluster, so a label never changes because an unrelated key appears elsewhere."""
+    slugs: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for cluster, key in set(pairs):
+        slug = _slug(key)
+        if slug is not None:
+            slugs[(cluster, slug)].add(key)
+    return {(c, k) for (c, _), ks in slugs.items() if len(ks) > 1 for k in ks}
 
 
 def _voiced(ln: NamedLine, turns: list[Turn]) -> float:
@@ -302,7 +372,9 @@ def refined_turns(pieces: list[Piece]) -> list[Turn]:
 
 def label_infos(pieces: list[Piece], lines: list[NamedLine]) -> dict[str, LabelInfo]:
     """Each refined label's parent cluster, key, display form and class, in first-appearance
-    order. The display form is the key's most common one among the lines."""
+    order. The display form is the key's most common one among the lines. Pass only the
+    visible lines (never hidden ones), so a hidden line can't lend a key its display form or
+    class."""
     displays: dict[str, Counter[str]] = defaultdict(Counter)
     classes: dict[str, NameClass] = {}
     for ln in lines:
@@ -321,7 +393,11 @@ def label_infos(pieces: list[Piece], lines: list[NamedLine]) -> dict[str, LabelI
         common = displays[p.key].most_common(1)
         cls = "role" if classes.get(p.key) is NameClass.ROLE else "named"
         out[p.label] = LabelInfo(
-            parent=p.cluster, key=p.key, display=common[0][0] if common else p.key, cls=cls
+            parent=p.cluster,
+            key=p.key,
+            display=common[0][0] if common else p.key,
+            cls=cls,
+            slug_clash=p.label != label_for(p.cluster, p.key),
         )
     return out
 
@@ -373,6 +449,11 @@ def refine_clusters(
                     best is not None
                     and _overlap(s, e, best.start, best.end) >= contain * (e - s) - 1e-9
                 ):
+                    if best.label not in labels:
+                        raise ValueError(
+                            f"refine_clusters: a row of {lb} moves to {best.label}, which "
+                            "turns_out does not hold; pass refined_turns(pieces)"
+                        )
                     rows[best.label].append((s, e, vec))
                 else:
                     dropped += e - s
@@ -394,5 +475,19 @@ def refine_clusters(
         )
     out.parent.mkdir(parents=True, exist_ok=True)
     with atomic_path(out) as tmp:
-        np.savez(tmp, **arrays)
+        _savez_stable(tmp, arrays)
     return round(dropped, 6)
+
+
+_ZIP_DATE = (1980, 1, 1, 0, 0, 0)
+
+
+def _savez_stable(path: Path, arrays: dict[str, Any]) -> None:
+    """`np.savez`'s format (uncompressed zip of `<name>.npy` members) with every member stamped
+    1980-01-01, so the same arrays always give the same bytes and an unchanged rerun leaves the
+    next stage's input hash as it was."""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+        for name, value in arrays.items():
+            info = zipfile.ZipInfo(f"{name}.npy", date_time=_ZIP_DATE)
+            with zf.open(info, "w", force_zip64=True) as f:
+                np.lib.format.write_array(f, np.asanyarray(value), allow_pickle=False)
