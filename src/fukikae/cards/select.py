@@ -58,6 +58,15 @@ MIN_VOICED_FRAMES = 10
 MAX_SECONDS = 120.0
 
 
+def pcm_float(seg: np.ndarray) -> np.ndarray:
+    """Integer PCM as float32 in [-1, 1]: signed by its maximum, unsigned (8-bit wav) centred
+    on its midpoint first."""
+    if seg.dtype.kind == "u":
+        mid = (int(np.iinfo(seg.dtype).max) + 1) / 2
+        return ((seg.astype(np.float32) - mid) / mid).astype(np.float32)
+    return seg.astype(np.float32) / float(np.iinfo(seg.dtype).max)
+
+
 def _read(vocals: Path, spans: list[tuple[float, float]]) -> tuple[list[np.ndarray], int]:
     """The spans' samples as mono float32, read from a wav of any rate, width or channels."""
     from scipy.io import wavfile
@@ -73,7 +82,7 @@ def _read(vocals: Path, spans: list[tuple[float, float]]) -> tuple[list[np.ndarr
         if seg.size == 0:
             continue
         if seg.dtype.kind in "iu":  # scale integer PCM before any mixdown
-            seg = seg.astype(np.float32) / float(np.iinfo(seg.dtype.str).max)
+            seg = pcm_float(seg)
         if seg.ndim > 1:
             seg = seg.mean(axis=1)
         pieces.append(seg.astype(np.float32))
@@ -178,7 +187,7 @@ class RefPick:
 def _samples(data: np.ndarray, rate: int, start: float, end: float) -> np.ndarray:
     seg = np.asarray(data[max(0, int(start * rate)) : max(0, int(end * rate))])
     if seg.dtype.kind in "iu":
-        seg = seg.astype(np.float32) / float(np.iinfo(seg.dtype.str).max)
+        seg = pcm_float(seg)
     if seg.ndim > 1:
         seg = seg.mean(axis=1)
     return seg.astype(np.float32)
