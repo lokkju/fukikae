@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -78,13 +79,31 @@ class CardStore:
         return self.root / f"{card_id}.toml"
 
     def put(self, card: Card) -> str:
-        """Write the card under its id. Idempotent; overwrites, so a recorded fingerprint
-        (which doesn't change the id) lands in the stored file."""
+        """Write the card under its id. Idempotent. When the store already holds this id, the
+        stored fingerprint and ``[meta]`` (both outside the id) are kept unless ``card``
+        carries its own fingerprint, which then replaces the stored one (recording); stored
+        ``[meta]`` is kept whenever ``card`` has none. A re-put of the same voice therefore
+        never drops a recorded fingerprint (CD22, CD26)."""
         cid = compute_card_id(card)
+        stored = self._stored(cid)
+        if stored is not None:
+            fingerprint = card.voice.fingerprint or stored.voice.fingerprint
+            meta = card.meta or stored.meta
+            card = replace(card, meta=meta, voice=replace(card.voice, fingerprint=fingerprint))
         text = dump_card(card)
         parse_card(text)  # a card built in code gets the same checks as one read from disk
         _atomic_write(self.card_path(cid), text.encode("utf-8"))
         return cid
+
+    def _stored(self, card_id: str) -> Card | None:
+        """The stored card ``card_id`` when its file parses as that card, else None (a
+        missing or corrupted file, which ``put`` rewrites)."""
+        path = self.card_path(card_id)
+        try:
+            stored = parse_card(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, CardError):
+            return None
+        return stored if compute_card_id(stored) == card_id else None
 
     def has(self, card_id: str) -> bool:
         return self.card_path(card_id).is_file()
