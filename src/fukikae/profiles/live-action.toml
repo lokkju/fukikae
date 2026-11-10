@@ -30,8 +30,9 @@ clustering_threshold = 0.5   # community-1 ships 0.6; changing it re-runs diariz
 [embed]
 backend = "wespeaker"
 
-[tag]   # character-cards Tasks 3 and 3b, both on the CPU: SenseVoiceSmall for sound events, emotion2vec+ large for
-# the scored per-turn emotion (SenseVoice labels about 9% of turns and gives no score)
+[tag]   # character-cards Tasks 3 and 3b: SenseVoiceSmall for sound events, emotion2vec+ large for the
+# scored per-turn emotion (SenseVoice labels about 9% of turns and gives no score); both on the
+# GPU under the GPU lock since D26 (the CPU when there is no usable GPU; `device = "cpu"` forces it)
 backend = "sensevoice"
 emotion_backend = "emotion2vec"
 enabled = true
