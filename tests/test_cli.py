@@ -211,3 +211,30 @@ def test_fukikae_lines_print_once_when_a_library_configures_logging_later(monkey
     logging.getLogger("fukikae.stages.mix").info("mix e1: a summary")
     assert ours.getvalue().count("a summary") == 1
     assert "a summary" not in theirs.getvalue()
+
+
+def test_run_takes_several_episodes_and_overlaps_their_cpu_tails(tmp_path, monkeypatch):
+    """D26: `fukikae run ws E1 E2` runs both through run_episodes, timefit and mix as the tail."""
+    import fukikae.job
+    from fukikae.job import EpisodeResult
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    for n in (1, 2):
+        (tmp_path / f"S01E0{n}.mkv").write_bytes(b"x")
+    seen = {}
+
+    def fake(eps, _cfg, stages, *, tail, from_stage, to_stage):  # noqa: ARG001
+        seen.update(ids=[e.id for e in eps], tail=tuple(tail), names=[s.name for s in stages])
+        return {
+            "S01E01": EpisodeResult(ran=["extract"]),
+            "S01E02": EpisodeResult(error=ValueError("boom")),
+        }
+
+    monkeypatch.setattr(fukikae.job, "run_episodes", fake)
+    r = CliRunner().invoke(
+        app, ["run", str(ws), str(tmp_path / "S01E01.mkv"), str(tmp_path / "S01E02.mkv")]
+    )
+    assert seen["ids"] == ["S01E01", "S01E02"] and seen["tail"] == ("timefit", "mix")
+    assert "S01E01: ran extract" in r.output
+    assert "error: S01E02: boom" in r.output and r.exit_code == 1

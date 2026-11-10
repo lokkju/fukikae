@@ -181,15 +181,23 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
     return stages
 
 
+# The stages `fukikae run` with several episodes overlaps with the next episode's GPU stages.
+CPU_TAIL = ("timefit", "mix")
+
+
 @app.command()
 def run(
     workspace: Path = typer.Argument(..., help="Workspace directory."),
-    episode: str = typer.Argument(..., help="Episode file path or SxxEyy code."),
+    episodes: list[str] = typer.Argument(
+        ...,
+        help="Episode file paths or SxxEyy codes; several run in order, each one's "
+        "timefit and mix overlapping the next one's GPU stages.",
+    ),
     from_stage: str | None = typer.Option(None, "--from", help="Rerun from this stage."),
     to_stage: str | None = typer.Option(None, "--to", help="Stop after this stage."),
     no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
 ) -> None:
-    """Run the pipeline stages for one episode."""
+    """Run the pipeline stages for one episode, or several in order."""
     from fukikae import job, runctx
     from fukikae.errors import user_errors
     from fukikae.workspace import Workspace
@@ -197,8 +205,35 @@ def run(
     runctx.vram_timeout_s = 0 if no_wait else None
     configure_logging()
     ws = Workspace(workspace)
+    if len(episodes) > 1:
+        try:
+            eps = [ws.find_episode(e) for e in episodes]
+            results = job.run_episodes(
+                eps, ws.config, pipeline_stages(ws.config), tail=CPU_TAIL,
+                from_stage=from_stage, to_stage=to_stage,
+            )  # fmt: skip
+        except user_errors() as e:
+            typer.echo(f"error: {e}", err=True)
+            raise typer.Exit(1) from e
+        failed = False
+        for ep in eps:
+            res = results.get(ep.id)
+            if res is None:
+                typer.echo(f"{ep.id}: not started (an earlier episode failed)")
+                continue
+            if res.ran or res.error is None:
+                ran = ", ".join(res.ran) if res.ran else "nothing (up to date)"
+                typer.echo(f"{ep.id}: ran {ran}")
+            if res.error is not None:
+                failed = True
+                if not isinstance(res.error, user_errors()):
+                    raise res.error
+                typer.echo(f"error: {ep.id}: {res.error}", err=True)
+        if failed:
+            raise typer.Exit(1)
+        return
     try:
-        ep = ws.find_episode(episode)
+        ep = ws.find_episode(episodes[0])
         stages = pipeline_stages(ws.config)
         ran = job.run_stages(ep, ws.config, stages, from_stage, to_stage)
     except user_errors() as e:
