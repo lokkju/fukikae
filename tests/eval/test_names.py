@@ -149,6 +149,10 @@ def test_hidden_accuracy_scores_only_hidden_lines(tmp_path: Path):
     asg.clusters.append(asg.clusters[0].model_copy(
         update={"cluster": "S0", "name": None, "source": "voice"}))  # fmt: skip
     write_json(work / "05-characters" / "assignments.json", asg)
+    from fukikae.models import Diarization
+
+    # the names stage's refined pair says the same (the turn stayed in the remainder)
+    write_json(work / "04c-names" / "turns.json", Diarization(backend="x", turns=asg.turns or []))
     n = read_json(names_path(work), NamesResult)
     write_json(names_path(work), n.model_copy(update={"hidden": [4]}))
     s = names_eval(root, ["S01E12"], gt_file=gt)
@@ -224,3 +228,23 @@ def test_a_held_out_episode_with_names_built_assignments_is_refused(tmp_path: Pa
     write_json(path, asg)
     with pytest.raises(HeldOutNamesError, match="S01E14's assignments hold name decisions"):
         names_eval(root, ["S01E12"], "S01E14", gt_file=gt)
+
+
+def test_an_episode_whose_assignments_predate_its_names_is_refused(tmp_path: Path):
+    """S01E12's names stage refined its clusters after its characters stage ran: the
+    assignments answer other turns, so its cues and references would be graded on clusters
+    the names never saw."""
+    root, gt = _ws(tmp_path)
+    work = Workspace(root).work_dir("S01E12")
+    from fukikae.models import Assignments
+
+    path = work / "05-characters" / "assignments.json"
+    asg = read_json(path, Assignments)
+    write_json(path, asg.model_copy(update={"turns": asg.turns[:-1]}))  # type: ignore[index]
+    with pytest.raises(
+        ValueError, match="S01E12: its assignments.json is older.*characters stage first"
+    ):
+        names_eval(root, ["S01E12"], gt_file=gt)
+    r = runner.invoke(app, ["eval", "names", str(root), "--tune", "S01E12", "--gt-file",
+                            str(gt), "--no-ledger"])  # fmt: skip
+    assert r.exit_code == 1 and "run the characters stage first" in r.output
