@@ -879,7 +879,7 @@ def test_remainder_still_matches_acoustically_and_names_never_block_it(tmp_path)
     assert (rem.status, rem.character_id, rem.source, rem.name) == ("matched", natsu, "voice", None)
 
 
-def test_an_ambiguous_key_is_reported_and_creates_nothing(tmp_path, caplog):
+def test_an_ambiguous_key_is_reported_and_takes_the_acoustic_path(tmp_path, caplog):
     import logging
 
     ep = make_ep(tmp_path)
@@ -893,8 +893,9 @@ def test_an_ambiguous_key_is_reported_and_creates_nothing(tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="fukikae.stages.characters"):
         CharactersStage().run(ep, NAMES_CFG)
     got = by_cluster(ep)["SPEAKER_01~lucy"]
-    assert (got.status, got.name, got.actor_id) == ("extra", "lucy", None)
-    assert "registry rename" in caplog.text
+    # HAPPY is 0.95 from WENDY: matched by voice, as a remainder would be, and named nobody
+    assert (got.status, got.character_id, got.source, got.name) == ("matched", a, "voice", None)
+    assert "left to acoustics" in caplog.text and "registry rename" in caplog.text
     with registry(ep) as reg:
         assert sorted(c.id for c in reg.characters()) == sorted([a, b])
 
@@ -926,3 +927,186 @@ def test_named_label_without_rows_creates_an_empty_centroid_character(tmp_path):
     with registry(ep) as reg:
         (actor,) = reg.actors()
         assert actor.centroid is None and reg.characters()[0].name == "Happy"
+
+
+# --- Task 6 review: precedence of operator state, acoustic evidence of named labels ---------
+
+
+def _below_rename(tmp_path):
+    """pinned_merged with wendy under 60%, so the parent's character stays unnamed and wendy,
+    happy and charle are created by subtitles."""
+    ep, cid = pinned_merged(tmp_path)
+    labels = merged_cluster()
+    labels["SPEAKER_08~wendy"] = ("SPEAKER_08", "wendy", "named", [WENDY] * 3, [(0, 100)])
+    labels["SPEAKER_08~happy"] = ("SPEAKER_08", "happy", "named", [HAPPY] * 2, [(100, 170)])
+    write_names(ep, labels)
+    return ep, cid
+
+
+def test_lock_after_a_names_run_takes_effect_on_rerun(tmp_path):
+    ep, cid = _below_rename(tmp_path)
+    CharactersStage().run(ep, NAMES_CFG)
+    assert by_cluster(ep)["SPEAKER_08~happy"].source == "name"
+    with registry(ep) as reg:
+        reg.lock_actor(next(c.actor_id for c in reg.characters() if c.id == cid), True)
+    CharactersStage().run(ep, NAMES_CFG)
+    by = by_cluster(ep)
+    assert by["SPEAKER_08"].character_id == cid
+    for k in ("wendy", "happy", "charle"):
+        assert (by[f"SPEAKER_08~{k}"].character_id, by[f"SPEAKER_08~{k}"].source) == (cid, "lock")
+
+
+def test_locked_character_keeps_its_cluster(tmp_path, caplog):
+    import logging
+
+    ep, cid = pinned_merged(tmp_path)
+    with registry(ep) as reg:
+        reg.lock_character(cid, True)
+    write_names(ep, merged_cluster())
+    with caplog.at_level(logging.INFO, logger="fukikae.stages.characters"):
+        CharactersStage().run(ep, NAMES_CFG)
+    subs = [a for a in assignments(ep).clusters if a.cluster.startswith("SPEAKER_08~")]
+    assert {(a.character_id, a.source, a.status) for a in subs} == {(cid, "lock", "pinned")}
+    assert "kept by lock" in caplog.text
+    with registry(ep) as reg:
+        assert [(c.id, c.name) for c in reg.characters()] == [(cid, None)]
+
+
+def _disagreements(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "acoustics disagree" in r.getMessage()]
+
+
+def test_disagreement_report_reproduces_on_rerun(tmp_path, caplog):
+    import logging
+
+    ep, _ = _below_rename(tmp_path)
+    with caplog.at_level(logging.INFO, logger="fukikae.stages.characters"):
+        CharactersStage().run(ep, NAMES_CFG)
+        first = _disagreements(caplog)
+        caplog.clear()
+        CharactersStage().run(ep, NAMES_CFG)
+        second = _disagreements(caplog)
+    assert len(first) == 3 and second == first
+
+
+def test_operator_rename_takes_a_key_from_a_subtitle_character(tmp_path):
+    ep = make_ep(tmp_path)
+    write_diarize(ep, {"SPEAKER_12": ([WENDY, NATSU], 40.0)}, [(0, 40, "SPEAKER_12")])
+    write_names(
+        ep,
+        {
+            "SPEAKER_12~wendy": ("SPEAKER_12", "wendy", "named", [WENDY], [(0, 25)]),
+            "SPEAKER_12~natsu": ("SPEAKER_12", "natsu", "named", [NATSU], [(25, 40)]),
+        },
+    )
+    CharactersStage().run(ep, NAMES_CFG)
+    y = by_cluster(ep)["SPEAKER_12~wendy"].character_id
+    with registry(ep) as reg:
+        x_actor, x = reg.create_actor_with_character(HAPPY)
+        reg.add_exemplars(x_actor, "e0", "S0", np.stack([HAPPY]), 5.0)
+        assert reg.rename_character(x, "Wendy") is None
+    CharactersStage().run(ep, NAMES_CFG)
+    a = by_cluster(ep)["SPEAKER_12~wendy"]
+    assert (a.character_id, a.source) == (x, "name")
+    with registry(ep) as reg:
+        wendy = {(al.alias, al.character_id, al.by) for al in reg.aliases() if al.alias == "wendy"}
+        assert wendy == {("wendy", x, "operator")}
+        assert reg.aliases(y) == []
+        assert reg.exemplar_count(x_actor) == 2
+
+
+def test_rematch_with_names_keeps_a_subtitle_character(tmp_path):
+    ep = make_ep(tmp_path)
+    write_diarize(ep, {"SPEAKER_12": ([WENDY, NATSU], 40.0)}, [(0, 40, "SPEAKER_12")])
+    write_names(
+        ep,
+        {
+            "SPEAKER_12~wendy": ("SPEAKER_12", "wendy", "named", [WENDY], [(0, 25)]),
+            "SPEAKER_12~natsu": ("SPEAKER_12", "natsu", "named", [NATSU], [(25, 40)]),
+        },
+    )
+    CharactersStage().run(ep, NAMES_CFG)
+    y = by_cluster(ep)["SPEAKER_12~wendy"].character_id
+    assert y is not None
+    with registry(ep) as reg:
+        reg.assign_card(y, "en", "0123456789abcdef", by="auto", locked=False)
+    CharactersStage(rematch=True).run(ep, NAMES_CFG)
+    a = by_cluster(ep)["SPEAKER_12~wendy"]
+    assert (a.character_id, a.status, a.source) == (y, "matched", "name")
+    with registry(ep) as reg:
+        card = reg.card_for(y, "en")
+        assert card is not None and card.card_id == "0123456789abcdef"
+
+
+def test_remainder_matching_never_sees_this_episodes_named_rows(tmp_path):
+    """Natsu (operator-named) holds one WENDY row from e0. e1's named natsu speech is NATSU;
+    the remainder SPEAKER_05 sounds like NATSU. Both matchers judge it against the registry
+    before e1's named rows: under lda (identity projection) as under centroid, it is new."""
+    got = {}
+    for matcher in ("centroid", "lda"):
+        ep0 = make_ep(tmp_path / matcher, "e0")
+        write_diarize(ep0, {"S0": ([WENDY], 40.0)}, [(0, 40, "S0")])
+        CharactersStage().run(ep0, NAMES_CFG)
+        with registry(ep0) as reg:
+            reg.rename_character(reg.characters()[0].id, "Natsu")
+            reg.save_projection("default", "lda", np.eye(3), np.zeros(3))
+        ep = make_ep(tmp_path / matcher, "e1")
+        near = unit([0, 1, 0.1])
+        write_diarize(
+            ep,
+            {"SPEAKER_04": ([NATSU] * 9, 30.0), "SPEAKER_05": ([near], 30.0)},
+            [(0, 30, "SPEAKER_04"), (30, 60, "SPEAKER_05")],
+        )
+        write_names(
+            ep,
+            {
+                "SPEAKER_04~natsu": ("SPEAKER_04", "natsu", "named", [NATSU] * 9, [(0, 30)]),
+                "SPEAKER_05": ("SPEAKER_05", None, "remainder", [near], [(30, 60)]),
+            },
+        )
+        cfg = Config(registry=NAMES_CFG.registry, raw={"characters": {"matcher": matcher}})
+        CharactersStage().run(ep, cfg)
+        got[matcher] = by_cluster(ep)["SPEAKER_05"].status
+    assert got == {"centroid": "new", "lda": "new"}
+
+
+def test_remainder_may_match_a_character_names_created_this_episode(tmp_path):
+    ep = make_ep(tmp_path)
+    near = unit([0.95, 0.3, 0])
+    write_diarize(
+        ep,
+        {"SPEAKER_08": ([HAPPY], 30.0), "SPEAKER_09": ([near], 30.0)},
+        [(0, 30, "SPEAKER_08"), (30, 60, "SPEAKER_09")],
+    )
+    write_names(
+        ep,
+        {
+            "SPEAKER_08~happy": ("SPEAKER_08", "happy", "named", [HAPPY], [(0, 30)]),
+            "SPEAKER_09": ("SPEAKER_09", None, "remainder", [near], [(30, 60)]),
+        },
+    )
+    CharactersStage().run(ep, NAMES_CFG)
+    by = by_cluster(ep)
+    assert by["SPEAKER_09"].character_id == by["SPEAKER_08~happy"].character_id
+    assert (by["SPEAKER_09"].status, by["SPEAKER_09"].source) == ("matched", "voice")
+
+
+def test_without_names_assignments_match_the_pre_names_code_byte_for_byte(tmp_path):
+    """tests/fixtures/characters_golden.json is what debd501 (before names) wrote for the
+    scenario in characters_golden.py beside it."""
+    import importlib.util
+    import json
+    from pathlib import Path
+
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    spec = importlib.util.spec_from_file_location(
+        "characters_golden", fixtures / "characters_golden.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    golden = json.loads((fixtures / "characters_golden.json").read_text())
+    got = module.scenario(tmp_path)
+    assert set(got) == set(golden)
+    for step, text in golden.items():
+        assert got[step] == text, step

@@ -45,10 +45,15 @@ or a key with under ``[names] min_new_seconds`` of named speech and no character
 least ``RENAME_SHARE`` one key, where that key has at least ``RENAME_SHARE`` of its speech on
 the character, is named by subtitles (`Registry.name_character`) and takes it; any other key
 creates a character, named by subtitles. Locked actors, operator names and operator aliases
-beat subtitle names; a sub-cluster whose acoustics (pin or parent match) point at another
-character is reported, never acted on. The unnamed remainder of each cluster goes through
-the pin and match path above; a character named sub-clusters took never sends a remainder
-to ``review``.
+beat subtitle names; a sub-cluster whose acoustics point at another character is reported,
+never acted on. A named sub-cluster's acoustics are its parent cluster's (the remainder's pin,
+else its own pin from an acoustic assignment, else the parent's match), never its own earlier
+name or lock decision. A key two characters answer to at the same rank takes the remainder
+path. The unnamed remainder of each cluster goes through the pin and match path above,
+judged, like the parents, against one snapshot of the actors taken before this episode's
+named exemplars (plus the characters names created here); a character named sub-clusters
+took never sends a remainder to ``review``. On a fresh run (or ``rematch``) an actor whose
+character answers to one of this episode's keys is not pruned before matching.
 """
 
 from __future__ import annotations
@@ -107,11 +112,18 @@ def resolve_names(
     rows: dict[str, np.ndarray],
     pinned: dict[str, ClusterAssignment],
     parent_tops: Tops,
+    own_pins: dict[str, ClusterAssignment] | None = None,
 ) -> tuple[dict[str, ClusterAssignment], list[str]]:
     """Characters for every named sub-cluster of a names-used episode, in the order the module
     docstring gives, and the report lines (locks kept, disagreements with acoustics, ambiguous
     keys). Creates and names characters in ``reg`` (the caller's transaction); adds no
-    exemplars. ``pinned`` is the pins of this run's labels, ``parent_tops`` each parent
+    exemplars. A key several characters answer to (`Registry.character_for_key` raises) is
+    reported and its sub-clusters left out of the result, for the caller's acoustic path.
+
+    A named sub-cluster's acoustic evidence is its parent cluster's: the pin of the parent's
+    remainder label in ``pinned`` (the remainder path's pins), else the sub-cluster's own pin
+    in ``own_pins`` (inherited only from a voice-sourced assignment, `pin(voice_only=True)`,
+    so never from its own earlier name or lock decision), else ``parent_tops``, each parent
     cluster's best (actor, score) over all its rows."""
     threshold = cfg.registry.match_threshold
     min_new = cfg.names.min_new_seconds
@@ -131,9 +143,12 @@ def resolve_names(
     curated = reg.curated_characters()
 
     def acoustic(label: str) -> tuple[int, int | None, str] | None:
-        """The (actor, character, how) the label's acoustics give: its pin, else its parent
-        cluster's match at the threshold."""
-        p = pinned.get(label)
+        """The (actor, character, how) the label's acoustics give: its parent's pin, else its
+        own voice-sourced pin, else its parent cluster's match at the threshold."""
+        parent = named[label].parent
+        p = pinned.get(parent) if parent not in named else None
+        if p is None:
+            p = (own_pins or {}).get(label)
         if p is not None and p.actor_id in actors:
             return p.actor_id, p.character_id or first_char.get(p.actor_id), "pin"
         top = parent_tops.get(named[label].parent)
@@ -193,9 +208,7 @@ def resolve_names(
         try:
             c = reg.character_for_key(k)
         except ValueError as e:
-            report.append(f"{k!r} ({key_seconds[k]:.1f} s) left to extras: {e}")
-            for lb in free:
-                assign(lb, "extra", None, None, "name")
+            report.append(f"{k!r} ({key_seconds[k]:.1f} s) left to acoustics: {e}")
             continue
         if c is None:
             unknown.append(k)
@@ -401,19 +414,20 @@ class CharactersStage:
         evidence, rows = load_clusters(clusters_path)
         mc = matcher_config(cfg, self._language(ep, cfg))
         dim = next((r.shape[1] for r in rows.values() if r.ndim == 2 and len(r)), 0)
-        named = (
-            set()
-            if names is None
-            else {lb for lb, info in names.labels.items() if info.key is not None}
-        )
+        labels = {} if names is None else names.labels
+        keyed = {lb: info.key for lb, info in labels.items() if info.key is not None}
 
         previous: Assignments | None = None
         if not self.rematch and assignments_path.exists():
             previous = read_json(assignments_path, Assignments)
         fresh = previous is None or previous.turns is None
         pinned: dict[str, ClusterAssignment] = {}
+        voice_pins: dict[str, ClusterAssignment] = {}
         if previous is not None and previous.turns is not None:
-            pinned = pin(previous, Diarization(backend=turns.backend, turns=previous.turns), turns)
+            prev_turns = Diarization(backend=turns.backend, turns=previous.turns)
+            pinned = pin(previous, prev_turns, turns)
+            if keyed:
+                voice_pins = pin(previous, prev_turns, turns, voice_only=True)
 
         result: dict[str, ClusterAssignment] = {}
         with Registry(Workspace(ep.workspace_root).registry_path) as reg, reg.transaction():
@@ -421,17 +435,32 @@ class CharactersStage:
             known = {a.id for a in reg.actors()}
             # A pin to an actor that no longer exists (deleted by hand) is matched afresh.
             pinned = {k: v for k, v in pinned.items() if v.actor_id in known}
-            # Named sub-clusters take their character from their names, never from a pin; only
-            # the remainders' pins claim actors against acoustic matches.
-            claimed = {
-                v.actor_id for k, v in pinned.items() if v.actor_id is not None and k not in named
-            }
-            if fresh:
-                reg.prune_actors(orphans)
+            voice_pins = {k: v for k, v in voice_pins.items() if v.actor_id in known}
+            # The characters this episode's keys answer to; a key several answer to is ambiguous
+            # and its sub-clusters take the remainder path (pin, else acoustic match).
+            answering: set[int] = set()
+            ambiguous: set[str] = set()
+            for k in sorted(set(keyed.values())):
+                try:
+                    c = reg.character_for_key(k)
+                except ValueError:
+                    ambiguous.add(k)
+                    continue
+                if c is not None:
+                    answering.add(c.actor_id)
+            named = {lb for lb, k in keyed.items() if k not in ambiguous}
+            # Named sub-clusters take their character from their names, never from a pin; the
+            # remainders' pins (and an ambiguous key's, from acoustic decisions only) claim
+            # actors against acoustic matches.
+            path_pins = {k: v for k, v in pinned.items() if k not in keyed}
+            path_pins.update({k: v for k, v in voice_pins.items() if k in keyed and k not in named})
+            claimed = {v.actor_id for v in path_pins.values() if v.actor_id is not None}
+            if fresh:  # never before this run's keys had their say on the characters they name
+                reg.prune_actors([a for a in orphans if a not in answering])
             touched: set[int] = set()
             for ev in evidence:
-                p = pinned.get(ev.cluster)
-                if p is None or p.actor_id is None or ev.cluster in named:
+                p = path_pins.get(ev.cluster)
+                if p is None or p.actor_id is None:
                     continue
                 if len(rows[ev.cluster]):
                     reg.add_exemplars(
@@ -440,19 +469,14 @@ class CharactersStage:
                     touched.add(p.actor_id)
                 result[ev.cluster] = p.model_copy(update={"clean_seconds": ev.clean_seconds})
             projection = self._projection(reg, cfg, mc, dim)
+            # One snapshot of the actors (centroids, and rows for lda) from before this
+            # episode's named exemplars and named characters, so the parents' matches and the
+            # remainders' see the same registry.
+            snapshot = reg.actors()
             actor_rows: dict[int, np.ndarray] = {}
-
-            def tops_of(evs: list[ClusterEvidence], evrows: dict[str, np.ndarray]) -> Tops:
-                if projection is None:
-                    return centroid_tops(evs, reg.actors())
-                return projected_tops(evs, evrows, actor_rows, projection)
-
-            def load_actor_rows() -> None:
-                if projection is None:
-                    return
-                actor_rows.clear()
+            if projection is not None:
                 actor_rows.update(reg.exemplar_rows())
-                for a in reg.actors():  # a locked actor matches by its own centroid
+                for a in snapshot:  # a locked actor matches by its own centroid
                     if a.centroid is not None and (a.locked or a.id not in actor_rows):
                         actor_rows[a.id] = a.centroid[None, :]
                 for aid, r in actor_rows.items():
@@ -464,8 +488,12 @@ class CharactersStage:
                             "`fukikae registry adapt` again"
                         )
 
-            if names is not None and named:
-                load_actor_rows()
+            def tops_of(evs: list[ClusterEvidence], evrows: dict[str, np.ndarray]) -> Tops:
+                if projection is None:
+                    return centroid_tops(evs, snapshot)
+                return projected_tops(evs, evrows, actor_rows, projection)
+
+            if names is not None and keyed:  # resolve_names reports ambiguous keys
                 parent_rows: dict[str, list[np.ndarray]] = defaultdict(list)
                 for lb, info in names.labels.items():
                     if lb in rows and len(rows[lb]):
@@ -473,7 +501,15 @@ class CharactersStage:
                 prows = {p: np.concatenate(r) for p, r in parent_rows.items()}
                 parents = [ClusterEvidence(p, mean_embedding(r), 0.0) for p, r in prows.items()]
                 by_name, report = resolve_names(
-                    reg, cfg, names, turns, evidence, rows, pinned, tops_of(parents, prows)
+                    reg,
+                    cfg,
+                    names,
+                    turns,
+                    evidence,
+                    rows,
+                    path_pins,
+                    tops_of(parents, prows),
+                    own_pins={k: v for k, v in voice_pins.items() if k in named},
                 )
                 for line in report:
                     log.info("characters %s: %s", ep.id, line)
@@ -483,12 +519,19 @@ class CharactersStage:
                         reg.add_exemplars(a.actor_id, ep.id, lb, rows[lb], a.clean_seconds)
                         touched.add(a.actor_id)
                     result[lb] = a
+                # characters names created here join both views with their named rows (their
+                # creation centroid), so a remainder may still match one
+                created: dict[int, list[np.ndarray]] = defaultdict(list)
+                for lb, a in by_name.items():
+                    if a.status == "new" and a.actor_id is not None:
+                        created[a.actor_id].append(rows[lb])
+                snapshot += [a for a in reg.actors() if a.id in created]
+                for aid, rs in created.items():
+                    r = np.concatenate(rs)
+                    if projection is not None and len(r):
+                        actor_rows[aid] = r
             rest = [ev for ev in evidence if ev.cluster not in result]
-            if projection is None:
-                tops = centroid_tops(rest, reg.actors())
-            else:
-                load_actor_rows()
-                tops = projected_tops(rest, rows, actor_rows, projection)
+            tops = tops_of(rest, rows)
             matched = decide(
                 rest,
                 tops,
