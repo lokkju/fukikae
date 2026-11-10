@@ -250,16 +250,24 @@ def find_target_subtitles(
     return None, dialogue_track(probe_result, want)
 
 
-# Ruling CD25: the subtitle path reads dialogue subtitles. A track whose title names signs,
-# songs or forced is never one; a track with fewer than DIALOGUE_MIN_PER_MINUTE cues a minute,
-# or under DIALOGUE_SHARE of the densest track of the language, is signs-and-songs-sized; a
-# forced flag is believed unless the track is dialogue-sized by both measures (FT E11's only
-# English track is flagged forced and carries every line), and a flagged track of unknown size
-# is skipped. Among dialogue tracks a plain one wins over closed captions (CC, SDH, or the
-# hearing_impaired disposition: sound descriptions), then an unflagged one, then stream order.
-NOT_DIALOGUE_TITLE = re.compile(r"\b(signs?|songs?|forced)\b", re.IGNORECASE)
+# Ruling CD25: the subtitle path reads dialogue subtitles.
+# - A title naming signs or forced is never dialogue; nor is one naming songs, unless it also
+#   says full, dialogue or complete ("Full Subtitles (incl. Songs)"), and then only when its
+#   cue count is known and dialogue-sized.
+# - Dialogue-sized: at least DIALOGUE_MIN_PER_MINUTE cues a minute and DIALOGUE_SHARE of the
+#   densest plausible dialogue track (unflagged, title not ruling it out), so a typeset signs
+#   track with a thousand styled events never sets the bar.
+# - A forced flag is believed unless the track reaches FORCED_DIALOGUE_MIN_PER_MINUTE as well
+#   (FT E11's only English track is flagged forced and carries every line at 14.4 a minute);
+#   a flagged track of unknown size is skipped.
+# - Among dialogue tracks a plain one wins over closed captions (CC, SDH, or the
+#   hearing_impaired disposition: sound descriptions), then an unflagged one, then stream order.
+NOT_DIALOGUE_TITLE = re.compile(r"\b(signs?|forced)\b", re.IGNORECASE)
+SONGS_TITLE = re.compile(r"\b(songs?|lyrics|karaoke)\b", re.IGNORECASE)
+FULL_TITLE = re.compile(r"\b(full|dialogue|dialog|complete)\b", re.IGNORECASE)
 CAPTIONS_TITLE = re.compile(r"\b(cc|sdh)\b", re.IGNORECASE)
 DIALOGUE_MIN_PER_MINUTE = 3.0
+FORCED_DIALOGUE_MIN_PER_MINUTE = 8.0
 DIALOGUE_SHARE = 0.4
 
 
@@ -269,6 +277,16 @@ def _per_minute(track: SubTrack, duration: float | None) -> float | None:
     return track.cues / (duration / 60.0)
 
 
+def _title_rules_out(title: str | None) -> str | None:
+    """Why a title says the track is not the dialogue, or None."""
+    t = title or ""
+    if NOT_DIALOGUE_TITLE.search(t):
+        return f"its title {title!r} says it is not the dialogue"
+    if SONGS_TITLE.search(t) and not FULL_TITLE.search(t):
+        return f"its title {title!r} says it holds songs only"
+    return None
+
+
 def dialogue_track(probe_result: ProbeResult, language: str | None) -> SubTrack | None:
     """The embedded text track of ``language`` (ISO 639-2) that carries the dialogue (ruling
     CD25), or None when there is none."""
@@ -276,20 +294,24 @@ def dialogue_track(probe_result: ProbeResult, language: str | None) -> SubTrack 
         t for t in probe_result.subtitles if _norm_lang(t.language) == language and _text_track(t)
     ]
     rates = {t.index: _per_minute(t, probe_result.duration) for t in tracks}
-    known = [r for r in rates.values() if r is not None]
-    densest = max(known, default=0.0)
+    plausible = [
+        r
+        for t in tracks
+        if not t.forced and _title_rules_out(t.title) is None
+        and (r := rates[t.index]) is not None
+    ]  # fmt: skip
+    densest = max(plausible, default=0.0)
     keep: list[SubTrack] = []
     for t in tracks:
         rate = rates[t.index]
-        why = None
-        if NOT_DIALOGUE_TITLE.search(t.title or ""):
-            why = f"its title {t.title!r} says it is not the dialogue"
-        elif rate is not None and (
-            rate < DIALOGUE_MIN_PER_MINUTE or rate < DIALOGUE_SHARE * densest
-        ):
+        floor = FORCED_DIALOGUE_MIN_PER_MINUTE if t.forced else DIALOGUE_MIN_PER_MINUTE
+        why = _title_rules_out(t.title)
+        if why is None and rate is not None and (rate < floor or rate < DIALOGUE_SHARE * densest):
             why = f"{t.cues} cues ({rate:.1f} a minute) is too few for dialogue"
-        elif t.forced and rate is None:
+        elif why is None and rate is None and t.forced:
             why = "it is flagged forced and its cue count is unknown"
+        elif why is None and rate is None and SONGS_TITLE.search(t.title or ""):
+            why = f"its title {t.title!r} mentions songs and its cue count is unknown"
         if why is not None:
             log.info("subtitle track %d (%s): skipped, %s", t.index, t.language, why)
             continue
