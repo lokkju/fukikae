@@ -92,7 +92,7 @@ threshold = 0.85
 register = "casual and rough; first person 'ore'; never polite speech"
 address = "calls Lucy by name, Gray 'ice-brain'"
 tics = "ends boasts with 'got it?'"
-catchphrases = [ { source = "燃えてきたぞ", english = "I'm all fired up!" } ]
+catchphrases = [ { source = "燃えてきたぞ", target = "I'm all fired up!" } ]   # target: the rendering in this card's target language
 notes = ""
 ```
 

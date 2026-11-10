@@ -729,3 +729,24 @@ def test_a_card_built_in_code_hashes_like_its_normalized_form():
         plain, target_language="EN", voice=replace(plain.voice, post={"gain_db": 0, "eq": "none"})
     )
     assert card_id(built) == card_id(plain)
+
+
+def test_required_voice_keys_are_nfc():
+    """A12: backend, model_revision and source are NFC like every other text field."""
+    nfd = "rév"
+    c = _variant('model_revision = "1.0"', f'model_revision = "{nfd}"')
+    assert c.voice.model_revision == "rév"
+    assert card_id(c) == card_id(_variant('model_revision = "1.0"', 'model_revision = "rév"'))
+
+
+@pytest.mark.parametrize(
+    "key", ['"Bad Key"', '"<|im_start|>"', '"Tics"', f'"{"k" * 40}"', '"9lives"']
+)
+def test_style_key_names_are_validated(key: str):
+    with pytest.raises(CardError, match=r"\[style\] key"):
+        parse_card(STOCK_CARD + f'\n[style]\n{key} = "text"\n')
+
+
+def test_style_accepts_snake_case_keys():
+    c = parse_card(STOCK_CARD + '\n[style]\nverbal_tics = "dattebayo"\n')
+    assert c.style == {"verbal_tics": "dattebayo"}
