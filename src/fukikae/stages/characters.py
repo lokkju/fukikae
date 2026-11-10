@@ -49,14 +49,17 @@ beat subtitle names; a sub-cluster whose acoustics point at another character is
 never acted on. A named sub-cluster's acoustics are its parent cluster's (the remainder's pin,
 else its own pin from an acoustic assignment, else the parent's match), never its own earlier
 name or lock decision. A key two characters answer to at the same rank takes the remainder
-path. The unnamed remainder of each cluster goes through the pin and match path above
-(a remainder left with no embedding rows of its own takes its parent cluster's match over all
-its sub-clusters' rows, at the threshold, and is ``extra`` only when that matches nobody),
+path. The unnamed remainder of each cluster goes through the pin and match path above,
 judged, like the parents, against one snapshot of the actors taken before this episode's
 named exemplars (plus the characters names created here); a character named sub-clusters
-took never sends a remainder to ``review``. On a fresh run (or ``rematch``) an actor whose
-character answers to one of this episode's keys (or is one an ambiguous key could mean) is
-not pruned before matching.
+took never sends a remainder to ``review``. A remainder left with no embedding rows of its
+own and no pin goes by its parent's named sub-clusters once they are decided
+(`fukikae.registry.siblings`, the Task 11 ruling amending R1): the character holding at least
+60% of the parent's named seconds (``matched``, source ``voice``, reported as following its
+named siblings), else ``extra`` (reported); only a parent with no named sub-cluster gives it
+the parent's match over all its sub-clusters' rows, at the threshold. On a fresh run (or
+``rematch``) an actor whose character answers to one of this episode's keys (or is one an
+ambiguous key could mean) is not pruned before matching.
 """
 
 from __future__ import annotations
@@ -87,6 +90,7 @@ from fukikae.registry.projection import (
     load_series_projection,
     projected_tops,
 )
+from fukikae.registry.siblings import has_named_siblings, sibling_verdict
 from fukikae.registry.store import AliasConflictError, Registry
 from fukikae.registry.usage import actors_in_use
 from fukikae.stages.language import LanguageResult
@@ -105,6 +109,10 @@ def _cosine(a: np.ndarray | None, b: np.ndarray | None) -> float | None:
         return None
     denom = float(np.linalg.norm(a) * np.linalg.norm(b))
     return float(np.dot(a, b)) / denom if denom else None
+
+
+def _describe(c: Any) -> str:
+    return f"character {c.id} ({c.name or 'unnamed'})"
 
 
 def resolve_names(
@@ -586,7 +594,20 @@ class CharactersStage:
                     r = np.concatenate(rs)
                     if projection is not None and len(r):
                         actor_rows[aid] = r
-            rest = [ev for ev in evidence if ev.cluster not in result]
+            # a rowless, unpinned remainder whose parent has named sub-clusters follows them
+            # once every sibling is decided (Task 11 ruling): ambiguous keys go through decide
+            followers = [
+                ev.cluster
+                for ev in evidence
+                if ev.cluster not in result
+                and ev.embedding is None
+                and ev.cluster in labels
+                and labels[ev.cluster].cls == "remainder"
+                and has_named_siblings(ev.cluster, labels)
+            ]
+            rest = [
+                ev for ev in evidence if ev.cluster not in result and ev.cluster not in followers
+            ]
             tops = tops_of(rest, rows)
             for ev in rest:  # a remainder with no rows of its own goes by its parent's match
                 info = labels.get(ev.cluster)
@@ -613,6 +634,29 @@ class CharactersStage:
                     reg.add_exemplars(a.actor_id, ep.id, a.cluster, emb, a.clean_seconds)
                     touched.add(a.actor_id)
                 result[a.cluster] = a
+            if followers:
+                seconds: dict[str, float] = defaultdict(float)
+                for t in turns.turns:
+                    seconds[t.speaker] += t.end - t.start
+                chars = {c.id: c for c in reg.characters()}
+                ev_of = {ev.cluster: ev for ev in evidence}
+                for lb in followers:
+                    verdict = sibling_verdict(lb, labels, result, seconds)
+                    assert verdict is not None  # has_named_siblings
+                    c = chars.get(verdict.character_id) if verdict.character_id else None
+                    who = "no character" if c is None else _describe(c)
+                    line = verdict.line(lb, labels[lb].parent, who)
+                    log.info("characters %s: %s", ep.id, line)
+                    report.append(line)
+                    follow = verdict.how == "follow" and c is not None
+                    result[lb] = ClusterAssignment(
+                        cluster=lb,
+                        actor_id=c.actor_id if follow and c is not None else None,
+                        character_id=c.id if follow and c is not None else None,
+                        score=None,
+                        clean_seconds=ev_of[lb].clean_seconds,
+                        status="matched" if follow else "extra",
+                    )
             for aid in sorted(touched):
                 reg.recompute_centroid(aid)
             kept = claimed | {a.actor_id for a in result.values() if a.actor_id is not None}

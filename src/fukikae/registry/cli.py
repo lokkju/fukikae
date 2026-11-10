@@ -809,3 +809,5 @@ def resolve(
         f"{' (' + ', '.join(map(str, s.new_actors)) + ')' if s.new_actors else ''}, "
         f"{s.extras} extras; pruned {', '.join(map(str, s.pruned)) or 'none'}"
     )
+    for note in s.notes:
+        typer.echo(f"  {note}")

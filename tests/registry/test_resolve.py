@@ -614,9 +614,9 @@ def test_a_rowless_remainder_takes_its_parent_clusters_match_in_resolve(tmp_path
 def _remainder_after_named(tmp_path, *, earlier: bool):
     """S01E01's SPEAKER_01 is 25 s named NATSU in voice B and a rowless 5 s remainder. With
     ``earlier``, S01E00 created Natsu from voice D (cosine 0.5 to B) and both episodes are
-    resolved; otherwise Natsu is created in S01E01 itself. The stage and resolve decide the
-    remainder by the parent's pooled rows against the actors stored before this run's named
-    rows, so both leave it extra."""
+    resolved; otherwise Natsu is created in S01E01 itself. Natsu holds all of the parent's
+    named seconds, so the stage and resolve both give the remainder to Natsu (Task 11
+    ruling (a)); before the ruling both left it extra by the parent's pooled rows."""
     import math
 
     from fukikae.registry.resolve import resolve_episodes
@@ -642,20 +642,76 @@ def _remainder_after_named(tmp_path, *, earlier: bool):
     )
     CharactersStage().run(e1, NAMES_CFG)
     eps.append(e1)
-    stage = {k: (v.status, v.source) for k, v in by_cluster(ws, "S01E01")[0].items()}
-    resolve_episodes(ws, eps, threshold=0.6)
-    res = {k: (v.status, v.source) for k, v in by_cluster(ws, "S01E01")[0].items()}
-    return stage, res
+
+    def view():
+        got = by_cluster(ws, "S01E01")[0]
+        return {k: (v.status, v.source, v.character_id) for k, v in got.items()}
+
+    stage = view()
+    summary = resolve_episodes(ws, eps, threshold=0.6)
+    return stage, view(), summary
 
 
 @pytest.mark.parametrize("earlier", [True, False])
-def test_a_rowless_remainder_never_matches_this_runs_named_rows(tmp_path, earlier):
-    """Task 8 review: resolve's parent match scores against stored exemplars and centroids
-    only, as the stage does, so a remainder doesn't join the character its own sibling's
-    named rows just seeded."""
-    stage, res = _remainder_after_named(tmp_path, earlier=earlier)
-    assert stage["SPEAKER_01"] == ("extra", "voice")
+def test_a_rowless_remainder_follows_its_named_sibling_in_stage_and_resolve(tmp_path, earlier):
+    stage, res, summary = _remainder_after_named(tmp_path, earlier=earlier)
+    natsu = stage["SPEAKER_01~natsu"][2]
+    assert stage["SPEAKER_01"] == ("matched", "voice", natsu)
     assert res == stage
+    assert any("S01E01 SPEAKER_01 follows its named siblings" in n for n in summary.notes)
+
+
+def _sibling_season(tmp_path, named):
+    """S01E00 made actor X from voice A. S01E01's SPEAKER_01 has the named sub-clusters
+    ``named`` ({key: (seconds, voice)}) and a 10 s remainder with no rows."""
+    from tests.stages.test_characters import NAMES_CFG, write_names
+
+    ws = make_ws(tmp_path, season={})
+    e0 = add_episode(ws, "S01E00", {"S0": (noisy(A, seed=9), 40.0)})
+    CharactersStage().run(e0, NAMES_CFG)
+    (x,) = by_cluster(ws, "S01E00")[0].values()
+    total = sum(secs for secs, _ in named.values()) + 10
+    e1 = add_episode(ws, "S01E01", {"SPEAKER_01": (noisy(A, seed=3), total)})  # unread
+    labels: dict[str, Any] = {}
+    t = 0.0
+    for k, (key, (secs, voice)) in enumerate(named.items()):
+        rows = noisy(voice, seed=10 + k)
+        labels[f"SPEAKER_01~{key}"] = ("SPEAKER_01", key, "named", rows, [(t, t + secs)])
+        t += secs
+    labels["SPEAKER_01"] = ("SPEAKER_01", None, "remainder", [], [(t, t + 10)])
+    write_names(e1, labels)
+    CharactersStage().run(e1, NAMES_CFG)
+    return ws, e1, x
+
+
+def test_resolve_gives_a_rowless_remainder_the_sibling_holding_60_percent(tmp_path):
+    """Ruling (a) in resolve: natsu (voice B) holds 70% of SPEAKER_01's named seconds, so the
+    remainder is Natsu's, though the parent's pooled rows (wendy's A among them) are near
+    actor X."""
+    from fukikae.registry.resolve import resolve_episodes
+
+    ws, e1, x = _sibling_season(tmp_path, {"natsu": (21.0, B), "wendy": (9.0, A)})
+    resolve_episodes(ws, [e1], threshold=0.6)
+    got = by_cluster(ws, "S01E01")[0]
+    natsu = got["SPEAKER_01~natsu"]
+    rem = got["SPEAKER_01"]
+    assert (rem.status, rem.source, rem.character_id, rem.actor_id) == (
+        "matched", "voice", natsu.character_id, natsu.actor_id
+    )  # fmt: skip
+    assert rem.character_id != x.character_id
+
+
+def test_resolve_leaves_a_rowless_remainder_extra_when_its_siblings_split(tmp_path):
+    """Ruling (b) in resolve: natsu and wendy split SPEAKER_01's named speech 50/50, so the
+    remainder is extra, not actor X (its parent's match under R1)."""
+    from fukikae.registry.resolve import resolve_episodes
+
+    ws, e1, _ = _sibling_season(tmp_path, {"natsu": (15.0, A), "wendy": (15.0, A)})
+    stage = by_cluster(ws, "S01E01")[0]["SPEAKER_01"]
+    summary = resolve_episodes(ws, [e1], threshold=0.6)
+    rem = by_cluster(ws, "S01E01")[0]["SPEAKER_01"]
+    assert (stage.status, rem.status, rem.character_id) == ("extra", "extra", None)
+    assert any("S01E01 SPEAKER_01 stays extra" in n for n in summary.notes)
 
 
 # --- Task 11: an actor another episode's assignments still name is never pruned ---------------
