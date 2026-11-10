@@ -191,8 +191,9 @@ def test_command_runs_the_worker_in_an_isolated_container(tmp_path):
     assert f"-v {s.checkout() / 'src'}:/fukikae/src:ro" in joined
     for k in ("HF_HUB_OFFLINE=1", "HF_HUB_DISABLE_TELEMETRY=1", "DO_NOT_TRACK=1"):
         assert f"-e {k}" in joined
-    assert cmd[-4:] == ["python", "-m", remote.WORKER_MODULE, "indextts2_trt"]
-    assert s.image() in cmd
+    # python as the entrypoint: the CUDA image's own prints a banner on stdout
+    assert cmd[-6:] == ["--entrypoint", "python", s.image(), "-m", remote.WORKER_MODULE,
+                        "indextts2_trt"]  # fmt: skip
 
 
 @pytest.mark.usefixtures("setup_done")
