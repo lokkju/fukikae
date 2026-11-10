@@ -972,3 +972,63 @@ def test_grouping_leaves_each_cards_rate_estimate_unchanged(ep, monkeypatch):
     mixed = {c.cue_id: (c.key, c.rate_factor) for c in _plan(ep).cues}
     assert {k: mixed[k] for k in alone} == alone
     assert any(f > 1.0 for _, f in alone.values())  # the estimate did move a factor
+
+
+# ---- engines (D28 lever 2): another backend renders a backend's cards ------------------------
+
+
+class FakeEngine(FakeSynth):
+    name: ClassVar[str] = "fake_fast"
+    card_backend: ClassVar[str] = "fake"
+
+
+ENGINE_CFG = Config(raw={"tts": {"backend": "fake", "engines": {"fake": "fake_fast"}}})
+
+
+@pytest.fixture
+def engine(monkeypatch):
+    monkeypatch.setitem(CLASSES, "fake_fast", FakeEngine)
+
+
+@pytest.mark.usefixtures("engine")
+def test_an_engine_renders_the_cards_under_its_own_cache_identity(ep):
+    _two_cards(ep)
+    TtsStage(CFG).run(ep, CFG)
+    before = {c.cue_id: c.key for c in _plan(ep).cues if c.skipped is None}
+    FakeSynth.LOG = []
+    TtsStage(ENGINE_CFG).run(ep, ENGINE_CFG)
+    assert "load fake_fast" in FakeSynth.LOG and "load fake" not in FakeSynth.LOG
+    after = {c.cue_id: c.key for c in _plan(ep).cues if c.skipped is None}
+    assert after.keys() == before.keys()
+    assert all(after[k] != before[k] for k in before)  # never a PyTorch render from the cache
+    assert TtsStage(ENGINE_CFG).config_key(ENGINE_CFG, ep) != TtsStage(CFG).config_key(CFG, ep)
+
+
+@pytest.mark.usefixtures("engine")
+def test_check_card_with_engines_returns_the_engine(ep):
+    natsu, _ = _two_cards(ep)
+    store = CardStore(ep.workspace_root)
+    assert tts.check_card(store, natsu, "Natsu", "en")[1] is FakeSynth
+    engines = tts.tts_engines(ENGINE_CFG)
+    assert engines == {"fake": "fake_fast"}
+    card, cls = tts.check_card(store, natsu, "Natsu", "en", engines)
+    assert cls is FakeEngine and card.voice.backend == "fake"
+
+
+@pytest.mark.parametrize(
+    ("engines", "match"),
+    [
+        ({"fake": "fake2"}, "does not render 'fake' cards"),
+        ({"fake": 3}, "must map a card backend"),
+        ("fake_fast", "must map a card backend"),
+    ],
+)
+@pytest.mark.usefixtures("engine")
+def test_bad_engines_are_refused(engines, match):
+    cfg = Config(raw={"tts": {"backend": "fake", "engines": engines}})
+    with pytest.raises(ConfigError, match=match):
+        tts.tts_engines(cfg)
+
+
+def test_no_engines_is_empty():
+    assert tts.tts_engines(CFG) == {}

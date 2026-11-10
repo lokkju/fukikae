@@ -803,8 +803,10 @@ def _render(
     picked: list[tuple[str, DubCue]],
     cards: dict[int, str],
     names: dict[int, str],
+    engines: dict[str, str] | None = None,
 ) -> tuple[list[RenderedCue], dict[str, BackendConfig], dict[str, bool]]:
-    """Each picked cue rendered through the tts stage's own render path (ruling CD12)."""
+    """Each picked cue rendered through the tts stage's own render path (ruling CD12), each
+    card by its backend or the engine ``engines`` names for it."""
     from fukikae.stages.tts import (
         DELIVERY_CAPS,
         LazySynth,
@@ -820,10 +822,10 @@ def _render(
         return f"character {cid}" + (f" ({names[cid]})" if cid in names else "")
 
     checked = {
-        card: check_card(store, card, who(cid), cfg.target_language)
+        card: check_card(store, card, who(cid), cfg.target_language, engines)
         for cid, card in sorted(cards.items())
     }
-    backends = sorted({card.voice.backend for card, _ in checked.values()})
+    backends = sorted({cls.name for _, cls in checked.values()})
     bcs = {b: backend_config(cfg, b) for b in backends}
     idents = {b: identity_key("tts", bcs[b]) for b in backends}
     neutral: dict[str, bool] = {}
@@ -833,7 +835,7 @@ def _render(
     events = {e: tag_events(ws.work_dir(e)) for e in sorted({e for e, _ in picked})}
     out: list[RenderedCue] = []
     for b in backends:
-        jobs = [(e, c) for e, c in picked if checked[cards[_cid(c)]][0].voice.backend == b]
+        jobs = [(e, c) for e, c in picked if checked[cards[_cid(c)]][1].name == b]
         cls = checked[cards[_cid(jobs[0][1])]][1]
         neutral[b] = not (cls.capabilities & DELIVERY_CAPS)
         rev = idents[b].get("revision") or getattr(cls, "model_revision", None) or "unknown"
@@ -1096,8 +1098,17 @@ def evaluate(
     for cid, found in refs.items():
         for line in reference_report(found[1]) if found else []:
             notes.append(f"character {cid}: {line}")
+    from fukikae.stages.tts import tts_engines
+
+    engines = tts_engines(cfg)
     if backend is not None:
         cls = loader.backend_class("tts", backend)
+        card_backend = getattr(cls, "card_backend", None)
+        if card_backend:
+            # an engine (indextts2_trt): the cards are its card backend's, rendered by it
+            engines[card_backend] = backend
+            cls = loader.backend_class("tts", card_backend)
+            backend = str(card_backend)
         sources = getattr(cls, "sources", frozenset())
         if "clone" in sources and "stock" not in sources:
             mode = "clone"
@@ -1141,7 +1152,7 @@ def evaluate(
             heldout[cid] = held
 
     # 1. TTS backend(s).
-    renders, bcs, neutral = _render(ws, cfg, store, picked, cards, names)
+    renders, bcs, neutral = _render(ws, cfg, store, picked, cards, names, engines)
     small = {(r.episode, r.cue.id): _sixteen(r.path) for r in renders}
     eval_dir = ws.root / ".fukikae" / "eval" / "tts"
 
