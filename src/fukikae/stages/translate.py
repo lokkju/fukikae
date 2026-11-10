@@ -1,8 +1,8 @@
 """Translate stage: dub cues with a speakable target-language line each.
 
 Reads ``03-asr/transcript.json``, ``05-characters/assignments.json`` (with its ``turns``),
-``04c-names/names.json`` on the subtitle path when it exists, ``04b-tag/tags.json`` when the tag
-stage is on,
+``04c-names/names.json`` on the subtitle path when it exists (not an input: what it gives the
+cues is ``cue_names`` in the key), ``04b-tag/tags.json`` when the tag stage is on,
 ``<workspace>/glossary.toml`` when present (its ``[terms]`` table maps source terms to
 renderings) and the cards of the speaking characters (the key holds a hash of each one's
 ``[style]``, not the card id, ruling CD6, so a voice-only change never re-translates); writes
@@ -365,8 +365,9 @@ class TranslateStage:
             ep.work / "05-characters" / "assignments.json",
         ]
         subtitles = self._subtitle_input(ep)
-        if subtitles and names_path(ep.work).exists():  # the subtitle path's name map and
-            paths.append(names_path(ep.work))  # hidden lines; the ASR path never reads them
+        # names.json is no input: the subtitle path's name map, hidden lines and offset are
+        # ``cue_names`` in the key, so names that change what cues say rerun translate and
+        # names that read nothing (off, none, held out) never do.
         if self._use_tags():
             paths.append(ep.work / "04b-tag" / "tags.json")
         paths.append(ep.workspace_root / "glossary.toml")

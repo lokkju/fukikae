@@ -163,7 +163,7 @@ The verdict is `full` (named share at least 0.9), `partial` (at least `min_cover
 
 ## The subtitle path
 
-`assign_subtitle_speakers` takes a key-to-speaker map from the episode's assignments (each `ClusterAssignment.name` to its character, or to its extra label for `extra`). A cue whose own Name gives a key in the map, and which the names stage did not hide, is spoken by that character; any other cue goes by turn overlap as today. When names come from a different track than translate reads (another language's track), cues carry no usable Name and go by turn overlap, which the refined turns already improve. Translate's inputs add `04c-names/names.json` when it exists, for the hidden lines.
+`assign_subtitle_speakers` takes a key-to-speaker map from the episode's assignments (each `ClusterAssignment.name` to its character, or to its extra label for `extra`). A cue whose own Name gives a key in the map, and which the names stage did not hide, is spoken by that character; any other cue goes by turn overlap as today. When names come from a different track than translate reads (another language's track), cues carry no usable Name and go by turn overlap, which the refined turns already improve. Translate reads `04c-names/names.json` for the name map, the hidden lines and the track offset, and puts them in its config key (`cue_names`) rather than taking the file as an input, so a names stage that read no names (off, none, held out) never reruns translate (final review B, reversing the earlier input ruling).
 
 ## Configuration and CLI
 
