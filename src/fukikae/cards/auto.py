@@ -21,10 +21,10 @@ name, or by a lock on a key it answers to), never its unnamed remainders and nev
 an inner-voice or multi line (``names.excluded``); names-used episodes are tried first, and
 acoustic-only ones only when none yields picks. A clone card with a reference in a names-used
 episode outside the character's name-confirmed turns (`NAME_CONTAINMENT`) is stale
-(`stale_cards`): ``ensure_assignments`` re-picks it, a new card and a new ``auto`` row, when
-the card is automatic (``replace_refusal`` lets ``auto`` replace it: ``auto``,
-``auto-fallback`` or ``restock``, unlocked) and name-confirmed picks exist; a curated or
-imported card is only reported. Without names nothing here changes.
+(`stale_cards`): ``ensure_assignments`` re-picks it as it would make a new card (a new card
+id and a new ``auto`` row) when the card is automatic (``replace_refusal`` lets ``auto``
+replace it: ``auto``, ``auto-fallback`` or ``restock``, unlocked); a curated or imported card
+is only reported. Without names nothing here changes.
 """
 
 from __future__ import annotations
@@ -205,10 +205,12 @@ def ensure_assignments(
     first voices of each pool). Returns one report line per character handled.
 
     ``stale`` (`stale_cards`) lists the characters whose clone card has references the
-    subtitle names contradict. An automatic card (``replace_refusal`` lets ``auto`` replace
-    it) is re-picked from name-confirmed references, a new card with a new ``auto`` row noted
-    `REPICK_NOTE`, when ``cloning`` is usable and such references exist; otherwise it is kept
-    and reported. A curated or imported card is only reported (D29 #4)."""
+    subtitle names contradict. While ``cloning`` is usable, an automatic card (``replace_refusal``
+    lets ``auto`` replace it) is re-picked the way a new card is made, a new card with a new
+    ``auto`` row noted `REPICK_NOTE`: a clone from name-confirmed references when there are
+    enough, else from acoustic-only episodes, else a stock voice, so a character whose speech
+    the names gave to others stops speaking in their voice. A curated or imported card, and
+    an automatic one while the clone backend can't run, is only reported (D29 #4)."""
     language = cfg.target_language
     usable = cloning is not None and cloning.unavailable is None
     todo = []
@@ -253,21 +255,10 @@ def ensure_assignments(
         by = "auto"
         if cid in fallbacks and not (found is not None and found.picks):
             continue  # still too little speech: the stand-in stays until a clone can be made
-        if cid in repick and not (found is not None and found.picks and found.confirmed):
-            lines.append(
-                f"character {_label(reg, cid)}: card {repick[cid]} is cloned from turns the "
-                f"subtitles now name otherwise ({_where((stale or {})[cid])}), but there are no "
-                "name-confirmed references to re-pick from; kept"
-            )
-            continue
         if found is not None and found.picks:
             new, note = _clone(cloning, found, store, language)  # type: ignore[arg-type]
             if cid in fallbacks:
                 note += "; replaces the stock fallback made while the clone backend couldn't run"
-            if cid in repick:
-                if new == repick[cid]:
-                    continue
-                note = f"{REPICK_NOTE} ({_where((stale or {})[cid])}); {note}"
         else:
             f0, seconds = speaker_f0(vocals, spans)
             gender = gender_of(f0, male_below, female_above)
@@ -293,6 +284,10 @@ def ensure_assignments(
                     "replaces this stand-in with a clone"
                 )
                 by = FALLBACK_BY
+        if cid in repick:
+            if new == repick[cid]:
+                continue
+            note = f"{REPICK_NOTE} ({_where((stale or {})[cid])}); {note}"
         try:
             reg.assign_card(cid, language, new, by=by, locked=False, note=note)
         except ProtectedAssignmentError as e:
