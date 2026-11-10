@@ -183,8 +183,23 @@ On Fairy Tail:
 
 - **D26 (done):** the performance task: tf32, the tag stage on the GPU, overlapping consecutive episodes, and a rate estimate before the first render. Its timings and the eval gate are in the ledger. The wall times above predate it.
 - **D27 (proposed next):** subtitle speaker names for identity. On the subtitle path with named lines (Crunchyroll ASS), use the names to split or check characters, which is the fix for the merged voices described above.
-- **D28 (pending with the operator):** further IndexTTS2 speed levers.
+- **D28 (operator, 2026-11-10):** further IndexTTS2 speed levers. Lever 1, rendering grouped by card, is done and measured below; it saves about 2%. Lever 2 is the TensorRT backend trial.
 - The ten older backends that download on a cache miss (above).
+
+## D28 lever 1: renders grouped by card
+
+The tts stage now renders each backend's jobs one card at a time (cards in order of first appearance in the episode, each card's cues in cue order; `render_order` in `stages/tts.py`). IndexTTS2 caches the conditioning of one speaker prompt, and a change of speaker reruns w2v-BERT, the semantic codec, CAMPPlus and the mel over the 15 s prompt, plus a `torch.cuda.empty_cache()`. In cue order E14's 320 IndexTTS2 lines change speaker 114 times; grouped, 8 times (9 cards).
+
+Nothing about the output depends on the order. Every render is seeded inside the worker before `infer`, `SpeechRates` keeps its renders per card (and each card still sees its own cues in cue order, so every estimate, factor and cache key is the same), the retry is per job, and the plan was already written in cue order. `run.json` now lists `rendered` and `cached` in cue order instead of render order. The emotion conditioning is not shared between lines in either order: each cue passes its own `ref/<cue-id>.wav`, and IndexTTS2 compares emotion prompts by path.
+
+I measured on scratch copies of the smoke workspace (`~/fukikae-scratch/group-tts/{main,branch}`, driver `~/fukikae-scratch/group-tts/driver.py`): the 40 consecutive spoken E14 cues c0026 to c0065, 7 cards, 20 speaker changes in cue order and 6 grouped (the other cues stay cache hits, so the worker sees only these 40). The driver deletes their cache entries, runs the stage on GPU 0 and times each `render_cue` call; the worker's load (about 41 s, inside the first call) is taken out. Two runs each, alternating:
+
+| code | run 1 | run 2 | mean |
+|---|---|---|---|
+| main (5a9c2f0) | 3.25 s/line | 3.41 s/line | 3.33 s/line |
+| grouped | 3.27 s/line | 3.32 s/line | 3.29 s/line |
+
+All 40 wavs are byte-identical (sha256) across all four runs, and every cache key is the same. The 1% difference is inside the run-to-run spread (main's two runs differ by 5%). A fit over all 156 timed lines (time against rendered audio seconds and whether the speaker changed) puts a speaker change at 0.23 ± 0.05 s, against a 1.30 s fixed cost and 1.01 s per second of audio. For a whole E14 that is 106 fewer changes, about 24 s of roughly 18 minutes of rendering. The research estimate assumed the prompt conditioning was a large share of the 0.35 s "other" per line; on the 3090 it is about 0.2 s, and the per-line emotion pass (also w2v-BERT, over the cue's span) runs whatever the order.
 
 ## How to run it
 
