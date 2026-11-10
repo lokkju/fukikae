@@ -191,6 +191,16 @@ def alias_key(name: str) -> str | None:
     return parse_name(name).key
 
 
+def _required_key(name: str) -> str:
+    """`alias_key`, refusing a name that keys nobody (ValueError)."""
+    key = alias_key(name)
+    if key is None:
+        raise ValueError(
+            f"{name!r} names nobody (two speakers, a group word, a sign or a song, or blank)"
+        )
+    return key
+
+
 @dataclass(frozen=True)
 class Exemplar:
     id: int
@@ -492,8 +502,10 @@ class Registry:
 
     def character_for_key(self, key: str) -> Character | None:
         """The character a name key answers to: the alias table first, then a character whose
-        name keys to it (``alias_key``). ValueError naming both when two names answer."""
-        key = _fold(key)
+        name keys to it (``alias_key``). ``key`` is keyed with ``alias_key`` first, so a
+        Name as written (``MAKAROV(WRAITH)``) finds what its key finds. ValueError for a name
+        that keys nobody, and naming both when two names answer."""
+        key = _required_key(key)
         con = self._con
         row = con.execute(
             "SELECT character_id FROM character_aliases WHERE alias = ?", (key,)
@@ -505,7 +517,7 @@ class Registry:
             listed = ", ".join(f"{c.id} ({c.name})" for c in named)
             raise ValueError(
                 f"name key {key!r} answers to several characters: {listed}; "
-                "`fukikae registry alias` says which"
+                "`fukikae registry rename` or `registry merge` resolves it"
             )
         return named[0] if named else None
 
@@ -530,9 +542,7 @@ class Registry:
     ) -> Alias:
         if by not in NAME_BY:
             raise ValueError(f"alias by must be one of {', '.join(sorted(NAME_BY))}, not {by!r}")
-        key = _fold(key)
-        if not key:
-            raise ValueError("an alias needs a name")
+        key = _required_key(key)
         self._require_character(con, character_id)
         holder = self._name_holder(con, key, character_id)
         if holder is not None:
@@ -581,7 +591,8 @@ class Registry:
         language: str | None = None,
         replace: bool = False,
     ) -> Alias:
-        """Make ``character_id`` answer to ``key`` (folded). Never a key that is another
+        """Make ``character_id`` answer to ``key`` (keyed with ``alias_key``; ValueError for a
+        name that keys nobody). Never a key that is another
         character's name. A ``subs`` alias never moves an existing alias; an ``operator``
         alias moves a ``subs`` one and another operator's only with ``replace``
         (AliasConflictError otherwise). The character's own alias is kept, raised to
@@ -590,9 +601,11 @@ class Registry:
             return self._add_alias(con, character_id, key, by, language, replace)
 
     def remove_alias(self, key: str) -> None:
-        """Delete an alias (KeyError when no character answers to it by alias)."""
+        """Delete an alias, keyed with ``alias_key`` (KeyError when no character answers to it
+        by alias, ValueError for a name that keys nobody)."""
+        alias = _required_key(key)
         with self._tx() as con:
-            cur = con.execute("DELETE FROM character_aliases WHERE alias = ?", (_fold(key),))
+            cur = con.execute("DELETE FROM character_aliases WHERE alias = ?", (alias,))
             if cur.rowcount == 0:
                 raise KeyError(key)
 
@@ -768,12 +781,18 @@ class Registry:
         ]
 
     def _is_curated(self, con: sqlite3.Connection, character_id: int) -> bool:
-        """Named, with an external id, with a schema-1 voice migrated into history, or with a
-        current card (any target language) that is locked or was not chosen by ``auto``
-        (ruling CD2). Lock and unlock rows by themselves curate nothing."""
+        """Named by the operator (``name_by = 'operator'``; a name without ``name_by`` predates
+        schema 4 and counts as the operator's), answering to an operator alias, with an
+        external id, with a schema-1 voice migrated into history, or with a current card (any
+        target language) that is locked or was not chosen by ``auto`` (ruling CD2). A name or
+        alias from subtitles curates nothing (D29 #2), nor do lock and unlock rows by
+        themselves."""
         row = con.execute(
-            "SELECT name IS NOT NULL OR external_id IS NOT NULL OR EXISTS (SELECT 1 FROM"
+            "SELECT (name IS NOT NULL AND COALESCE(name_by, 'operator') = 'operator')"
+            " OR external_id IS NOT NULL OR EXISTS (SELECT 1 FROM"
             " card_history WHERE character_id = characters.id AND by = 'migrated')"
+            " OR EXISTS (SELECT 1 FROM character_aliases WHERE character_id = characters.id"
+            " AND by = 'operator')"
             " FROM characters WHERE id = ?",
             (character_id,),
         ).fetchone()
@@ -1186,20 +1205,16 @@ class Registry:
                 (keep, lang, card[0], hid),
             )
 
-    def rename_character(
-        self, character_id: int, name: str, by: AliasBy = "operator"
-    ) -> str | None:
-        """Set a character's name and ``name_by``, and make it answer to the name's key
-        (``alias_key``) with an alias ``by`` the same. Earlier aliases stay, so the keys of
-        old names keep resolving. When another character answers to the key (by alias or by
-        name) the alias is skipped and the warning returned; a name that keys nobody adds
-        none."""
-        if by not in NAME_BY:
-            raise ValueError(f"name by must be one of {', '.join(sorted(NAME_BY))}, not {by!r}")
+    def rename_character(self, character_id: int, name: str) -> str | None:
+        """The operator names a character (``name_by = 'operator'``; subtitles name only
+        through `name_character`), and it answers to the name's key (``alias_key``) by an
+        operator alias. Earlier aliases stay, so the keys of old names keep resolving. When
+        another character answers to the key (by alias or by name) the alias is skipped and
+        the warning returned; a name that keys nobody adds none."""
         with self._tx() as con:
             cur = con.execute(
-                "UPDATE characters SET name = ?, name_by = ? WHERE id = ?",
-                (name, by, character_id),
+                "UPDATE characters SET name = ?, name_by = 'operator' WHERE id = ?",
+                (name, character_id),
             )
             if cur.rowcount == 0:
                 raise KeyError(character_id)
@@ -1215,7 +1230,7 @@ class Registry:
                     f"character {held[0]}'s alias ({held[1]}); `fukikae registry alias` moves it"
                 )
             try:
-                self._add_alias(con, character_id, key, by, None, False)
+                self._add_alias(con, character_id, key, "operator", None, False)
             except AliasConflictError as e:
                 return f"character {character_id} named {name!r}, but no alias added: {e}"
             return None

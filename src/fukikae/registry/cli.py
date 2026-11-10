@@ -317,7 +317,10 @@ def rename(
     ),
 ) -> None:
     """Name a character (an operator name, which subtitles never replace) and make it answer to
-    the name's key; its episodes' characters stage reruns next time."""
+    the name's key; its episodes' characters stage reruns next time, and so does every episode
+    whose names stage used that key."""
+    from fukikae.registry.store import alias_key
+
     ws = Workspace(workspace)
     with _open(workspace) as reg:
         char = next((c for c in reg.characters() if c.id == character_id), None)
@@ -330,7 +333,9 @@ def rename(
         affected = list(reg.episode_counts(char.actor_id))
     if warning:
         typer.echo(f"warning: {warning}")
-    _stale(ws, affected)
+    key = alias_key(name)
+    users = _episodes_with_key(ws, key) if key is not None else []
+    _stale(ws, sorted(set(affected) | set(users)))
 
 
 def _episodes_with_key(ws: Workspace, key: str) -> list[str]:
@@ -401,7 +406,10 @@ def alias(
                 f"{name!r} names nobody (two speakers, a group word, a sign or a song, or blank); "
                 "only a single speaker's name can be an alias"
             )
-        before = reg.character_for_key(key) if not remove else None
+        try:
+            before = reg.character_for_key(key) if not remove else None
+        except ValueError as e:  # two characters' names share the key
+            raise _fail(str(e)) from e
         if remove:
             held = next((a for a in reg.aliases() if a.alias == key), None)
             if held is None:

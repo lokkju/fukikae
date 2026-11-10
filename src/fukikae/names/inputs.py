@@ -37,7 +37,14 @@ class HeldOutNamesError(ValueError):
 def check_held_out(work: Path, episode: str) -> None:
     """Refuse to grade `episode` as held out when its names stage read names (verdict other than
     `holdout` or `off`): the run would be graded on its own labels (Review Focus 3). Every eval
-    path that scores a held-out episode calls this first."""
+    path that scores a held-out episode calls this first.
+
+    A missing `names.json` passes, because it means one of two things this guard can't tell
+    apart: the names stage never ran (a workspace from before it), so identity read
+    `04-diarize`'s inputs and no names; or its last run failed, since a run removes the old
+    file first. In the second case the manifest records `names` as failed and the episode's
+    `assignments.json` may still come from an earlier run that read names, so rerun the
+    episode from `names` before grading it."""
     path = names_path(work)
     if not path.exists():
         return

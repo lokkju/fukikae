@@ -137,3 +137,56 @@ def test_registry_rename_records_the_operator_and_warns_on_a_held_key(tmp_path):
     assert "character 1" in r.output
     r = runner.invoke(app, ["registry", "show", str(ws.root), "2"])
     assert "Erza (name by operator)" in r.output
+
+
+def test_registry_alias_reports_an_ambiguous_key_in_one_line(tmp_path):
+    ws = _alias_ws(tmp_path)
+    with Registry(ws.registry_path) as reg, reg._tx() as con:  # two names, one key, no alias
+        con.execute("UPDATE characters SET name = 'Lucy', name_by = 'operator'")
+    r = runner.invoke(app, ["registry", "alias", str(ws.root), "2", "LUCY"])
+    assert r.exit_code == 1 and isinstance(r.exception, SystemExit), r.output
+    (line,) = r.output.strip().splitlines()  # one line, no traceback
+    assert line.startswith("error:") and "registry rename" in line and "registry merge" in line
+
+
+def _names_used(ws: Workspace, episode: str, key: str) -> None:
+    from fukikae.artifacts import write_json
+    from fukikae.names.inputs import names_path
+    from fukikae.names.models import NamedLine, NamesResult
+    from fukikae.names.normalize import NameClass
+
+    line = NamedLine(
+        id=0, start=0.0, end=1.0, raw=key.upper(), key=key, display=key.title(),
+        cls=NameClass.NAMED, inner=False, text="hi",
+    )  # fmt: skip
+    path = names_path(ws.work_dir(episode))
+    path.parent.mkdir(parents=True)
+    write_json(
+        path,
+        NamesResult(
+            episode=episode,
+            used=True,
+            verdict="full",
+            reason=None,
+            source=None,
+            offset_s=0.0,
+            coverage={},
+            lines=[line],
+            hidden=[],
+            pieces=[],
+            labels={},
+            unvoiced=[],
+            excluded=[],
+            dropped_row_seconds=0.0,
+            suggestions=[],
+        ),  # fmt: skip
+    )
+
+
+def test_registry_rename_stales_episodes_that_used_the_new_names_key(tmp_path):
+    ws = _alias_ws(tmp_path)
+    _names_used(ws, "S01E03", "erza")
+    _names_used(ws, "S01E04", "lucy")
+    r = runner.invoke(app, ["registry", "rename", str(ws.root), "2", "ERZA"])
+    assert r.exit_code == 0, r.output
+    assert "stale" in r.output and "S01E03" in r.output and "S01E04" not in r.output

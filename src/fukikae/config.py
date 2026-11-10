@@ -106,6 +106,7 @@ def _positive(table: dict[str, Any], key: str, default: float, hi: float) -> flo
 
 
 _EPISODE_ID = re.compile(r"[Ss](\d+)[Ee](\d+)")
+_SLUG_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")  # workspace.episode_id without SxxEyy
 
 
 def canonical_episode_id(text: str) -> str | None:
@@ -150,8 +151,13 @@ def names_settings(table: Any) -> NamesSettings:
     canonical: list[str] = []
     for e in holdout:
         eid = canonical_episode_id(e)
+        if eid is None and _SLUG_ID.fullmatch(e) and not _EPISODE_ID.search(e):
+            eid = e  # workspace.episode_id's slug, for a file named without SxxEyy
         if eid is None:
-            raise ConfigError(f"[names] holdout_episodes: {e!r} is not an episode id like S01E14")
+            raise ConfigError(
+                f"[names] holdout_episodes: {e!r} is not an episode id like S01E14 (or the "
+                "slug a file named without SxxEyy gets, such as ova-2)"
+            )
         if eid not in canonical:
             canonical.append(eid)
     seed = table.get("hide_seed", 0)
