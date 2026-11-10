@@ -320,3 +320,22 @@ def test_cd25_full_subtitles_with_signs_are_dialogue(tmp_path):
         assert find_target_subtitles(src, _cd25(unknown), "en", {}) == (None, None), title
     signs = SubTrack(4, "ass", "eng", "Signs", False, cues=350)
     assert find_target_subtitles(src, _cd25(signs), "en", {}) == (None, None)
+
+
+def test_extract_subtitles_removes_its_files_when_ffmpeg_fails(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from fukikae import media
+
+    def fail(args: list[str]) -> None:
+        for a in args:
+            if a.endswith(".ass"):
+                Path(a).write_text("half", encoding="utf-8")
+        raise media.MediaError("ffmpeg failed")
+
+    monkeypatch.setattr(media, "run_ffmpeg", fail)
+    a = media.SubTrack(index=2, codec="ass", language="eng", title=None, forced=False, cues=1)
+    b = media.SubTrack(index=3, codec="ass", language="ger", title=None, forced=False, cues=1)
+    with pytest.raises(media.MediaError):
+        media.extract_subtitles(tmp_path / "in.mkv", [(a, tmp_path / "a"), (b, tmp_path / "b")])
+    assert list(tmp_path.iterdir()) == []

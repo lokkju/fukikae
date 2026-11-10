@@ -12,6 +12,7 @@ from fukikae.models import Diarization, Turn
 from fukikae.names import detect
 from fukikae.names.inputs import identity_inputs
 from fukikae.names.models import NamesResult
+from fukikae.stages import names as names_mod
 from fukikae.stages.characters import CharactersStage
 from fukikae.stages.names import NamesStage
 from fukikae.workspace import Episode
@@ -39,8 +40,13 @@ def _stamp(t: float) -> str:
     return f"{cs // 360000}:{cs // 6000 % 60:02d}:{cs // 100 % 60:02d}.{cs % 100:02d}"
 
 
-def ass(named: bool = True, rename: dict[str, str] | None = None) -> str:
+def ass(
+    named: bool = True,
+    rename: dict[str, str] | None = None,
+    names_at: dict[int, str] | None = None,
+) -> str:
     rename = rename or {}
+    names_at = names_at or {}
     head = [
         "[Script Info]",
         "ScriptType: v4.00+",
@@ -53,7 +59,8 @@ def ass(named: bool = True, rename: dict[str, str] | None = None) -> str:
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
     rows = [
-        f"Dialogue: 0,{_stamp(a)},{_stamp(b)},Default,{rename.get(n, n) if named else ''},"
+        f"Dialogue: 0,{_stamp(a)},{_stamp(b)},Default,"
+        f"{names_at.get(i, rename.get(n, n)) if named else ''},"
         f"0,0,0,,Line number {i}."
         for i, (a, b, n) in enumerate(LINES)
     ]
@@ -271,8 +278,9 @@ def test_missing_names_file_is_a_config_error(tmp_path):
     ]
     with pytest.raises(ConfigError, match="not found"):
         stage.run(ep, cfg)
-    with pytest.raises(ConfigError, match="not found"):
-        stage.config_key(cfg, ep)
+    # config_key never raises outside run(): the error is part of the key, and run() raises it
+    key = stage.config_key(cfg, ep)
+    assert "not found" in key["candidates_error"]
 
 
 def test_names_file_is_read_first(tmp_path):
@@ -356,3 +364,154 @@ def test_missing_names_track_is_a_config_error(tmp_path):
     cfg = set_names(root, "track=9")
     with pytest.raises(ConfigError, match="no subtitle track 9"):
         NamesStage(cfg).run(ep, cfg)
+
+
+def test_hidden_lines_count_as_unnamed_in_detection(tmp_path):
+    ep, root = make_ws(tmp_path)
+    cfg = set_names(root, "hide_fraction=0.2\nhide_seed=0")
+    NamesStage(cfg).run(ep, cfg)
+    r = result(ep)
+    assert len(r.hidden) == 6
+    assert r.coverage["dialogue"] == 30 and r.coverage["named"] == 24
+    assert r.verdict == "partial"  # 80% named once the hidden lines are unnamed
+
+
+def _inner_typo_ws(tmp_path: Path) -> tuple[Episode, Path]:
+    """Lines 2 and 5 (HAPPY's) spelled NATSO/I: an inner-voice key one edit from natsu."""
+    ep, root = make_ws(tmp_path)
+    side = ep.source.with_name("S01E01.en.ass")
+    side.write_text(ass(names_at={2: "NATSO/I", 5: "NATSO/I"}), encoding="utf-8")
+    return ep, root
+
+
+def test_hidden_keys_reach_no_label_exclusion_or_suggestion(tmp_path, monkeypatch):
+    ep, root = _inner_typo_ws(tmp_path / "shown")
+    NamesStage().run(ep, cfg_of(root))
+    shown = result(ep)
+    assert ("natso", "natsu") in shown.suggestions
+    assert any(info.key == "natso" for info in shown.labels.values())
+    assert len(shown.excluded) == 2
+
+    def hide_natso(lines, *_a, **_k):
+        return sorted(ln.id for ln in lines if ln.key == "natso")
+
+    monkeypatch.setattr(names_mod, "hide_lines", hide_natso)
+    ep, root = _inner_typo_ws(tmp_path / "hidden")
+    NamesStage().run(ep, cfg_of(root))
+    r = result(ep)
+    assert len(r.hidden) == 2
+    assert all(ln.key == "natso" for ln in r.lines if ln.id in set(r.hidden))
+    assert not any(info.key == "natso" for info in r.labels.values())
+    assert r.excluded == [] and r.suggestions == []
+    assert not any(set(p.line_ids) & set(r.hidden) for p in r.pieces)
+
+
+def test_failed_rerun_leaves_no_names_json_beside_new_files(tmp_path, monkeypatch):
+    ep, root = make_ws(tmp_path)
+    cfg = cfg_of(root)
+    out = ep.work / "04c-names"
+    NamesStage(cfg).run(ep, cfg)
+    assert (out / "names.json").exists()
+
+    def boom(*_a, **_k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(names_mod, "refine_clusters", boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        NamesStage(cfg).run(ep, cfg)
+    assert not (out / "names.json").exists()
+    assert not (out / "turns.json").exists() and not (out / "clusters.npz").exists()
+    assert identity_inputs(ep.work)[:2] == (
+        ep.work / "04-diarize" / "turns.json",
+        ep.work / "04-diarize" / "clusters.npz",
+    )
+
+
+def test_track_copy_follows_an_edit_with_the_same_size_and_mtime(tmp_path):
+    import os
+
+    ep, root = make_ws(tmp_path)
+    cfg = cfg_of(root)
+    before = cache_key(NamesStage(cfg), ep, cfg)
+    side = ep.source.with_name("S01E01.en.ass")
+    st = side.stat()
+    text = side.read_text(encoding="utf-8")
+    new = text.replace("HAPPY", "CHARL")  # same length
+    assert len(new) == len(text) and new != text
+    side.write_text(new, encoding="utf-8")
+    os.utime(side, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert side.stat().st_size == st.st_size and side.stat().st_mtime_ns == st.st_mtime_ns
+    assert cache_key(NamesStage(cfg), ep, cfg) != before
+
+
+@pytest.mark.parametrize("body", ['holdout_episodes=["S01E01"]', 'use="off"'])
+def test_unread_names_remove_the_track_copies(tmp_path, body):
+    ep, root = make_ws(tmp_path)
+    NamesStage().run(ep, cfg_of(root))
+    tracks = ep.work / "04c-names" / "tracks"
+    assert tracks.is_dir() and any(tracks.iterdir())
+    cfg = set_names(root, body)
+    NamesStage(cfg).run(ep, cfg)
+    assert not tracks.exists()
+
+
+def test_holdout_matches_any_spelling_of_the_episode(tmp_path, monkeypatch):
+    ep, root = make_ws(tmp_path)
+    cfg = set_names(root, 'holdout_episodes=["s01e01"]')
+    monkeypatch.setattr(detect, "candidate_tracks", explode)
+    NamesStage(cfg).run(ep, cfg)
+    assert result(ep).verdict == "holdout"
+
+
+def test_config_key_under_use_off_reads_nothing(tmp_path, monkeypatch):
+    ep, root = make_ws(tmp_path)
+    cfg = set_names(root, 'use="off"')
+    monkeypatch.setattr(media, "extract_subtitles", explode)
+    monkeypatch.setattr(media, "probe", explode)
+    monkeypatch.setattr(detect, "candidate_tracks", explode)
+    assert NamesStage(cfg).config_key(cfg, ep) == {
+        "version": names_mod.NAMES_VERSION,
+        "use": "off",
+    }
+
+
+def _embedded_ws(tmp_path: Path, monkeypatch) -> tuple[Episode, Path]:
+    ep, root = make_ws(tmp_path)
+    ep.source.with_name("S01E01.en.ass").unlink()
+    ep.source.write_bytes(b"mkv")
+    track = media.SubTrack(index=3, codec="ass", language="eng", title=None, forced=False, cues=30)
+    monkeypatch.setattr(
+        media, "probe", lambda _p: media.ProbeResult(subtitles=[track], duration=90.0)
+    )
+    return ep, root
+
+
+def test_ffmpeg_failure_leaves_the_track_index_unadvanced(tmp_path, monkeypatch):
+    import os
+
+    ep, root = _embedded_ws(tmp_path, monkeypatch)
+
+    def extract(_source: Path, wanted: list[tuple[media.SubTrack, Path]]) -> list[Path]:
+        out = []
+        for _t, path in wanted:
+            dest = Path(path).with_name(Path(path).name + ".ass")
+            dest.write_text(ass(), encoding="utf-8")
+            out.append(dest)
+        return out
+
+    monkeypatch.setattr(media, "extract_subtitles", extract)
+    cfg = cfg_of(root)
+    NamesStage(cfg).run(ep, cfg)
+    index = ep.work / "04c-names" / "tracks" / "index.json"
+    first = index.read_bytes()
+
+    def fail(*_a: object, **_k: object) -> list[Path]:
+        raise media.MediaError("ffmpeg failed")
+
+    monkeypatch.setattr(media, "extract_subtitles", fail)
+    st = ep.source.stat()
+    os.utime(ep.source, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))  # a new source version
+    with pytest.raises(media.MediaError):
+        NamesStage(cfg).run(ep, cfg)
+    assert index.read_bytes() == first
+    assert not (ep.work / "04c-names" / "names.json").exists()

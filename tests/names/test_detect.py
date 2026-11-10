@@ -374,3 +374,20 @@ def test_unapplied_offset_reports_the_share_the_decision_accepted():
     v, got = assess(lines, STYLES, SPEECH)
     assert v.offset_s == 0.0 and got[0].start == lines[0].start
     assert v.align_share == pytest.approx(rep.share_at_offset)
+
+
+def test_hidden_lines_count_as_unnamed():
+    lines = dialogue_lines(cues(NAMED_EPISODE))
+    hidden = {ln.id for ln in lines if ln.key == "natsu"}
+    assert hidden
+    v, _ = assess(lines, STYLES, SPEECH, hidden=hidden)
+    assert v.dialogue == len(lines) and v.named == len(lines) - len(hidden)
+    assert v.level == "partial"  # no longer 90% named
+
+
+def test_hidden_lines_can_fail_detection():
+    lines = dialogue_lines(cues(NAMED_EPISODE))
+    keep = {"natsu"}  # 6 of 18 lines
+    hidden = {ln.id for ln in lines if ln.key not in keep}
+    v, _ = assess(lines, STYLES, SPEECH, hidden=hidden)
+    assert v.level == "none" and v.reason is not None and "share" in v.reason

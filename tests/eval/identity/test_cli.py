@@ -461,3 +461,53 @@ def test_identity_cli_ledger_failure_warns_and_exits_zero(
     assert r.exit_code == 0, r.output
     assert "fraction: 0.75" in r.stdout
     assert "warning: ledger not written:" in r.stderr
+
+
+def _names_json(root: Path, ep: str, verdict: str) -> None:
+    from fukikae.names.models import NamesResult
+
+    work = root / ".fukikae" / "episodes" / ep / "04c-names"
+    work.mkdir(parents=True)
+    write_json(
+        work / "names.json",
+        NamesResult(
+            episode=ep,
+            used=verdict in ("full", "partial"),
+            verdict=verdict,  # type: ignore[arg-type]
+            reason=None,
+            source=None,
+            offset_s=0.0,
+            coverage={},
+            lines=[],
+            hidden=[],
+            pieces=[],
+            labels={},
+            unvoiced=[],
+            excluded=[],
+            dropped_row_seconds=0.0,
+            suggestions=[],
+        ),
+    )
+
+
+@pytest.mark.parametrize("verdict", ["full", "partial", "none"])
+def test_identity_refuses_a_holdout_whose_names_were_read(tmp_path: Path, verdict: str):
+    root = setup_ws(tmp_path, ["S01E01", "S01E02"])
+    _names_json(root, "S01E02", verdict)
+    r = CliRunner().invoke(
+        app,
+        ["eval", "identity", str(root), "--tune", "S01E01", "--holdout", "S01E02",
+         "--gt-file", str(tmp_path / "gt")],
+    )  # fmt: skip
+    assert r.exit_code != 0
+    assert "held-out episode S01E02 read its subtitle names" in r.output
+
+
+@pytest.mark.parametrize("verdict", ["holdout", "off"])
+def test_check_held_out_accepts_unread_names(tmp_path: Path, verdict: str):
+    from fukikae.names.inputs import check_held_out
+
+    root = setup_ws(tmp_path, ["S01E02"])
+    _names_json(root, "S01E02", verdict)
+    check_held_out(root / ".fukikae" / "episodes" / "S01E02", "S01E02")
+    check_held_out(root / ".fukikae" / "episodes" / "S01E09", "S01E09")  # no names.json

@@ -209,12 +209,25 @@ def test_names_table_rejects_unknown_key(tmp_path):
         "align='yes'",
         "holdout_episodes='S01E14'",
         "hide_seed=0.5",
+        "turn_share=0",
+        "track=-1",
+        "holdout_episodes=['E14']",
+        "holdout_episodes=['episode-14']",
+        "holdout_episodes=['S01E14x']",
     ],
 )
 def test_names_table_rejects_bad_values(tmp_path, body):
     (tmp_path / "fukikae.toml").write_text(f"[names]\n{body}\n")
     with pytest.raises(ConfigError, match=r"\[names\]"):
         load_config(tmp_path, user_config=None)
+
+
+def test_holdout_episodes_are_canonical_episode_ids(tmp_path):
+    # the stage compares them with episode ids (S%02dE%02d), so spell them that way once here
+    (tmp_path / "fukikae.toml").write_text(
+        '[names]\nholdout_episodes=["s01e14", "S1E3", "S01E14"]\n'
+    )
+    assert load_config(tmp_path, user_config=None).names.holdout_episodes == ("S01E14", "S01E03")
 
 
 def test_names_table_needs_no_backend(tmp_path):

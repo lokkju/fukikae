@@ -227,7 +227,12 @@ def extract_subtitles(source: Path, wanted: list[tuple[SubTrack, Path]]) -> list
         ass = track.codec in ("ass", "ssa")
         args += ["-map", f"0:{track.index}", "-c:s", "copy" if ass else "srt", str(dest)]
         dests.append(dest)
-    run_ffmpeg(args)
+    try:
+        run_ffmpeg(args)
+    except BaseException:
+        for dest in dests:  # no half-written scratch file stays behind
+            dest.unlink(missing_ok=True)
+        raise
     return dests
 
 
