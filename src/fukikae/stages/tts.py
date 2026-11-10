@@ -350,6 +350,11 @@ def backend_config(cfg: Config, backend: str) -> BackendConfig:
     return BackendConfig(backend, options)
 
 
+class NoUsableGpuError(ConfigError):
+    """A backend that refuses the CPU found no usable GPU: the machine's state, not a typo in
+    the config (``cards.auto.clone_problem`` falls back to stock voices on it)."""
+
+
 def synth_device(cfg: Config, cls: type[Synthesizer]) -> str:
     """The device ``cls`` renders on (ruling CD14): ``[tts.<backend>] device``, else the
     backend's ``default_device`` (Kokoro cpu, the cloning workers cuda), else the legacy
@@ -375,7 +380,8 @@ def synth_device(cfg: Config, cls: type[Synthesizer]) -> str:
     refusal = getattr(cls, "cpu_refusal", None)
     if device == "cpu" and refusal and table.get("force_cpu") is not True:
         why = "is set to the CPU" if want == "cpu" else "found no usable GPU"
-        raise ConfigError(
+        error = ConfigError if want == "cpu" else NoUsableGpuError
+        raise error(
             f"{cls.name} {why}: {refusal} Set `force_cpu = true` in [tts.{cls.name}] to run "
             "it there anyway."
         )
