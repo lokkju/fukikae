@@ -15,6 +15,11 @@ def names_path(work: Path) -> Path:
     return Path(work) / NAMES_DIR / "names.json"
 
 
+def names_report_path(work: Path) -> Path:
+    """The characters stage's `NamesReport` for a names-used episode."""
+    return Path(work) / "05-characters" / "names-report.json"
+
+
 def identity_inputs(work: Path) -> tuple[Path, Path, NamesResult | None]:
     """(turns.json, clusters.npz, names result) for an episode's work directory: the refined
     pair under `04c-names/` when names were used, else `04-diarize/`'s, with the result (None

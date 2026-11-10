@@ -81,3 +81,35 @@ class NamesResult(BaseModel):
     def visible_lines(self) -> list[NamedLine]:
         hidden = set(self.hidden)
         return [ln for ln in self.lines if ln.id not in hidden]
+
+
+KeyHow = Literal["known", "renamed", "created", "extra", "lock", "ambiguous"]
+
+
+class KeyDecision(BaseModel):
+    """How the characters stage placed one name key of a names-used episode (`resolve_names`):
+    ``known`` (a character answers to it), ``renamed`` (an unnamed character took its name),
+    ``created``, ``extra`` (a role label or under ``min_new_seconds``), ``lock`` (every
+    sub-cluster kept by a lock) or ``ambiguous`` (several characters answer to it; its
+    sub-clusters went the acoustic way). ``locked`` lists the sub-clusters a lock kept, each
+    with the character it kept them on, whatever ``how`` says of the rest."""
+
+    key: str
+    how: KeyHow
+    character_id: int | None
+    display: str | None
+    seconds: float  # the key's named speech in the episode
+    labels: list[str]
+    locked: dict[str, int | None] = Field(default_factory=dict)
+
+
+class NamesReport(BaseModel):
+    """`05-characters/names-report.json`: what the characters stage did with an episode's
+    names, for `fukikae names show`. Written beside `assignments.json` only when names were
+    used, and not a stage output, so it never enters a cache key and an episode without names
+    writes nothing new."""
+
+    schema_version: int = 1
+    episode: str
+    keys: list[KeyDecision]
+    lines: list[str]  # the stage's report lines: locks, renames, disagreements, ambiguous keys

@@ -820,4 +820,11 @@ def _register_identity() -> None:
     eval_app.command("identity")(identity_cmd)
 
 
+def _register_names() -> None:
+    from fukikae.eval.names import names_cmd
+
+    eval_app.command("names")(names_cmd)
+
+
 _register_identity()
+_register_names()

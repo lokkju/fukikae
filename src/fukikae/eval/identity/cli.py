@@ -725,7 +725,10 @@ def identity_cmd(
         "`registry resolve`) instead of running a matcher; diarization segmentation only.",
     ),
     test_set: str = typer.Option(
-        None, "--set", help="Ledger test-set name (default: the workspace directory's name)."
+        None,
+        "--set",
+        "--test-set",
+        help="Ledger test-set name (default: the workspace directory's name).",
     ),
     tag: str = typer.Option(None, "--tag", help="Free-form ledger tag for this run."),
     no_ledger: bool = typer.Option(
