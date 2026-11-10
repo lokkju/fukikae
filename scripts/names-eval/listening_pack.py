@@ -18,6 +18,30 @@ import shutil
 from pathlib import Path
 
 EPS = ("S01E12", "S01E13", "S01E14")
+README = """Names listening check (D29 #9): Fairy Tail E12 to E14, ja to en, IndexTTS2.
+
+Each row is one English dub cue whose subtitle names NATSU or YOUNG MAKAROV and whose voice
+card changed when the pipeline started reading the subtitle speaker names. A and B are the
+same line rendered before names (the t12 workspace) and after (the names arm, E14 held out
+of names), in a shuffled order. original.wav is the Japanese line itself, the clip the tts
+stage passes as the emotion reference.
+
+What to listen for:
+- Natsu should now sound male and like his own clips: before names many of his lines went to
+  the character that merged Wendy, Happy and Charle (cloned from Wendy, a girl's voice) or to
+  other characters' cards.
+- Young Makarov should sound like one consistent young male voice, not another character's.
+- Note per row which of A and B matches original.wav's speaker (or "same"), then open
+  key.toml to see which is before and which is after.
+
+The E14 lines are from the held-out episode: the names arm read no E14 names, so a cue there
+can still sit on the wrong character.
+
+Rows:
+{counts}
+
+Open index.html in a browser (the audio players read the wavs beside it).
+"""
 
 
 def ts(s: str) -> float:
@@ -149,6 +173,8 @@ def main() -> None:
         + "</table>",
         encoding="utf-8",
     )
+    readme = README.format(counts="\n".join(f"- {c}" for c in readme_counts))
+    (args.out / "README.txt").write_text(readme, encoding="utf-8")
     print("\n".join(readme_counts))
 
 

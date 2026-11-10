@@ -27,9 +27,11 @@ declare -A FRAG=(
 )
 ARMS=(baseline names ceiling hidden hidden-base)
 
-# en base: the dub workspace, upstream rerun on GPU 0
-"$MK" ~/fukikae-ws/t9hold/fairytail-en "$D/en-base" ''
-F run "$D/en-base" "${EPS[@]}" --to diarize
+# en base: the dub workspace, upstream rerun on GPU 0 (once; the arms copy it)
+if [ ! -d "$D/en-base" ]; then
+  "$MK" ~/fukikae-ws/t9hold/fairytail-en "$D/en-base" ''
+  F run "$D/en-base" "${EPS[@]}" --to diarize
+fi
 
 for L in ja en; do
   if [ "$L" = ja ]; then SRC=~/fukikae-scratch/t12/fairytail SET=fairytail; else SRC=$D/en-base SET=fairytail-en; fi
@@ -60,6 +62,8 @@ for L in ja en; do
   done
 done
 uv run --directory "$REPO" python "$REPO/scripts/names-eval/tables.py" "$OUT" "$D" ja en > "$OUT/tables.md"
+
+[ "${SKIP_TTS:-}" = 1 ] && exit 0
 
 # Listening check (D29 #9): the ja names arm through tts on GPU 0. The worker environment is
 # the main checkout's (.venvs/indextts2; workers/ is the same on this branch).
