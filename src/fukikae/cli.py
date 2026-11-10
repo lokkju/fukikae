@@ -216,6 +216,7 @@ def run(
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(1) from e
         failed = False
+        bug: BaseException | None = None
         for ep in eps:
             res = results.get(ep.id)
             if res is None:
@@ -226,9 +227,13 @@ def run(
                 typer.echo(f"{ep.id}: ran {ran}")
             if res.error is not None:
                 failed = True
-                if not isinstance(res.error, user_errors()):
-                    raise res.error
-                typer.echo(f"error: {ep.id}: {res.error}", err=True)
+                if isinstance(res.error, user_errors()):
+                    typer.echo(f"error: {ep.id}: {res.error}", err=True)
+                else:  # a bug: every episode is reported first, then its traceback
+                    typer.echo(f"error: {ep.id}: {type(res.error).__name__}: {res.error}", err=True)
+                    bug = bug or res.error
+        if bug is not None:
+            raise bug
         if failed:
             raise typer.Exit(1)
         return
