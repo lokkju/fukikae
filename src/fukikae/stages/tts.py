@@ -69,6 +69,7 @@ import hashlib
 import importlib
 import json
 import logging
+import math
 import os
 import shutil
 import time
@@ -715,6 +716,18 @@ class SpeechRates:
 
 # An estimated rate is kept unless its render misses the slot by more than this share.
 RATE_MISS = 0.10
+# Rate factors move in steps of this (B4): the estimate's median shifts a little whenever one
+# cue changes, and an unquantized factor would change every later cue's key with it.
+RATE_STEP = 0.05
+
+
+def quantize_factor(factor: float, speedup: float) -> float:
+    """``factor`` rounded up to the next ``RATE_STEP`` (so the line still fits), at most
+    ``speedup``; 1.0 stays 1.0."""
+    if factor <= 1.0:
+        return 1.0
+    steps = math.ceil(round(factor / RATE_STEP, 6))
+    return round(min(steps * RATE_STEP, speedup), 4)
 
 
 def render_for_slot(
@@ -740,7 +753,9 @@ def render_for_slot(
         return g.key, g.seconds, g.seconds, 1.0, g.calls, g
     rates = rates if rates is not None else SpeechRates()
     estimate = rates.seconds(job)
-    first = round(min(estimate / job.slot, speedup), 4) if estimate > job.slot else 1.0
+    first = (
+        quantize_factor(min(estimate / job.slot, speedup), speedup) if estimate > job.slot else 1.0
+    )
     if first > 1.0:
         rates.estimated += 1
     g = render_guarded(job, lazy, cache, store, ref_dir=ref_dir, factor=first)
@@ -756,7 +771,7 @@ def render_for_slot(
         factor = min(needed, speedup)
     elif seconds < job.slot * (1 - RATE_MISS):
         factor = max(1.0, needed)
-    factor = round(factor, 4)
+    factor = quantize_factor(factor, speedup)
     if factor == first:
         return g.key, seconds, seconds, first, calls, g
     if first > 1.0:

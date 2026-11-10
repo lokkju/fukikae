@@ -976,12 +976,60 @@ class _Renderer:
 
     def __init__(self) -> None:
         self.synths: dict[tuple[str, str], Any] = {}
+        self.plans: dict[Path, dict[str, Any]] = {}
+
+    def _stage_render(self, job: RenderJob, work: Path, cache: Path) -> Rendered | None:
+        """The tts stage's own render of this cue (B4), when its plan in ``work`` holds the
+        same card and a key derived from this job's render key (at the card's rate, a fitted
+        rate, or a guard retry) and that wav is still in the cache."""
+        from fukikae.artifacts import read_json
+        from fukikae.models import TtsPlan
+        from fukikae.stages.tts import fitted_key, retry_key
+
+        if work not in self.plans:
+            path = work / "07-tts" / "plan.json"
+            try:
+                self.plans[work] = (
+                    {c.cue_id: c for c in read_json(path, TtsPlan).cues} if path.exists() else {}
+                )
+            except (OSError, ValueError):
+                self.plans[work] = {}
+        pc = self.plans[work].get(job.cue.id)
+        if pc is None or pc.card_id != job.card_id or pc.key is None or pc.seconds is None:
+            return None
+        firsts = {job.key, fitted_key(job.key, pc.rate_factor)}
+        allowed = set(firsts)
+        if pc.retry_seed is not None:
+            retries = {retry_key(k, pc.retry_seed) for k in firsts}
+            allowed |= retries | {fitted_key(k, pc.rate_factor) for k in retries}
+        wav = cache / f"{pc.key}.wav"
+        if pc.key not in allowed or not wav.exists():
+            return None
+        from fukikae.eval.tts import _voice_name
+
+        return Rendered(
+            wav, pc.seconds, pc.rate_factor, pc.key, job.card_id, _voice_name(job.card),
+            pc.retry_seed, pc.suspect, 0,
+        )  # fmt: skip
 
     def render(
-        self, cand: Candidate, job: RenderJob, cfg: Config, ws: Workspace, store: CardStore
+        self,
+        cand: Candidate,
+        job: RenderJob,
+        cfg: Config,
+        ws: Workspace,
+        store: CardStore,
+        *,
+        work: Path | None = None,
     ) -> Rendered:
+        """The cue rendered for its slot; with ``work`` (the episode's work dir), the tts
+        stage's own render is reused when it is the same render (B4)."""
         from fukikae.stages.tts import LazySynth, max_speedup, render_for_slot, synth_device
 
+        if work is not None:
+            reused = self._stage_render(job, work, ws.root / ".fukikae" / "tts-cache")
+            if reused is not None:
+                return reused
         backend = job.card.voice.backend
         k = (cand.name, backend)
         if k not in self.synths:
@@ -1114,7 +1162,7 @@ def gather_set(
                     c, cards[cand.name][cid], ccfg, store, who=who(cid), checked=checked[cid],
                     vocals=vocals, events=events,
                 )  # fmt: skip
-                r = renderer.render(cand, job, ccfg, ws, store)
+                r = renderer.render(cand, job, ccfg, ws, store, work=ws.work_dir(_ep))
                 made += r.renders_made
                 rendered[(cand.name, c.id)] = r
             renderer.close()
@@ -1305,7 +1353,7 @@ def _scene(
             jobs.sort(key=lambda j: (j.card.voice.backend, j.cue.start))
             done: dict[str, Rendered] = {}
             for job in jobs:
-                done[job.cue.id] = renderer.render(cand, job, ccfg, ws, store)
+                done[job.cue.id] = renderer.render(cand, job, ccfg, ws, store, work=work)
             renderer.close()
             fs = fit_settings(ccfg)
             cdir = sdir / cand.name.replace(":", "-")

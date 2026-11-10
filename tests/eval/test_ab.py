@@ -304,3 +304,38 @@ def test_cli_reports_a_bad_spec_and_a_used_folder(tmp_path):
     )
     r = CliRunner().invoke(app, ["eval", "tts-ab", str(spec), "-o", str(used)])
     assert r.exit_code == 1 and "not empty" in r.output
+
+
+def test_tts_ab_reuses_the_stage_fitted_render(tmp_path):
+    """B4: a cue the tts stage already rendered for its slot (its plan's key derives from
+    this job's render key) is reused from the cache, not rendered again at another rate."""
+    from types import SimpleNamespace
+
+    from fukikae.artifacts import write_json
+    from fukikae.cards.card import parse_card
+    from fukikae.eval.ab import Candidate, _Renderer
+    from fukikae.models import TtsPlan, TtsPlanCue
+    from fukikae.stages.tts import fitted_key
+    from fukikae.workspace import Workspace
+    from tests.cards.test_card import STOCK_CARD
+
+    ws = Workspace(tmp_path / "ws")
+    work = ws.work_dir("E1")
+    card = parse_card(STOCK_CARD)
+    job = SimpleNamespace(
+        cue=SimpleNamespace(id="c0001"), card_id="a" * 16, card=card, key="k" * 16,
+        backend_cfg=None, cls=None,
+    )  # fmt: skip
+    final = fitted_key(job.key, 1.15)
+    cache = ws.root / ".fukikae" / "tts-cache"
+    cache.mkdir(parents=True)
+    (cache / f"{final}.wav").write_bytes(b"RIFF")
+    plan = TtsPlanCue(
+        cue_id="c0001", character_id=1, extra=None, card_id=job.card_id, key=final,
+        seconds=1.9, slot=2.0, rate_factor=1.15,
+    )  # fmt: skip
+    (work / "07-tts").mkdir(parents=True)
+    write_json(work / "07-tts" / "plan.json", TtsPlan(episode="E1", cues=[plan]))
+    r = _Renderer().render(Candidate("kokoro"), job, None, ws, None, work=work)  # type: ignore[arg-type]
+    assert r.renders_made == 0 and r.key == final and r.rate_factor == 1.15
+    assert r.path == cache / f"{final}.wav" and r.seconds == 1.9
