@@ -1110,3 +1110,77 @@ def test_without_names_assignments_match_the_pre_names_code_byte_for_byte(tmp_pa
     assert set(got) == set(golden)
     for step, text in golden.items():
         assert got[step] == text, step
+
+
+# --- Task 7 review: rowless remainders, the lock hint, ambiguous keys on fresh runs --------
+
+
+def _rowless_remainder(tmp_path, parent_rows):
+    """Natsu (operator-named, NATSU) and an unnamed actor at WENDY exist; SPEAKER_08's named
+    natsu speech carries `parent_rows`, and its remainder has no embedding rows."""
+    ep = make_ep(tmp_path)
+    with registry(ep) as reg:
+        _, natsu = reg.create_actor_with_character(NATSU)
+        reg.rename_character(natsu, "Natsu")
+        _, other = reg.create_actor_with_character(WENDY)
+    write_diarize(ep, {"SPEAKER_08": (parent_rows, 40.0)}, [(0, 40, "SPEAKER_08")])
+    write_names(
+        ep,
+        {
+            "SPEAKER_08~natsu": ("SPEAKER_08", "natsu", "named", parent_rows, [(0, 30)]),
+            "SPEAKER_08": ("SPEAKER_08", None, "remainder", [], [(30, 40)]),
+        },
+    )
+    return ep, natsu, other
+
+
+def test_a_rowless_remainder_takes_its_parent_clusters_match(tmp_path):
+    ep, natsu, other = _rowless_remainder(tmp_path, [WENDY] * 3)
+    CharactersStage().run(ep, NAMES_CFG)
+    by = by_cluster(ep)
+    assert by["SPEAKER_08~natsu"].character_id == natsu
+    rem = by["SPEAKER_08"]
+    assert (rem.status, rem.character_id, rem.source) == ("matched", other, "voice")
+    assert rem.score is not None and rem.score > 0.99
+
+
+def test_a_rowless_remainder_is_extra_when_its_parent_matches_nobody(tmp_path):
+    ep, _, _ = _rowless_remainder(tmp_path, [unit([0, 0, 1])] * 3)
+    CharactersStage().run(ep, NAMES_CFG)
+    rem = by_cluster(ep)["SPEAKER_08"]
+    assert (rem.status, rem.character_id) == ("extra", None)
+
+
+def test_locked_character_report_says_how_to_unlock_the_character(tmp_path, caplog):
+    import logging
+
+    ep, cid = pinned_merged(tmp_path)
+    with registry(ep) as reg:
+        reg.lock_character(cid, True)
+    write_names(ep, merged_cluster())
+    with caplog.at_level(logging.INFO, logger="fukikae.stages.characters"):
+        CharactersStage().run(ep, NAMES_CFG)
+    assert f"registry lock <ws> {cid} --character --unlock" in caplog.text
+
+
+def test_fresh_run_keeps_the_candidates_of_an_ambiguous_key(tmp_path):
+    """A first-run actor whose character is one of two subtitles-named Lucys: a fresh run
+    (assignments deleted) must not prune it before the ambiguous key's acoustic path."""
+    ep = make_ep(tmp_path)
+    write_diarize(ep, {"SPEAKER_01": ([HAPPY] * 2, 30.0)}, [(0, 30, "SPEAKER_01")])
+    CharactersStage().run(ep, NAMES_CFG)
+    (first,) = assignments(ep).clusters
+    with registry(ep) as reg:
+        other = reg.create_actor_with_character(NATSU)[1]
+        with reg._tx() as con:
+            con.execute(
+                "UPDATE characters SET name = 'Lucy', name_by = 'subs' WHERE id IN (?, ?)",
+                (first.character_id, other),
+            )
+        with pytest.raises(ValueError):
+            reg.character_for_key("lucy")
+    (ep.work / "05-characters" / "assignments.json").unlink()
+    write_names(ep, {"SPEAKER_01~lucy": ("SPEAKER_01", "lucy", "named", [HAPPY] * 2, [(0, 30)])})
+    CharactersStage().run(ep, NAMES_CFG)
+    got = by_cluster(ep)["SPEAKER_01~lucy"]
+    assert (got.status, got.character_id, got.source) == ("matched", first.character_id, "voice")

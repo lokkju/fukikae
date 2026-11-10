@@ -530,6 +530,20 @@ class Registry:
                 return hits[0]
         return None
 
+    def characters_answering(self, key: str) -> list[Character]:
+        """Every character a name key could mean at any rank (its alias holder and every
+        character whose name keys to it), by id: what an ambiguous key leaves open."""
+        key = _required_key(key)
+        row = self._con.execute(
+            "SELECT character_id FROM character_aliases WHERE alias = ?", (key,)
+        ).fetchone()
+        return [
+            c
+            for c in self.characters()
+            if (row is not None and c.id == row[0])
+            or (c.name is not None and alias_key(c.name) == key)
+        ]
+
     def _name_holder(
         self, con: sqlite3.Connection, key: str, besides: int, over_subs: bool = False
     ) -> Character | None:
@@ -608,13 +622,16 @@ class Registry:
         replace: bool = False,
     ) -> Alias:
         """Make ``character_id`` answer to ``key`` (keyed with ``alias_key``; ValueError for a
-        name that keys nobody). Never a key that is another
-        character's name. A ``subs`` alias never moves an existing alias; an ``operator``
+        name that keys nobody). Never a key that is another character's name, except that an
+        ``operator`` alias may take a key that is only a name subtitles set (it outranks one,
+        D29 #2). A ``subs`` alias never moves an existing alias; an ``operator``
         alias moves a ``subs`` one and another operator's only with ``replace``
         (AliasConflictError otherwise). The character's own alias is kept, raised to
         ``operator`` when an operator sets it, never lowered."""
         with self._tx() as con:
-            return self._add_alias(con, character_id, key, by, language, replace)
+            return self._add_alias(
+                con, character_id, key, by, language, replace, over_subs_name=by == "operator"
+            )
 
     def remove_alias(self, key: str) -> None:
         """Delete an alias, keyed with ``alias_key`` (KeyError when no character answers to it

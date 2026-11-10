@@ -1,7 +1,12 @@
-"""A names-less characters scenario whose assignments the pre-names code (debd501) wrote to
-`characters_golden.json` (regenerate only with that commit's code): the stage must reproduce
-them byte for byte without names (Review Focus 4). Uses only API both versions share."""
+"""A names-less characters scenario whose assignments and registry the pre-names code
+(debd501) wrote to `characters_golden.json` (regenerate only with that commit's code): the
+stage must reproduce them byte for byte without names (Review Focus 4). Each step records the
+assignments (``<step>``) and a dump of the registry after it (``<step>/registry``); the last
+steps run with a locked actor and an operator-named character. Uses only API (and registry
+columns) both versions share."""
 
+import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +48,50 @@ def _episode(root: Path, eid: str, rng: np.random.Generator, spec: list[tuple]) 
     return ep
 
 
+def registry_dump(root: Path) -> str:
+    """The registry's actors, characters, aliases and exemplars as JSON text (centroids and
+    rows rounded to 6 places), read with sqlite so either version's store reads the same."""
+    con = sqlite3.connect(Workspace(root).registry_path)
+    try:
+
+        def vec(blob: bytes | None) -> list[float] | None:
+            if blob is None:
+                return None
+            return [round(float(x), 6) for x in np.frombuffer(blob, dtype=np.float32)]
+
+        dump = {
+            "actors": [
+                [r[0], r[1], r[2], vec(r[3]), r[4]]
+                for r in con.execute(
+                    "SELECT id, name, external_id, centroid, locked FROM actors ORDER BY id"
+                )
+            ],
+            "characters": [
+                list(r)
+                for r in con.execute(
+                    "SELECT id, actor_id, name, external_id, locked, name_by FROM characters"
+                    " ORDER BY id"
+                )
+            ],
+            "aliases": [
+                list(r)
+                for r in con.execute(
+                    "SELECT alias, character_id, by, language FROM character_aliases ORDER BY alias"
+                )
+            ],
+            "exemplars": [
+                list(r)
+                for r in con.execute(
+                    "SELECT actor_id, episode, cluster, COUNT(*) FROM exemplars"
+                    " GROUP BY actor_id, episode, cluster ORDER BY actor_id, episode, cluster"
+                )
+            ],
+        }
+    finally:
+        con.close()
+    return json.dumps(dump, indent=1)
+
+
 def scenario(root: Path) -> dict[str, str]:
     """Run the stage through first runs, pinned reruns, a rematch and the lda matcher; return
     each step's assignments.json text."""
@@ -76,6 +125,7 @@ def scenario(root: Path) -> dict[str, str]:
     def step(name: str, ep: Episode, c: Config, rematch: bool = False) -> None:
         CharactersStage(rematch=rematch).run(ep, c)
         out[name] = (ep.work / "05-characters" / "assignments.json").read_text()
+        out[f"{name}/registry"] = registry_dump(root)
 
     step("e1-first", e1, cfg)
     step("e2-first", e2, cfg)
@@ -85,4 +135,22 @@ def scenario(root: Path) -> dict[str, str]:
         reg.save_projection("default", "lda", np.eye(DIM)[:, :2], np.zeros(DIM))
     step("e2-lda-rematch", e2, lda, rematch=True)
     step("e2-lda-rerun", e2, lda)
+    # operator state without names: a locked actor and an operator-named character
+    with Registry(Workspace(root).registry_path) as reg:
+        first = {a.cluster: a for a in _assignments(e1).clusters}
+        locked, named = first["SPEAKER_00"].actor_id, first["SPEAKER_01"].character_id
+        assert locked is not None and named is not None
+        reg.lock_actor(locked, True)
+        reg.rename_character(named, "Natsu")
+    step("e1-locked-rematch", e1, cfg, rematch=True)
+    step("e2-locked-rematch", e2, cfg, rematch=True)
+    step("e2-locked-rerun", e2, cfg)
+    step("e2-locked-lda-rematch", e2, lda, rematch=True)
     return out
+
+
+def _assignments(ep: Episode) -> Any:
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments
+
+    return read_json(ep.work / "05-characters" / "assignments.json", Assignments)
