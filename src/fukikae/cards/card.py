@@ -99,6 +99,8 @@ STYLE_TEXT_CAP = 300  # register, address, tics and any other free-text key
 STYLE_CAPS = {"notes": 1000}
 CATCHPHRASES_CAP = 20
 CATCHPHRASE_SIDE_CAP = 80
+# [style] key names reach the translator's prompt as labels: lowercase snake case, short.
+_STYLE_KEY = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 # Per-card clone modes (ruling CD21): the field, its values, and its frozen default (CD1). The
 # worker impls take the same names; the stage-wide ``[tts.<backend>] mode`` is only the
@@ -342,13 +344,11 @@ def _parse_voice(raw: Any) -> Voice:
     where = "[voice]"
     t = _table(raw, where)
     _check_keys(t, _VOICE_KEYS, where)
-    for key in _VOICE_REQUIRED:
-        _str(_require(t, key, where), key, where)
-    source = t["source"]
+    kw: dict[str, Any] = {k: _str(_require(t, k, where), k, where) for k in _VOICE_REQUIRED}
+    source = kw["source"]
     if source not in CARD_SOURCES:
         raise CardError(f"unknown [voice] source {source!r}; use one of {', '.join(CARD_SOURCES)}")
 
-    kw: dict[str, Any] = {k: t[k] for k in _VOICE_REQUIRED}
     if "seed" in t:
         kw["seed"] = _int(t["seed"], "seed", where)
         if kw["seed"] < 0:
@@ -417,6 +417,11 @@ def _parse_style(raw: Any, strip_tokens: bool = True) -> dict[str, Any]:
     style: dict[str, Any] = {}
     clean = _for_translator if strip_tokens else (lambda s: s)
     for key, value in t.items():
+        if not _STYLE_KEY.fullmatch(key):
+            raise CardError(
+                f"[style] key {key[:40]!r} must be lowercase letters, digits and underscores, "
+                "starting with a letter, at most 32 characters (such as register or tics)"
+            )
         if key == "catchphrases":
             if not isinstance(value, list):
                 raise CardError("[style] catchphrases must be an array of { source, target }")
