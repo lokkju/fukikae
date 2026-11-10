@@ -451,3 +451,67 @@ def test_hidden_lines_match_between_the_names_and_off_arms(tmp_path: Path, monke
     other = names.model_copy(update={"hidden": names.hidden[1:]})
     with pytest.raises(ValueError, match="other cues"):
         _hidden_spans(cfg, "S01E01", track, other)
+
+
+# -- Task 10 fixes review follow-ups -------------------------------------------------------
+
+
+def test_a_hidden_line_of_another_key_hides_no_cue_in_the_tally(tmp_path: Path):
+    """Wendy's 40-45 line is hidden. Natsu's 42-52 cue overlaps it by more than half of the
+    shorter, as `cues._hidden` measures, but carries another key: the subtitle path names it
+    from its own Name, and the hidden split must not count it either. (Wendy's own cue now
+    has two ground-truth names, so it is scored nowhere.)"""
+    root, gt = _ws(tmp_path)
+    work = Workspace(root).work_dir("S01E12")
+    n = read_json(names_path(work), NamesResult)
+    write_json(names_path(work), n.model_copy(update={"hidden": [4]}))
+    _gt(gt, "S01E12", [*TUNE, (42.0, 52.0, "S0~natsu", 0.02, "NATSU")])
+    s = names_eval(root, ["S01E12"], gt_file=gt)
+    assert s.hidden is None and s.tune.hidden_accuracy is None
+    assert s.tune.cues == 5  # natsu x3 and the 42-52 cue; wendy's 30-35
+
+
+def test_cues_of_an_episode_without_names_are_attributed_with_the_alignment_shift(
+    tmp_path: Path,
+):
+    """A names-off episode whose ground-truth track runs 8 s late: the cue of Natsu's 20-25
+    line lands on Wendy's 30-35 turn unless it is moved back by the alignment shift."""
+    from fukikae.config import load_config
+    from fukikae.eval.names import _Episode, attributed_cues
+    from fukikae.models import Assignments
+
+    root, gt = _ws(tmp_path, names_on_tune=False)
+    work = Workspace(root).work_dir("S01E12")
+    path = work / "05-characters" / "assignments.json"
+    asg = read_json(path, Assignments)
+    split = [
+        t.model_copy(update={"speaker": "W" if t.start >= 30 else "N"}) for t in asg.turns or []
+    ]
+    clusters = [
+        asg.clusters[0].model_copy(update={"cluster": "N", "character_id": 1, "actor_id": 1}),
+        asg.clusters[0].model_copy(update={"cluster": "W", "character_id": 2, "actor_id": 2}),
+    ]
+    asg = asg.model_copy(update={"turns": split, "clusters": clusters})
+    write_json(path, asg)
+    _gt(gt, "S01E12", [(a + 8.0, b + 8.0, c, n, g) for a, b, c, n, g in TUNE])
+    cfg = load_config(root, user_config=None)
+    ws = Workspace(root)
+
+    def natsu_cue(shift: float):
+        e = _Episode("S01E12", work, asg, [], gt / "S01E12.ass", None, [], shift=shift)
+        cues = attributed_cues(ws, cfg, e)
+        return next(c.character_id for c in cues if c.start == 28.0)
+
+    assert natsu_cue(0.0) == 2
+    assert natsu_cue(8.0) == 1
+
+
+def test_the_ledger_row_detail_records_the_hide_settings(tmp_path: Path):
+    from fukikae.eval.names import names_rows
+
+    root, gt = _ws(tmp_path)
+    toml = root / "fukikae.toml"
+    toml.write_text(toml.read_text() + "hide_fraction = 0.2\nhide_seed = 3\n")
+    run = names_eval(root, ["S01E12"], gt_file=gt)
+    rows = names_rows(run, Workspace(root).config, "ft", "t")
+    assert all((r.detail["hide_fraction"], r.detail["hide_seed"]) == (0.2, 3) for r in rows)
