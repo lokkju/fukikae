@@ -73,6 +73,8 @@ TITLE_CAP = 100
 NAME_CAP = 200
 TEXT_CAPS = {"series_title": 300, "author": 200, "notes": 2000}
 VECTOR_MAX_DIM = 8192
+# A fingerprint threshold under this matches almost any voice; import warns about it (A11).
+LOW_THRESHOLD = 0.5
 
 
 class PackError(Exception):
@@ -913,6 +915,20 @@ def read_pack(path: Path, *, limits: PackLimits | None = None) -> Pack:
 # -- series check ---------------------------------------------------------------------------
 
 
+def low_thresholds(pack: Pack, ids: list[str] | None = None) -> list[str]:
+    """A warning for each card (of ``ids``, default all) whose fingerprint threshold is under
+    ``LOW_THRESHOLD``: verify against it reports nearly any render as a match."""
+    out = []
+    for cid in sorted(pack.cards if ids is None else ids):
+        fp = pack.cards[cid].voice.fingerprint
+        if fp is not None and fp.threshold < LOW_THRESHOLD:
+            out.append(
+                f"card {cid}'s fingerprint threshold {fp.threshold:g} is below "
+                f"{LOW_THRESHOLD:g}; verify against it reports nearly any voice as a match"
+            )
+    return out
+
+
 def series_check(pack: Pack, series: SeriesInfo) -> tuple[bool, str]:
     """(passes, why). Refuses when an id both sides have differs; with no id on both sides,
     matches normalized titles (passing with a warning that it was by title)."""
@@ -1103,6 +1119,7 @@ __all__ = [
     "apply_import",
     "copy_cards",
     "export_pack",
+    "low_thresholds",
     "normalize_name",
     "plan_import",
     "printable",
