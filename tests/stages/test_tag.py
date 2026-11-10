@@ -4,7 +4,7 @@ from typing import Any, ClassVar
 import pytest
 
 from fukikae.artifacts import read_json, write_json
-from fukikae.config import Config, load_config
+from fukikae.config import Config, ConfigError, load_config
 from fukikae.models import Diarization, Tags, TagSpan, Turn
 from fukikae.stages import tag
 from fukikae.stages.tag import TagStage, tag_enabled
@@ -293,3 +293,27 @@ def test_tag_rejects_an_unknown_device(ep):
 
     with pytest.raises(ConfigError, match="device"):
         TagStage().run(ep, Config(raw={"tag": {**EMO_CFG.raw["tag"], "device": "tpu"}}))
+
+
+def _tag(**table: Any) -> Config:
+    return Config(raw={"tag": {"backend": "sensevoice", **table}})
+
+
+def test_a_typo_for_enabled_is_an_error_not_a_silent_off():
+    """C9: `[tag] enable = true` must not quietly leave tagging off."""
+    with pytest.raises(ConfigError, match=r"enable.*enabled"):
+        tag_enabled(_tag(enable=True))
+
+
+def test_unknown_tag_backend_options_are_errors():
+    with pytest.raises(ConfigError, match="lanugage"):
+        tag_enabled(_tag(enabled=True, lanugage="ja"))
+    assert tag_enabled(_tag(enabled=True, language="ja", device="cpu")) is True
+    with pytest.raises(ConfigError, match="modle"):
+        tag_enabled(_tag(enabled=True, emotion_backend="emotion2vec", emotion={"modle": "x"}))
+    assert tag_enabled(_tag(enabled=True, emotion_backend="emotion2vec", emotion={"device": "cpu"}))
+
+
+def test_enabled_must_be_a_boolean():
+    with pytest.raises(ConfigError, match="enabled"):
+        tag_enabled(_tag(enabled="yes"))
