@@ -429,3 +429,90 @@ def test_refined_npz_is_byte_identical_on_rewrite(tmp_path, monkeypatch):
     monkeypatch.setattr(time, "time", lambda: real() + 7200)
     refine_clusters(npz, pieces, refined_turns(pieces), tmp_path / "b.npz")
     assert (tmp_path / "a.npz").read_bytes() == (tmp_path / "b.npz").read_bytes()
+
+
+# -- cut edge cases pinned from the Task 4 review's probe (/tmp/rev-t4/cutprobe.py) ----------
+
+
+def _spans(turns: list[Turn], lines: list[NamedLine]) -> list[tuple[float, float, str | None]]:
+    """The pieces as (start, end, key), after checking the invariants every cut keeps: each
+    turn is covered end to end with no gap or overlap, no piece is empty, and a keyed piece
+    overlaps a line of its own key."""
+    pieces, _ = attribute(turns, lines)
+    for i, t in enumerate(turns):
+        ps = [p for p in pieces if p.turn == i]
+        assert ps[0].start == pytest.approx(t.start) and ps[-1].end == pytest.approx(t.end)
+        assert all(a.end == pytest.approx(b.start) for a, b in zip(ps, ps[1:], strict=False))
+        assert all(p.end > p.start for p in ps)
+        for p in ps:
+            if p.key is not None:
+                assert any(
+                    ln.key == p.key
+                    and ln.cls is not NameClass.MULTI
+                    and min(ln.end, p.end) > max(ln.start, p.start)
+                    for ln in lines
+                )
+    return [(round(p.start, 3), round(p.end, 3), p.key) for p in pieces]
+
+
+def _multi(start: float, end: float) -> NamedLine:
+    return line(start, end, None, cls=NameClass.MULTI)
+
+
+def test_cut_with_a_gap_at_the_start_gives_it_to_the_first_side():
+    lines = [line(3, 6, "a"), line(6.5, 10, "b")]
+    assert _spans([turn(0, 10, "S")], lines) == [(0, 6.25, "a"), (6.25, 10, "b")]
+
+
+def test_gap_at_the_end_under_turn_share_names_nothing():
+    lines = [line(0, 3, "a"), line(3.5, 6, "b")]  # 5.5 s of 10: under 0.6
+    assert _spans([turn(0, 10, "S")], lines) == [(0, 10, None)]
+
+
+def test_three_way_overlap_keeps_only_the_uncontested_ends():
+    lines = [line(0, 6, "a"), line(2, 8, "b"), line(4, 10, "c")]
+    assert _spans([turn(0, 10, "S")], lines) == [(0, 2, "a"), (2, 8, None), (8, 10, "c")]
+
+
+def test_three_way_stagger_unnames_each_overlap():
+    lines = [line(0, 4, "a"), line(3, 7, "b"), line(6, 10, "c")]
+    assert _spans([turn(0, 10, "S")], lines) == [
+        (0, 3, "a"),
+        (3, 4, None),
+        (4, 6, "b"),
+        (6, 7, None),
+        (7, 10, "c"),
+    ]
+
+
+def test_whole_turn_span_with_nested_lines_unnames_the_nested_stretches():
+    lines = [
+        line(0, 20, "a"),
+        line(2, 3, "b"),
+        line(5, 7, "c"),
+        line(9, 10, "b"),
+        line(12, 15, "d"),
+        line(17, 18, "c"),
+    ]
+    assert _spans([turn(0, 20, "S")], lines) == [
+        (0, 2, "a"),
+        (2, 3, None),
+        (3, 5, "a"),
+        (5, 7, None),
+        (7, 9, "a"),
+        (9, 10, None),
+        (10, 12, "a"),
+        (12, 15, None),
+        (15, 17, "a"),
+        (17, 18, None),
+        (18, 20, "a"),
+    ]
+
+
+def test_all_multi_lines_name_nothing():
+    assert _spans([turn(0, 10, "S")], [_multi(0, 5), _multi(5, 10)]) == [(0, 10, None)]
+
+
+def test_multi_line_over_two_keys_names_nothing():
+    lines = [_multi(0, 10), line(0, 5, "a"), line(5, 10, "b")]
+    assert _spans([turn(0, 10, "S")], lines) == [(0, 10, None)]

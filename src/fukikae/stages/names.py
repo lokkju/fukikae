@@ -20,10 +20,12 @@ Writes under ``04c-names/``:
     returns ``04-diarize``'s pair.
 
 Evaluation hooks (``[names]``): an episode in ``holdout_episodes`` reads no subtitles at all
-(verdict ``holdout``); ``hide_fraction`` withholds that share of each key's lines (keys with at
-least ``MIN_HIDE_LINES``), drawn with ``random.Random(f"{hide_seed}:{episode}:{key}")``. Hidden
-lines stay in ``names.json`` with their keys, but name, cut, label, exclude and suggest
-nothing; consumers read lines through ``NamesResult.visible_lines()``.
+(verdict ``holdout``, and no track copy stays under ``tracks/``); ``hide_fraction`` withholds
+that share of each key's lines (keys with at least ``MIN_HIDE_LINES``), drawn per candidate
+before detection with ``random.Random(f"{hide_seed}:{episode}:{key}")``. Hidden lines stay in
+``names.json`` with their keys, but count as unnamed in detection and the offset, and name,
+cut, label, exclude and suggest nothing; consumers read lines through
+``NamesResult.visible_lines()``. ``names.inputs.check_held_out`` is the eval's guard.
 """
 
 from __future__ import annotations
@@ -207,7 +209,9 @@ class NamesStage:
                 out.append((c, None))
                 continue
             st = src.stat()
-            stamp = [str(src), st.st_size, st.st_mtime_ns, *extra]
+            # inode and ctime too: an edit that keeps the size and resets the mtime still
+            # changes the ctime, and a replaced file has a new inode
+            stamp = [str(src), st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns, *extra]
             dest = tracks / name
             if index.get(name) != stamp or not dest.is_file():
                 tracks.mkdir(parents=True, exist_ok=True)
@@ -268,9 +272,15 @@ class NamesStage:
         }
         if s.hide_fraction > 0:
             key["hide_seed"] = s.hide_seed
+        try:
+            sources = self._sources(ep, cfg)
+        except (ConfigError, media.MediaError, OSError) as e:
+            # Never raise outside run(): the error is part of the key, and run() raises it.
+            key["candidates_error"] = f"{type(e).__name__}: {e}"
+            return key
         key["candidates"] = [
             {**_describe(c), "file": None if p is None or c.file is None else p.name}
-            for c, p in self._sources(ep, cfg)
+            for c, p in sources
         ]
         return key
 
@@ -279,6 +289,14 @@ class NamesStage:
         out = ep.work / NAMES_DIR
         out.mkdir(parents=True, exist_ok=True)
         turns_out, clusters_out = out / "turns.json", out / "clusters.npz"
+        names_out = out / "names.json"
+        # names.json goes last and says whether the pair beside it is the identity input, so a
+        # run that fails part way must leave neither an old names.json nor a half-new pair.
+        for p in (names_out, turns_out, clusters_out):
+            p.unlink(missing_ok=True)
+        if not self._reads_subtitles(ep, cfg):
+            # held out or off: no copy of a track that could carry names stays behind
+            shutil.rmtree(out / TRACKS_DIR, ignore_errors=True)
         diar_dir = ep.work / DIARIZE_DIR
         diar = read_json(diar_dir / "turns.json", Diarization)
         empty: dict[str, Any] = {
@@ -304,11 +322,16 @@ class NamesStage:
                 **empty, verdict="holdout", reason=f"{ep.id} is in [names] holdout_episodes"
             )
         else:
-            result = self._attribute(ep, cfg, diar, empty, turns_out, clusters_out)
+            try:
+                result = self._attribute(ep, cfg, diar, empty, turns_out, clusters_out)
+            except BaseException:
+                turns_out.unlink(missing_ok=True)
+                clusters_out.unlink(missing_ok=True)
+                raise
         if not result.used:
             turns_out.unlink(missing_ok=True)
             clusters_out.unlink(missing_ok=True)
-        write_json(out / "names.json", result)
+        write_json(names_out, result)
         log.info(
             "names %s: %s%s",
             ep.id,
@@ -328,14 +351,25 @@ class NamesStage:
         s = cfg.names
         tried: list[dict[str, Any]] = []
         chosen: tuple[dict[str, Any], detect.Verdict, list[NamedLine]] | None = None
+
+        def hide(lines: list[NamedLine]) -> list[int]:
+            return hide_lines(lines, s.hide_fraction, s.hide_seed, ep.id)
+
         for choice, path in self._sources(ep, cfg):
             desc = _describe(choice)
             why = detect.no_name_field(choice)
             if why is not None or path is None:
                 tried.append({**desc, "verdict": "none", "reason": why})
                 continue
+            # Hidden lines are drawn from each candidate's own lines before detection and count
+            # as unnamed there, so they never decide the verdict or the offset (spec step 1).
             v, lines = detect.assess_path(
-                path, diar.turns, min_coverage=s.min_coverage, use=s.use, align=s.align
+                path,
+                diar.turns,
+                min_coverage=s.min_coverage,
+                use=s.use,
+                align=s.align,
+                hide=hide,
             )
             tried.append({**desc, "verdict": v.level, "reason": v.reason})
             if v.level != "none":
@@ -352,7 +386,7 @@ class NamesStage:
                 )
             return NamesResult(**{**empty, "tried": tried}, verdict="none", reason=reason)
         desc, v, lines = chosen
-        hidden = hide_lines(lines, s.hide_fraction, s.hide_seed, ep.id)
+        hidden = hide(lines)  # the same draw: the offset moves lines, never their ids or keys
         hidden_set = set(hidden)
         visible = [ln for ln in lines if ln.id not in hidden_set]
         pieces, unvoiced = attribute(diar.turns, lines, turn_share=s.turn_share, hidden=hidden)

@@ -233,6 +233,7 @@ def run_identity(
     from fukikae.eval.identity.segments import Segment as Seg
     from fukikae.eval.identity.segments import segments as make_segments
     from fukikae.eval.identity.simulate import simulate
+    from fukikae.names.inputs import check_held_out
     from fukikae.registry.matchers import MATCHERS, make_matcher
     from fukikae.workspace import Workspace, episode_id
 
@@ -269,6 +270,8 @@ def run_identity(
             raise ValueError(f"--matcher-option {reserved}: use --{reserved.replace('_', '-')}")
 
     ws = Workspace(root)
+    if hold_id is not None:
+        check_held_out(ws.work_dir(hold_id), hold_id)
     cfg = ws.config
     emb_cfg = embedder_config(cfg, embedder, embedder_options or {})
     seg_emb_cfg = (

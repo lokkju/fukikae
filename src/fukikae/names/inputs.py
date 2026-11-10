@@ -23,3 +23,28 @@ def identity_inputs(work: Path) -> tuple[Path, Path, NamesResult | None]:
     result = read_json(path, NamesResult) if path.exists() else None
     d = Path(work) / (NAMES_DIR if result is not None and result.used else DIARIZE_DIR)
     return d / "turns.json", d / "clusters.npz", result
+
+
+# What a held-out episode's names.json may say: it read no names (`holdout`), or names were
+# off for the whole run (a baseline arm). A missing file is a workspace from before the stage.
+HELD_OUT_VERDICTS = frozenset({"holdout", "off"})
+
+
+class HeldOutNamesError(ValueError):
+    """A held-out episode whose names stage read its subtitle names."""
+
+
+def check_held_out(work: Path, episode: str) -> None:
+    """Refuse to grade `episode` as held out when its names stage read names (verdict other than
+    `holdout` or `off`): the run would be graded on its own labels (Review Focus 3). Every eval
+    path that scores a held-out episode calls this first."""
+    path = names_path(work)
+    if not path.exists():
+        return
+    result = read_json(path, NamesResult)
+    if result.verdict not in HELD_OUT_VERDICTS:
+        raise HeldOutNamesError(
+            f"held-out episode {episode} read its subtitle names (names verdict "
+            f"{result.verdict!r}); add it to [names] holdout_episodes and rerun it from names, "
+            "or score it as a tuning episode"
+        )

@@ -7,7 +7,7 @@ that holds one value, the style names or a track that doesn't line up with the s
 passes under `use = "auto"` (Review Focus 2)."""
 
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -146,16 +146,20 @@ def assess(
     min_coverage: float = MIN_COVERAGE,
     use: Use = "auto",
     align: bool = True,
+    hidden: Collection[int] = (),
 ) -> tuple[Verdict, list[NamedLine]]:
     """The verdict on a track's dialogue lines against the diarize speech, and the lines moved
-    back by the offset applied (all of them, named or not). `use = "auto"` needs a named share
+    back by the offset applied (all of them, named or not). `hidden` line ids count as unnamed
+    dialogue throughout: never toward the named share, dominance, styles or the offset.
+    `use = "auto"` needs a named share
     of `min_coverage`, two keys with none on more than MAX_TOP_SHARE of named lines, keys equal
     to a style name on under MAX_STYLE_SHARE of named lines, and named-line time over speech of
     MIN_SHARE at the best offset. `use = "on"` needs two keys and the alignment only (none of
     it when `align` is false). `use = "off"` reads nothing."""
     if use == "off":
         return _none('[names] use = "off"'), []
-    named = [ln for ln in lines if ln.key is not None]
+    hidden = set(hidden)
+    named = [ln for ln in lines if ln.key is not None and ln.id not in hidden]
     counts = Counter(ln.key for ln in named)
     dialogue = len(lines)
     share = len(named) / dialogue if dialogue else 0.0
@@ -216,6 +220,16 @@ def _is_ass(path: Path, text: str) -> bool:
     )
 
 
+def read_track(path: Path, rules: Sequence[str] = RULES) -> tuple[list[NamedLine], set[str]] | str:
+    """A subtitle file's dialogue lines and style names, or why it can't carry names (only
+    ASS/SSA has a Name field)."""
+    text = read_text(path)
+    if not _is_ass(path, text):
+        fmt = path.suffix.lstrip(".").casefold() or "text"
+        return f"format has no Name field ({fmt})"
+    return dialogue_lines(parse_ass_cues(text), rules), parse_ass_styles(text)
+
+
 def assess_path(
     path: Path,
     speech: list[Turn],
@@ -224,18 +238,20 @@ def assess_path(
     use: Use = "auto",
     align: bool = True,
     rules: Sequence[str] = RULES,
+    hide: Callable[[list[NamedLine]], Collection[int]] | None = None,
 ) -> tuple[Verdict, list[NamedLine]]:
     """`assess` on a subtitle file. Only ASS/SSA has a Name field; any other format is `none`
-    at once."""
+    at once. `hide`, given the file's lines, returns the ids to treat as unnamed (drawn before
+    detection, so hidden lines never count toward it)."""
     if use == "off":
         return _none('[names] use = "off"'), []
-    text = read_text(path)
-    if not _is_ass(path, text):
-        fmt = path.suffix.lstrip(".").casefold() or "text"
-        return _none(f"format has no Name field ({fmt})"), []
-    lines = dialogue_lines(parse_ass_cues(text), rules)
+    got = read_track(path, rules)
+    if isinstance(got, str):
+        return _none(got), []
+    lines, styles = got
+    hidden = hide(lines) if hide is not None else ()
     return assess(
-        lines, parse_ass_styles(text), speech, min_coverage=min_coverage, use=use, align=align
+        lines, styles, speech, min_coverage=min_coverage, use=use, align=align, hidden=hidden
     )
 
 
