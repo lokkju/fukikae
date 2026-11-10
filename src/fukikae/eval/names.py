@@ -284,6 +284,7 @@ def names_eval(
 ) -> NamesRun:
     """Score cue attribution and reference purity over ``tune`` and the held-out episodes."""
     from fukikae.artifacts import read_json
+    from fukikae.cards.auto import checked_names
     from fukikae.eval.groundtruth.base import load_alias_file
     from fukikae.eval.identity.cli import _ground_truth
     from fukikae.models import Assignments
@@ -313,11 +314,18 @@ def names_eval(
         asg_path = work / "05-characters" / "assignments.json"
         if not asg_path.exists():
             raise ValueError(f"{eid} has no assignments.json; run it through characters first")
+        asg = read_json(asg_path, Assignments)
+        _, why = checked_names(work, asg)
+        if why is not None:
+            raise ValueError(
+                f"{eid}: {why}; run the characters stage first "
+                f"(`fukikae run {ws.root} {eid} --from characters`)"
+            )
         path, gt = _ground_truth(ws, ref, eid, gt_kind, gt_file, len(order), subtitle_track, merged)
         npath = names_path(work)
         names = read_json(npath, NamesResult) if npath.exists() else None
         eps[eid] = _Episode(
-            eid, work, read_json(asg_path, Assignments), gt, path, names,
+            eid, work, asg, gt, path, names,
             _hidden_spans(cfg, eid, path, names),
         )  # fmt: skip
     modal = modal_names([(eps[e].asg, eps[e].gt) for e in ids])
