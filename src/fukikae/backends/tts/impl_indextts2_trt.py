@@ -158,6 +158,25 @@ def build(engines: Path) -> dict[str, Any]:
     return manifest
 
 
+def _gpu_identity() -> tuple[str, str]:
+    """(name, compute capability) of this process's GPU, from ``nvidia-smi`` (no CUDA context
+    held), else from torch."""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,compute_cap", "--format=csv,noheader", "-i", "0"],  # noqa: S607
+            capture_output=True, text=True, timeout=60, check=False,
+        )  # fmt: skip
+        name, _, cap = r.stdout.strip().splitlines()[0].rpartition(",")
+        if r.returncode == 0 and name and cap.strip():
+            return name.strip(), cap.strip()
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        pass
+    import torch
+
+    props = torch.cuda.get_device_properties(0)
+    return props.name, f"{props.major}.{props.minor}"
+
+
 def _build_into(engines: Path) -> dict[str, Any]:
     """Export, convert and build every engine into ``engines`` (empty) on this process's GPU
     and return the manifest (timings, sizes, sha256 of each engine and the build id, the first
@@ -165,6 +184,10 @@ def _build_into(engines: Path) -> dict[str, Any]:
     and the work directory are deleted once the engines exist; their sizes are recorded."""
     import shutil
 
+    # The GPU first: a host `systemctl daemon-reload` during the build's half hour revokes the
+    # container's device access for new opens (NVIDIA's cgroup issue), which a CUDA init at the
+    # end would then fail on.
+    gpu_name, capability = _gpu_identity()
     engines.mkdir(parents=True, exist_ok=True)
     work = engines / "work"
     work.mkdir(exist_ok=True)
@@ -232,9 +255,6 @@ def _build_into(engines: Path) -> dict[str, Any]:
     digests = {str(p.relative_to(engines)): _sha256(p) for p in files if p.is_file()}
     sizes = {str(p.relative_to(engines)): p.stat().st_size for p in files if p.is_file()}
     build_id = hashlib.sha256(json.dumps(digests, sort_keys=True).encode()).hexdigest()[:12]
-    import torch
-
-    props = torch.cuda.get_device_properties(0)
     import tensorrt  # pyright: ignore[reportMissingImports]
     import tensorrt_llm  # pyright: ignore[reportMissingImports]
 
@@ -243,8 +263,8 @@ def _build_into(engines: Path) -> dict[str, Any]:
         "build_id": build_id,
         "precision": PRECISION,
         "max_batch": MAX_BATCH,
-        "gpu": props.name,
-        "compute_capability": f"{props.major}.{props.minor}",
+        "gpu": gpu_name,
+        "compute_capability": capability,
         "tensorrt": tensorrt.__version__,
         "tensorrt_llm": tensorrt_llm.__version__,
         "model": f"{REPO}@{REVISION}",
