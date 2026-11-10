@@ -81,6 +81,8 @@ STDERR_KEEP = 2000  # lines of worker stderr held in memory, newest last
 STDERR_LINE_MAX = 4096  # bytes per held line; a longer one is split
 HELLO_TIMEOUT_S = 60.0
 KILL_WAIT_S = 10.0
+# A worker that closed its output is given this long to exit before it is killed (B10).
+EOF_WAIT_S = 5.0
 LOCK_HASH_FILE = "fukikae-uv-lock.sha256"
 ENV_ALLOW = frozenset(
     {
@@ -162,12 +164,37 @@ class _StderrTail:
             self._stream.close()
 
 
-def _die_with_parent() -> None:  # pragma: no cover - runs in the child between fork and exec
-    import ctypes
+_DEATH_HOOK: list[Callable[[], None] | None] = []
 
-    with contextlib.suppress(Exception):
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+
+def death_signal_hook() -> Callable[[], None] | None:
+    """The worker's ``preexec_fn``: ``prctl(PR_SET_PDEATHSIG, SIGTERM)``, so the worker gets
+    SIGTERM when fukikae dies. ctypes resolves ``prctl`` here, in the parent, once (B8): the
+    hook runs between fork and exec, where loading a library can deadlock, so it only calls
+    the function. None off Linux or when libc can't be loaded."""
+    if not _DEATH_HOOK:
+        prctl: Any = None
+        if sys.platform.startswith("linux"):
+            import ctypes
+
+            with contextlib.suppress(OSError, AttributeError):
+                prctl = ctypes.CDLL("libc.so.6", use_errno=True).prctl
+
+        def call() -> None:  # pragma: no cover - runs in the child
+            prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+
+        _DEATH_HOOK.append(call if prctl is not None else None)
+    return _DEATH_HOOK[0]
+
+
+def _signal_group(proc: subprocess.Popen[bytes], sig: int) -> None:
+    """``sig`` to the worker's whole process group (it leads its own session, B9), so
+    anything it started goes with it; to the worker alone if the group is already gone."""
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        with contextlib.suppress(ProcessLookupError):
+            proc.send_signal(sig)
 
 
 def nvml_index(device: str) -> int:
@@ -182,11 +209,11 @@ def nvml_index(device: str) -> int:
 
 def _reap(proc: subprocess.Popen[bytes]) -> None:
     if proc.poll() is None:
-        proc.terminate()
+        _signal_group(proc, signal.SIGTERM)
         try:
             proc.wait(timeout=KILL_WAIT_S)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _signal_group(proc, signal.SIGKILL)
             proc.wait()
     else:
         proc.wait()
@@ -378,7 +405,8 @@ class WorkerSynthesizer(Synthesizer):
                 cwd=self._cwd,
                 bufsize=0,
                 pass_fds=held_fds(),
-                preexec_fn=_die_with_parent if sys.platform.startswith("linux") else None,  # noqa: PLW1509
+                start_new_session=True,  # its own group, killed whole (B9)
+                preexec_fn=death_signal_hook(),  # noqa: PLW1509 - resolved in the parent (B8)
             )
         except OSError as e:
             self._stop()
@@ -457,7 +485,7 @@ class WorkerSynthesizer(Synthesizer):
         if kill and self._proc is not None:
             proc = self._proc
             if proc.poll() is None:
-                proc.kill()
+                _signal_group(proc, signal.SIGKILL)
             self._stop()
         message = f"{self.name} worker {what}"
         if tail:
@@ -480,7 +508,10 @@ class WorkerSynthesizer(Synthesizer):
                     continue
                 chunk = os.read(fd, 65536)
                 if not chunk:
-                    code = self._proc.wait()
+                    try:
+                        code = self._proc.wait(timeout=EOF_WAIT_S)
+                    except subprocess.TimeoutExpired:
+                        self._fail(f"closed its output and did not exit within {EOF_WAIT_S:g} s")
                     self._fail(f"exited with status {code}")
                 self._buf += chunk
         line, _, self._buf = self._buf.partition(b"\n")

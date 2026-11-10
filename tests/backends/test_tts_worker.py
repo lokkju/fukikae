@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import wave
 from pathlib import Path
 from typing import Any, ClassVar
@@ -609,3 +610,71 @@ def test_the_answer_reports_the_strip(tmp_path):
         assert w.last_stripped == 0
     finally:
         w.unload()
+
+
+def test_the_worker_runs_in_its_own_session_and_its_group_is_killed(monkeypatch, tmp_path):
+    """B9: a worker that started children of its own is killed with them (killpg)."""
+    child_pid = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys, time; "
+        "p = subprocess.Popen(['sleep', '60']); "
+        f"open({str(child_pid)!r}, 'w').write(str(p.pid)); "
+        "sys.stdin.readline(); time.sleep(60)"
+    )
+    monkeypatch.setattr(ScriptWorker, "SCRIPT", script)
+    monkeypatch.setattr(remote, "HELLO_TIMEOUT_S", 2.0)
+    w = ScriptWorker({}, "cpu")
+    seen: dict[str, int] = {}
+    real = remote.subprocess.Popen
+
+    def popen(*a, **kw):
+        proc = real(*a, **kw)
+        seen["pid"] = proc.pid
+        return proc
+
+    monkeypatch.setattr(remote.subprocess, "Popen", popen)
+    with pytest.raises(BackendError, match="did not answer"):
+        w.load()
+    grandchild = int(child_pid.read_text())
+    deadline = time.monotonic() + 5
+    while _alive(grandchild) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(grandchild)
+
+
+def test_a_worker_in_its_own_session():
+    w = FakeWorker({}, "cpu")
+    w.load()
+    try:
+        assert w.pid is not None and os.getsid(w.pid) == w.pid
+    finally:
+        w.unload()
+
+
+def test_eof_without_exit_is_a_bounded_wait_then_a_kill(monkeypatch):
+    """B10: a worker that closes its output and hangs is killed after a bounded wait."""
+    script = "import os, sys, time; sys.stdin.readline(); os.close(1); time.sleep(60)"
+    monkeypatch.setattr(ScriptWorker, "SCRIPT", script)
+    monkeypatch.setattr(remote, "EOF_WAIT_S", 0.5)
+    w = ScriptWorker({}, "cpu")
+    started = time.monotonic()
+    with pytest.raises(BackendError, match="closed its output"):
+        w.load()
+    assert time.monotonic() - started < 10
+    assert w.pid is None
+
+
+def test_the_death_signal_is_resolved_in_the_parent(monkeypatch):
+    """B8: preexec_fn runs between fork and exec, where loading a library is unsafe; ctypes
+    resolves prctl in the parent once, and the hook only calls it."""
+    import ctypes
+
+    hook = remote.death_signal_hook()
+    assert hook is not None
+
+    def boom(*_a, **_k):
+        raise AssertionError("ctypes.CDLL called from the hook")
+
+    monkeypatch.setattr(ctypes, "CDLL", boom)
+    hook()  # sets PDEATHSIG on this test process: harmless, the runner outlives nothing
+    assert remote.death_signal_hook() is hook
