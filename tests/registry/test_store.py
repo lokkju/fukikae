@@ -1214,3 +1214,21 @@ def test_lock_character_sets_the_flag_and_refuses_unknown(reg: Registry):
     with pytest.raises(KeyError):
         reg.lock_character(99, True)
     assert a
+
+
+def test_operator_alias_outranks_a_subs_name(reg: Registry):
+    """Task 7 review F4: rank is operator alias > subs name, so an operator may alias a key
+    that is only a subtitles-set name of another character; an operator-set name still
+    blocks it."""
+    a, b, c = _char(reg), _char(reg), _char(reg)
+    reg.name_character(a, "Natsu", "natsu", "en")
+    reg.remove_alias("natsu")  # the subs name alone keys a now
+    alias = reg.add_alias(b, "NATSU", by="operator")
+    assert (alias.alias, alias.character_id, alias.by) == ("natsu", b, "operator")
+    hit = reg.character_for_key("natsu")
+    assert hit is not None and hit.id == b
+    with pytest.raises(AliasConflictError, match="name"):
+        reg.add_alias(c, "natsu", by="subs")  # a subtitles alias still never moves one
+    reg.rename_character(a, "Gray")
+    with pytest.raises(AliasConflictError, match="name"):
+        reg.add_alias(c, "gray", by="operator")  # an operator's name still blocks it

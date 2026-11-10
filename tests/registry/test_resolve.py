@@ -461,3 +461,151 @@ def test_unnamed_speech_joins_the_anchor_its_names_seeded(tmp_path):
     assert (rem.status, rem.character_id, rem.source, rem.name) == (
         "matched", wendy.id, "voice", None
     )  # fmt: skip
+
+
+# --- Task 7 review: stale assignments, vanished characters, locks, extras, rowless remainders
+
+
+def test_resolve_refuses_names_newer_than_the_characters_stage(tmp_path):
+    """B1: names rerun after characters (refined turns changed) leave assignments.json about
+    other labels; resolve refuses, and writes neither registry nor characters records."""
+    from fukikae.registry.resolve import resolve_episodes
+    from tests.stages.test_characters import write_names
+
+    ws, e1, e2 = _named_season(tmp_path)
+    write_names(
+        e2,
+        {
+            "SPEAKER_03~wendy": ("SPEAKER_03", "wendy", "named", noisy(A, seed=4), [(0, 25)]),
+            "SPEAKER_03": ("SPEAKER_03", None, "remainder", noisy(A, seed=7), [(25, 30)]),
+            "SPEAKER_04": ("SPEAKER_04", None, "remainder", noisy(A, seed=5), [(30, 60)]),
+            "SPEAKER_05~natsu": ("SPEAKER_05", "natsu", "named", noisy(B, seed=6), [(60, 90)]),
+        },
+    )
+    before = _snapshot(ws, ["S01E01", "S01E02"])
+    with pytest.raises(ValueError, match="run the characters stage first"):
+        resolve_episodes(ws, [e1, e2], threshold=0.6)
+    assert _snapshot(ws, ["S01E01", "S01E02"]) == before
+    (e2.work / "05-characters" / "assignments.json").unlink()  # never run at all
+    with pytest.raises(ValueError, match="S01E02.*run the characters stage first"):
+        resolve_episodes(ws, [e1, e2], threshold=0.6)
+
+
+def test_a_decision_whose_character_vanished_follows_its_key(tmp_path):
+    """F1: natsu's actor merged into another; its labels re-resolve by key and keep it."""
+    from fukikae.registry.resolve import resolve_episodes
+
+    ws, e1, e2 = _named_season(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        natsu = reg.character_for_key("natsu")
+        assert natsu is not None
+        keep, target = reg.create_actor_with_character(unit([0.1, 1, 0]))
+        reg.add_exemplars(keep, "S01E09", "X", np.array([unit([0.1, 1, 0])] * 3), 30.0)
+        reg.merge_actors(keep, natsu.actor_id)
+        hit = reg.character_for_key("natsu")
+        assert hit is not None and hit.id == target
+    resolve_episodes(ws, [e1, e2], threshold=0.6)
+    for eid, lb in (("S01E01", "SPEAKER_00~natsu"), ("S01E02", "SPEAKER_05~natsu")):
+        a = by_cluster(ws, eid)[0][lb]
+        assert (a.character_id, a.actor_id, a.name, a.source) == (target, keep, "natsu", "name")
+
+
+def _locked_season(tmp_path):
+    """S01E01 ran names-less first (SPEAKER_00, voice A, became actor X), X was locked, then
+    names split SPEAKER_00 into natsu (voice B rows) and a remainder: natsu is kept by lock.
+    S01E02 is a names-less episode whose one cluster sounds like B."""
+    from tests.stages.test_characters import NAMES_CFG, write_names
+
+    ws = make_ws(tmp_path, season={})
+    e1 = add_episode(ws, "S01E01", {"SPEAKER_00": (noisy(A, seed=1), 60.0)})
+    CharactersStage().run(e1, NAMES_CFG)
+    (first,) = by_cluster(ws, "S01E01")[0].values()
+    assert first.actor_id is not None
+    with Registry(ws.registry_path) as reg:
+        reg.lock_actor(first.actor_id, True)
+    write_names(
+        e1,
+        {
+            "SPEAKER_00~natsu": ("SPEAKER_00", "natsu", "named", noisy(B, seed=2), [(0, 6)]),
+            "SPEAKER_00": ("SPEAKER_00", None, "remainder", noisy(A, seed=1), [(6, 8)]),
+        },
+    )
+    CharactersStage().run(e1, NAMES_CFG)
+    got = by_cluster(ws, "S01E01")[0]["SPEAKER_00~natsu"]
+    assert (got.character_id, got.source) == (first.character_id, "lock")
+    e2 = add_episode(ws, "S01E02", {"S0": (noisy(B, seed=3), 30.0)})
+    return ws, e1, e2, first
+
+
+def test_lock_decisions_survive_and_a_locked_actor_anchors_on_its_centroid(tmp_path):
+    """Lock-sourced decisions keep their character; F2: the locked actor's anchor is its
+    stored centroid alone (voice A), so S01E02's B voice never joins it through the B rows the
+    lock kept, which still become its exemplars."""
+    from fukikae.registry.resolve import resolve_episodes
+
+    ws, e1, e2, first = _locked_season(tmp_path)
+    resolve_episodes(ws, [e1, e2], threshold=0.6)
+    got = by_cluster(ws, "S01E01")[0]["SPEAKER_00~natsu"]
+    assert (got.character_id, got.name, got.source) == (first.character_id, "natsu", "lock")
+    other = by_cluster(ws, "S01E02")[0]["S0"]
+    assert other.status == "new" and other.actor_id != first.actor_id
+    with Registry(ws.registry_path) as reg:
+        assert first.actor_id is not None and reg.exemplar_count(first.actor_id) >= 6
+
+
+def test_named_extras_stay_extras_through_resolve(tmp_path):
+    from fukikae.registry.resolve import resolve_episodes
+    from tests.stages.test_characters import NAMES_CFG, write_names
+
+    ws = make_ws(tmp_path, season={})
+    e1 = add_episode(ws, "S01E01", {"SPEAKER_00": (noisy(A, seed=1) + noisy(B, seed=2), 60.0)})
+    write_names(
+        e1,
+        {
+            "SPEAKER_00~wendy": ("SPEAKER_00", "wendy", "named", noisy(A, seed=1), [(0, 50)]),
+            "SPEAKER_00~townspeople-b": (
+                "SPEAKER_00", "townspeople b", "role", noisy(B, seed=2), [(50, 60)]
+            ),
+        },
+    )  # fmt: skip
+    CharactersStage().run(e1, NAMES_CFG)
+    extra = by_cluster(ws, "S01E01")[0]["SPEAKER_00~townspeople-b"]
+    assert (extra.status, extra.name, extra.source) == ("extra", "townspeople b", "name")
+    resolve_episodes(ws, [e1], threshold=0.0)
+    got = by_cluster(ws, "S01E01")[0]["SPEAKER_00~townspeople-b"]
+    assert (got.status, got.character_id, got.name, got.source) == (
+        "extra", None, "townspeople b", "name"
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(("voice", "status"), [(A, "matched"), (C, "extra")])
+def test_a_rowless_remainder_takes_its_parent_clusters_match_in_resolve(tmp_path, voice, status):
+    """R1: S01E02's SPEAKER_07 kept no rows of its own; its parent's pooled rows (a role
+    label's, which names no character) decide it at the threshold: the anchor near them, else
+    extra."""
+    from fukikae.registry.resolve import resolve_episodes
+    from tests.stages.test_characters import NAMES_CFG, write_names
+
+    ws = make_ws(tmp_path, season={})
+    e0 = add_episode(ws, "S01E00", {"S0": (noisy(A, seed=9), 40.0)})
+    CharactersStage().run(e0, NAMES_CFG)
+    (anchor,) = by_cluster(ws, "S01E00")[0].values()
+    e2 = add_episode(ws, "S01E02", {"SPEAKER_07": (noisy(voice, seed=3), 40.0)})
+    write_names(
+        e2,
+        {
+            "SPEAKER_07~guard-a": (
+                "SPEAKER_07",
+                "guard a",
+                "role",
+                noisy(voice, seed=3),
+                [(0, 30)],
+            ),
+            "SPEAKER_07": ("SPEAKER_07", None, "remainder", [], [(30, 40)]),
+        },
+    )
+    CharactersStage().run(e2, NAMES_CFG)
+    resolve_episodes(ws, [e2], threshold=0.6)
+    rem = by_cluster(ws, "S01E02")[0]["SPEAKER_07"]
+    want = anchor.character_id if status == "matched" else None
+    assert (rem.status, rem.character_id, rem.source) == (status, want, "voice")

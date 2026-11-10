@@ -49,11 +49,14 @@ beat subtitle names; a sub-cluster whose acoustics point at another character is
 never acted on. A named sub-cluster's acoustics are its parent cluster's (the remainder's pin,
 else its own pin from an acoustic assignment, else the parent's match), never its own earlier
 name or lock decision. A key two characters answer to at the same rank takes the remainder
-path. The unnamed remainder of each cluster goes through the pin and match path above,
+path. The unnamed remainder of each cluster goes through the pin and match path above
+(a remainder left with no embedding rows of its own takes its parent cluster's match over all
+its sub-clusters' rows, at the threshold, and is ``extra`` only when that matches nobody),
 judged, like the parents, against one snapshot of the actors taken before this episode's
 named exemplars (plus the characters names created here); a character named sub-clusters
 took never sends a remainder to ``review``. On a fresh run (or ``rematch``) an actor whose
-character answers to one of this episode's keys is not pruned before matching.
+character answers to one of this episode's keys (or is one an ambiguous key could mean) is
+not pruned before matching.
 """
 
 from __future__ import annotations
@@ -195,10 +198,14 @@ def resolve_names(
         c = chars.get(cid) if cid is not None else None
         if actors[aid].locked or (c is not None and c.locked):
             assign(lb, "pinned" if how == "pin" else "matched", aid, cid, "lock")
+            release = (
+                f"`fukikae registry lock <ws> {aid} --unlock`"
+                if actors[aid].locked
+                else f"`fukikae registry lock <ws> {cid} --character --unlock`"
+            )
             report.append(
                 f"{lb}: {seconds[lb]:.1f} s named {named[lb].key!r} kept by lock on "
-                f"{describe(cid)}; release with `fukikae registry lock <ws> {aid} --unlock`, "
-                "then rerun from names"
+                f"{describe(cid)}; release with {release}, then rerun from names"
             )
     # 2. keys a character answers to
     taken: set[int] = set()
@@ -437,7 +444,8 @@ class CharactersStage:
             pinned = {k: v for k, v in pinned.items() if v.actor_id in known}
             voice_pins = {k: v for k, v in voice_pins.items() if v.actor_id in known}
             # The characters this episode's keys answer to; a key several answer to is ambiguous
-            # and its sub-clusters take the remainder path (pin, else acoustic match).
+            # and its sub-clusters take the remainder path (pin, else acoustic match), so every
+            # character it might mean is spared too.
             answering: set[int] = set()
             ambiguous: set[str] = set()
             for k in sorted(set(keyed.values())):
@@ -445,6 +453,7 @@ class CharactersStage:
                     c = reg.character_for_key(k)
                 except ValueError:
                     ambiguous.add(k)
+                    answering |= {c.actor_id for c in reg.characters_answering(k)}
                     continue
                 if c is not None:
                     answering.add(c.actor_id)
@@ -493,13 +502,18 @@ class CharactersStage:
                     return centroid_tops(evs, snapshot)
                 return projected_tops(evs, evrows, actor_rows, projection)
 
-            if names is not None and keyed:  # resolve_names reports ambiguous keys
+            # each parent diarize cluster's match over all its sub-clusters' rows: a named
+            # label's acoustic evidence, and a rowless remainder's (Task 7 review R1)
+            parent_tops: Tops = {}
+            if names is not None:
                 parent_rows: dict[str, list[np.ndarray]] = defaultdict(list)
                 for lb, info in names.labels.items():
                     if lb in rows and len(rows[lb]):
                         parent_rows[info.parent].append(rows[lb])
                 prows = {p: np.concatenate(r) for p, r in parent_rows.items()}
                 parents = [ClusterEvidence(p, mean_embedding(r), 0.0) for p, r in prows.items()]
+                parent_tops = tops_of(parents, prows)
+            if names is not None and keyed:  # resolve_names reports ambiguous keys
                 by_name, report = resolve_names(
                     reg,
                     cfg,
@@ -508,7 +522,7 @@ class CharactersStage:
                     evidence,
                     rows,
                     path_pins,
-                    tops_of(parents, prows),
+                    parent_tops,
                     own_pins={k: v for k, v in voice_pins.items() if k in named},
                 )
                 for line in report:
@@ -532,6 +546,12 @@ class CharactersStage:
                         actor_rows[aid] = r
             rest = [ev for ev in evidence if ev.cluster not in result]
             tops = tops_of(rest, rows)
+            for ev in rest:  # a remainder with no rows of its own goes by its parent's match
+                info = labels.get(ev.cluster)
+                if ev.embedding is None and info is not None and info.cls == "remainder":
+                    top = parent_tops.get(info.parent)
+                    if top is not None and top[1] >= threshold:
+                        tops[ev.cluster] = top
             matched = decide(
                 rest,
                 tops,

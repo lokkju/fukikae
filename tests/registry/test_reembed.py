@@ -360,6 +360,10 @@ def name_episode(ws: Workspace, eid: str, label: str, key: str) -> str:
 def test_reembed_finds_rows_of_sub_cluster_labels(tmp_path, monkeypatch):
     ws, _ = make_registry(tmp_path, monkeypatch)
     sub = name_episode(ws, "S01E02", "S0", "ben")
+    e2 = Episode(
+        source=ws.root / "S01E02", id="S01E02", work=ws.work_dir("S01E02"), workspace_root=ws.root
+    )
+    CharactersStage().run(e2, ws.config)  # resolve reads the characters stage's decisions
     _resolve(ws, "S01E01,S01E02")  # S01E02's exemplars are now filed under S0~ben
     with Registry(ws.registry_path) as reg:
         assert len(reg.cluster_actors("S01E02", sub)) == 1

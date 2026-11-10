@@ -17,11 +17,20 @@ seeded one group per diarization cluster. Against an existing registry:
   stage's sub-clusters when names were used), and a label its current ``assignments.json``
   decided by name or lock (``source`` ``name`` or ``lock``) is not grouped. It keeps its
   character, ``name``, ``source`` and status (a named extra stays an extra), its rows are
-  added to that character's actor, and they join that actor's anchor; a character names
-  created that has no other exemplars is anchored by those rows alone. Anchors never share a
-  group, so two keys never merge, and only unnamed clusters (remainders, episodes without
-  names, keys several characters answered to) are grouped against them. A decision whose
-  character no longer exists is grouped like an unnamed cluster.
+  added to that character's actor, and they join that actor's anchor (a locked actor's
+  anchor stays its stored centroid alone); a character names created that has no other
+  exemplars is anchored by those rows alone. Anchors never share a group, so two keys never
+  merge, and only unnamed clusters (remainders, episodes without names, keys several
+  characters answered to) are grouped against them. A name decision whose character no
+  longer exists (merged or deleted by hand) follows its key (`Registry.character_for_key`)
+  and keeps its ``name``; one whose key answers nobody, or a lock decision whose character is
+  gone, is grouped like an unnamed cluster. A remainder left with no embedding rows of its
+  own takes its parent diarize cluster's match: the anchor nearest the mean of all the
+  parent's sub-cluster rows, when at least the threshold, else it is ``extra``.
+- A names-used episode's ``assignments.json`` must be the characters stage's answer to its
+  current refined clusters (the same turns, every label covered); otherwise (names reran
+  after characters, or characters never ran) resolve refuses: run the characters stage
+  first.
 - A final group holding an anchor maps to that actor (status ``matched``, the actor's
   lowest-id character); a group without one becomes a new actor with a new character when
   its clusters total at least `min_new_seconds` of clean speech (``new``), else its clusters
@@ -119,12 +128,22 @@ def resolve_episodes(
 
     stage = CharactersStage()
     order = [ep.id for ep in episodes]
-    turns = {ep.id: read_json(identity_inputs(ep.work)[0], Diarization) for ep in episodes}
-    loaded = {ep.id: load_clusters(identity_inputs(ep.work)[1]) for ep in episodes}
+    inputs = {ep.id: identity_inputs(ep.work) for ep in episodes}
+    turns = {e: read_json(i[0], Diarization) for e, i in inputs.items()}
+    loaded = {e: load_clusters(i[1]) for e, i in inputs.items()}
+    # each names-used label's parent diarize cluster, for a rowless remainder's match
+    parents: dict[str, dict[str, str]] = {
+        e: {lb: info.parent for lb, info in i[2].labels.items()}
+        for e, i in inputs.items()
+        if i[2] is not None and i[2].used
+    }
     # Name decisions (D27): the labels the characters stage gave a character by name or lock
     # keep it; they are not grouped, and their rows seed their character's anchor.
     decided = {
-        ep.id: _name_decisions(ep, {ev.cluster for ev in loaded[ep.id][0]}) for ep in episodes
+        ep.id: _name_decisions(
+            ep, turns[ep.id], {ev.cluster for ev in loaded[ep.id][0]}, ep.id in parents
+        )
+        for ep in episodes
     }
     seconds = {(e, ev.cluster): ev.clean_seconds for e, (evs, _) in loaded.items() for ev in evs}
 
@@ -152,22 +171,31 @@ def resolve_episodes(
         remaining = reg.exemplar_rows()
         known = {a.id for a in reg.actors()}
         chars = {c.id: c for c in reg.characters()}
-        # a decision whose character is gone (merged or deleted by hand) is resolved afresh
+        # a name decision whose character is gone (merged or deleted by hand) follows its key;
+        # one whose key answers nobody (and a gone lock decision) is grouped afresh
+        by_key: dict[str, Any] = {}
+
+        def follow(key: str) -> Any:
+            if key not in by_key:
+                try:
+                    by_key[key] = reg.character_for_key(key)
+                except ValueError:
+                    by_key[key] = None
+            return by_key[key]
+
         for e in order:
-            decided[e] = {
-                lb: a
-                for lb, a in decided[e].items()
-                if a.character_id is None
-                or (a.character_id in chars and chars[a.character_id].actor_id in known)
-            }
-            decided[e] = {
-                lb: (
-                    a
-                    if a.character_id is None
-                    else a.model_copy(update={"actor_id": chars[a.character_id].actor_id})
-                )
-                for lb, a in decided[e].items()
-            }
+            current: dict[str, ClusterAssignment] = {}
+            for lb, a in decided[e].items():
+                if a.character_id is None:
+                    current[lb] = a
+                    continue
+                c = chars.get(a.character_id)
+                if (c is None or c.actor_id not in known) and a.source == "name" and a.name:
+                    c = follow(a.name)
+                if c is None or c.actor_id not in known:
+                    continue
+                current[lb] = a.model_copy(update={"actor_id": c.actor_id, "character_id": c.id})
+            decided[e] = current
         named_rows: dict[int, list[np.ndarray]] = {}
         for e in order:
             rows_e = loaded[e][1]
@@ -179,13 +207,14 @@ def resolve_episodes(
             named = named_rows.get(a.id, [])
             if a.id in orphans and a.id not in protected and not named:
                 continue
-            if a.id in remaining and not a.locked:
-                seed = [remaining[a.id]]
-            elif a.centroid is not None and (a.locked or not named):
+            if a.locked and a.centroid is not None:  # its own centroid alone, as it matches
+                seed = [a.centroid[None, :].astype(np.float32)]
+            elif a.id in remaining:
+                seed = [remaining[a.id], *named]
+            elif a.centroid is not None and not named:
                 seed = [a.centroid[None, :].astype(np.float32)]
             else:  # a character names created: its named rows are its only seed
-                seed = []
-            seed += named
+                seed = list(named)
             if seed:
                 anchors.append((a.id, np.vstack(seed).astype(np.float32)))
 
@@ -243,6 +272,7 @@ def resolve_episodes(
                 group_secs[gid] = group_secs.get(gid, 0.0) + seconds[(e, c)]
         created: dict[int, tuple[int, int]] = {}
         touched: set[int] = set()
+        claimed: set[int] = set()
         for e in order:
             evs, rows = loaded[e]
             for ev in evs:
@@ -263,7 +293,13 @@ def resolve_episodes(
                     continue
                 gid = group_of.get((e, ev.cluster))
                 status, aid, cid, score = "extra", None, None, None
-                if gid is not None and gid in anchor_of_group:
+                if gid is None and not len(rows[ev.cluster]) and ev.cluster in parents.get(e, {}):
+                    top = _parent_match(ev.cluster, parents[e], rows, anchor_mean)
+                    if top is not None and top[1] >= threshold:
+                        aid, score = top
+                        status, cid = "matched", first_char.get(aid)
+                        claimed.add(aid)
+                elif gid is not None and gid in anchor_of_group:
                     aid = anchor_of_group[gid]
                     status, cid = "matched", first_char.get(aid)
                     score = _cosine(anchor_mean[aid], ev.embedding)
@@ -292,7 +328,7 @@ def resolve_episodes(
                 )
         for aid in sorted(touched):
             reg.recompute_centroid(aid)
-        pruned = reg.prune_actors(sorted(orphans - touched))
+        pruned = reg.prune_actors(sorted(orphans - touched - claimed))
 
     for ep in episodes:
         evs, _ = loaded[ep.id]
@@ -320,19 +356,51 @@ def resolve_episodes(
     )
 
 
-def _name_decisions(ep: Episode, labels: set[str]) -> dict[str, ClusterAssignment]:
+def _name_decisions(
+    ep: Episode, turns: Diarization, labels: set[str], names_used: bool
+) -> dict[str, ClusterAssignment]:
     """The episode's current assignments that names decided (``source`` name or lock), for
     labels still in its identity clusters: named sub-clusters keep their character (or stay
-    named extras), whatever resolve's grouping would say."""
+    named extras), whatever resolve's grouping would say. ValueError for a names-used episode
+    whose ``assignments.json`` is missing or answers other clusters than the identity pair
+    (other turns, or labels it doesn't cover): its decisions would be stale."""
     from fukikae.stages.characters import CharactersStage
 
     (path,) = CharactersStage().outputs(ep)
-    if not path.exists():
+    a = read_json(path, Assignments) if path.exists() else None
+    if names_used and (
+        a is None or a.turns != turns.turns or not labels <= {c.cluster for c in a.clusters}
+    ):
+        why = "has no assignments.json" if a is None else "has assignments older than its names"
+        raise ValueError(
+            f"{ep.id} {why}: its names stage refined the clusters after the characters stage "
+            "decided them; run the characters stage first (`fukikae run`), then resolve"
+        )
+    if a is None:
         return {}
-    a = read_json(path, Assignments)
     return {
         c.cluster: c for c in a.clusters if c.source in ("name", "lock") and c.cluster in labels
     }
+
+
+def _parent_match(
+    label: str,
+    parents: dict[str, str],
+    rows: dict[str, np.ndarray],
+    anchor_mean: dict[int, np.ndarray | None],
+) -> tuple[int, float] | None:
+    """The best (anchor actor, cosine) for the mean of every row of ``label``'s parent diarize
+    cluster (all its sub-clusters', decided or not, as the characters stage pools them), first
+    best on ties; None without rows or anchors."""
+    parent = parents[label]
+    pooled = [rows[lb] for lb, p in parents.items() if p == parent and lb in rows and len(rows[lb])]
+    mean = mean_embedding(np.concatenate(pooled)) if pooled else None
+    best: tuple[int, float] | None = None
+    for aid, m in anchor_mean.items():
+        s = _cosine(m, mean)
+        if s is not None and (best is None or s > best[1]):
+            best = (aid, s)
+    return best
 
 
 def _spans(path: Any) -> dict[str, list[tuple[float, float]]]:
