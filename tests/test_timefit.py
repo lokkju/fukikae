@@ -137,3 +137,19 @@ def test_apply_fit_without_stretch_copies(tmp_path):
     out = tmp_path / "out.wav"
     seconds = apply_fit(src, plan_fit(0.5, (0, 2.0), None, None, 1.0, S), out)
     assert out.read_bytes() == src.read_bytes() and seconds == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("slot", [(5.0, 5.0), (5.0, 4.9)])
+def test_zero_or_negative_slot_places_at_start_and_borrows(slot):
+    """C2: a zero-length cue never divides by zero; the render starts at the slot, is not
+    stretched, borrows silence on both sides and plays over the rest."""
+    p = plan_fit(2.0, slot, None, None, 1.0, S)
+    assert p.stretch == 1.0
+    assert p.borrowed_after == pytest.approx(0.4) and p.borrowed_before == pytest.approx(0.4)
+    assert p.start == pytest.approx(4.6)
+    assert p.over_by == pytest.approx(1.2)
+
+
+def test_zero_slot_with_nothing_rendered_is_a_no_op():
+    p = plan_fit(0.0, (5.0, 5.0), None, None, 1.0, S)
+    assert (p.start, p.stretch, p.over_by) == (5.0, 1.0, 0.0)

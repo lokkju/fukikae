@@ -338,3 +338,11 @@ def test_subtitle_extra_cluster_and_filtered_cues_keep_rule():
     assert got[1].extra == "S9" and got[1].speaker == "extra:S9"
     off = _subs(cues, turns, [_cluster("S9", None, status="extra")], rules=())
     assert [c.skip for c in off] == [None, None, "ruby"]
+
+
+def test_zero_length_subtitle_events_are_skipped_as_empty():
+    """C2: an event with end <= start has no slot to speak in."""
+    turns = [Turn(start=0.0, end=4.0, speaker="S0")]
+    cues = [Cue(1.0, 1.0, "Hi."), Cue(2.0, 1.5, "Odd."), Cue(2.0, 3.0, "Fine.")]
+    got = _subs(cues, turns, [_cluster("S0", 3)])
+    assert [c.skip for c in got] == ["empty", "empty", None]

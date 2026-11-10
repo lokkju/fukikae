@@ -108,10 +108,17 @@ def plan_fit(
     length = b - a
     if rendered_s <= length:
         return FitPlan(a, 1.0, 0.0, 0.0, 0.0)
-    cap = max(1.0, s.max_speedup / max(rate_factor, 1e-9))
-    stretch = min(rendered_s / length, cap)
-    if stretch < 1.0 + 1e-6:
-        stretch = 1.0
+    if length <= 0.0:
+        # a zero-length (or inverted) slot: no stretch can fit it, so the render starts at
+        # the slot, unstretched, and borrows and plays over as usual
+        b, length, stretch = a, 0.0, 1.0
+        if rendered_s <= 0.0:
+            return FitPlan(a, 1.0, 0.0, 0.0, 0.0)
+    else:
+        cap = max(1.0, s.max_speedup / max(rate_factor, 1e-9))
+        stretch = min(rendered_s / length, cap)
+        if stretch < 1.0 + 1e-6:
+            stretch = 1.0
     remain = rendered_s / stretch - length
     borrow = s.borrow_silence_ms / 1000.0
     after_room = math.inf if next_start is None else next_start - b

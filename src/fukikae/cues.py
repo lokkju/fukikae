@@ -361,8 +361,8 @@ def assign_subtitle_speakers(
         skip = "ruby" if cue.ruby else filter_cue(cue, rules)
         if skip is None and "song" in rules and any(e.start <= mid <= e.end for e in singing):
             skip = "song"
-        if skip is None and not text:
-            skip = "empty"
+        if skip is None and (not text or cue.end <= cue.start):
+            skip = "empty"  # nothing to say, or no slot to say it in
         emotion = _emotion(tags, cue.start, cue.end)
         out.append(
             DubCue(
