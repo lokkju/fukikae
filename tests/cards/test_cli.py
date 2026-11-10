@@ -504,7 +504,7 @@ def test_voices_clone_assigns_locked(tmp_path: Path):
     assert card.voice.backend == "indextts2" and card.voice.source == "clone"  # the profile's
     (ref,) = card.voice.references
     assert ref.transcript == "燃えてきた" and ref.language == "ja"
-    assert ref.origin == {"file": "natsu.wav"}
+    assert ref.origin == {"source": "voices clone"}
     from scipy.io import wavfile
 
     rate, data = wavfile.read(store.sidecar_path(ref.clip))
@@ -523,5 +523,126 @@ def test_voices_clone_refuses_a_clip_too_short_or_a_stock_backend(tmp_path: Path
         "--backend", "kokoro",
     )  # fmt: skip
     assert r.exit_code == 1 and "clone" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.card_for(cid, "en") is None
+
+
+# -- ruling CD26: voices export fingerprints what it exports -------------------------------
+
+
+def _fake_verify(calls: list[str]):
+    from dataclasses import replace as dc_replace
+
+    from fukikae.cards.card import Fingerprint
+    from fukikae.cards.verify import VerifyResult
+
+    def fake(_cfg, _store, card, record):
+        assert record
+        calls.append(card.voice.voice or card.voice.backend)
+        fp = Fingerprint(embedder="wespeaker", vector="sha256:" + "0" * 64, threshold=0.85)
+        new = dc_replace(card, voice=dc_replace(card.voice, fingerprint=fp))
+        return VerifyResult("recorded", None, "fake"), new
+
+    return fake
+
+
+def _kokoro_card():
+    from fukikae.cards.stock import revision, stock_card
+
+    return stock_card("kokoro", "af_heart", "en", revision("kokoro"))
+
+
+def test_export_records_missing_fingerprints(tmp_path: Path, monkeypatch):
+    ws, cid, store = setup(tmp_path)
+    card_id = store.put(_kokoro_card())
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", card_id, by="assign", locked=True)
+    calls: list[str] = []
+    monkeypatch.setattr("fukikae.cards.cli._verify", _fake_verify(calls))
+    monkeypatch.setattr("fukikae.cards.auto.clone_problem", lambda *_: None)
+    monkeypatch.setattr("fukikae.cards.cli._export_pack", lambda *_, **__: _Report())
+    r = invoke("export", str(ws.root), "-o", str(tmp_path / "pack"))
+    assert r.exit_code == 0, r.output
+    assert calls == ["af_heart"] and "recorded a fingerprint" in r.output
+    assert store.get(card_id).voice.fingerprint is not None  # same id, fingerprint stored
+
+
+class _Report:
+    left_out: list = []
+    written = 1
+
+
+def test_export_warns_or_refuses_when_the_backend_is_unavailable(tmp_path: Path, monkeypatch):
+    ws, cid, store = setup(tmp_path)
+    card_id = store.put(_kokoro_card())
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", card_id, by="assign", locked=True)
+    calls: list[str] = []
+    monkeypatch.setattr("fukikae.cards.cli._verify", _fake_verify(calls))
+    monkeypatch.setattr("fukikae.cards.auto.clone_problem", lambda *_: "no GPU here")
+    written: list[int] = []
+    monkeypatch.setattr(
+        "fukikae.cards.cli._export_pack", lambda *_, **__: written.append(1) or _Report()
+    )
+    r = invoke("export", str(ws.root), "-o", str(tmp_path / "pack"))
+    assert r.exit_code == 0, r.output
+    assert not calls and written == [1]
+    assert "without a fingerprint" in r.output and card_id in r.output and "no GPU here" in r.output
+    r = invoke("export", str(ws.root), "-o", str(tmp_path / "pack2"), "--require-fingerprints")
+    assert r.exit_code == 1 and written == [1] and "--require-fingerprints" in r.output
+
+
+# -- voices clone, fix round 1 --------------------------------------------------------------
+
+
+def test_voices_clone_refuses_blank_transcript_and_zero_rate(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    (ws.root / "fukikae.toml").write_text('source_language = "ja"\n')
+    ok = _clip(tmp_path / "ok.wav")
+    r = invoke("clone", str(ws.root), "Natsu", "--clip", str(ok), "--transcript", "   ")
+    assert r.exit_code == 1 and "transcript" in r.output
+    bad = tmp_path / "zero.wav"
+    data = bytearray(ok.read_bytes())
+    data[24:32] = (0).to_bytes(8, "little")  # the fmt chunk's sample and byte rates
+    bad.write_bytes(bytes(data))
+    r = invoke("clone", str(ws.root), "Natsu", "--clip", str(bad), "--transcript", "あ")
+    assert r.exit_code == 1 and "rate" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.card_for(cid, "en") is None
+
+
+def test_voices_clone_reads_8_bit_wavs_centred(tmp_path: Path):
+    from scipy.io import wavfile
+
+    ws, cid, store = setup(tmp_path)
+    (ws.root / "fukikae.toml").write_text('source_language = "ja"\n')
+    rate = 16000
+    t = np.arange(4 * rate) / rate
+    x = (128 + 60 * np.sin(2 * np.pi * 140 * t)).astype(np.uint8)
+    clip = tmp_path / "u8.wav"
+    wavfile.write(clip, rate, x)
+    r = invoke("clone", str(ws.root), "Natsu", "--clip", str(clip), "--transcript", "あ")
+    assert r.exit_code == 0, r.output
+    with Registry(ws.registry_path) as reg:
+        cur = _cur(reg, cid, "en")
+    (ref,) = store.get(cur.card_id).voice.references  # type: ignore[arg-type]
+    _, y = wavfile.read(store.sidecar_path(ref.clip))
+    assert abs(float(y.mean())) < 200  # centred on zero, not on +0.5 full scale
+    assert ref.origin is not None and "u8.wav" not in str(ref.origin)
+
+
+def test_voices_clone_checks_the_card_before_assigning(tmp_path: Path, monkeypatch):
+    from fukikae.cards.card import CardError
+
+    ws, cid, store = setup(tmp_path)
+    (ws.root / "fukikae.toml").write_text('source_language = "ja"\n')
+
+    def refuse(*_, **__):
+        raise CardError("indextts2 refuses this card")
+
+    monkeypatch.setattr("fukikae.cards.cli._check_clone_card", refuse)
+    r = invoke("clone", str(ws.root), "Natsu", "--clip", str(_clip(tmp_path / "a.wav")),
+               "--transcript", "あ")  # fmt: skip
+    assert r.exit_code == 1 and "refuses" in r.output
     with Registry(ws.registry_path) as reg:
         assert reg.card_for(cid, "en") is None

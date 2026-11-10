@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import typer
 
@@ -214,6 +214,14 @@ def assign(
 CLIP_SECONDS = (3.0, 30.0)
 
 
+def _check_clone_card(store: CardStore, card_id: str, who: str, language: str) -> None:
+    """The tts stage's own card check (backend, model revision, options, sidecars), so a card
+    the stage would refuse is never assigned locked; raises CardError."""
+    from fukikae.stages.tts import check_card
+
+    check_card(store, card_id, who, language)
+
+
 @voices_app.command("clone")
 def clone(
     workspace: Path = _WS,
@@ -247,6 +255,8 @@ def clone(
         raise _fail(str(e)) from e
     if not name:
         raise _fail("no [tts] clone_backend in the workspace or its profile; pass --backend")
+    if not transcript.strip():
+        raise _fail("--transcript is empty: give what the clip says")
     try:
         cls = loader.backend_class("tts", name)
     except (ConfigError, loader.BackendUnavailable) as e:
@@ -264,6 +274,8 @@ def clone(
         rate, data = wavfile.read(clip, mmap=True)
     except (ValueError, OSError) as e:
         raise _fail(f"{clip}: not a readable wav ({e})") from e
+    if int(rate) <= 0:
+        raise _fail(f"{clip}: its header gives a sample rate of {rate}")
     seconds = len(data) / float(rate)
     if not CLIP_SECONDS[0] <= seconds <= CLIP_SECONDS[1]:
         raise _fail(
@@ -276,9 +288,9 @@ def clone(
             cut = cut_clip(clip, 0.0, seconds, Path(tmp) / "clip.wav")
             ref = Reference(
                 clip=store.add_sidecar(cut, "clip"),
-                transcript=transcript,
+                transcript=transcript.strip(),
                 language=source,
-                origin={"file": clip.name},
+                origin={"source": "voices clone"},
             )
         card = Card(
             target_language=language,
@@ -291,6 +303,7 @@ def clone(
             ),
         )
         card_ref = store.put(card)
+        _check_clone_card(store, card_ref, _label(char), language)
         a = reg.assign_card(char.id, language, card_ref, by="assign", locked=True)
         _echo(
             f"{_label(char)} {language}: clone card {card_ref} of {cls.name} from {clip.name} "
@@ -706,18 +719,35 @@ def export(
     ),
     title: str | None = typer.Option(None, "--title", help="Pack title (default: series title)."),
     author: str = typer.Option("", "--author", help="Pack author."),
+    require_fingerprints: bool = typer.Option(
+        False,
+        "--require-fingerprints",
+        help="Refuse to export when a card has no fingerprint and none can be recorded here.",
+    ),
 ) -> None:
     """Write the characters' current cards to a pack. Packs carry names and external ids,
-    never registry ids; unnamed characters are left out and listed."""
-    from fukikae.cards.packs import PackError, export_pack
+    never registry ids; unnamed characters are left out and listed. A card without a
+    fingerprint gets one first (ruling CD26: one render of the test script on its backend);
+    when its backend can't run here the card is exported without one and listed, or, with
+    --require-fingerprints, nothing is written."""
+    from fukikae.cards.packs import PackError
 
     with _session(workspace, None) as (reg, store, _):
-        series = Workspace(workspace).config.series
+        cfg = Workspace(workspace).config
+        series = cfg.series
         ids = None
         if characters is not None:
             ids = [reg.character_by_ref(c).id for c in _csv(characters) or []]
+        missing = _fingerprint_for_export(cfg, reg, store, ids, _csv(langs), no_clips)
+        for label, card_id, why in missing:
+            _echo(f"without a fingerprint: {label} card {card_id} ({why})")
+        if missing and require_fingerprints:
+            raise _fail(
+                f"{len(missing)} card(s) have no fingerprint and none can be recorded here; "
+                "nothing was written (drop --require-fingerprints to export them without)"
+            )
         try:
-            report = export_pack(
+            report = _export_pack(
                 reg, store, series, out, characters=ids, languages=_csv(langs),
                 no_clips=no_clips, title=title or f"{series.title} voices", author=author,
             )  # fmt: skip
@@ -726,6 +756,61 @@ def export(
         for what, why in report.left_out:
             _echo(f"left out: {what}: {why}")
         _echo(f"wrote {out}: {report.written} card assignment(s)")
+
+
+def _export_pack(*args: Any, **kwargs: Any) -> Any:
+    from fukikae.cards.packs import export_pack
+
+    return export_pack(*args, **kwargs)
+
+
+def _fingerprint_for_export(
+    cfg: Config,
+    reg: Registry,
+    store: CardStore,
+    ids: list[int] | None,
+    langs: list[str] | None,
+    no_clips: bool,
+) -> list[tuple[str, str, str]]:
+    """Record a fingerprint for every card the export will carry that has none (CD26), each
+    on its backend under the GPU lock; returns (character, card id, why) for those whose
+    backend can't run here (``clone_problem``) or whose recording failed."""
+    from fukikae.backends import loader
+    from fukikae.cards import auto
+    from fukikae.config import ConfigError
+
+    missing: list[tuple[str, str, str]] = []
+    done: set[str] = set()
+    for char in reg.characters():
+        if (ids is not None and char.id not in ids) or not char.name:
+            continue
+        for lang in reg.card_languages(char.id):
+            if langs is not None and lang not in langs:
+                continue
+            a = reg.card_for(char.id, lang)
+            if a is None or a.card_id is None or a.card_id in done or not store.has(a.card_id):
+                continue
+            card = store.get(a.card_id)
+            if card.voice.fingerprint is not None or (no_clips and card.voice.references):
+                continue
+            done.add(a.card_id)
+            label = f"{_label(char)} {lang}"
+            try:
+                cls = loader.backend_class("tts", card.voice.backend)
+                why = auto.clone_problem(cast("type[Synthesizer]", cls), cfg)
+            except (ConfigError, loader.BackendUnavailable) as e:
+                why = str(e)
+            if why is not None:
+                missing.append((label, a.card_id, why))
+                continue
+            res, new = _verify(cfg, store, card, True)
+            if res.status != "recorded":
+                missing.append((label, a.card_id, f"{res.status}: {res.detail}"))
+                continue
+            if store.put(new) != a.card_id:  # pragma: no cover - the fingerprint is outside the id
+                raise _fail(f"recording changed card {a.card_id}'s id; nothing was stored")
+            _echo(f"{label}: recorded a fingerprint for card {a.card_id}")
+    return missing
 
 
 @voices_app.command("import")
