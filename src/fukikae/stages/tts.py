@@ -14,7 +14,9 @@ when stale, below): a clone card of ``[tts] clone_backend`` (IndexTTS2 in every 
 from the character's reference turns in the workspace's episodes
 (``cards.auto.workspace_cloning``; name-confirmed turns first when subtitle names were used, and
 an automatic clone card whose references the names now contradict is re-picked,
-``cards.auto.stale_cards``), or, with under 6 s of clean speech or no ``clone_backend``, a
+``cards.auto.stale_cards``, as is one under the clone floor of 2 clips and 10 s when a better
+pick exists, ``cards.auto.below_floor``; one with no better pick is kept and flagged in
+``run.json``), or, with under 6 s of clean speech or no ``clone_backend``, a
 gender-matched stock voice of the ``[tts]`` backend (the F0 estimate skips theme songs and
 tagged singing). Cues with no character (extras, and clusters the characters stage left for
 review) speak with a stock voice from the extras pools, one per label, fixed by first appearance
@@ -103,11 +105,13 @@ from fukikae.backends.tts import worker
 from fukikae.backends.tts.remote import WorkerSynthesizer
 from fukikae.cards.auto import (
     FALLBACK_BY,
+    below_floor,
     character_spans,
     clone_backend,
     ensure_assignments,
     extras_voices,
     repick_blocker,
+    replace_refusal,
     stale_cards,
     workspace_cloning,
 )
@@ -1302,9 +1306,11 @@ class TtsStage:
     ) -> tuple[dict[int, str], dict[int, str], list[str], list[str]]:
         """(character -> card id, character -> name, report lines, flag lines), after giving
         every character with a cue to speak (not all skipped or errored) and no card one, and
-        re-picking stale automatic cards. The report lines are the cards assigned, appended to
-        ``07-tts/assignments.log``; the flags (curated cards the subtitle names contradict,
-        episodes skipped for stale assignments) changed nothing and go only to ``run.json``."""
+        re-picking stale automatic cards and those under the clone floor that a better pick
+        beats. The report lines are the cards assigned, appended to ``07-tts/assignments.log``;
+        the flags (curated cards the subtitle names contradict, episodes skipped for stale
+        assignments, clone cards under the floor that stay) changed nothing and go only to
+        ``run.json``."""
         speaking = sorted(
             {c.character_id for c in cues if c.character_id is not None and cls._skipped(c) is None}
         )
@@ -1331,7 +1337,15 @@ class TtsStage:
                 Workspace(ep.workspace_root), reg, store, speaking, cfg.target_language,
                 notes=flags,
             )  # fmt: skip
-            work = bool(todo or stale or fallback)
+            # automatic clone cards under the clone floor (D32): re-picked when a better pick
+            # exists, else flagged; only an unlocked one is worth a reference search
+            short = below_floor(reg, store, speaking, cfg.target_language)
+            repickable = [
+                cid
+                for cid in short
+                if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
+            ]
+            work = bool(todo or stale or fallback or repickable)
             cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if work else None
             if work:  # the gender estimate never reads a theme song or tagged singing
                 exclude = _song_spans(ep, cfg)
@@ -1347,6 +1361,7 @@ class TtsStage:
                 vocals,
                 cloning=cloning,
                 stale=stale,
+                short=short,
                 flags=flags,
             )
             cards: dict[int, str] = {}

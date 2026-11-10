@@ -429,14 +429,18 @@ def _merge_suggestions(
 
 def _card_lines(ws: Workspace, reg: Registry, characters: list[int]) -> list[str]:
     """Stale or flagged clone cards of the episode's characters (`stale_cards`), with what
-    replaces each."""
+    replaces each (a kept one under the clone floor too says so, `floor_suffix`), then
+    automatic clone cards under the clone floor (`floor_lines`, D32)."""
+    from fukikae.cards import auto
     from fukikae.cards.auto import AUTOMATIC_BY, repick_blocker, replace_refusal, stale_cards
     from fukikae.cards.store import CardStore
 
     cfg = ws.config
     language = cfg.target_language
     notes: list[str] = []
-    stale = stale_cards(ws, reg, CardStore(ws.root), characters, language, notes=notes)
+    store = CardStore(ws.root)
+    stale = stale_cards(ws, reg, store, characters, language, notes=notes)
+    short = auto.below_floor(reg, store, list(stale), language)
     out: list[str] = []
     blocker: list[str | None] = []
     for cid in sorted(stale):
@@ -451,14 +455,17 @@ def _card_lines(ws: Workspace, reg: Registry, characters: list[int]) -> list[str
                 "the next tts run re-picks it"
                 if blocker[0] is None
                 else f"kept while {blocker[0]}; `fukikae voices clone` replaces it"
+                + auto.floor_suffix(short, cid)
             )
         else:
-            fix = "`fukikae voices clone` replaces it"
+            fix = "`fukikae voices clone` replaces it" + auto.floor_suffix(short, cid)
         out.append(
             f"{_char(reg, cid)}'s card {a.card_id} ({a.chosen_by}) was cloned from turns now "
             f"named {', '.join(k.upper() for k in said) or 'otherwise'}; {fix}"
         )
-    return out + notes
+    rest = [cid for cid in characters if cid not in stale]  # a stale card's line says it all
+    floor = auto.floor_lines(ws, reg, store, rest, language)
+    return out + floor + notes
 
 
 def _unnamed_exemplars(ws: Workspace, reg: Registry, characters: list[int]) -> list[str]:

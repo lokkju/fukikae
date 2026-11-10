@@ -90,7 +90,7 @@ def test_ranked_by_snr(tmp_path):
 
 def test_non_neutral_refs_rank_last_and_warn(tmp_path):
     """CD5: a scored non-neutral turn ranks after every other eligible turn, is picked only to
-    reach min_total, and the report says so."""
+    reach the floor (D32), and the report says so."""
     turns = [
         Turn(start=0, end=5, speaker="A"),  # the cleanest turn, but angry at 0.8
         Turn(start=10, end=14, speaker="A"),  # neutral, 4 s: short of min_total alone
@@ -102,14 +102,15 @@ def test_non_neutral_refs_rank_last_and_warn(tmp_path):
     assert picks is not None and [p.emotion for p in picks] == [None, "angry"]
     assert reference_report(picks) == ["references may carry emotion: angry"]
 
-    # with enough neutral speech, the angry turn is not used at all, clean as it is
-    turns.append(Turn(start=20, end=24, speaker="A"))
-    vocals = _vocals(tmp_path / "v2.wav", [(0, 5, 0.0005), (10, 14, 0.01), (20, 24, 0.01)])
+    # with enough neutral speech for the floor (D32: 2 clips, 10 s), the angry turn is not
+    # used at all, clean as it is
+    turns.append(Turn(start=20, end=26, speaker="A"))
+    vocals = _vocals(tmp_path / "v2.wav", [(0, 5, 0.0005), (10, 14, 0.01), (20, 26, 0.01)])
     tags = _tags(
-        [(0, 5, "angry", 0.8), (10, 14, "neutral", 0.9), (20, 24, "happy", 0.4)], "emotion2vec"
+        [(0, 5, "angry", 0.8), (10, 14, "neutral", 0.9), (20, 26, "happy", 0.4)], "emotion2vec"
     )
     picks = select_references(turns, "A", _transcript(turns), tags, vocals)
-    assert sorted(_spans(picks)) == [(10, 14), (20, 24)]
+    assert sorted(_spans(picks)) == [(10, 14), (20, 26)]
     assert picks is not None and reference_report(picks) == []
 
 
@@ -315,3 +316,249 @@ def test_sparse_check_needs_the_speaker_rate_too(tmp_path):
     segs = [Segment(start=t.start, end=t.end, text="ねえ", words=[]) for t in turns]
     tr = Transcript(language="ja", backend="x", word_timing=False, segments=segs)
     assert len(eligible_references(turns, "A", tr, None, vocals)) == 3
+
+
+# -- D32: fragments joined, and the clone floor ------------------------------------------------
+
+
+def _refs(turns, vocals, **kw):
+    from fukikae.cards.select import eligible_references
+
+    return eligible_references(turns, "A", _transcript(turns), None, vocals, **kw)
+
+
+def test_fragments_of_one_speaker_are_joined_before_the_length_check(tmp_path):
+    """D32 #1: two turns of the speaker 0.3 s apart, each under 3 s, are one 4.5 s turn."""
+    turns = [Turn(start=0, end=2, speaker="A"), Turn(start=2.3, end=4.5, speaker="A")]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 2, 0.01), (2.3, 4.5, 0.01)])
+    (p,) = _refs(turns, vocals)
+    assert (p.start, p.end) == (0.0, 4.5)
+    assert p.transcript == "line at 0line at 2.3"
+    assert _refs(turns, vocals, join_gap=0.0) == []  # the join is the gap setting's doing
+
+
+def test_join_gap_is_0_6_s(tmp_path):
+    from fukikae.cards.select import JOIN_GAP_S
+
+    assert JOIN_GAP_S == 0.6
+    turns = [Turn(start=0, end=2, speaker="A"), Turn(start=2.7, end=4.5, speaker="A")]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 2, 0.01), (2.7, 4.5, 0.01)])
+    assert _refs(turns, vocals) == []  # 0.7 s apart: two fragments, both too short
+
+
+def test_another_speakers_turn_in_the_gap_blocks_the_join(tmp_path):
+    turns = [
+        Turn(start=0, end=2, speaker="A"),
+        Turn(start=2.1, end=2.4, speaker="B"),
+        Turn(start=2.5, end=4.5, speaker="A"),
+    ]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 2, 0.01), (2.5, 4.5, 0.01)])
+    assert _refs(turns, vocals) == []
+
+
+def test_a_join_never_grows_past_the_longest_reference(tmp_path):
+    """5 s and 8.7 s, 0.3 s apart, would be 14 s joined: they stay two references."""
+    turns = [Turn(start=0, end=5, speaker="A"), Turn(start=5.3, end=14, speaker="A")]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 5, 0.01), (5.3, 14, 0.01)])
+    assert sorted((p.start, p.end) for p in _refs(turns, vocals)) == [(0.0, 5.0), (5.3, 14.0)]
+
+
+def test_a_fragment_overlapping_someone_else_never_sinks_its_clean_neighbour(tmp_path):
+    turns = [
+        Turn(start=0, end=4, speaker="A"),
+        Turn(start=4.3, end=6, speaker="A"),
+        Turn(start=5, end=7, speaker="B"),  # overlaps A's second fragment
+    ]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 4, 0.01), (4.3, 6, 0.01)])
+    assert [(p.start, p.end) for p in _refs(turns, vocals)] == [(0.0, 4.0)]
+
+
+def test_a_joined_turn_that_fails_a_check_falls_back_to_its_pieces(tmp_path):
+    """The gap is inside an excluded span (a song): the joined turn is refused, and the 4 s
+    piece is still a reference on its own."""
+    turns = [Turn(start=0, end=4, speaker="A"), Turn(start=4.4, end=6, speaker="A")]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 4, 0.01), (4.4, 6, 0.01)])
+    got = _refs(turns, vocals, exclude=[(4.1, 4.3)])
+    assert [(p.start, p.end) for p in got] == [(0.0, 4.0)]
+
+
+def test_foreign_speech_drops_a_turn_and_blocks_a_join(tmp_path):
+    """``foreign`` (speech the subtitle names give someone else): a turn with 10% or more of
+    it under that is no candidate, and a joined turn that much under it falls back."""
+    turns = [Turn(start=0, end=4, speaker="A"), Turn(start=4.5, end=6, speaker="A"),
+             Turn(start=10, end=15, speaker="A")]  # fmt: skip
+    vocals = _vocals(tmp_path / "v.wav", [(0, 4, 0.01), (4.5, 6, 0.01), (10, 15, 0.01)])
+    # 0.5 s of named speech in the gap: 8% of the 6 s joined turn passes
+    assert [(p.start, p.end) for p in _refs(turns, vocals, foreign=[(4.0, 4.5)])][:1] == [
+        (0.0, 6.0)
+    ]
+    # under someone else's name from 3.5 s: 0-4 alone is 12.5% foreign, so out, and with it
+    # the join; 4.5-6 is too short alone
+    got = _refs(turns, vocals, foreign=[(3.5, 4.5)])
+    assert [(p.start, p.end) for p in got] == [(10.0, 15.0)]
+
+
+def test_the_floor_takes_non_neutral_turns_until_two_clips_and_10_s(tmp_path):
+    """D32 #2: one neutral 11 s turn is one clip; the angry turn makes the second."""
+    from fukikae.cards.select import meets_floor
+
+    turns = [Turn(start=0, end=11, speaker="A"), Turn(start=20, end=24, speaker="A")]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 11, 0.01), (20, 24, 0.0005)])
+    tags = _tags([(0, 11, "neutral", 0.9), (20, 24, "angry", 0.8)], "emotion2vec")
+    picks = select_references(turns, "A", _transcript(turns), tags, vocals)
+    assert _spans(picks) == [(0, 11), (20, 24)] and picks is not None and meets_floor(picks)
+
+
+def test_the_floor_stops_taking_non_neutral_turns_once_reached(tmp_path):
+    from fukikae.cards.select import meets_floor
+
+    turns = [Turn(start=0, end=6, speaker="A"), Turn(start=10, end=15, speaker="A"),
+             Turn(start=20, end=24, speaker="A")]  # fmt: skip
+    vocals = _vocals(tmp_path / "v.wav", [(0, 6, 0.01), (10, 15, 0.01), (20, 24, 0.0005)])
+    tags = _tags([(20, 24, "angry", 0.8)], "emotion2vec")
+    picks = select_references(turns, "A", _transcript(turns), tags, vocals)
+    assert sorted(_spans(picks)) == [(0, 6), (10, 15)] and meets_floor(picks or [])
+
+
+def test_under_the_floor_the_best_picks_are_still_returned(tmp_path):
+    """One 6.3 s turn is a clone below the floor: returned, and `meets_floor` says no."""
+    from fukikae.cards.select import floor_shortfall, meets_floor
+
+    turns = [Turn(start=0, end=6.3, speaker="A")]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 6.3, 0.01)])
+    picks = select_references(turns, "A", _transcript(turns), None, vocals)
+    assert _spans(picks) == [(0, 6.3)] and picks is not None and not meets_floor(picks)
+    assert (
+        floor_shortfall([p.seconds for p in picks])
+        == "1 clip and 6.3 s, under the floor of 2 clips and 10 s"
+    )
+
+
+def test_the_floor_is_judged_at_the_tenth_of_a_second_every_message_shows():
+    """3 clips of 9.97 s print as 10.0 s: they reach the floor, as the report says."""
+    from fukikae.cards.select import floor_shortfall
+
+    assert floor_shortfall([3.526, 3.291, 3.156]) is None
+    assert floor_shortfall([3.5, 3.0, 3.44]) == (
+        "3 clips and 9.9 s, under the floor of 2 clips and 10 s"
+    )
+
+
+# -- D32 review: the clip cap, the in-fill floor test, joins split at the failing gap ---------
+
+
+def _p(start, seconds, snr, emotion=None):
+    from fukikae.cards.select import RefPick
+
+    return RefPick(start, round(start + seconds, 3), "x", snr, emotion)
+
+
+def _ranked(picks):
+    from fukikae.cards.select import rank_key
+
+    return sorted(picks, key=rank_key)
+
+
+def test_the_clip_cap_never_stops_short_of_a_floor_the_episode_reaches():
+    """Erza's shape: six non-neutral turns, the greedy three 9.6 s; swapping the third for the
+    4.29 s turn reaches the floor, keeping the two best-ranked."""
+    from fukikae.cards.select import meets_floor, pick_references
+
+    ranked = _ranked([
+        _p(948.457, 3.105, 44.1, "disgusted"), _p(917.086, 3.021, 31.75, "happy"),
+        _p(935.075, 3.51, 28.98, "happy"), _p(939.243, 4.286, 27.7, "sad"),
+        _p(711.61, 3.162, 25.83, "angry"), _p(900.38, 3.105, 22.21, "disgusted"),
+    ])  # fmt: skip
+    picks = pick_references(ranked)
+    assert picks is not None and meets_floor(picks)
+    assert [p.start for p in picks] == [948.457, 917.086, 939.243]
+    assert round(sum(p.seconds for p in picks), 1) == 10.4
+
+
+def test_the_floor_wins_over_a_neutral_pick_when_nothing_else_reaches_it():
+    """Gray's shape: no three clips that keep both neutral turns reach 10 s, so the neutral
+    3.06 s turn makes way for the two longest angry ones."""
+    from fukikae.cards.select import meets_floor, pick_references
+
+    ranked = _ranked([
+        _p(1167.595, 3.055, 52.54), _p(759.997, 3.341, 25.38),
+        _p(941.352, 3.122, 46.45, "angry"), _p(965.973, 3.206, 37.92, "angry"),
+        _p(753.28, 3.46, 28.57, "angry"),
+    ])  # fmt: skip
+    picks = pick_references(ranked)
+    assert picks is not None and meets_floor(picks)
+    assert [p.start for p in picks] == [759.997, 965.973, 753.28]
+
+
+def test_as_few_neutral_picks_as_possible_give_way_the_lowest_ranked_first():
+    """Three neutral 3 s turns fill the cap at 9 s: one of them (the lowest-ranked) makes way
+    for the 4.5 s angry turn."""
+    from fukikae.cards.select import pick_references
+
+    ranked = _ranked([
+        _p(0, 3.0, 50), _p(10, 3.0, 40), _p(20, 3.0, 30),  # neutral: 9 s greedy
+        _p(30, 4.5, 45, "angry"),
+    ])  # fmt: skip
+    picks = pick_references(ranked)
+    assert picks is not None and [p.start for p in picks] == [0, 10, 30]
+
+
+def test_an_episode_short_of_the_floor_keeps_the_greedy_picks():
+    from fukikae.cards.select import meets_floor, pick_references
+
+    ranked = _ranked([_p(0, 3.0, 50), _p(10, 3.1, 40), _p(20, 3.2, 30, "angry"),
+                      _p(30, 3.0, 20, "happy")])  # fmt: skip
+    picks = pick_references(ranked)
+    assert picks is not None and [p.start for p in picks] == [0, 10, 20]
+    assert not meets_floor(picks)
+
+
+def test_two_neutral_clips_at_9_96_s_reach_the_floor_and_take_no_filler():
+    """The in-fill test judges the floor at a tenth, as `floor_shortfall` does."""
+    from fukikae.cards.select import pick_references
+
+    ranked = _ranked([_p(0, 5.0, 50), _p(10, 4.96, 40), _p(20, 3.0, 60, "angry")])
+    picks = pick_references(ranked)
+    assert picks is not None and [p.start for p in picks] == [0, 10]
+
+
+def test_a_run_of_three_that_fails_splits_at_the_failing_gap(tmp_path):
+    """The gap between the second and third pieces is inside a song: the first two still join,
+    and the third is a reference alone."""
+    turns = [Turn(start=0, end=2, speaker="A"), Turn(start=2.3, end=4.5, speaker="A"),
+             Turn(start=4.9, end=8, speaker="A")]  # fmt: skip
+    vocals = _vocals(tmp_path / "v.wav", [(0, 2, 0.01), (2.3, 4.5, 0.01), (4.9, 8, 0.01)])
+    got = _refs(turns, vocals, exclude=[(4.6, 4.8)])
+    assert sorted((p.start, p.end) for p in got) == [(0.0, 4.5), (4.9, 8.0)]
+
+
+def test_a_join_never_strands_a_short_third_piece_another_split_keeps(tmp_path):
+    """5 s, 4.7 s and 2.5 s pieces 0.3 s apart are 12.8 s together: joining the last two keeps
+    every piece, where joining the first two would leave 2.5 s alone."""
+    turns = [Turn(start=0, end=5, speaker="A"), Turn(start=5.3, end=10, speaker="A"),
+             Turn(start=10.3, end=12.8, speaker="A")]  # fmt: skip
+    vocals = _vocals(tmp_path / "v.wav", [(0, 5, 0.01), (5.3, 10, 0.01), (10.3, 12.8, 0.01)])
+    got = _refs(turns, vocals)
+    assert sorted((p.start, p.end) for p in got) == [(0.0, 5.0), (5.3, 12.8)]
+    assert _refs(turns, vocals) == got  # deterministic
+
+
+def test_a_join_spans_two_labels_of_one_character(tmp_path):
+    from fukikae.cards.select import eligible_references
+
+    turns = [Turn(start=0, end=2, speaker="A"), Turn(start=2.3, end=4.5, speaker="B")]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 2, 0.01), (2.3, 4.5, 0.01)])
+    got = eligible_references(turns, {"A", "B"}, _transcript(turns), None, vocals)
+    assert [(p.start, p.end) for p in got] == [(0.0, 4.5)]
+
+
+def test_overlapping_turns_of_the_speaker_never_make_overlapping_references(tmp_path):
+    """Two overlapping turns are one reference over both; when that would pass 12 s, one of
+    them is a reference and the other is dropped, never both."""
+    turns = [Turn(start=0, end=4, speaker="A"), Turn(start=3, end=7, speaker="A")]
+    vocals = _vocals(tmp_path / "v.wav", [(0, 7, 0.01)])
+    assert [(p.start, p.end) for p in _refs(turns, vocals)] == [(0.0, 7.0)]
+
+    turns = [Turn(start=0, end=8, speaker="A"), Turn(start=6, end=13, speaker="A")]
+    vocals = _vocals(tmp_path / "v2.wav", [(0, 13, 0.01)])
+    assert [(p.start, p.end) for p in _refs(turns, vocals)] == [(0.0, 8.0)]

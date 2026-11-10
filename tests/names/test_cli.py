@@ -371,3 +371,41 @@ def test_show_marks_report_entries_the_registry_or_assignments_no_longer_hold(cl
     assert "fukikae run" in line
     (ok,) = [ln for ln in r.output.splitlines() if ln.startswith("  lucy ")]
     assert "stale" not in ok
+
+
+def test_show_lists_clone_cards_under_the_floor(tmp_path: Path, monkeypatch):
+    """D32: `names show` prints `floor_lines` for the episode's characters with the clone
+    cards it flags."""
+    from tests.cards.test_auto import NAMED_EP
+
+    root, reg, _ = _merge_ws(tmp_path)
+    reg.close()
+    seen: dict = {}
+
+    def lines(_ws, _reg, _store, characters, _language, **_):
+        seen["characters"] = sorted(characters)
+        return ["character 9's card x (auto) is below the clone floor (1 clip and 6.3 s)"]
+
+    monkeypatch.setattr("fukikae.cards.auto.floor_lines", lines)
+    r = runner.invoke(app, ["names", "show", str(root), NAMED_EP])
+    assert r.exit_code == 0, r.output
+    assert "clone cards:" in r.output
+    assert "character 9's card x (auto) is below the clone floor" in r.output
+    assert seen["characters"]
+
+
+def test_show_appends_the_floor_to_a_kept_stale_cards_line(tmp_path: Path):
+    from fukikae.cards.store import CardStore
+    from tests.cards.test_auto import NAMED_EP, _auto_clone
+
+    root, reg, (_, natsu, _) = _merge_ws(tmp_path)
+    card = _auto_clone(reg, CardStore(root), natsu, [(NAMED_EP, 30.0, 35.0)], locked=True)
+    reg.close()
+    r = runner.invoke(app, ["names", "show", str(root), NAMED_EP])
+    assert r.exit_code == 0, r.output
+    (line,) = [ln for ln in r.output.splitlines() if "clone floor" in ln or "now named" in ln]
+    assert line.strip() == (
+        f"character {natsu} (Natsu)'s card {card} (auto) was cloned from turns now named "
+        "WENDY; `fukikae voices clone` replaces it; below the clone floor (1 clip and 5.0 s, "
+        "under the floor of 2 clips and 10 s)"
+    )

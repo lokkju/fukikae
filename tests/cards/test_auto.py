@@ -1167,3 +1167,366 @@ def test_an_engine_is_refused_as_clone_backend_or_tts_backend():
         clone_backend(Config(raw={"tts": {"clone_backend": "indextts2_trt"}}))
     with pytest.raises(ConfigError, match=r"\[tts\] engines"):
         tts_backend(Config(raw={"tts": {"backend": "indextts2_trt"}}))
+
+
+# -- D32: joined fragments and the clone floor ------------------------------------------------
+
+# Young Makarov in miniature: one shouted 6.3 s name-confirmed turn, and two fragments the
+# names cut 0.3 s apart (4.5 s joined); Wendy has one named turn between them.
+FLOOR_EP = NAMED_EP
+FLOOR_TURNS = [
+    (0.0, 6.3, "S0~mak", 0.01),
+    (10.0, 12.0, "S0~mak", 0.01),
+    (12.3, 14.5, "S0~mak", 0.01),
+    (20.0, 25.0, "S0~wendy", 0.01),
+]
+FLOOR_CLUSTERS = [
+    {"cluster": "S0~mak", "character_id": 1, "name": "makarov", "source": "name"},
+    {"cluster": "S0~wendy", "character_id": 2, "name": "wendy", "source": "name"},
+]
+FLOOR_NAMES = [
+    (0.0, 6.3, "makarov", False), (10.0, 14.5, "makarov", False), (20.0, 25.0, "wendy", False),
+]  # fmt: skip
+
+
+def _ws_floor(tmp_path: Path, turns=FLOOR_TURNS, names=FLOOR_NAMES):
+    from fukikae.workspace import Workspace
+
+    reg, ids = _registry(tmp_path, 2)
+    _named_episode(tmp_path / "ws", FLOOR_EP, turns, FLOOR_CLUSTERS, names=names)
+    return reg, ids, Workspace(tmp_path / "ws")
+
+
+def test_name_confirmed_fragments_are_joined(tmp_path: Path):
+    from fukikae.cards.auto import character_candidates
+
+    reg, _, ws = _ws_floor(tmp_path)
+    got = character_candidates(ws, [FLOOR_EP], 1)[FLOOR_EP]
+    assert sorted((p.start, p.end) for p in got) == [(0.0, 6.3), (10.0, 14.5)]
+    reg.close()
+
+
+def test_a_join_over_someone_elses_named_line_falls_back(tmp_path: Path):
+    """Wendy's name over the gap is 0.3 s of a 4.5 s joined turn, 6.7%: still joined. Over
+    12.0-12.6 it also covers 14% of the second fragment, which is then no candidate and
+    blocks the join, and the first fragment (2 s) is too short alone."""
+    from fukikae.cards.auto import character_candidates
+
+    names = [*FLOOR_NAMES, (12.0, 12.3, "wendy", False)]
+    reg, _, ws = _ws_floor(tmp_path, names=names)
+    got = character_candidates(ws, [FLOOR_EP], 1)[FLOOR_EP]
+    assert (10.0, 14.5) in [(p.start, p.end) for p in got]
+    reg.close()
+    names = [*FLOOR_NAMES, (12.0, 12.6, "wendy", False)]
+    reg, _, ws = _ws_floor(tmp_path / "b", names=names)
+    got = character_candidates(ws, [FLOOR_EP], 1)[FLOOR_EP]
+    assert [(p.start, p.end) for p in got] == [(0.0, 6.3)]
+    reg.close()
+
+
+def test_an_auto_card_below_the_floor_is_re_picked_when_a_better_pick_exists(
+    tmp_path: Path, vocals: Path
+):
+    """D32: the one-clip 6.3 s card is below the floor; the join gives 2 clips and 10.8 s,
+    so it is re-picked like a stale card: a new card, the old one kept in history (CD1)."""
+    from fukikae.cards.auto import FLOOR_NOTE, below_floor
+
+    reg, _, ws = _ws_floor(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)])
+    short = below_floor(reg, store, [1, 2], "en")
+    assert list(short) == [1] and short[1].card_id == old
+    assert short[1].phrase == "1 clip and 6.3 s, under the floor of 2 clips and 10 s"
+    flags: list[str] = []
+    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 14.5)]}, vocals,
+                                 cloning=_cloning_ws(ws), short=short, flags=flags)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old and cur.by == "auto" and not cur.locked
+    assert [h.card_id for h in reg.card_history(1, "en")] == [old, cur.card_id]
+    assert line.startswith(f"character 1: {FLOOR_NOTE} (1 clip and 6.3 s")
+    origins = sorted((r.origin["start"], r.origin["end"])
+                     for r in store.get(cur.card_id or "").voice.references
+                     if r.origin is not None)  # fmt: skip
+    assert origins == [(0.0, 6.3), (10.0, 14.5)]
+    assert flags == [] and below_floor(reg, store, [1], "en") == {}
+    reg.close()
+
+
+def test_an_auto_card_below_the_floor_with_no_better_pick_is_kept_and_flagged(
+    tmp_path: Path, vocals: Path
+):
+    from fukikae.cards.auto import below_floor
+
+    turns = [FLOOR_TURNS[0], FLOOR_TURNS[3]]  # no fragments: the 6.3 s turn is all there is
+    reg, _, ws = _ws_floor(tmp_path, turns=turns)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)])
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 6.3)]}, vocals,
+                               cloning=_cloning_ws(ws),
+                               short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id == old and len(reg.card_history(1, "en")) == 1
+    assert lines == []
+    assert flags == [
+        f"character 1: clone card {old} is below the clone floor (1 clip and 6.3 s, under the "
+        "floor of 2 clips and 10 s) and no better reference pick exists; kept, flagged for "
+        "review: `fukikae voices clone` with a better clip replaces it"
+    ]
+    reg.close()
+
+
+def test_a_floor_re_pick_never_falls_back_to_a_stock_voice(tmp_path: Path, vocals: Path):
+    """Character 2's card is below the floor and no reference picks remain at all: kept and
+    flagged, never a stock voice or another character's card."""
+    from fukikae.cards.auto import below_floor
+
+    reg, _, ws = _ws_floor(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 2, [(FLOOR_EP, 20.0, 25.0)])
+    flags: list[str] = []
+    ensure_assignments(reg, store, CFG, {2: [(20.0, 25.0)]}, vocals, cloning=_cloning_ws(ws),
+                       short=below_floor(reg, store, [2], "en"), flags=flags)  # fmt: skip
+    cur = reg.card_for(2, "en")
+    assert cur is not None and cur.card_id == old
+    (flag,) = flags
+    assert "below the clone floor (1 clip and 5.0 s" in flag and "voices clone" in flag
+    reg.close()
+
+
+@pytest.mark.parametrize("by", ["assign", "import:Pack"])
+def test_curated_and_imported_cards_are_never_below_the_floor(tmp_path: Path, by: str):
+    from fukikae.cards.auto import below_floor
+
+    reg, _, ws = _ws_floor(tmp_path)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)], by=by)
+    assert below_floor(reg, store, [1], "en") == {}
+    reg.close()
+
+
+def test_a_locked_auto_card_below_the_floor_is_flagged_not_re_picked(tmp_path: Path, vocals: Path):
+    from fukikae.cards.auto import below_floor
+
+    reg, _, ws = _ws_floor(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)], locked=True)
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 14.5)]}, vocals,
+                               cloning=_cloning_ws(ws),
+                               short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id == old and lines == []
+    (flag,) = flags
+    assert "below the clone floor" in flag and "locked" in flag and "voices clone" in flag
+    reg.close()
+
+
+def test_a_new_clone_below_the_floor_is_made_and_flagged(tmp_path: Path, vocals: Path):
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    flags: list[str] = []
+    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.3)]}, vocals,
+                                 cloning=_cloning({a: [(0.0, 6.3, None)]}, vocals),
+                                 flags=flags)  # fmt: skip
+    cur = reg.card_for(a, "en")
+    assert cur is not None and store.get(cur.card_id or "").voice.source == "clone"
+    assert "below the clone floor (1 clip and 6.3 s" in line
+    (flag,) = flags
+    assert flag.startswith(f"character {a}: clone card {cur.card_id} is below the clone floor")
+    reg.close()
+
+
+def test_floor_lines_say_what_the_next_tts_run_does(tmp_path: Path, monkeypatch):
+    """`voices list` and `names show`: a re-pick when a better pick exists, else a flag."""
+    from fukikae.cards.auto import floor_lines
+
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    reg, _, ws = _ws_floor(tmp_path)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)])
+    old2 = _auto_clone(reg, store, 2, [(FLOOR_EP, 20.0, 25.0)])
+    one, two = floor_lines(ws, reg, store, [1, 2], "en")
+    assert "below the clone floor (1 clip and 6.3 s" in one
+    assert one.endswith("the next tts run re-picks it (2 clips, 10.8 s)")
+    assert two.startswith(f"character 2's card {old2} (auto) is below the clone floor")
+    assert two.endswith("no better reference pick exists; flagged for review: "
+                        "`fukikae voices clone` with a better clip replaces it")  # fmt: skip
+    reg.close()
+
+
+def test_the_episode_meeting_the_floor_beats_one_with_more_seconds(tmp_path: Path):
+    from fukikae.cards.auto import character_references
+
+    reg, _ = _registry(tmp_path, 1)
+    from fukikae.workspace import Workspace
+
+    one = [(0.0, 11.5, "S5", 0.01)]  # one clip, 11.5 s
+    two = [(0.0, 5.0, "S5", 0.01), (10.0, 15.5, "S5", 0.01)]  # two clips, 10.5 s
+    _named_episode(tmp_path / "ws", "S01E12", one, [{"cluster": "S5", "character_id": 1}])
+    _named_episode(tmp_path / "ws", "S01E13", two, [{"cluster": "S5", "character_id": 1}])
+    got = character_references(Workspace(tmp_path / "ws"), ["S01E12", "S01E13"], 1)
+    assert got is not None and got[0] == "S01E13" and len(got[1]) == 2
+    reg.close()
+
+
+def test_floor_filling_never_moves_a_character_to_another_episode(tmp_path: Path):
+    """Episodes that reach the floor compare by the seconds picked before any floor filling
+    (neutral turns, and non-neutral ones up to 6 s), as before D32: an episode of three
+    neutral clips (10.5 s) keeps winning over one whose angry turns only fill it up."""
+    from fukikae.cards.auto import character_references
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 1)
+    calm = [(0.0, 3.5, "S5", 0.01), (10.0, 13.5, "S5", 0.01), (20.0, 23.5, "S5", 0.01)]
+    # 4 s neutral, then angry 3 s (the louder) and 6 s: 7 s before D32, 13 s filled
+    loud = [(0.0, 4.0, "S5", 0.01), (10.0, 13.0, "S5", 0.002), (20.0, 26.0, "S5", 0.01)]
+    _named_episode(tmp_path / "ws", "S01E11", loud, [{"cluster": "S5", "character_id": 1}])
+    _named_episode(tmp_path / "ws", "S01E12", calm, [{"cluster": "S5", "character_id": 1}])
+    from fukikae.artifacts import write_json
+    from fukikae.models import Tags, TagSpan
+
+    tags = Tags(backend="x", events=[], emotion_backend="emotion2vec", emotions=[
+        TagSpan(start=10.0, end=13.0, label="angry", confidence=0.9),
+        TagSpan(start=20.0, end=26.0, label="angry", confidence=0.9)])  # fmt: skip
+    work = Workspace(tmp_path / "ws").work_dir("S01E11")
+    (work / "04b-tag").mkdir(parents=True, exist_ok=True)
+    write_json(work / "04b-tag" / "tags.json", tags)
+    got = character_references(Workspace(tmp_path / "ws"), ["S01E11", "S01E12"], 1)
+    assert got is not None and got[0] == "S01E12"
+    reg.close()
+
+
+# -- D32 review -----------------------------------------------------------------------------
+
+
+def test_eligible_seconds_are_the_picked_episodes_in_the_tier_used(tmp_path: Path):
+    """Charle's shape: the picks are name-confirmed turns of a names-used episode (11 s
+    eligible), while an acoustic-only episode has 15 s the confirmed tier can't use: the
+    figure is the picked episode's 11 s."""
+    from fukikae.cards.auto import find_references
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 2)
+    named = [(0.0, 5.0, "S0~mak", 0.01), (10.0, 16.0, "S0~mak", 0.01)]
+    clusters = [{"cluster": "S0~mak", "character_id": 1, "name": "makarov", "source": "name"}]
+    names = [(0.0, 5.0, "makarov", False), (10.0, 16.0, "makarov", False)]
+    _named_episode(tmp_path / "ws", "S01E12", named, clusters, names=names)
+    plain = [(0.0, 5.0, "S5", 0.01), (10.0, 15.0, "S5", 0.01), (20.0, 25.0, "S5", 0.01)]
+    _named_episode(tmp_path / "ws", "S01E13", plain, [{"cluster": "S5", "character_id": 1}])
+    got = find_references(Workspace(tmp_path / "ws"), ["S01E12", "S01E13"], 1, "ja")
+    assert got.episode == "S01E12" and got.confirmed
+    assert got.seconds == 11.0
+    reg.close()
+
+
+def test_below_the_floor_episodes_rank_by_how_close_they_come(tmp_path: Path):
+    """Neither episode reaches the floor: the one with 2 clips and 9.5 s (6.5 s neutral, then
+    an angry 3 s) beats 2 neutral clips of 8.5 s, though it picked less before filling."""
+    from fukikae.artifacts import write_json
+    from fukikae.cards.auto import character_references
+    from fukikae.models import Tags, TagSpan
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 1)
+    calm = [(0.0, 4.0, "S5", 0.01), (10.0, 14.5, "S5", 0.01)]
+    filled = [(0.0, 6.5, "S5", 0.01), (10.0, 13.0, "S5", 0.01)]
+    _named_episode(tmp_path / "ws", "S01E11", calm, [{"cluster": "S5", "character_id": 1}])
+    _named_episode(tmp_path / "ws", "S01E12", filled, [{"cluster": "S5", "character_id": 1}])
+    tags = Tags(backend="x", events=[], emotion_backend="emotion2vec", emotions=[
+        TagSpan(start=10.0, end=13.0, label="angry", confidence=0.9)])  # fmt: skip
+    work = Workspace(tmp_path / "ws").work_dir("S01E12")
+    (work / "04b-tag").mkdir(parents=True, exist_ok=True)
+    write_json(work / "04b-tag" / "tags.json", tags)
+    got = character_references(Workspace(tmp_path / "ws"), ["S01E11", "S01E12"], 1)
+    assert got is not None and got[0] == "S01E12" and len(got[1]) == 2
+    reg.close()
+
+
+def test_a_locked_stale_card_under_the_floor_says_both(tmp_path: Path, vocals: Path):
+    from fukikae.cards.auto import below_floor, stale_cards
+
+    reg, _, ws = _ws_named(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)], locked=True)
+    stale = stale_cards(ws, reg, store, [1], "en")
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
+                               cloning=_cloning_ws(ws), stale=stale,
+                               short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
+    (flag,) = flags
+    assert "wendy" in flag and "voices clone" in flag
+    assert flag.endswith(
+        "; below the clone floor (1 clip and 5.0 s, under the floor of 2 clips and 10 s)"
+    )
+    reg.close()
+
+
+def test_a_re_pick_still_under_the_floor_is_flagged_and_a_second_run_changes_nothing(
+    tmp_path: Path, vocals: Path
+):
+    """The one-clip 6.3 s card is re-picked to two clips (9.3 s), still under the floor:
+    flagged. The next run finds no better pick: no new card, no report line, the same flag."""
+    from fukikae.cards.auto import below_floor
+
+    turns = [FLOOR_TURNS[0], (10.0, 13.0, "S0~mak", 0.01), FLOOR_TURNS[3]]
+    names = [(0.0, 6.3, "makarov", False), (10.0, 13.0, "makarov", False),
+             (20.0, 25.0, "wendy", False)]  # fmt: skip
+    reg, _, ws = _ws_floor(tmp_path, turns=turns, names=names)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)])
+    flags: list[str] = []
+    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 13.0)]}, vocals,
+                                 cloning=_cloning_ws(ws),
+                                 short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old
+    assert "below the clone floor (2 clips and 9.3 s" in line
+    (flag,) = flags
+    assert flag.startswith(f"character 1: clone card {cur.card_id} is below the clone floor")
+    again: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 13.0)]}, vocals,
+                               cloning=_cloning_ws(ws),
+                               short=below_floor(reg, store, [1], "en"), flags=again)  # fmt: skip
+    assert lines == [] and reg.card_for(1, "en").card_id == cur.card_id  # type: ignore[union-attr]
+    assert len(reg.card_history(1, "en")) == 2
+    (flag,) = again
+    assert "no better reference pick exists" in flag
+    reg.close()
+
+
+def test_reference_candidates_are_read_once_per_process_until_a_file_changes(
+    tmp_path: Path, monkeypatch
+):
+    """Each episode-run's tts asks `find_references` again for a flagged character: the
+    episode's candidates and song exclusions are worked out once while its files are
+    unchanged, whatever order the episodes come in."""
+    import os
+
+    from fukikae.cards import select
+    from fukikae.cards.auto import find_references
+
+    reg, _, ws = _ws_floor(tmp_path)
+    reg.close()
+    calls = {"eligible": 0, "exclusions": 0}
+    eligible, exclusions = select.eligible_references, select.reference_exclusions
+
+    def count_eligible(*a, **kw):
+        calls["eligible"] += 1
+        return eligible(*a, **kw)
+
+    def count_exclusions(*a, **kw):
+        calls["exclusions"] += 1
+        return exclusions(*a, **kw)
+
+    monkeypatch.setattr(select, "eligible_references", count_eligible)
+    monkeypatch.setattr(select, "reference_exclusions", count_exclusions)
+    first = find_references(ws, [FLOOR_EP], 1, "ja")
+    assert find_references(ws, [FLOOR_EP], 1, "ja") == first
+    assert calls == {"eligible": 1, "exclusions": 1}
+    tr = ws.work_dir(FLOOR_EP) / "03-asr" / "transcript.json"
+    st = tr.stat()
+    os.utime(tr, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    find_references(ws, [FLOOR_EP], 1, "ja")
+    assert calls == {"eligible": 2, "exclusions": 1}
