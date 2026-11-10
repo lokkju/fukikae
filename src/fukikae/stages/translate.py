@@ -26,7 +26,9 @@ whose ``{episode}`` is replaced by the episode id, then ``[subs] track``, a side
 track), each spoken by the diarize cluster that overlaps it most, and a cue within its budget
 is spoken verbatim. Only a cue over budget goes to the translator, in condense mode (English to
 shorter English), unless ``subs_condense = false``; a condensed line that fails or comes back no
-shorter leaves the subtitle line in place, flagged over budget for time fitting. Signs, songs
+shorter leaves the subtitle line in place, flagged over budget for time fitting, and so does
+a backend that gives up (``MAX_BACKEND_FAILURES``): the episode goes on with the lines as
+written. Signs, songs
 and SDH notes are filtered by ``subs_filter`` (default all three rules). ``auto`` takes the
 subtitle path when subtitles are found, else the ASR path. Stage settings (``max_speed``,
 ``source``, ``subs_condense``, ``subs_filter``) are not backend options.
@@ -497,6 +499,15 @@ class TranslateStage:
                     self._translate_all(
                         cast(Translator, backend), todo, styles, glossary, src, target, mode
                     )
+                except TranslateBackendError as e:
+                    if not subs:
+                        raise
+                    # C5: condensing is optional; every line is still spoken as written
+                    log.warning("translate %s: %s; speaking the subtitle lines as written",
+                                ep.id, e)  # fmt: skip
+                    for c in todo:
+                        if c.text is None or c.error is not None or c.text == c.source_text:
+                            c.error = c.error or f"translate: backend: {e}"
                 finally:
                     backend.unload()
         if subs:

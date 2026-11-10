@@ -718,3 +718,20 @@ def test_budget_per_cue_follows_the_speakers_voice(ep):
         assert c.budget == budget_chars(c.end - c.start, "en", 1.25, cps=cps)
     _backend_card(ep, 1, "kokoro")
     assert TranslateStage().config_key(cfg, ep)["cps"] != key["cps"]
+
+
+@pytest.mark.usefixtures("fake")
+def test_subtitle_mode_keeps_the_lines_when_the_backend_gives_up(ep, monkeypatch):
+    """C5: in subtitle mode a dead endpoint costs only the condensing: every line is still
+    spoken as written, and the episode goes on."""
+    from fukikae.stages import translate
+
+    monkeypatch.setattr(translate, "MAX_BACKEND_FAILURES", 1)
+    _sidecar(ep)
+    FakeTranslator.SCRIPT = [backend_down] * 8
+    TranslateStage().run(ep, CFG)
+    out = _out(ep)
+    for c in (out.cues[1], out.cues[4]):
+        assert c.text == c.source_text and c.error is None
+        assert c.note is not None and c.note.startswith("condense failed: ")
+    assert FakeTranslator.LOG == ["load", "unload"]
