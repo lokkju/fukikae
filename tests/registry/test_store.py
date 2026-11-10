@@ -958,8 +958,6 @@ def test_alias_keys_are_folded_and_checked(reg: Registry):
     a = _char(reg)
     assert reg.add_alias(a, "ＮＡＴＳＵ", by="operator").alias == "natsu"
     with pytest.raises(ValueError):
-        reg.add_alias(a, "  ", by="operator")
-    with pytest.raises(ValueError):
         reg.add_alias(a, "x", by="robot")  # type: ignore[arg-type]
     with pytest.raises(KeyError):
         reg.add_alias(999, "x", by="operator")
@@ -1077,7 +1075,87 @@ def test_merge_moves_aliases_and_prune_deletes_them(reg: Registry):
     hit = reg.character_for_key("nabaru")
     assert hit is not None and hit.id == c1
     a3, c3 = reg.create_actor_with_character(unit(1, 1))
-    reg.add_alias(c3, "loke", by="subs")
+    reg.name_character(c3, "Loke", "loke", "en")
     assert reg.prune_actors([a3]) == [a3]
     assert reg.character_for_key("loke") is None
     assert "loke" not in {x.alias for x in reg.aliases()}
+
+
+def test_a_subs_named_orphan_is_not_curated_and_prunes_with_its_alias(reg: Registry):
+    # controller ruling on D29 #2: only an operator name or an operator alias curates
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.name_character(cid, "Wendy", "wendy", "en")
+    assert cid not in reg.curated_characters() and aid not in reg.protected_actors()
+    assert reg.prune_actors([aid]) == [aid]
+    assert reg.characters() == [] and reg.aliases() == []
+
+
+def test_an_orphan_holding_only_an_operator_alias_is_kept(reg: Registry):
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.add_alias(cid, "charle", by="operator")
+    assert cid in reg.curated_characters() and aid in reg.protected_actors()
+    assert reg.prune_actors([aid]) == []
+    assert [(x.alias, x.by) for x in reg.aliases(cid)] == [("charle", "operator")]
+    with pytest.raises(ValueError, match="curated"):
+        reg.name_character(cid, "Charle", "charle", "en")
+
+
+def test_an_operator_named_orphan_is_kept(reg: Registry):
+    aid, cid = reg.create_actor_with_character(unit(1, 0))
+    reg.rename_character(cid, "Erza")
+    assert cid in reg.curated_characters() and reg.prune_actors([aid]) == []
+
+
+def test_rename_character_is_always_the_operator(reg: Registry):
+    import inspect
+
+    assert "by" not in inspect.signature(Registry.rename_character).parameters
+    a = _char(reg)
+    reg.name_character(a, "Natsu", "natsu", "en")
+    reg.rename_character(a, "Natsu Dragneel")
+    assert reg.characters()[0].name_by == "operator"
+
+
+def test_no_subs_path_overwrites_an_operator_name(reg: Registry):
+    a = _char(reg)
+    reg.rename_character(a, "Natsu Dragneel")
+    with pytest.raises(ValueError):
+        reg.name_character(a, "Zeref", "zeref", "en")
+    with pytest.raises(AliasConflictError):  # nor takes its key away
+        reg.add_alias(_char(reg), "natsu dragneel", by="subs")
+    (c, _) = reg.characters()
+    assert (c.name, c.name_by) == ("Natsu Dragneel", "operator")
+    assert [(x.alias, x.by) for x in reg.aliases(a)] == [("natsu dragneel", "operator")]
+
+
+@pytest.mark.parametrize(
+    ("written", "key"),
+    [("MAKAROV(WRAITH)", "makarov (wraith)"), ("{\\i1}NATSU", "natsu"), ("WENDY/I", "wendy")],
+)
+def test_alias_methods_key_names_as_the_names_stage_does(reg: Registry, written: str, key: str):
+    a = _char(reg)
+    assert reg.add_alias(a, written, by="operator").alias == key
+    for spelled in (written, key):
+        hit = reg.character_for_key(spelled)
+        assert hit is not None and hit.id == a
+    reg.remove_alias(written)
+    assert reg.aliases() == []
+
+
+@pytest.mark.parametrize("nobody", ["MAKAROV/WRAITH", "NATSU & LUCY", "SIGN", "  "])
+def test_alias_methods_refuse_a_name_that_keys_nobody(reg: Registry, nobody: str):
+    a = _char(reg)
+    with pytest.raises(ValueError, match="names nobody"):
+        reg.add_alias(a, nobody, by="operator")
+    with pytest.raises(ValueError, match="names nobody"):
+        reg.character_for_key(nobody)
+    with pytest.raises(ValueError, match="names nobody"):
+        reg.remove_alias(nobody)
+
+
+def test_ambiguous_key_hint_names_rename_and_merge(reg: Registry):
+    a, b = _char(reg), _char(reg)
+    with reg._tx() as con:
+        con.execute("UPDATE characters SET name = 'Lucy' WHERE id IN (?, ?)", (a, b))
+    with pytest.raises(ValueError, match="registry rename.*registry merge"):
+        reg.character_for_key("lucy")

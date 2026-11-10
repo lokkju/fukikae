@@ -212,7 +212,8 @@ def test_names_table_rejects_unknown_key(tmp_path):
         "turn_share=0",
         "track=-1",
         "holdout_episodes=['E14']",
-        "holdout_episodes=['episode-14']",
+        "holdout_episodes=['Episode 14']",
+        "holdout_episodes=['ep-s01e14']",
         "holdout_episodes=['S01E14x']",
     ],
 )
@@ -228,6 +229,12 @@ def test_holdout_episodes_are_canonical_episode_ids(tmp_path):
         '[names]\nholdout_episodes=["s01e14", "S1E3", "S01E14"]\n'
     )
     assert load_config(tmp_path, user_config=None).names.holdout_episodes == ("S01E14", "S01E03")
+
+
+def test_holdout_episodes_take_a_slug_episode_id(tmp_path):
+    # files without SxxEyy get workspace.episode_id's slug of the stem; that form is kept
+    (tmp_path / "fukikae.toml").write_text('[names]\nholdout_episodes=["ova-2", "S01E14"]\n')
+    assert load_config(tmp_path, user_config=None).names.holdout_episodes == ("ova-2", "S01E14")
 
 
 def test_names_table_needs_no_backend(tmp_path):
