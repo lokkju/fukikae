@@ -19,6 +19,7 @@ from fukikae.models import (
     Turn,
     Word,
 )
+from fukikae.names.inputs import names_path
 from fukikae.registry.store import Registry
 from fukikae.stages import translate
 from fukikae.stages.translate import TranslateStage
@@ -735,3 +736,162 @@ def test_subtitle_mode_keeps_the_lines_when_the_backend_gives_up(ep, monkeypatch
         assert c.text == c.source_text and c.error is None
         assert c.note is not None and c.note.startswith("condense failed: ")
     assert FakeTranslator.LOG == ["load", "unload"]
+
+
+# ---- names (Task 8): a cue's own Name picks its speaker on the subtitle path ----
+
+ASS_HEAD = """\
+[Script Info]
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour
+Style: Default,Arial,24,&H00FFFFFF
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def _ass_sidecar(ep: Episode) -> Path:
+    rows = [
+        ("0:00:00.00", "0:00:01.00", "NATSU", "I'm all fired up!"),
+        ("0:00:03.00", "0:00:04.00", "NATSU", "Yes."),  # under Lucy's turn
+        ("0:00:04.00", "0:00:05.00", "LUCY", "Fine."),
+    ]
+    body = "".join(f"Dialogue: 0,{a},{b},Default,{n},0,0,0,,{t}\n" for a, b, n, t in rows)
+    path = ep.source.with_name(f"{ep.source.stem}.en.ass")
+    path.write_text(ASS_HEAD + body, encoding="utf-8")
+    return path
+
+
+def _names_used(ep: Episode, how: str = "target", hidden: list[int] | None = None) -> None:
+    """names.json (used) for the sidecar's three lines, and assignments in which the characters
+    stage gave the sub-cluster S0~natsu to Natsu (character 1) by name."""
+    from fukikae.names.models import LabelInfo, NamedLine, NamesResult
+    from fukikae.names.normalize import NameClass
+
+    lines = [
+        NamedLine(id=i, start=s, end=e, raw=raw, key=raw.lower(), display=raw.title(),
+                  cls=NameClass.NAMED, inner=False, text=t)
+        for i, (s, e, raw, t) in enumerate(
+            [(0.0, 1.0, "NATSU", "I'm all fired up!"), (3.0, 4.0, "NATSU", "Yes."),
+             (4.0, 5.0, "LUCY", "Fine.")]
+        )
+    ]  # fmt: skip
+    names_path(ep.work).parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        names_path(ep.work),
+        NamesResult(
+            episode=ep.id, used=True, verdict="full", reason=None,
+            source={"how": how, "language": "en", "track": None, "codec": "ass", "title": None,
+                    "file": None},
+            offset_s=0.0, coverage={}, lines=lines, hidden=hidden or [], pieces=[],
+            labels={"S0~natsu": LabelInfo(parent="S0", key="natsu", display="Natsu", cls="named")},
+            unvoiced=[], excluded=[], dropped_row_seconds=0.0, suggestions=[],
+        ),
+    )  # fmt: skip
+    path = ep.work / "05-characters" / "assignments.json"
+    asg = read_json(path, Assignments)
+    natsu = ClusterAssignment.model_validate(
+        {"cluster": "S0~natsu", "actor_id": 1, "character_id": 1, "score": 0.9,
+         "clean_seconds": 1.0, "status": "matched", "name": "natsu", "source": "name"}
+    )  # fmt: skip
+    turns = [Turn(start=0.0, end=1.0, speaker="S0~natsu"), *asg.turns[1:]]  # type: ignore[index]
+    turns.insert(1, Turn(start=1.0, end=2.5, speaker="S0"))
+    write_json(path, asg.model_copy(update={"clusters": [natsu, *asg.clusters], "turns": turns}))
+
+
+SUBS = Config(
+    source_language="ja",
+    raw={"translate": {"backend": "fake", "max_speed": 1.25, "subs_condense": False}},
+)
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_cue_named_by_its_own_name_goes_to_that_character(ep):
+    _ass_sidecar(ep)
+    _names_used(ep)
+    TranslateStage().run(ep, SUBS)
+    assert [(c.text, c.speaker) for c in _out(ep).cues] == [
+        ("I'm all fired up!", "Natsu"), ("Yes.", "Natsu"), ("Fine.", "char2"),
+    ]  # fmt: skip
+
+
+@pytest.mark.usefixtures("fake")
+def test_hidden_lines_and_other_tracks_go_by_overlap(ep):
+    _ass_sidecar(ep)
+    _names_used(ep, hidden=[1])
+    TranslateStage().run(ep, SUBS)
+    assert [c.speaker for c in _out(ep).cues] == ["Natsu", "char2", "char2"]
+    _names_used(ep, how="other-language")
+    TranslateStage().run(ep, SUBS)
+    assert [c.speaker for c in _out(ep).cues] == ["Natsu", "char2", "char2"]
+    assert "cue_names" not in TranslateStage().config_key(SUBS, ep)
+
+
+def test_translate_key_changes_when_names_json_changes(ep):
+    _ass_sidecar(ep)
+    stage = TranslateStage()
+    plain = stage.config_key(SUBS, ep)
+    assert names_path(ep.work) not in stage.inputs(ep)
+    _names_used(ep)
+    assert names_path(ep.work) not in stage.inputs(ep)  # cue_names in the key drives reruns
+    named = stage.config_key(SUBS, ep)
+    assert named["cue_names"] == {"map": {"natsu": [1, None]}, "hidden": [], "offset_s": 0.0}
+    assert {k: v for k, v in named.items() if k != "cue_names"} == plain
+    _names_used(ep, hidden=[1])
+    assert stage.config_key(SUBS, ep)["cue_names"]["hidden"] == [[3.0, 4.0, "natsu"]]
+
+
+@pytest.mark.parametrize("verdict", ["off", "none", "holdout"])
+def test_unused_names_change_no_translate_input_or_key(ep, verdict):
+    """Final review B #5: names.json is never a translate input, so a names stage that read
+    no names (off, no named track, held out) leaves translate's inputs and key as they were."""
+    from fukikae.names.models import NamesResult
+
+    _ass_sidecar(ep)
+    stage = TranslateStage()
+    inputs, key = stage.inputs(ep), stage.config_key(SUBS, ep)
+    names_path(ep.work).parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        names_path(ep.work),
+        NamesResult(
+            episode=ep.id, used=False, verdict=verdict, reason="x", source=None, offset_s=0.0,
+            coverage={}, lines=[], hidden=[], pieces=[], labels={}, unvoiced=[], excluded=[],
+            dropped_row_seconds=0.0, suggestions=[],
+        ),
+    )  # fmt: skip
+    assert stage.inputs(ep) == inputs and stage.config_key(SUBS, ep) == key
+
+
+def test_names_json_is_no_input_on_the_asr_path(ep):
+    """Task 8 review: only the subtitle path reads names.json, so an ASR-path workspace with
+    names doesn't re-translate when its names change."""
+    asr = Config(source_language="ja", raw={"translate": {"backend": "fake", "source": "asr"}})
+    stage = TranslateStage(cfg=asr)
+    _names_used(ep)
+    assert names_path(ep.work) not in stage.inputs(ep)
+    assert "cue_names" not in stage.config_key(asr, ep)
+
+
+def test_same_track_file_and_track_branches(tmp_path):
+    from fukikae import media
+    from fukikae.stages.translate import _same_track
+
+    f = tmp_path / "a.en.ass"
+    f.write_text("")
+    other = tmp_path / "b.en.ass"
+    other.write_text("")
+    track = media.SubTrack(index=3, codec="ass", language="eng", title=None, forced=False)
+    assert _same_track({"how": "file", "file": str(f)}, f, None)
+    assert not _same_track({"how": "file", "file": str(f)}, other, None)
+    assert not _same_track({"how": "file", "file": str(f)}, None, track)
+    assert not _same_track({"how": "file", "file": None}, f, None)
+    assert _same_track({"how": "track", "track": 3}, None, track)
+    assert not _same_track({"how": "track", "track": 4}, None, track)
+    assert not _same_track({"how": "track", "track": 3}, f, track)
+    assert not _same_track({"how": "track", "track": 3}, None, None)
+    assert _same_track({"how": "target"}, None, None)
+    assert not _same_track({"how": "other-language"}, f, None)
+    assert not _same_track(None, f, None)

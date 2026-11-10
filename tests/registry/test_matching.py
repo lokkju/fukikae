@@ -120,3 +120,24 @@ def test_pin_skips_previous_extra_and_review():
     )  # fmt: skip
     prev = Assignments(episode="e", threshold=0.6, clusters=[extra, review])
     assert pin(prev, turns, cur) == {}
+
+
+def test_pin_tie_goes_to_the_same_label_and_carries_no_name():
+    # a names-stage remainder (SPEAKER_00) nested inside another cluster's overlapping named
+    # turn: both previous labels cover it fully; its own label wins, and the pin is acoustic
+    prev_turns = Diarization(
+        backend="x",
+        turns=[
+            Turn(start=0, end=10, speaker="SPEAKER_06~cana"),
+            Turn(start=2, end=4, speaker="SPEAKER_00"),
+        ],
+    )
+    named = _ca("SPEAKER_06~cana", 5, 5).model_copy(update={"name": "cana", "source": "name"})
+    prev = Assignments(episode="e", threshold=0.6, clusters=[named, _ca("SPEAKER_00", 4, 4)])
+    got = pin(prev, prev_turns, prev_turns)
+    assert got["SPEAKER_00"].character_id == 4
+    assert (got["SPEAKER_00"].name, got["SPEAKER_00"].source) == (None, "voice")
+    assert got["SPEAKER_06~cana"].name is None and got["SPEAKER_06~cana"].source == "voice"
+    alone = Assignments(episode="e", threshold=0.6, clusters=[named])
+    other = pin(alone, prev_turns, prev_turns)["SPEAKER_00"]  # only the named one to inherit
+    assert (other.character_id, other.name, other.source) == (5, None, "voice")

@@ -159,3 +159,85 @@ def test_target_language_must_be_a_language_tag(tmp_path):
     (tmp_path / "fukikae.toml").write_text('target_language = "pt_BR"\n')
     with pytest.raises(ConfigError, match="pt-BR"):
         load_config(tmp_path, user_config=None)
+
+
+def test_names_table_defaults(tmp_path):
+    from fukikae.names import align, detect
+
+    n = load_config(tmp_path, user_config=None).names
+    assert n.use == "auto" and n.align and n.holdout_episodes == () and n.hide_fraction == 0
+    assert n.min_coverage == detect.MIN_COVERAGE and n.turn_share == align.TURN_SHARE
+
+
+def test_names_table_reads_every_key(tmp_path):
+    (tmp_path / "fukikae.toml").write_text(
+        '[names]\nuse="on"\nfile="names/{episode}.ass"\ntrack=3\nmin_coverage=0.7\n'
+        'turn_share=0.65\nmin_new_seconds=4\nalign=false\nholdout_episodes=["S01E14"]\n'
+        "hide_fraction=0.2\nhide_seed=7\n"
+    )
+    n = load_config(tmp_path, user_config=None).names
+    assert (n.use, n.file, n.track, n.align, n.holdout_episodes) == (
+        "on",
+        "names/{episode}.ass",
+        3,
+        False,
+        ("S01E14",),
+    )
+    assert (n.min_coverage, n.turn_share, n.min_new_seconds, n.hide_fraction, n.hide_seed) == (
+        0.7,
+        0.65,
+        4.0,
+        0.2,
+        7,
+    )
+
+
+def test_names_table_rejects_unknown_key(tmp_path):
+    (tmp_path / "fukikae.toml").write_text("[names]\nuse='auto'\nshare=0.5\n")
+    with pytest.raises(ConfigError, match="unknown key.*share"):
+        load_config(tmp_path, user_config=None)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "use='sometimes'",
+        "track='3'",
+        "track=true",
+        "hide_fraction=0.95",
+        "min_coverage=1.5",
+        "align='yes'",
+        "holdout_episodes='S01E14'",
+        "hide_seed=0.5",
+        "turn_share=0",
+        "track=-1",
+        "holdout_episodes=['E14']",
+        "holdout_episodes=['Episode 14']",
+        "holdout_episodes=['ep-s01e14']",
+        "holdout_episodes=['S01E14x']",
+    ],
+)
+def test_names_table_rejects_bad_values(tmp_path, body):
+    (tmp_path / "fukikae.toml").write_text(f"[names]\n{body}\n")
+    with pytest.raises(ConfigError, match=r"\[names\]"):
+        load_config(tmp_path, user_config=None)
+
+
+def test_holdout_episodes_are_canonical_episode_ids(tmp_path):
+    # the stage compares them with episode ids (S%02dE%02d), so spell them that way once here
+    (tmp_path / "fukikae.toml").write_text(
+        '[names]\nholdout_episodes=["s01e14", "S1E3", "S01E14"]\n'
+    )
+    assert load_config(tmp_path, user_config=None).names.holdout_episodes == ("S01E14", "S01E03")
+
+
+def test_holdout_episodes_take_a_slug_episode_id(tmp_path):
+    # files without SxxEyy get workspace.episode_id's slug of the stem; that form is kept
+    (tmp_path / "fukikae.toml").write_text('[names]\nholdout_episodes=["ova-2", "S01E14"]\n')
+    assert load_config(tmp_path, user_config=None).names.holdout_episodes == ("ova-2", "S01E14")
+
+
+def test_names_table_needs_no_backend(tmp_path):
+    # R3's exemption: a settings table, like [resolve]; nothing asks it for a backend
+    (tmp_path / "fukikae.toml").write_text('profile="anime"\n[names]\nuse="off"\n')
+    assert load_config(tmp_path, user_config=None).names.use == "off"

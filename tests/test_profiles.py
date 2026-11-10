@@ -126,9 +126,9 @@ SHIPPED = ("default", "anime", "live-action")
 @pytest.mark.parametrize("name", SHIPPED)
 def test_every_profile_table_names_its_backend(name):
     for kind, table in cfgmod.load_profile(name).items():
-        # [registry], [timefit] and [mix] hold plain settings (no model behind them); [resolve]
-        # selects its matcher by `matcher`, as [characters] does (Ruling R17).
-        if kind in ("registry", "timefit", "mix"):
+        # [registry], [timefit], [mix] and [names] hold plain settings (no model behind
+        # them); [resolve] selects its matcher by `matcher`, as [characters] does (R17).
+        if kind in ("registry", "timefit", "mix", "names"):
             continue
         key = "matcher" if kind in ("characters", "resolve") else "backend"
         assert isinstance(table, dict) and table.get(key), f"{name}: [{kind}] lacks {key}"

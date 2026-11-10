@@ -313,3 +313,74 @@ def test_rematch_and_resolve_work_after_reembed(tmp_path, monkeypatch):
     for eid, label in (("S01E01", "S0"), ("S01E02", "S1"), ("S01E03", "S0")):
         got, _ = by_cluster(ws, eid)
         assert got[label].actor_id == ana, (eid, got)
+
+
+def name_episode(ws: Workspace, eid: str, label: str, key: str) -> str:
+    """Names as the names stage would write them: `label` becomes the sub-cluster
+    `<label>~<key>` in 04c-names (same turns, rows and spans); the other clusters remain."""
+    from fukikae.artifacts import read_json
+    from fukikae.names.models import LabelInfo, NamesResult
+
+    work = ws.work_dir(eid)
+    sub = f"{label}~{key}"
+    out = work / "04c-names"
+    out.mkdir(parents=True, exist_ok=True)
+    diar = read_json(work / "04-diarize" / "turns.json", Diarization)
+    turns = [t.model_copy(update={"speaker": sub}) if t.speaker == label else t for t in diar.turns]
+    write_json(out / "turns.json", Diarization(backend="x", turns=turns))
+    with np.load(work / "04-diarize" / "clusters.npz") as z:
+        labels = [str(x) for x in z["labels"]]
+        arrays: dict[str, Any] = {"labels": np.array([sub if x == label else x for x in labels])}
+        for x in labels:
+            y = sub if x == label else x
+            for part in ("embeddings", "spans", "clean_seconds"):
+                arrays[f"{y}/{part}"] = z[f"{x}/{part}"]
+    np.savez(out / "clusters.npz", **arrays)
+    infos = {
+        (sub if x == label else x): LabelInfo(
+            parent=x,
+            key=key if x == label else None,
+            display=key.title() if x == label else None,
+            cls="named" if x == label else "remainder",
+        )
+        for x in labels
+    }
+    write_json(
+        out / "names.json",
+        NamesResult(
+            episode=eid, used=True, verdict="full", reason=None,
+            source={"how": "target", "language": "en"}, offset_s=0.0, coverage={}, lines=[],
+            hidden=[], pieces=[], labels=infos, unvoiced=[], excluded=[],
+            dropped_row_seconds=0.0, suggestions=[],
+        ),
+    )  # fmt: skip
+    return sub
+
+
+def test_reembed_finds_rows_of_sub_cluster_labels(tmp_path, monkeypatch):
+    ws, _ = make_registry(tmp_path, monkeypatch)
+    sub = name_episode(ws, "S01E02", "S0", "ben")
+    e2 = Episode(
+        source=ws.root / "S01E02", id="S01E02", work=ws.work_dir("S01E02"), workspace_root=ws.root
+    )
+    CharactersStage().run(e2, ws.config)  # resolve reads the characters stage's decisions
+    _resolve(ws, "S01E01,S01E02")  # S01E02's exemplars are now filed under S0~ben
+    with Registry(ws.registry_path) as reg:
+        assert len(reg.cluster_actors("S01E02", sub)) == 1
+        assert reg.cluster_actors("S01E02", "S0") == []
+    r = runner.invoke(app, ["registry", "reembed", str(ws.root), "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert "400 spans to embed from 2 episodes" in r.output
+    r = runner.invoke(app, ["registry", "reembed", str(ws.root)])
+    assert r.exit_code == 0, r.output
+    with Registry(ws.registry_path) as reg:
+        rows = [e for e in reg.exemplars() if e.cluster == sub]
+        assert len(rows) == 100 and {len(e.embedding) for e in rows} == {NEW}
+
+
+def test_reembed_still_finds_exemplars_from_before_names(tmp_path, monkeypatch):
+    ws, _ = make_registry(tmp_path, monkeypatch)
+    name_episode(ws, "S01E02", "S0", "ben")  # names now used; the exemplars are 04-diarize's
+    r = runner.invoke(app, ["registry", "reembed", str(ws.root), "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert "400 spans to embed from 2 episodes" in r.output

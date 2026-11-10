@@ -59,6 +59,22 @@ def _norm_lang(code: str | None) -> str | None:
     return _ISO3_ALIASES.get(c, c)
 
 
+_ISO3_TO_1 = {v: k for k, v in _ISO1_TO_3.items()}
+
+
+def iso3_language(code: str | None) -> str | None:
+    """A language code as the ISO 639-2 form ``dialogue_track`` matches (``en``, ``ger`` ->
+    ``eng``, ``deu``). Not ``config.normalize_language``, which keeps a tag's own form."""
+    return _norm_lang(code)
+
+
+def short_language(code: str | None) -> str | None:
+    """A language code as ISO 639-1 when it has one (``eng``, ``ger``, ``en-US`` -> ``en``,
+    ``de``, ``en``), else its ISO 639-2 form; None for none."""
+    c = _norm_lang(code)
+    return _ISO3_TO_1.get(c, c) if c else None
+
+
 def _tail(text: str, lines: int = 20) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
@@ -184,24 +200,40 @@ TEXT_SUBTITLE_CODECS = frozenset({"ass", "ssa", "subrip", "srt", "webvtt", "mov_
 SIDECAR_SUFFIXES = (".ass", ".ssa", ".srt", ".vtt")
 
 
+def _subtitle_dest(track: SubTrack, out: Path) -> Path:
+    ass = track.codec in ("ass", "ssa")
+    out = Path(out)
+    stem = out.with_suffix("") if out.suffix.casefold() in SIDECAR_SUFFIXES else out
+    return stem.with_name(stem.name + (".ass" if ass else ".srt"))
+
+
 def extract_subtitle(source: Path, track: SubTrack, out: Path) -> Path:
     """The subtitle stream at ``track`` written to ``out`` plus ``.ass`` for an ASS/SSA track,
     copied as is, else ``.srt`` (a subtitle suffix already on ``out`` is replaced, any other
     dot in the name kept: ``subs.en`` -> ``subs.en.ass``). Returns the written path."""
-    ass = track.codec in ("ass", "ssa")
-    out = Path(out)
-    stem = out.with_suffix("") if out.suffix.casefold() in SIDECAR_SUFFIXES else out
-    dest = stem.with_name(stem.name + (".ass" if ass else ".srt"))
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    run_ffmpeg(
-        [
-            "-i", str(Path(source).resolve()),
-            "-map", f"0:{track.index}",
-            "-c:s", "copy" if ass else "srt",
-            str(dest),
-        ]
-    )  # fmt: skip
-    return dest
+    return extract_subtitles(source, [(track, out)])[0]
+
+
+def extract_subtitles(source: Path, wanted: list[tuple[SubTrack, Path]]) -> list[Path]:
+    """``extract_subtitle`` for several tracks in one ffmpeg pass over the source (each pass
+    reads the whole file). Returns the written paths in order; nothing runs for none."""
+    if not wanted:
+        return []
+    args = ["-i", str(Path(source).resolve())]
+    dests: list[Path] = []
+    for track, out in wanted:
+        dest = _subtitle_dest(track, out)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        ass = track.codec in ("ass", "ssa")
+        args += ["-map", f"0:{track.index}", "-c:s", "copy" if ass else "srt", str(dest)]
+        dests.append(dest)
+    try:
+        run_ffmpeg(args)
+    except BaseException:
+        for dest in dests:  # no half-written scratch file stays behind
+            dest.unlink(missing_ok=True)
+        raise
+    return dests
 
 
 def _text_track(track: SubTrack) -> bool:

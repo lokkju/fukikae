@@ -1,6 +1,9 @@
 """Segmentation variants: the stretches of an episode that get one embedding and one identity.
 
-`diarization`: the clean spans of each ``04-diarize`` cluster (the speaker's turns minus any
+`diarization`: the clean spans of each identity cluster (``names.inputs.identity_inputs``: the
+names stage's ``<cluster>~<slug>`` sub-clusters when names were used, else ``04-diarize``'s
+clusters; or the turns ``assignments.json`` recorded, with ``--from-assignments``), that is the
+speaker's turns minus any
 overlap with another speaker, padded in by 0.1 s, at least 1.5 s; `stages.diarize.clean_spans`),
 all of them, clusters in order of first appearance and each cluster's spans in time order.
 A span is labeled with the ground-truth name covering at least 60% of it (the rule
@@ -34,6 +37,7 @@ from fukikae.eval.groundtruth import GroundTruthLine
 from fukikae.eval.groundtruth.ass_names import UNKNOWN, Line, label_spans
 from fukikae.eval.speakers import label_key
 from fukikae.models import Diarization, Transcript, Turn, Word
+from fukikae.names.inputs import identity_inputs
 from fukikae.stages.diarize import clean_spans
 from fukikae.workspace import Workspace
 
@@ -265,19 +269,24 @@ def segments(
     gt: list[GroundTruthLine],
     window_embed: WindowEmbed | None = None,
     options: dict[str, Any] | None = None,
+    turns: list[Turn] | None = None,
 ) -> list[Segment]:
-    """The episode's segments for `kind`; `diarization` reads ``04-diarize/turns.json``,
-    `asr` reads ``03-asr/transcript.json`` and the turns (for overlap) and needs
-    `window_embed`; `options` are `asr_segments`' keyword options (window, split, max_gap)."""
+    """The episode's segments for `kind`; `diarization` reads the identity turns
+    (`identity_inputs`: ``04c-names/turns.json`` when names were used, else
+    ``04-diarize/turns.json``) unless `turns` gives them (``assignments.turns``, so labels match
+    the assignments' clusters), `asr` reads ``03-asr/transcript.json`` and the turns (for
+    overlap) and needs `window_embed`; `options` are `asr_segments`' keyword options (window,
+    split, max_gap)."""
     if kind == "subtitles":
         return subtitle_segments(episode, gt)
     if kind not in ("diarization", "asr"):
         raise ValueError(f"unknown segmentation {kind!r}; use one of {', '.join(KINDS)}")
     w = ws if isinstance(ws, Workspace) else Workspace(Path(ws))
-    path = w.work_dir(episode) / "04-diarize" / "turns.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"{episode}: no diarization at {path}")
-    turns = read_json(path, Diarization).turns
+    if turns is None:
+        path = identity_inputs(w.work_dir(episode))[0]
+        if not path.is_file():
+            raise FileNotFoundError(f"{episode}: no diarization at {path}")
+        turns = read_json(path, Diarization).turns
     if kind == "diarization":
         return diarization_segments(episode, turns, gt)
     if window_embed is None:
