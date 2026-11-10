@@ -82,15 +82,22 @@ def test_run_command_extracts(tmp_path, readonly_copy):
 
 def _user_errors():
     from fukikae.backends.loader import BackendUnavailable
+    from fukikae.backends.tts.remote import BackendError
     from fukikae.cards.card import CardError
     from fukikae.config import ConfigError
     from fukikae.gpu import VramTimeout
+    from fukikae.gpulock import GpuBusy
+    from fukikae.translation import TranslateBackendError
 
     return [
         CardError("character 1: card 0123456789abcdef needs sidecar sha256:9e1f"),
         VramTimeout("not enough free VRAM"),
         ConfigError("unknown asr backend 'nope'"),
         BackendUnavailable("asr backend 'qwen3_asr' cannot be imported"),
+        # C6: the machine's state or an endpoint, not a bug in fukikae
+        GpuBusy("GPU 0 is held by pid 123 (fukikae tts indextts2)"),
+        TranslateBackendError("3 windows in a row failed on the backend"),
+        BackendError("indextts2 worker exited with 9"),
     ]
 
 
@@ -238,3 +245,31 @@ def test_run_takes_several_episodes_and_overlaps_their_cpu_tails(tmp_path, monke
     assert seen["ids"] == ["S01E01", "S01E02"] and seen["tail"] == ("timefit", "mix")
     assert "S01E01: ran extract" in r.output
     assert "error: S01E02: boom" in r.output and r.exit_code == 1
+
+
+def test_run_reports_every_episode_before_raising_a_bug(tmp_path, monkeypatch):
+    """C6: a multi-episode run reports each episode's result; an unexpected error in one no
+    longer hides the others'."""
+    import fukikae.job
+    from fukikae.job import EpisodeResult
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    for n in (1, 2, 3):
+        (tmp_path / f"S01E0{n}.mkv").write_bytes(b"x")
+
+    def fake(eps, _cfg, stages, *, tail, from_stage, to_stage):  # noqa: ARG001
+        return {
+            "S01E01": EpisodeResult(error=KeyError("a bug")),
+            "S01E02": EpisodeResult(ran=["extract"]),
+            "S01E03": EpisodeResult(error=ValueError("bad input")),
+        }
+
+    monkeypatch.setattr(fukikae.job, "run_episodes", fake)
+    r = CliRunner().invoke(
+        app, ["run", str(ws), *(str(tmp_path / f"S01E0{n}.mkv") for n in (1, 2, 3))]
+    )
+    assert "S01E01" in r.output and "a bug" in r.output
+    assert "S01E02: ran extract" in r.output
+    assert "error: S01E03: bad input" in r.output
+    assert r.exit_code != 0
