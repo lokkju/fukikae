@@ -358,12 +358,13 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
                 env=client, check=True)  # fmt: skip
             client.pop("HF_TOKEN", None)
         engines = inst.engine_dir()
-        engines.mkdir(parents=True, exist_ok=True)
+        # the build writes a sibling of the engines and renames it into place: mount the parent
+        engines.parent.mkdir(parents=True, exist_ok=True)
         gpu = nvml_index("cuda:0")
         log.info("building the TensorRT engines on GPU %d into %s", gpu, engines)
         with gpu_lock(gpu, f"{cls.name} engine build"):
             run([*base, "--gpus", f"device={gpu}", "--network", "none", "--shm-size", "2g",
-                 "-v", f"{hub}:{hub}:ro", "-v", f"{engines}:{engines}",
+                 "-v", f"{hub}:{hub}:ro", "-v", f"{engines.parent}:{engines.parent}",
                  "-e", f"FUKIKAE_HUB_REAL={hub}", "-e", "HF_HUB_OFFLINE=1",
                  "--entrypoint", "python", inst.image(), "-m",
                  "fukikae.backends.tts.impl_indextts2_trt",

@@ -295,3 +295,55 @@ def test_the_gpu_lock_is_held_while_the_container_runs():
     finally:
         s.unload()
     assert not gpulock.held_fds()
+
+
+# ---- the engine build ------------------------------------------------------------------------
+
+
+def _old_engines(engines: Path) -> None:
+    (engines / "trt_engines_fp16").mkdir(parents=True)
+    (engines / "trt_engines_fp16" / "dit.engine").write_text("old")
+    (engines / impl.MANIFEST).write_text(json.dumps({"build_id": "0ld000000000"}))
+
+
+def test_a_build_replaces_the_engines_whole(tmp_path, monkeypatch):
+    engines = tmp_path / "trt" / "abc123"
+    _old_engines(engines)
+
+    def into(dest: Path) -> dict:
+        assert dest.parent == engines.parent and dest.name.startswith("abc123.tmp-")
+        (dest / "trt_engines_fp16").mkdir()
+        (dest / "trt_engines_fp16" / "bigvgan.engine").write_text("new")
+        return {"build_id": "new000000000"}
+
+    monkeypatch.setattr(impl, "_build_into", into)
+    assert impl.build(engines)["build_id"] == "new000000000"
+    assert json.loads((engines / impl.MANIFEST).read_text())["build_id"] == "new000000000"
+    assert (engines / "trt_engines_fp16" / "bigvgan.engine").read_text() == "new"
+    assert not (engines / "trt_engines_fp16" / "dit.engine").exists()  # nothing of the old set
+    assert sorted(p.name for p in engines.parent.iterdir()) == ["abc123"]
+
+
+def test_a_failed_build_leaves_the_old_engines_untouched(tmp_path, monkeypatch):
+    engines = tmp_path / "trt" / "abc123"
+    _old_engines(engines)
+    (engines.parent / "abc123.tmp-deadbeef").mkdir()  # a killed build's leftovers go too
+
+    def into(dest: Path) -> dict:
+        (dest / "trt_engines_fp16").mkdir()
+        (dest / "trt_engines_fp16" / "bigvgan.engine").write_text("partial")
+        raise subprocess.CalledProcessError(1, ["build_bigvgan_trt.py"])
+
+    monkeypatch.setattr(impl, "_build_into", into)
+    with pytest.raises(subprocess.CalledProcessError):
+        impl.build(engines)
+    assert json.loads((engines / impl.MANIFEST).read_text())["build_id"] == "0ld000000000"
+    assert sorted(p.name for p in (engines / "trt_engines_fp16").iterdir()) == ["dit.engine"]
+    assert sorted(p.name for p in engines.parent.iterdir()) == ["abc123"]
+
+
+def test_a_first_build_needs_no_old_engines(tmp_path, monkeypatch):
+    engines = tmp_path / "trt" / "abc123"
+    monkeypatch.setattr(impl, "_build_into", lambda _dest: {"build_id": "first0000000"})
+    impl.build(engines)
+    assert json.loads((engines / impl.MANIFEST).read_text())["build_id"] == "first0000000"
