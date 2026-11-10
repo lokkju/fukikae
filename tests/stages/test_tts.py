@@ -1041,3 +1041,60 @@ def test_a_re_pick_in_prepare_changes_the_tts_key(ep, monkeypatch):
     after = stage.config_key(CFG, ep)
     assert after["cards"]["1"] != old and after["cards"]["2"] == before["cards"]["2"]
     assert after != before
+
+
+def test_a_second_run_after_a_re_pick_is_a_no_op(ep, monkeypatch):
+    """F10: the first run re-picks character 1's stale automatic card and renders its cues;
+    the new card isn't stale, so a second prepare and run changes no card, keeps the key and
+    renders nothing. ensure_assignments re-picks only what it is handed as stale, as the real
+    one does."""
+    old = _auto_card(ep, 1, "am_adam")
+    _assign(ep, 2, _stock("af_heart"))
+
+    def stale(_ws, reg, *_a, **_k):
+        card = reg.card_for(1, "en")
+        return STALE_1 if card is not None and card.card_id == old else {}
+
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", stale)
+    monkeypatch.setattr("fukikae.stages.tts.workspace_cloning", lambda *_, **__: None)
+    picks: list[str] = []
+
+    def ensure(reg, store, *_, stale=None, **__):
+        if not stale:
+            return []
+        new = store.put(parse_card(_stock("bf_emma")))
+        reg.assign_card(1, "en", new, by="auto", locked=False, note="re-picked")
+        picks.append(new)
+        return [f"character 1: re-picked, card {new}"]
+
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments", ensure)
+    stage = TtsStage(CFG)
+    stage.prepare(ep, CFG)
+    key = stage.config_key(CFG, ep)
+    assert key["cards"]["1"] != old
+    stage.run(ep, CFG)
+    assert _run(ep).report and _run(ep).rendered
+    FakeSynth.CALLS.clear()
+    stage = TtsStage(CFG)
+    stage.prepare(ep, CFG)
+    assert stage.config_key(CFG, ep) == key
+    stage.run(ep, CFG)
+    assert FakeSynth.CALLS == []
+    assert _run(ep).rendered == [] and _run(ep).report == []
+    assert len(picks) == 1
+
+
+def test_a_run_json_written_before_flags_loads(ep):
+    """F10: run.json from before the flags field (and the D26 counters) reads with defaults."""
+    import json
+
+    from fukikae.models import TtsRun
+
+    path = ep.work / "07-tts" / "run.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "schema_version": 1, "episode": "S01E01", "finished": "2026-11-01T00:00:00Z",
+        "renders": 2, "rendered": ["c0001"], "cached": ["c0002"], "report": ["a line"],
+    }), encoding="utf-8")  # fmt: skip
+    got = read_json(path, TtsRun)
+    assert got.flags == [] and got.report == ["a line"] and got.rate_refits == 0
