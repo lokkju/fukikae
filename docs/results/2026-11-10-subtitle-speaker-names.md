@@ -1,6 +1,6 @@
 # Subtitle speaker names on Fairy Tail E11 to E14: results
 
-_Run 2026-11-10 on ml-01 (RTX 3090, index 0), branch `plan/subtitle-speaker-names`, Task 11 of `docs/superpowers/plans/2026-11-10-subtitle-speaker-names.md`. Every run used copies under `~/fukikae-scratch/names-t11/`; no original workspace changed. The commands are `scripts/names-eval/run_arms.sh`; the ledger rows are exported to `2026-11-10-subtitle-speaker-names.jsonl` (tags `t11-names-<language>-<arm>`)._
+_Run 2026-11-10 on ml-01 (RTX 3090, index 0), branch `plan/subtitle-speaker-names`, Task 11 of `docs/superpowers/plans/2026-11-10-subtitle-speaker-names.md`. Every run used copies under `~/fukikae-scratch/names-t11/`; no original workspace changed. The commands are `scripts/names-eval/run_arms.sh`; the ledger rows are exported to `2026-11-10-subtitle-speaker-names.jsonl` (tags `t11b-names-<language>-<arm>`). Every table is the t11b re-measure: the arms rebuilt and rescored on b8afe4c (the remainder rule, below) and 9ad5be5 (eval names follow-ups); the t11 rows are retracted._
 
 ## Setup
 
@@ -77,10 +77,10 @@ Per character on E14 (share of the character's E14 speech on its modal tuning id
 |---|---|---|---|---|---|---|---|---|---|
 | baseline | tune | 941 | 62.9% | - | 66.0% | 75.4 | 38.8 | 1.4 (1.2%) | natsu 2 |
 | baseline | holdout | 321 | 25.8% | - | 36.4% | 12.7 | 22.1 | 0.2 (0.7%) | natsu 2 |
-| names | tune | 941 | 97.1% | - | 99.8% | 122.1 | 0.3 | 10.4 (7.8%) | happy 2, touka 2, young goldmine 2 |
-| names | holdout | 321 | 32.7% | - | 73.9% | 25.7 | 9.1 | 0.2 (0.7%) | happy 2, touka 2, young goldmine 2 |
-| ceiling | tune | 941 | 97.1% | - | 99.8% | 122.1 | 0.3 | 10.4 (7.8%) | touka 2, young goldmine 2 |
-| ceiling | ceiling | 321 | 83.9% | - | 99.5% | 59.9 | 0.3 | 0.9 (1.5%) | touka 2, young goldmine 2 |
+| names | tune | 941 | 97.1% | - | 99.8% | 122.1 | 0.3 | 10.4 (7.8%) | touka 2 |
+| names | holdout | 321 | 32.7% | - | 73.9% | 25.7 | 9.1 | 0.2 (0.7%) | touka 2 |
+| ceiling | tune | 941 | 97.1% | - | 99.8% | 122.1 | 0.3 | 10.4 (7.8%) | touka 2 |
+| ceiling | ceiling | 321 | 83.9% | - | 99.5% | 59.9 | 0.3 | 0.9 (1.5%) | touka 2 |
 
 ### en
 
@@ -116,10 +116,10 @@ names holdout merges: HAPPY + JUVIA (id 33); HAPPY + LUCY (id 33); HAPPY + WENDY
 |---|---|---|---|---|---|---|---|---|---|
 | baseline | tune | 941 | 63.7% | - | 84.2% | 195.7 | 36.7 | 9.8 (4.0%) | lucy 3, natsu 2, touka 2, wraith 3 |
 | baseline | holdout | 321 | 27.0% | - | 56.8% | 54.1 | 41.1 | 2.2 (2.2%) | lucy 3, natsu 2, touka 2, wraith 3 |
-| names | tune | 941 | 97.4% | - | 99.7% | 246.3 | 0.9 | 10.9 (4.2%) | cana 2, juvia 2, natsu 2, nebaru 3, white mage 2 |
-| names | holdout | 321 | 44.6% | - | 68.8% | 74.0 | 33.6 | 2.2 (2.0%) | cana 2, juvia 2, natsu 2, nebaru 3, white mage 2 |
-| ceiling | tune | 941 | 97.4% | - | 99.7% | 246.3 | 0.9 | 10.9 (4.2%) | cana 2, juvia 2, nebaru 2, white mage 2 |
-| ceiling | ceiling | 321 | 83.9% | - | 99.6% | 142.8 | 0.6 | 2.9 (2.0%) | cana 2, juvia 2, nebaru 2, white mage 2 |
+| names | tune | 941 | 97.4% | - | 99.7% | 246.3 | 0.9 | 10.9 (4.2%) | juvia 2, nebaru 2 |
+| names | holdout | 321 | 44.6% | - | 68.8% | 74.0 | 33.6 | 2.2 (2.0%) | juvia 2, nebaru 2 |
+| ceiling | tune | 941 | 97.4% | - | 99.7% | 246.3 | 0.9 | 10.9 (4.2%) | juvia 2, nebaru 2 |
+| ceiling | ceiling | 321 | 83.9% | - | 99.6% | 142.8 | 0.6 | 2.9 (2.0%) | juvia 2, nebaru 2 |
 
 ### What protocol A says
 
@@ -201,8 +201,8 @@ en, E14 per character:
 |---|---|---|---|---|---|---|---|---|---|
 | hidden-base | tune | 1262 | 59.3% | 59.4% | 62.5% | 83.6 | 50.1 | 1.6 (1.2%) | natsu 2 |
 | hidden-base | hidden | 235 | 59.4% | - | 62.5% | 83.6 | 50.1 | 1.6 (1.2%) | natsu 2 |
-| hidden | tune | 1262 | 90.4% | 60.7% | 94.7% | 161.1 | 9.0 | 6.2 (3.5%) | touka 2 |
-| hidden | hidden | 235 | 60.7% | - | 94.7% | 161.1 | 9.0 | 6.2 (3.5%) | touka 2 |
+| hidden | tune | 1262 | 91.0% | 63.8% | 94.7% | 161.1 | 9.0 | 6.2 (3.5%) | touka 2 |
+| hidden | hidden | 235 | 63.8% | - | 94.7% | 161.1 | 9.0 | 6.2 (3.5%) | touka 2 |
 
 ### en
 
@@ -215,25 +215,58 @@ en, E14 per character:
 |---|---|---|---|---|---|---|---|---|---|
 | hidden-base | tune | 1262 | 62.0% | 63.7% | 77.8% | 219.0 | 62.5 | 10.4 (3.6%) | lucy 2, natsu 2, touka 3, wraith 3 |
 | hidden-base | hidden | 235 | 63.7% | - | 77.8% | 219.0 | 62.5 | 10.4 (3.6%) | lucy 2, natsu 2, touka 3, wraith 3 |
-| hidden | tune | 1262 | 89.5% | 54.9% | 95.8% | 282.0 | 12.5 | 9.5 (3.1%) | juvia 2, nebaru 2, touka 2, white mage 2 |
-| hidden | hidden | 235 | 54.9% | - | 95.8% | 282.0 | 12.5 | 9.5 (3.1%) | juvia 2, nebaru 2, touka 2, white mage 2 |
+| hidden | tune | 1262 | 89.9% | 57.2% | 95.8% | 282.0 | 12.5 | 9.5 (3.1%) | juvia 2, nebaru 2, touka 2, white mage 2 |
+| hidden | hidden | 235 | 57.2% | - | 95.8% | 282.0 | 12.5 | 9.5 (3.1%) | juvia 2, nebaru 2, touka 2, white mage 2 |
 
-On the hidden lines alone, names don't help: ja 59.4% (off) against 60.7% (names), and en 63.7% against 54.9%, a loss of 8.8 points. Purity rises as in protocol A (62.5% to 94.7% ja, 77.8% to 95.8% en), and so does the identity harness (2 of 4 to 4 of 4 on both).
+On the hidden lines alone, names help little on ja and still cost on en: ja 59.4% (off) against 63.8% (names), and en 63.7% against 57.2%, a loss of 6.5 points. Purity rises as in protocol A (62.5% to 94.7% ja, 77.8% to 95.8% en), and so does the identity harness (2 of 4 to 4 of 4 on both).
 
 Per character, hidden accuracy off to names:
 
 | character | ja | en |
 |---|---|---|
-| natsu | 66% to 10% | 58% to 16% |
+| natsu | 66% to 32% | 58% to 31% |
 | lucy | 81% to 35% | 72% to 46% |
 | happy | 0% to 71% | 0% to 39% |
 | young makarov | 0% to 78% | 0% to 78% |
 | cana | 49% to 86% | 82% to 70% |
 | wraith | 89% to 89% | 97% to 30% |
 
-Natsu is the clearest case. His named lines fall in 4 to 7 different diarize clusters per episode (ja hidden arm: E12 SPEAKER_09, 10, 12 and 13; E13 seven clusters), so the names stage cuts a `~natsu` sub-cluster out of each. The hidden lines stay in each cluster's unnamed remainder, and a remainder follows its parent cluster's acoustic match (Ruling R1), which for most of those clusters is another character (E12: 8, 17 and 40; E13: 17, 40 and 36). Without names, the one cluster that is mostly Natsu goes to one character whose modal name is natsu, and his hidden lines in that cluster score. A split cluster's unnamed speech goes to whoever the cluster as a whole sounds like, which is right for the dominant voice and wrong for the others.
+Natsu is still the clearest case. His named lines fall in 4 to 7 different diarize clusters per episode (ja hidden arm: E12 SPEAKER_09, 10, 12 and 13; E13 seven clusters), so the names stage cuts a `~natsu` sub-cluster out of each, and his hidden lines stay in each cluster's unnamed remainder. Of his 32 hidden lines on ja, 23 sit in a remainder that kept embedding rows of its own (on en, 21): the remainder rule doesn't touch those, and the matcher sends them to whoever the remainder sounds like, or makes a new character of them (9 on ja, 12 on en). Without names, the one cluster that is mostly Natsu goes to one character whose modal name is natsu, and his hidden lines in that cluster score. The section below has what the remainder rule changed.
 
 Under `use = "auto"` on a full track this touches only the 0 to 1.2% of lines that are unnamed; on a partial track it is the main effect.
+
+## The remainder rule (Task 11 ruling, amending R1)
+
+Task 11 first ran with R1: a remainder with no embedding rows and no pin took its parent diarize cluster's acoustic match. In a cluster names split between several voices, that sent the unnamed speech to whoever the whole cluster sounded like. Commit b8afe4c replaces it, in the characters stage and in `registry resolve` alike (`fukikae.registry.siblings`): such a remainder takes the character holding at least 60% of its parent's named seconds (source `voice`, with a report line saying it follows its named siblings); when the parent's named speech splits with no character at 60%, it is `extra`; only a parent with no named sub-cluster gives it the parent's match, as R1 did. A role label is not a named sub-cluster (it names no character, D29 #6), so a parent holding only role labels keeps R1's path; a named key that went extra (under `min_new_seconds`) counts in the parent's named seconds, held by no character.
+
+Rowless remainders with named siblings in the final assignments (after resolve, which has no pins; every one agrees with the rule):
+
+| arm | ja: follow / extra | en: follow / extra |
+|---|---|---|
+| names | 19 / 3 | 24 / 4 |
+| ceiling | 24 / 5 | 33 / 6 |
+| hidden | 4 / 0 | 8 / 2 |
+
+The followers took their sibling at 68 to 100% of the parent's named seconds. Among the extras are ceiling E14 SPEAKER_08 (Wendy 56% of 243 s, Happy and Charle the rest) and E11 SPEAKER_11 (Igneel 58% of 68 s). The hidden arms have few: a hidden line leaves its speech, rows included, in the remainder, so most of their remainders are matched on their own rows.
+
+| measure | set | before (R1) | after (rule) |
+|---|---|---|---|
+| protocol B hidden accuracy | ja | 60.7% | 63.8% |
+| protocol B hidden accuracy, Natsu | ja | 10% | 32% |
+| protocol B hidden accuracy | en | 54.9% | 57.2% |
+| protocol B hidden accuracy, Natsu | en | 16% | 31% |
+| protocol B cue accuracy (tune, all cues) | ja / en | 90.4% / 89.5% | 91.0% / 89.9% |
+| protocol A E14 identity (passing of 12) | ja / en | 6 / 6 | 6 / 6 |
+| protocol A E14 modal share | ja / en | 46.1% / 58.5% | 46.1% / 58.5% |
+| protocol A E14 cue accuracy | ja / en | 32.7% / 44.6% | 32.7% / 44.6% |
+| reference purity, tune | ja / en | 99.8% / 99.7% | 99.8% / 99.7% |
+| reference purity, E14 held out | ja / en | 73.9% / 68.8% | 73.9% / 68.8% |
+| reference purity, protocol B | ja / en | 94.7% / 95.8% | 94.7% / 95.8% |
+| characters per name over 1, names arm | ja / en | 3 / 5 names | 1 / 2 names |
+
+The baseline arms (`use = "off"`) read no names, so they have no remainders: their assignments are byte-identical to Task 11's on all four episodes of both sets, and every number in their rows is unchanged. Protocol A doesn't move because E14 is held out (no remainders there) and the tuning registry's characters keep their names; purity doesn't move because a character with name-confirmed turns draws its references from those alone, never from a remainder. What the rule removes is the over-split: on ja the leftover character 2 (the old Wendy, Happy and Charle merge, which three E11 and E13 remainders kept alive by their parent's match) and character 10 are gone, and on en characters 2, 13, 16 and 20.
+
+The eval names follow-ups (9ad5be5) moved nothing on Fairy Tail: the hidden tally now counts a cue only when a hidden line of its own key overlaps it (`cues._hidden`, as the subtitle path tests it), and both off arms score the same 235 cues as before; cues of an episode whose names weren't used are attributed with the alignment shift, and no Fairy Tail episode needed one (every baseline number is unchanged); each `names` row's detail records `hide_fraction` and `hide_seed`.
 
 ## Coverage
 
@@ -277,7 +310,7 @@ The dub cuts many more turns (E12: 25 against 5) and drops more row seconds (E12
 
 ## Characters per name
 
-Several characters standing for one modal name (an over-split registry) each score as that name in `eval names`. ja names arm: happy 2 (characters 2 and 18), touka 2, young goldmine 2. en names arm: nebaru 3, cana 2, juvia 2, natsu 2, white mage 2. The baselines over-split too (ja natsu 2; en lucy 3, wraith 3, natsu 2, touka 2). On ja, character 2 (the old Wendy, Happy and Charle merge) still exists after the names arm because three rowless remainder clusters in E11 and E13 take it by their parent's match.
+Several characters standing for one modal name (an over-split registry) each score as that name in `eval names`. ja names arm: touka 2. en names arm: juvia 2, nebaru 2. The baselines over-split too (ja natsu 2; en lucy 3, wraith 3, natsu 2, touka 2). Before the remainder rule the ja names arm also had happy 2 (characters 2 and 18) and young goldmine 2, and en cana, natsu and white mage 2 and nebaru 3: character 2, the old Wendy, Happy and Charle merge, survived only because three rowless remainders in E11 and E13 took it by their parent's match. With the rule they follow their named siblings and character 2 is pruned.
 
 ## The character 2 case
 
@@ -304,10 +337,12 @@ In the episodes whose names were read, every Natsu and Young Makarov cue is now 
 
 The pack is `~/fukikae-review/names-natsu/` (6.9 MB): 10 Natsu cues (E12, E13 and E14 in turn, longest first) and 10 Young Makarov cues (all E12; he speaks in no other episode), each with `original.wav` (the Japanese line, the tts emotion reference) and the two renders as `A.wav` and `B.wav` in a shuffled order (seed 0). `index.html` plays them, `README.txt` says what to listen for, and `key.toml` holds which letter is before and which is after, with the characters and cards. Built by `scripts/names-eval/listening_pack.py`. No verdict yet: the listening is the operator's.
 
+The pack was rendered from the Task 11 (R1) names arm, kept as `~/fukikae-scratch/names-t11/ja-names-t11`. `scripts/names-eval/pack_check.py` attributes each of the 20 pack cues in that arm (agreeing with its `cues.en.json` on every cue of E12 to E14) and in the t11b arm built with the remainder rule, and compares the reference picks of the character each lands on: all 20 keep their character (9, 30, and 37 and 31 on E14) and every one of those characters keeps the same reference picks, so no pack cue would get a different character or card. The pack stands as it is.
+
 ## Limits and follow-ups
 
 - One series, four episodes, two audio languages of the same episodes. Every recurring-character count is small (5 in tuning, 12 on E14), so one character is 8 to 20 points of fraction.
 - Protocol A cannot show a gain in identity on an unnamed episode while diarization merges voices there; the gain names give is in the episodes that have them. A follow-up that would move E14 is an acoustic one (diarization or embedding that separates Wendy, Happy and Charle), not a names one.
-- Protocol B's loss on en, and Natsu's on both sets, come from remainders following the parent cluster. Candidates, for a ruling rather than a retune: a remainder could take the character of the named sub-cluster of the same parent nearest to it in time or in embedding, or stay extra when its parent splits between several named characters. Nothing here changes a threshold; every threshold stayed at the spec's value.
+- Protocol B's loss on en, and Natsu's on both sets, now come from remainders that kept embedding rows of their own: the remainder rule decides only rowless ones, and the matcher sends the others to whoever they sound like or makes new characters of them. Nothing here changes a threshold; every threshold stayed at the spec's value.
 - The en E12 to E14 diarization was redone (stale separate key), so the en baseline here is not comparable row for row with `2026-11-07-identity-profiles.md`.
-- The ledger rows were written from a dirty tree (commit 0f9e4ee plus the uncommitted `run_arms.sh` edit and this doc); the code under test is 0f9e4ee.
+- The t11b ledger rows were written from a dirty tree (commit 9ad5be5 plus the uncommitted `run_arms.sh` and `pack_check.py` edits and this doc); the code under test is 9ad5be5.
