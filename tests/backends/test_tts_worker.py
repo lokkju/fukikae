@@ -715,6 +715,15 @@ def test_eof_without_exit_is_a_bounded_wait_then_a_kill(monkeypatch):
     assert w.pid is None
 
 
+def _pdeathsig(prctl: Any) -> int:
+    """The calling process's parent-death signal (PR_GET_PDEATHSIG)."""
+    import ctypes
+
+    sig = ctypes.c_int(0)
+    prctl(2, ctypes.byref(sig))
+    return sig.value
+
+
 def test_the_death_signal_is_resolved_in_the_parent(monkeypatch):
     """B8: preexec_fn runs between fork and exec, where loading a library is unsafe; ctypes
     resolves prctl in the parent once, and the hook only calls it."""
@@ -722,12 +731,25 @@ def test_the_death_signal_is_resolved_in_the_parent(monkeypatch):
 
     hook = remote.death_signal_hook()
     assert hook is not None
+    prctl = ctypes.CDLL("libc.so.6", use_errno=True).prctl  # resolved before CDLL is patched
 
     def boom(*_a, **_k):
         raise AssertionError("ctypes.CDLL called from the hook")
 
     monkeypatch.setattr(ctypes, "CDLL", boom)
-    hook()  # sets PDEATHSIG on this test process: harmless, the runner outlives nothing
+    # the hook sets PDEATHSIG on whoever calls it, so call it in a forked child, never in
+    # the pytest process; the child's exit status says whether the signal got set
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - the child
+        code = 3
+        try:
+            hook()
+            code = 0 if _pdeathsig(prctl) == signal.SIGTERM else 2
+        finally:
+            os._exit(code)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert _pdeathsig(prctl) == 0  # this process was left alone
     assert remote.death_signal_hook() is hook
 
 
