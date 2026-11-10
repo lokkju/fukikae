@@ -1368,3 +1368,30 @@ def test_the_episode_meeting_the_floor_beats_one_with_more_seconds(tmp_path: Pat
     got = character_references(Workspace(tmp_path / "ws"), ["S01E12", "S01E13"], 1)
     assert got is not None and got[0] == "S01E13" and len(got[1]) == 2
     reg.close()
+
+
+def test_floor_filling_never_moves_a_character_to_another_episode(tmp_path: Path):
+    """Episodes that reach the floor compare by the seconds picked before any floor filling
+    (neutral turns, and non-neutral ones up to 6 s), as before D32: an episode of three
+    neutral clips (10.5 s) keeps winning over one whose angry turns only fill it up."""
+    from fukikae.cards.auto import character_references
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 1)
+    calm = [(0.0, 3.5, "S5", 0.01), (10.0, 13.5, "S5", 0.01), (20.0, 23.5, "S5", 0.01)]
+    # 4 s neutral, then angry 3 s (the louder) and 6 s: 7 s before D32, 13 s filled
+    loud = [(0.0, 4.0, "S5", 0.01), (10.0, 13.0, "S5", 0.002), (20.0, 26.0, "S5", 0.01)]
+    _named_episode(tmp_path / "ws", "S01E11", loud, [{"cluster": "S5", "character_id": 1}])
+    _named_episode(tmp_path / "ws", "S01E12", calm, [{"cluster": "S5", "character_id": 1}])
+    from fukikae.artifacts import write_json
+    from fukikae.models import Tags, TagSpan
+
+    tags = Tags(backend="x", events=[], emotion_backend="emotion2vec", emotions=[
+        TagSpan(start=10.0, end=13.0, label="angry", confidence=0.9),
+        TagSpan(start=20.0, end=26.0, label="angry", confidence=0.9)])  # fmt: skip
+    work = Workspace(tmp_path / "ws").work_dir("S01E11")
+    (work / "04b-tag").mkdir(parents=True, exist_ok=True)
+    write_json(work / "04b-tag" / "tags.json", tags)
+    got = character_references(Workspace(tmp_path / "ws"), ["S01E11", "S01E12"], 1)
+    assert got is not None and got[0] == "S01E12"
+    reg.close()
