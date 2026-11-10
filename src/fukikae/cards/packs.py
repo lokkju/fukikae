@@ -1005,9 +1005,9 @@ class CopyReport:
     conflicts: list[str] = field(default_factory=list)
 
     def rollback(self) -> None:
-        """Put the store back as it was: remove what was created, restore what was rewritten."""
-        for p in self.created:
-            p.unlink(missing_ok=True)
+        """Restore the card files whose fingerprint was merged in. Created files stay: cards
+        and sidecars are content-addressed, so an import running at the same time may already
+        have found and assigned the same file, and an orphan is harmless (ruling A6)."""
         for p, old in self.rewritten.items():
             _atomic_write(p, old)
 
@@ -1018,7 +1018,8 @@ def copy_cards(pack: Pack, store: CardStore, ids: list[str]) -> CopyReport:
     it has no fingerprint and the pack's copy has one: the fingerprint is merged in (the id
     doesn't change; the fingerprint is outside it) and the old bytes kept for rollback. When
     both have fingerprints and they differ, the local one stays and the conflict is reported.
-    On any failure everything it did is rolled back before the error propagates."""
+    On any failure the merged card files are restored before the error propagates; created
+    files stay (``CopyReport.rollback``)."""
     report = CopyReport()
     try:
         wanted: set[str] = set()
