@@ -69,6 +69,10 @@ class IdentityRun:
     # tuning episodes test; for the holdout, all tuning episodes train.
     tune_nc: dict[str, float] = field(default_factory=dict)
     holdout_nc: dict[str, float] = field(default_factory=dict)
+    # `--ceiling` episodes: scored as the held-out one is, without `check_held_out` (their
+    # names were read, so each is graded on its own input), ledger split `ceiling`
+    ceiling: dict[str, IdentityScore] = field(default_factory=dict)
+    ceiling_nc: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 class _Recording:
@@ -218,7 +222,13 @@ def run_identity(
     force: bool = False,
     from_assignments: bool = False,
     colour_anonymous: str | None = None,
+    ceiling: list[str] | None = None,
 ) -> IdentityRun:
+    """Score ``tune`` and the held-out episode (see the module docstring). Each ``ceiling``
+    episode is scored as a held-out one, resolved against the registry the tuning episodes
+    built, but without `check_held_out`: protocol A's ceiling arm, whose names were read."""
+    import copy
+
     import numpy as np
 
     from fukikae.eval.autolabel import speech_turns
@@ -257,10 +267,14 @@ def run_identity(
     hold_id = episode_id(Path(holdout)) if holdout else None
     if hold_id is not None and hold_id in ids:
         raise ValueError(f"held-out episode {hold_id} is also a tuning episode")
-    if hold_id is not None and hasattr(MATCHERS.get(matcher), "fit_all"):
+    ceil_refs = list(ceiling or [])
+    ceil_ids = [episode_id(Path(r)) for r in ceil_refs]
+    if len(set(ceil_ids)) != len(ceil_ids) or set(ceil_ids) & (set(ids) | {hold_id}):
+        raise ValueError("an episode is named twice across --tune, --holdout and --ceiling")
+    if (hold_id is not None or ceil_ids) and hasattr(MATCHERS.get(matcher), "fit_all"):
         raise ValueError(
             f"matcher {matcher} clusters every episode at once and keeps no registry to "
-            "resolve a held-out episode against; score it without --holdout"
+            "resolve a held-out episode against; score it without --holdout or --ceiling"
         )
     if segmentation != "asr" and (segment_embedder or segmentation_options):
         raise ValueError("--segment-embedder and --segmentation-option apply to asr only")
@@ -290,8 +304,9 @@ def run_identity(
     merged_aliases = {**load_alias_file(ws.root / "labels-aliases.yaml"), **(aliases or {})}
     colour_map = workspace_colour_map(ws.root, gt_kind, colour_anonymous)
 
-    refs = list(tune) + ([holdout] if holdout else [])
-    order = ids + ([hold_id] if hold_id else [])
+    refs = list(tune) + ([holdout] if holdout else []) + ceil_refs
+    extra = ([hold_id] if hold_id else []) + ceil_ids  # each resolved against tune alone
+    order = ids + extra
     gt: dict[str, list[GroundTruthLine]] = {}
     segs: dict[str, list[Segment]] = {}
     infos: dict[str, EpisodeInfo] = {}
@@ -371,8 +386,13 @@ def run_identity(
     elif hasattr(the_matcher, "fit_all"):
         assign = simulate(order, the_matcher, segs, embs)
     else:
+        from fukikae.registry.matchers import RegistryState
+
         rec = _Recording(the_matcher)
-        assign = simulate(order, rec, segs, embs)
+        state = RegistryState()
+        assign = simulate(ids, rec, segs, embs, state=state)
+        for x in extra:  # never against another held-out or ceiling episode
+            assign.update(simulate([x], rec, segs, embs, state=copy.deepcopy(state)))
         for eid, counts in rec.statuses.items():
             infos[eid].statuses = counts
 
@@ -399,10 +419,17 @@ def run_identity(
         p_segs, p_assign, p_gt = _pooled(ids, hold_id, segs, assign, gt)
         hold_score = score(p_assign, p_segs, min_speech=floor, gt=p_gt, reference=[POOLED])
         hold_nc = nearest_centroid_accuracy(*stacked(ids), *stacked([hold_id]))
+    ceil_scores: dict[str, IdentityScore] = {}
+    ceil_nc: dict[str, dict[str, float]] = {}
+    for c in ceil_ids:
+        p_segs, p_assign, p_gt = _pooled(ids, c, segs, assign, gt)
+        ceil_scores[c] = score(p_assign, p_segs, min_speech=floor, gt=p_gt, reference=[POOLED])
+        ceil_nc[c] = nearest_centroid_accuracy(*stacked(ids), *stacked([c]))
     settings = {
         "workspace": str(ws.root),
         "tune": ids,
         "holdout": hold_id,
+        "ceiling": ceil_ids,
         "gt": gt_kind,
         "segmentation": segmentation,
         "embedder": {"backend": emb_cfg.backend, "options": emb_cfg.options},
@@ -432,12 +459,14 @@ def run_identity(
         cache.misses,
         tune_nc,
         hold_nc,
+        ceil_scores,
+        ceil_nc,
     )
 
 
 # ---- ledger ----
 
-_NOT_OPTIONS = ("workspace", "tune", "holdout")
+_NOT_OPTIONS = ("workspace", "tune", "holdout", "ceiling")
 
 
 def identity_rows(run: IdentityRun, cfg: Config, test_set: str, tag: str | None) -> list[LedgerRow]:
@@ -477,6 +506,8 @@ def identity_rows(run: IdentityRun, cfg: Config, test_set: str, tag: str | None)
     ]
     if run.holdout is not None and run.holdout_episode is not None:
         splits.append(("holdout", [run.holdout_episode], run.holdout, run.holdout_nc))
+    for c, s in run.ceiling.items():
+        splits.append(("ceiling", [c], s, run.ceiling_nc.get(c, {})))
     return [
         make_row(
             stage="identity",
@@ -491,7 +522,11 @@ def identity_rows(run: IdentityRun, cfg: Config, test_set: str, tag: str | None)
             split=split,
             episodes=episodes,
             metrics=metrics(score, nc),
-            detail={"merges": [list(m) for m in score.merges], "nc": dict(nc)},
+            detail={
+                "merges": [list(m) for m in score.merges],
+                "nc": dict(nc),
+                **({"ceiling": True} if split == "ceiling" else {}),
+            },
             workspace=st.get("workspace"),
             tag=tag,
         )
@@ -605,6 +640,12 @@ def format_run(r: IdentityRun) -> str:
             "ids from the tuning episodes, shares from the held-out speech)"
         )
         rows.append(format_score(r.holdout, title, floor, r.holdout_nc))
+    for c, s in r.ceiling.items():
+        title = (
+            f"ceiling: {c} (graded on its own names: resolved against the registry the tuning "
+            "episodes built, ids from the tuning episodes, no held-out check)"
+        )
+        rows.append(format_score(s, title, floor, r.ceiling_nc.get(c)))
     return "\n".join(rows)
 
 
@@ -634,6 +675,10 @@ def to_json(r: IdentityRun) -> dict[str, Any]:
             "score": plain(r.holdout),
             "nearest_centroid": r.holdout_nc,
         },
+        "ceiling": [
+            {"episode": c, "score": plain(s), "nearest_centroid": r.ceiling_nc.get(c, {})}
+            for c, s in r.ceiling.items()
+        ],
     }
 
 
@@ -650,6 +695,13 @@ def identity_cmd(
         "its modal id in the tuning episodes, and its share is the held-out speech on that id. "
         "A recurring character needs --min-speech in the tuning episodes together and in the "
         "held-out one.",
+    ),
+    ceiling: str = typer.Option(
+        None,
+        "--ceiling",
+        help="Episodes scored as --holdout is, comma-separated, but without its check that "
+        "they read no subtitle names: protocol A's ceiling arm, graded on its own input "
+        "(ledger split ceiling). Each is resolved against the tuning episodes alone.",
     ),
     gt: str = typer.Option(
         "ass", "--gt", help="Ground truth: ass (Name field), sdh (speaker tags) or colour."
@@ -768,6 +820,7 @@ def identity_cmd(
             colour_anonymous=colour_anonymous,
             force=force,
             from_assignments=from_assignments,
+            ceiling=[e.strip() for e in ceiling.split(",") if e.strip()] if ceiling else None,
         )
     except user_errors() as e:
         typer.echo(f"error: {e}", err=True)
