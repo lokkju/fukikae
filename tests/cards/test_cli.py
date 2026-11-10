@@ -844,3 +844,57 @@ def test_lang_option_is_validated_and_normalized(tmp_path: Path):
     assert invoke("assign", str(ws.root), "Natsu", a, "--lang", "EN").exit_code == 0
     r = invoke("list", str(ws.root), "--lang", "pt_BR")
     assert r.exit_code == 1 and "pt-BR" in r.output
+
+
+STALE = STOCK_CARD.replace('target_language = "en"', 'target_language = "EN"') + (
+    '\n[voice.post]\ngain_db = 0.0\n\n[style]\nregister = ""\n'
+)
+STALE_ID = "0123456789abcdef"  # its id under the rules before A5 (any id but today's)
+
+
+def _plant_stale(store: CardStore) -> None:
+    store.root.mkdir(parents=True, exist_ok=True)
+    store.card_path(STALE_ID).write_text(STALE)
+
+
+def test_a_card_stored_under_the_old_id_rules_says_so_and_how_to_fix_it(tmp_path: Path):
+    """A5 changed what a card id hashes (language case, [voice.post] defaults, empty [style]
+    fields); a card stored before that is named as such, with the way out."""
+    import pytest
+
+    from fukikae.cards.card import CardError, card_id
+
+    ws, cid, store = setup(tmp_path)
+    _plant_stale(store)
+    with pytest.raises(CardError) as e:
+        store.get(STALE_ID)
+    msg = str(e.value)
+    new_id = card_id(parse_card(STALE))
+    assert "card id rules changed" in msg and "voices assign" in msg and new_id in msg
+    assert "never edited in place" not in msg
+
+
+def test_voices_assign_stores_a_stale_card_under_its_new_id(tmp_path: Path):
+    from fukikae.cards.card import card_id
+
+    ws, cid, store = setup(tmp_path)
+    _plant_stale(store)
+    new_id = card_id(parse_card(STALE))
+    r = invoke("assign", str(ws.root), "natsu", STALE_ID, "--no-verify")
+    assert r.exit_code == 0, r.output
+    assert new_id in r.output
+    assert store.get(new_id).target_language == "en"
+    with Registry(ws.registry_path) as reg:
+        assert _cur(reg, cid, "en").card_id == new_id
+
+
+def test_a_card_edited_in_place_is_still_called_that(tmp_path: Path):
+    import pytest
+
+    from fukikae.cards.card import CardError
+
+    ws, cid, store = setup(tmp_path)
+    store.root.mkdir(parents=True, exist_ok=True)
+    store.card_path(STALE_ID).write_text(STOCK_CARD.replace("af_heart", "af_bella"))
+    with pytest.raises(CardError, match="never edited in place"):
+        store.get(STALE_ID)

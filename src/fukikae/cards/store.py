@@ -6,11 +6,13 @@ import hashlib
 import os
 import shutil
 import tempfile
+import tomllib
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fukikae.cards.card import (
+    POST_DEFAULTS,
     Card,
     CardError,
     dump_card,
@@ -20,6 +22,7 @@ from fukikae.cards.card import (
     sidecars,
 )
 from fukikae.cards.card import card_id as compute_card_id
+from fukikae.config import normalize_language
 
 SidecarKind = Literal["clip", "latent", "vector"]
 SIDECAR_DIRS: dict[str, str] = {"clip": "clips", "latent": "latents", "vector": "vectors"}
@@ -67,6 +70,48 @@ class StrippedCardError(CardError):
             "card with the markup already removed; save it, and the clean copy becomes a new "
             "card (derived_from the old id), assigned to the character"
         )
+
+
+class StaleCardError(CardError):
+    """A card stored before the card id rules changed (A5: language case, ``[voice.post]``
+    defaults and empty ``[style]`` fields no longer count): its file name is its id under the
+    old rules, and today it hashes to ``new_id``. ``card`` is the loaded card, which
+    ``voices assign`` stores under ``new_id``."""
+
+    def __init__(self, card_id: str, path: Path, card: Card, new_id: str) -> None:
+        self.card_id, self.path, self.card, self.new_id = card_id, path, card, new_id
+        super().__init__(
+            f"card {card_id} ({path}) was stored before the card id rules changed (language "
+            "case, [voice.post] defaults and empty [style] fields no longer count); today it "
+            f"is card {new_id}. Re-assign it with `fukikae voices assign <workspace> "
+            f"<character> {card_id}`, which stores it under {new_id}"
+        )
+
+
+def _old_id_rules_apply(text: str) -> bool:
+    """Whether the card text holds something the A5 id rules drop or rewrite: a language tag
+    not in conventional case, a ``[voice.post]`` key at its default, or an empty ``[style]``
+    field. A card stored before A5 under such text has another id today."""
+    try:
+        raw = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+
+    def table(parent: dict[str, Any], key: str) -> dict[str, Any]:
+        value = parent.get(key)
+        return value if isinstance(value, dict) else {}
+
+    voice = table(raw, "voice")
+    refs = voice.get("references")
+    refs = refs if isinstance(refs, list) else []
+    langs = [raw.get("target_language")] + [r.get("language") for r in refs if isinstance(r, dict)]
+    if any(isinstance(lang, str) and normalize_language(lang) != lang for lang in langs):
+        return True
+    post = table(voice, "post")
+    if any(k in POST_DEFAULTS and v == POST_DEFAULTS[k] for k, v in post.items()):
+        return True
+    style = table(raw, "style")
+    return any(v in ("", []) for v in style.values())
 
 
 class CardStore:
@@ -117,6 +162,8 @@ class CardStore:
         actual = compute_card_id(card)
         if actual != card_id and compute_card_id(parse_card(text, strip_tokens=False)) == card_id:
             raise StrippedCardError(card_id, path, card)
+        if actual != card_id and _old_id_rules_apply(text):
+            raise StaleCardError(card_id, path, card, actual)
         if actual != card_id:
             raise CardError(
                 f"{path} holds card {actual}, not card {card_id}; a card file is never edited "

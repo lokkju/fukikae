@@ -27,7 +27,7 @@ from fukikae.cards.card import (
     is_card_id,
     parse_card,
 )
-from fukikae.cards.store import CardStore, StrippedCardError
+from fukikae.cards.store import CardStore, StaleCardError, StrippedCardError
 from fukikae.workspace import Workspace
 
 if TYPE_CHECKING:
@@ -201,7 +201,13 @@ def assign(
                 raise _fail(
                     f"card {ref} is not in the card store ({store.root}); nothing was assigned"
                 )
-            card = store.get(ref)
+            try:
+                card = store.get(ref)
+            except StaleCardError as e:
+                # stored before the id rules changed: store it under today's id and assign that
+                ref = store.put(e.card)
+                _echo(f"card {e.card_id} was stored under the old id rules; it is card {ref} now")
+                card = store.get(ref)
             if card.target_language != language:
                 raise _fail(
                     f"card {ref} is for target language {card.target_language!r}, not "
