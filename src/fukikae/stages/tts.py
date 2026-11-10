@@ -76,7 +76,7 @@ import math
 import os
 import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -123,7 +123,7 @@ _sleep = time.sleep
 
 # Bump when the stage changes what it renders for the same inputs.
 RENDER_VERSION = 2  # 2: leading and trailing silence trimmed (ruling CD7)
-STAGE_KEYS = ("device", "gender", "clone_backend")
+STAGE_KEYS = ("device", "gender", "clone_backend", "engines")
 # Silence trimming: 10 ms frames quieter than TRIM_DB below the loudest frame are silence;
 # TRIM_KEEP_S of it is kept at each end.
 TRIM_FRAME_S = 0.010
@@ -324,6 +324,9 @@ def stage_settings(cfg: Config) -> tuple[BackendConfig, str | None]:
     """``[tts]`` as (backend config without the stage keys and the ``[tts.<backend>]`` tables,
     the legacy stage-wide device preference)."""
     bc = cfg.resolve("tts")
+    problem = loader.engine_problem("tts", bc.backend, "[tts] backend")
+    if problem:
+        raise ConfigError(problem)
     device = bc.options.get("device")
     if device is not None and device not in DEVICES:
         raise ConfigError(f'[tts] device must be "cpu" or "cuda", not {device!r}')
@@ -395,24 +398,62 @@ def synth_device(cfg: Config, cls: type[Synthesizer]) -> str:
     return device
 
 
+def tts_engines(cfg: Config) -> dict[str, str]:
+    """``[tts] engines``: card backend -> the backend that renders its cards instead, the
+    workspace's over the profile's (D28: ``{ indextts2 = "indextts2_trt" }``). The renders
+    carry the engine's name and identity in their cache keys; the cards stay as they are. An
+    engine must declare that it renders that backend's cards (``card_backend``)."""
+    raw = cfg.resolve("tts").options.get("engines")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in raw.items()
+    ):
+        raise ConfigError(
+            "[tts] engines must map a card backend to a backend name, like "
+            '{ indextts2 = "indextts2_trt" }'
+        )
+    out: dict[str, str] = {}
+    for card_backend, engine in raw.items():
+        if engine == card_backend:
+            continue
+        try:
+            cls = loader.backend_class("tts", engine)
+        except (ConfigError, loader.BackendUnavailable) as e:
+            raise ConfigError(f"[tts] engines: {card_backend} = {engine!r}: {e}") from e
+        if getattr(cls, "card_backend", None) != card_backend:
+            raise ConfigError(f"[tts] engines: {engine!r} does not render {card_backend!r} cards")
+        out[card_backend] = engine
+    return out
+
+
 def check_card(
-    store: CardStore, card_id: str, who: str, target: str
+    store: CardStore,
+    card_id: str,
+    who: str,
+    target: str,
+    engines: Mapping[str, str] | None = None,
 ) -> tuple[Card, type[Synthesizer]]:
-    """The card and its backend class, or a CardError naming ``who``, the card and what
-    to do."""
+    """The card and the class that renders it (its backend's, or the backend ``engines``
+    names for it), or a CardError naming ``who``, the card and what to do."""
     fix = "assign another card with `fukikae voices assign`"
     try:
         card = store.get(card_id)
     except CardError as e:
         raise CardError(f"{who}: {e}; {fix}") from e
-    return card, check_loaded_card(store, card, card_id, who, target)
+    return card, check_loaded_card(store, card, card_id, who, target, engines)
 
 
 def check_loaded_card(
-    store: CardStore, card: Card, card_id: str, who: str, target: str
+    store: CardStore,
+    card: Card,
+    card_id: str,
+    who: str,
+    target: str,
+    engines: Mapping[str, str] | None = None,
 ) -> type[Synthesizer]:
-    """``check_card`` for a card already in hand (perhaps not yet stored): its backend class,
-    or a CardError naming ``who``, the card and what to do."""
+    """``check_card`` for a card already in hand (perhaps not yet stored): the class that
+    renders it, or a CardError naming ``who``, the card and what to do."""
     fix = "assign another card with `fukikae voices assign`"
     if card.target_language != target:
         raise CardError(
@@ -420,7 +461,10 @@ def check_loaded_card(
         )
     backend = card.voice.backend
     try:
-        cls = cast(type[Synthesizer], loader.backend_class("tts", backend))
+        cls = cast(
+            type[Synthesizer],
+            loader.backend_class("tts", (engines or {}).get(backend, backend)),
+        )
     except (ConfigError, loader.BackendUnavailable) as e:
         raise CardError(f"{who}: card {card_id}: {e}") from e
     try:
@@ -525,14 +569,17 @@ def prepare_cue(
     vocals: Path | None = None,
     events: Sequence[tuple[float, float, str]] = (),
 ) -> RenderJob:
-    """The render job of one cue with ``card_id``: the card checked (``check_card``, unless
-    ``checked`` holds its result), its backend config, the cache key and the delivery passed.
-    ``identity`` is the backend's ``identity_key``, looked up when not given. ``vocals`` (the
-    episode's separated vocals) is needed when the backend takes ``emotion_audio``."""
+    """The render job of one cue with ``card_id``: the card checked (``check_card`` with the
+    config's ``[tts] engines``, unless ``checked`` holds its result), its backend config, the
+    cache key and the delivery passed. ``identity`` is the backend's ``identity_key``, looked up
+    when not given. ``vocals`` (the episode's separated vocals) is needed when the backend takes
+    ``emotion_audio``."""
     card, cls = (
-        checked if checked is not None else check_card(store, card_id, who, cfg.target_language)
+        checked
+        if checked is not None
+        else check_card(store, card_id, who, cfg.target_language, tts_engines(cfg))
     )
-    bc = backend_config(cfg, card.voice.backend)
+    bc = backend_config(cfg, cls.name)
     ident = identity if identity is not None else identity_key("tts", bc)
     slot = cue.end - cue.start
     passed = delivery_passed(cue, card, cls, slot, events)
@@ -907,11 +954,13 @@ class TtsStage:
         cues = self._cues(ep, cfg)
         cards = self._assigned(ep, cues, cfg.target_language)
         store = CardStore(ep.workspace_root)
+        engines = tts_engines(cfg)
         backends = {bc.backend}
         for card in cards.values():
             if store.has(card):
                 with contextlib.suppress(CardError):  # run() reports it, naming the character
-                    backends.add(store.get(card).voice.backend)
+                    be = store.get(card).voice.backend
+                    backends.add(engines.get(be, be))
         return {
             "backend": bc.backend,
             "clone_backend": clone_backend(cfg),
@@ -975,17 +1024,18 @@ class TtsStage:
             users.setdefault(card, who(c))
 
         # Every card is checked before any model loads.
-        checked = {cid: check_card(store, cid, users[cid], target) for cid in users}
+        engines = tts_engines(cfg)
+        checked = {cid: check_card(store, cid, users[cid], target, engines) for cid in users}
         identities = {
             b: identity_key("tts", backend_config(cfg, b))
-            for b in sorted({card.voice.backend for card, _ in checked.values()})
+            for b in sorted({cls.name for _, cls in checked.values()})
         }
 
         events = tag_events(ep.work)
         jobs: dict[str, list[RenderJob]] = {}
         for c in spoken:
             card_id = card_of[c.id]
-            backend = checked[card_id][0].voice.backend
+            backend = checked[card_id][1].name
             job = prepare_cue(
                 c,
                 card_id,

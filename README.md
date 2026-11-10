@@ -99,6 +99,27 @@ fukikae backends setup qwen3_tts
 
 The `qwen-tts` package is pinned by version (and by hash in `workers/qwen3tts/uv.lock`) and checked again at every load; the model is pinned by revision. The environment takes about 7 GB, the model about 4.3 GB. It clones from a card's reference clips: `[tts.qwen3_tts] mode = "auto"` (the default) gives the model the clips' transcripts and speech codes (`icl`) when every clip has a transcript, and only the speaker embedding (`xvector`) otherwise; `mode` can force either. It takes no delivery input (no direction, emotion audio, emotion vector, speed or duration target), and the card's `seed`, `temperature` and `top_p` are its only voice keys. Only the clone model is integrated; Qwen3-TTS's VoiceDesign model (`source = "design"`) is not.
 
+### IndexTTS2 on TensorRT (opt-in)
+
+`indextts2_trt` renders IndexTTS2 cards through upstream's TensorRT backend: the same weights and prompt handling, about 2.2 times as fast a line on a 3090, and voices measurably further from the characters (every similarity measure lower in both samples, `docs/results/2026-11-09-character-cards.md`, "D28 lever 2"). It is opt-in and off in every profile (D30); the PyTorch worker stays the default. A workspace turns it on with
+
+```toml
+[tts]
+engines = { indextts2 = "indextts2_trt" }
+```
+
+The cards stay `indextts2` cards and nothing about them changes. The renders carry the engine's name and identity (the worker project's digest and the engines' build id) in their cache keys, so turning it on or off re-renders those lines and never mixes the two engines' audio. An engine makes no cards, so `indextts2_trt` is refused as `[tts] clone_backend`, as `[tts] backend` and as `voices clone --backend`, with a message pointing here. It reads its own table, `[tts.indextts2_trt]`, which takes no options (its engines are fp16 by construction): `[tts.indextts2]` options such as `fp16` and `tf32` don't carry over. `voices verify` and the fingerprint `voices export` records render on the card's own backend, PyTorch IndexTTS2, whatever `[tts] engines` says.
+
+The worker needs OpenMPI, which the host doesn't carry, so it runs in a local Docker image, never pushed. Setup needs Docker and the NVIDIA Container Toolkit (`nvidia` in `docker info`'s runtimes):
+
+```bash
+fukikae backends setup indextts2_trt            # --force rebuilds engines that are current
+```
+
+That checks docker, its NVIDIA runtime and the disk first, then builds the image from `workers/indextts2_trt` (about 24 GB under docker's root; 14 minutes the first time, 2 to 4 after a lock change), fetches the pinned models into the Hugging Face cache, and builds the engines for GPU 0 under its lock into `~/.cache/fukikae/indextts2_trt/<digest>/`: about 26 minutes on a 3090 (9 exporting ONNX graphs, 1 converting the GPT, 16 building), 3.1 GB of engines plus about 5 GB of intermediates while they build. The engines are built for the GPU's compute capability; setup skips them when engines for this digest and this capability exist. A run takes 15.1 GiB of VRAM, against about 9.3 GB for the PyTorch worker, because TensorRT-LLM reserves its KV cache up front.
+
+At run time the container gets one GPU, no network, the caller's uid, no capabilities, a read-only image, the models and engines read-only and one writable directory for the line's files; it is removed before the GPU lock is released, and the next load removes any left by a run that was killed. With `[tts] engines` naming `indextts2_trt` and Docker missing or down, or the image or engines not built, the tts stage stops with an error naming the setup command. It never falls back to the PyTorch worker, which would mix two engines' renders in one episode without saying so; to render on PyTorch, take the line out of `[tts] engines`.
+
 Each TTS backend takes its options and its device from its own table, `[tts.<backend>]` (for example `[tts.indextts2] fp16 = true`). Kokoro runs on the CPU and the cloning backends on the GPU unless that table's `device` says otherwise; the old stage-wide `[tts] device` applies only to a backend that declares no default. IndexTTS2 refuses the CPU (fp32, about 9 GB of RAM, minutes per line) unless `force_cpu = true` is in `[tts.indextts2]`. The profiles set `[tts.indextts2] tf32 = true` (TF32 matmuls, which speed up the diffusion decoder: about 12% faster a line, within the eval gate); like every backend option it is part of each render's cache key and of the tts stage key.
 
 ## Profiles

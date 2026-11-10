@@ -65,6 +65,9 @@ def backends_list() -> None:
 def backends_setup(
     name: str = typer.Argument(..., help="A backend with model files to fetch."),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="Sync only; download nothing."),
+    force: bool = typer.Option(
+        False, "--force", help="Redo the costly steps even when done (indextts2_trt's engines)."
+    ),
     workspace: Path | None = typer.Option(
         None,
         "--workspace",
@@ -93,11 +96,14 @@ def backends_setup(
         raise typer.Exit(1) from e
     if isinstance(cls, type) and issubclass(cls, WorkerSynthesizer):
         try:
-            cls.setup(fetch=not no_fetch)
+            cls.setup(fetch=not no_fetch, force=force)
         except subprocess.CalledProcessError as e:
             typer.echo(f"error: {' '.join(map(str, e.cmd))} exited with {e.returncode}", err=True)
             raise typer.Exit(1) from e
-        typer.echo(f"{name}: set up in {cls({}, 'cpu').venv()}")
+        except (OSError, BackendUnavailable) as e:  # docker (or uv) missing, docker down
+            typer.echo(f"error: {e}", err=True)
+            raise typer.Exit(1) from e
+        typer.echo(f"{name}: set up in {cls({}, 'cpu').environment_location()}")
         return
     fetch = getattr(cls, "fetch", None)
     if fetch is None:

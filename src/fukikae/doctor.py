@@ -30,7 +30,12 @@ def _tts_workers() -> list[tuple[str, bool, str]]:
         if not (isinstance(cls, type) and issubclass(cls, WorkerSynthesizer)):
             continue
         inst = cls({}, "cpu")
-        if not inst.interpreter().exists():
+        if inst.environment_location() != inst.venv():
+            # a worker outside a venv (indextts2_trt's container) reports its own problem
+            problem = inst.environment_problem()
+            detail = f"{problem}: `{inst.setup_hint()}`" if problem else inst.environment_location()
+            rows.append((f"tts worker: {name}", problem is None, str(detail)))
+        elif not inst.interpreter().exists():
             detail = f"{inst.venv()} not set up: `{inst.setup_hint()}`"
             rows.append((f"tts worker: {name}", False, detail))
         elif problem := inst.lock_problem():
