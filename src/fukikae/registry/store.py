@@ -501,34 +501,49 @@ class Registry:
         return [Alias(*r) for r in self._con.execute(sql + " ORDER BY alias", args).fetchall()]
 
     def character_for_key(self, key: str) -> Character | None:
-        """The character a name key answers to: the alias table first, then a character whose
-        name keys to it (``alias_key``). ``key`` is keyed with ``alias_key`` first, so a
-        Name as written (``MAKAROV(WRAITH)``) finds what its key finds. ValueError for a name
-        that keys nobody, and naming both when two names answer."""
+        """The character a name key answers to, by rank (D29 #2): an operator alias, then a
+        name the operator set (``name_by`` operator, or NULL from before schema 4), then a
+        subtitles alias, then a name subtitles set; names key by ``alias_key``. ``key`` is
+        keyed with ``alias_key`` first, so a Name as written (``MAKAROV(WRAITH)``) finds what
+        its key finds. ValueError for a name that keys nobody, and naming them when two names
+        of the deciding rank answer."""
         key = _required_key(key)
         con = self._con
         row = con.execute(
-            "SELECT character_id FROM character_aliases WHERE alias = ?", (key,)
+            "SELECT character_id, by FROM character_aliases WHERE alias = ?", (key,)
         ).fetchone()
-        if row is not None:
-            return self._character(con, row[0])
         named = [c for c in self.characters() if c.name is not None and alias_key(c.name) == key]
-        if len(named) > 1:
-            listed = ", ".join(f"{c.id} ({c.name})" for c in named)
-            raise ValueError(
-                f"name key {key!r} answers to several characters: {listed}; "
-                "`fukikae registry rename` or `registry merge` resolves it"
-            )
-        return named[0] if named else None
+        by_operator = [c for c in named if (c.name_by or "operator") == "operator"]
+        by_subs = [c for c in named if c.name_by == "subs"]
+        if row is not None and row[1] == "operator":
+            return self._character(con, row[0])
+        for tier, hits in (("operator", by_operator), ("subs", by_subs)):
+            if tier == "subs" and row is not None:
+                return self._character(con, row[0])
+            if len(hits) > 1:
+                listed = ", ".join(f"{c.id} ({c.name})" for c in hits)
+                raise ValueError(
+                    f"name key {key!r} answers to several characters: {listed}; "
+                    "`fukikae registry rename` or `registry merge` resolves it"
+                )
+            if hits:
+                return hits[0]
+        return None
 
-    def _name_holder(self, con: sqlite3.Connection, key: str, besides: int) -> Character | None:
-        """Another character whose own name keys to ``key``."""
+    def _name_holder(
+        self, con: sqlite3.Connection, key: str, besides: int, over_subs: bool = False
+    ) -> Character | None:
+        """Another character whose own name keys to ``key``; with ``over_subs``, only one the
+        operator named (a subtitles name ranks below an operator alias anyway)."""
         for r in con.execute(
             "SELECT id FROM characters WHERE name IS NOT NULL AND id != ? ORDER BY id", (besides,)
         ).fetchall():
             c = self._character(con, r[0])
-            if c is not None and c.name is not None and alias_key(c.name) == key:
-                return c
+            if c is None or c.name is None or alias_key(c.name) != key:
+                continue
+            if over_subs and c.name_by == "subs":
+                continue
+            return c
         return None
 
     def _add_alias(
@@ -539,12 +554,13 @@ class Registry:
         by: str,
         language: str | None,
         replace: bool,
+        over_subs_name: bool = False,
     ) -> Alias:
         if by not in NAME_BY:
             raise ValueError(f"alias by must be one of {', '.join(sorted(NAME_BY))}, not {by!r}")
         key = _required_key(key)
         self._require_character(con, character_id)
-        holder = self._name_holder(con, key, character_id)
+        holder = self._name_holder(con, key, character_id, over_subs=over_subs_name)
         if holder is not None:
             raise AliasConflictError(
                 f"{key!r} is character {holder.id}'s name ({holder.name}); rename that "
@@ -1211,9 +1227,12 @@ class Registry:
     def rename_character(self, character_id: int, name: str) -> str | None:
         """The operator names a character (``name_by = 'operator'``; subtitles name only
         through `name_character`), and it answers to the name's key (``alias_key``) by an
-        operator alias. Earlier aliases stay, so the keys of old names keep resolving. When
-        another character answers to the key (by alias or by name) the alias is skipped and
-        the warning returned; a name that keys nobody adds none."""
+        operator alias. Earlier aliases stay, so the keys of old names keep resolving. The
+        operator beats subtitles (D29 #2): a ``subs`` alias of the key moves here, and a name
+        subtitles gave another character doesn't stop it (that character keeps its name and
+        exemplars, and the operator alias outranks its name in `character_for_key`). When
+        another character answers to the key by an operator alias or an operator name, the
+        alias is skipped and the warning returned; a name that keys nobody adds none."""
         with self._tx() as con:
             cur = con.execute(
                 "UPDATE characters SET name = ?, name_by = 'operator' WHERE id = ?",
@@ -1227,13 +1246,13 @@ class Registry:
             held = con.execute(
                 "SELECT character_id, by FROM character_aliases WHERE alias = ?", (key,)
             ).fetchone()
-            if held is not None and held[0] != character_id:  # a rename never moves an alias
+            if held is not None and held[0] != character_id and held[1] == "operator":
                 return (
                     f"character {character_id} named {name!r}, but no alias added: {key!r} is "
                     f"character {held[0]}'s alias ({held[1]}); `fukikae registry alias` moves it"
                 )
-            try:
-                self._add_alias(con, character_id, key, "operator", None, False)
+            try:  # moves a subs alias of the key (an operator alias replaces a subs one)
+                self._add_alias(con, character_id, key, "operator", None, False, True)
             except AliasConflictError as e:
                 return f"character {character_id} named {name!r}, but no alias added: {e}"
             return None
@@ -1256,6 +1275,17 @@ class Registry:
             cur = con.execute("UPDATE actors SET locked = ? WHERE id = ?", (int(locked), actor_id))
             if cur.rowcount == 0:
                 raise KeyError(actor_id)
+
+    def lock_character(self, character_id: int, locked: bool) -> None:
+        """Lock a character (or unlock it): the characters stage keeps a named sub-cluster whose
+        parent pins or matches it with the character, whatever its name says, and subtitles
+        never name it."""
+        with self._tx() as con:
+            cur = con.execute(
+                "UPDATE characters SET locked = ? WHERE id = ?", (int(locked), character_id)
+            )
+            if cur.rowcount == 0:
+                raise KeyError(character_id)
 
     def merge_actors(self, keep: int, drop: int, report: list[str] | None = None) -> dict[int, int]:
         """Fold actor drop into keep, delete drop, recompute keep.
