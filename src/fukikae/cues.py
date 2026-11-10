@@ -17,6 +17,7 @@ import re
 import unicodedata
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import replace
 
 from fukikae.models import (
     Assignments,
@@ -322,6 +323,29 @@ def _subtitle_cluster(cue: Cue, turns: list[Turn], words: list[Word]) -> str | N
     return ranked[0]
 
 
+# Two events with the same spoken text that start within this of the other's end are layers
+# of one line (C8).
+LAYER_TOUCH_S = 0.05
+
+
+def merge_layers(cues: list[Cue]) -> list[Cue]:
+    """Typeset ASS draws one line as several events (an outline and a text layer, or the line
+    split where it touches); events with the same non-empty spoken text that overlap or touch
+    become one cue spanning them all (C8), in start order."""
+    out: list[Cue] = []
+    last: dict[tuple[str, bool], int] = {}  # (spoken text, ruby) -> index in out
+    for cue in sorted(cues, key=lambda c: (c.start, c.end)):
+        text = spoken_text(cue)
+        key = (text, cue.ruby)
+        i = last.get(key)
+        if text and i is not None and cue.start <= out[i].end + LAYER_TOUCH_S:
+            out[i] = replace(out[i], end=max(out[i].end, cue.end))
+            continue
+        last[key] = len(out)
+        out.append(cue)
+    return out
+
+
 def assign_subtitle_speakers(
     cues: list[Cue],
     turns: list[Turn],
@@ -341,12 +365,13 @@ def assign_subtitle_speakers(
     unless the translate stage condenses it. A cue the filter catches keeps ``skip`` set to its
     rule; a furigana event is skipped as ``ruby`` and one with nothing left to say as ``empty``,
     whatever the rules; a cue in a ``singing`` tag span is ``song`` when that rule is on.
+    Layers of one line (``merge_layers``) are one cue.
     """
     by_cluster = {a.cluster: a for a in assignments.clusters}
     words = [w for seg in transcript.segments for w in (seg.words or [])] if transcript else []
     singing = [e for e in (tags.events if tags else []) if e.label == "singing"]
     out: list[DubCue] = []
-    for cue in sorted(cues, key=lambda c: (c.start, c.end)):
+    for cue in merge_layers(cues):
         cluster = _subtitle_cluster(cue, turns, words)
         if cluster is None:
             character_id, extra = None, "unknown"
