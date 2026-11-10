@@ -318,6 +318,9 @@ def stage_settings(cfg: Config) -> tuple[BackendConfig, str | None]:
     """``[tts]`` as (backend config without the stage keys and the ``[tts.<backend>]`` tables,
     the legacy stage-wide device preference)."""
     bc = cfg.resolve("tts")
+    problem = loader.engine_problem("tts", bc.backend, "[tts] backend")
+    if problem:
+        raise ConfigError(problem)
     device = bc.options.get("device")
     if device is not None and device not in DEVICES:
         raise ConfigError(f'[tts] device must be "cpu" or "cuda", not {device!r}')

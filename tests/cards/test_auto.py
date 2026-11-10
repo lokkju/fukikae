@@ -596,3 +596,15 @@ def test_under_6_s_stock_is_plain_auto_and_stays(tmp_path: Path, vocals: Path):
     more = _cloning({a: [(0.0, 4.0, None), (6.0, 10.0, None)]}, vocals)
     assert ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, vocals, cloning=more) == []
     reg.close()
+
+
+def test_an_engine_is_refused_as_clone_backend_or_tts_backend():
+    """indextts2_trt renders indextts2 cards; it makes none, so it is no clone_backend and no
+    [tts] backend. The message points at [tts] engines."""
+    from fukikae.cards.auto import clone_backend, tts_backend
+    from fukikae.config import ConfigError
+
+    with pytest.raises(ConfigError, match=r"\[tts\] engines"):
+        clone_backend(Config(raw={"tts": {"clone_backend": "indextts2_trt"}}))
+    with pytest.raises(ConfigError, match=r"\[tts\] engines"):
+        tts_backend(Config(raw={"tts": {"backend": "indextts2_trt"}}))

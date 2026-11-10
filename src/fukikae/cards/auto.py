@@ -92,12 +92,26 @@ def clone_backend(cfg: Config) -> str | None:
             name = table["clone_backend"]
     if name is not None and not isinstance(name, str):
         raise ConfigError(f"[tts] clone_backend must be a backend name, not {name!r}")
+    if name:
+        from fukikae.backends.loader import engine_problem
+
+        problem = engine_problem("tts", name, "[tts] clone_backend")
+        if problem:
+            raise ConfigError(problem)
     return name or None
 
 
 def tts_backend(cfg: Config) -> str:
-    """The ``[tts]`` backend: the one automatic cards and extras are made for."""
-    return cfg.resolve("tts").backend
+    """The ``[tts]`` backend: the one automatic cards and extras are made for (never an engine
+    of another backend's cards)."""
+    from fukikae.backends.loader import engine_problem
+    from fukikae.config import ConfigError
+
+    name = cfg.resolve("tts").backend
+    problem = engine_problem("tts", name, "[tts] backend")
+    if problem:
+        raise ConfigError(problem)
+    return name
 
 
 def gender_thresholds(cfg: Config) -> tuple[float, float]:

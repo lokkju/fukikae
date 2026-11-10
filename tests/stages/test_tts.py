@@ -1032,3 +1032,10 @@ def test_bad_engines_are_refused(engines, match):
 
 def test_no_engines_is_empty():
     assert tts.tts_engines(CFG) == {}
+
+
+@pytest.mark.usefixtures("engine")
+def test_an_engine_is_refused_as_the_tts_backend():
+    cfg = Config(raw={"tts": {"backend": "fake_fast"}})
+    with pytest.raises(ConfigError, match=r"\[tts\] engines"):
+        tts.stage_settings(cfg)
