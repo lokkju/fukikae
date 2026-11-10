@@ -836,12 +836,33 @@ def test_translate_key_changes_when_names_json_changes(ep):
     plain = stage.config_key(SUBS, ep)
     assert names_path(ep.work) not in stage.inputs(ep)
     _names_used(ep)
-    assert names_path(ep.work) in stage.inputs(ep)
+    assert names_path(ep.work) not in stage.inputs(ep)  # cue_names in the key drives reruns
     named = stage.config_key(SUBS, ep)
     assert named["cue_names"] == {"map": {"natsu": [1, None]}, "hidden": [], "offset_s": 0.0}
     assert {k: v for k, v in named.items() if k != "cue_names"} == plain
     _names_used(ep, hidden=[1])
     assert stage.config_key(SUBS, ep)["cue_names"]["hidden"] == [[3.0, 4.0, "natsu"]]
+
+
+@pytest.mark.parametrize("verdict", ["off", "none", "holdout"])
+def test_unused_names_change_no_translate_input_or_key(ep, verdict):
+    """Final review B #5: names.json is never a translate input, so a names stage that read
+    no names (off, no named track, held out) leaves translate's inputs and key as they were."""
+    from fukikae.names.models import NamesResult
+
+    _ass_sidecar(ep)
+    stage = TranslateStage()
+    inputs, key = stage.inputs(ep), stage.config_key(SUBS, ep)
+    names_path(ep.work).parent.mkdir(parents=True, exist_ok=True)
+    write_json(
+        names_path(ep.work),
+        NamesResult(
+            episode=ep.id, used=False, verdict=verdict, reason="x", source=None, offset_s=0.0,
+            coverage={}, lines=[], hidden=[], pieces=[], labels={}, unvoiced=[], excluded=[],
+            dropped_row_seconds=0.0, suggestions=[],
+        ),
+    )  # fmt: skip
+    assert stage.inputs(ep) == inputs and stage.config_key(SUBS, ep) == key
 
 
 def test_names_json_is_no_input_on_the_asr_path(ep):
