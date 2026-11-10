@@ -297,6 +297,9 @@ def clone(
         raise _fail("no [tts] clone_backend in the workspace or its profile; pass --backend")
     if not transcript.strip():
         raise _fail("--transcript is empty: give what the clip says")
+    problem = loader.engine_problem("tts", name, "--backend" if backend else "[tts] clone_backend")
+    if problem:
+        raise _fail(problem)
     try:
         cls = loader.backend_class("tts", name)
     except (ConfigError, loader.BackendUnavailable) as e:
