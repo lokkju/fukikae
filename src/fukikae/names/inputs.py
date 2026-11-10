@@ -40,23 +40,47 @@ class HeldOutNamesError(ValueError):
 
 
 def check_held_out(work: Path, episode: str) -> None:
-    """Refuse to grade `episode` as held out when its names stage read names (verdict other than
-    `holdout` or `off`): the run would be graded on its own labels (Review Focus 3). Every eval
-    path that scores a held-out episode calls this first.
+    """Refuse to grade `episode` as held out when it read subtitle names (Review Focus 3).
+    Every eval path that scores a held-out episode calls this first. Refused when:
 
-    A missing `names.json` passes, because it means one of two things this guard can't tell
-    apart: the names stage never ran (a workspace from before it), so identity read
-    `04-diarize`'s inputs and no names; or its last run failed, since a run removes the old
-    file first. In the second case the manifest records `names` as failed and the episode's
-    `assignments.json` may still come from an earlier run that read names, so rerun the
-    episode from `names` before grading it."""
+    - its names stage read names (`names.json` verdict other than `holdout` or `off`);
+    - its `05-characters/assignments.json` holds a name decision (a cluster with a key, or
+      one whose source is a name), since the characters run behind it read names whatever
+      `names.json` says now;
+    - those assignments record other turns than `04-diarize/turns.json` (the names stage's
+      refined turns).
+
+    A missing `names.json` passes the first test, because it means one of two things this
+    guard can't tell apart: the names stage never ran (a workspace from before it), so
+    identity read `04-diarize`'s inputs and no names; or its last run failed, since a run
+    removes the old file first. The assignments tests catch the second case when the
+    assignments came from a run that read names. Missing assignments, or assignments from
+    before they recorded turns, pass those tests (the eval reports a missing file itself)."""
+    from fukikae.models import Assignments, Diarization
+
     path = names_path(work)
-    if not path.exists():
+    if path.exists():
+        result = read_json(path, NamesResult)
+        if result.verdict not in HELD_OUT_VERDICTS:
+            raise HeldOutNamesError(
+                f"held-out episode {episode} read its subtitle names (names verdict "
+                f"{result.verdict!r}); add it to [names] holdout_episodes and rerun it from "
+                "names, or score it as a tuning episode"
+            )
+    asg_path = Path(work) / "05-characters" / "assignments.json"
+    if not asg_path.exists():
         return
-    result = read_json(path, NamesResult)
-    if result.verdict not in HELD_OUT_VERDICTS:
+    asg = read_json(asg_path, Assignments)
+    rerun = f"rerun it from names (`fukikae run <ws> {episode} --from names`) before grading it"
+    named = sorted(c.cluster for c in asg.clusters if c.name is not None or c.source == "name")
+    if named:
         raise HeldOutNamesError(
-            f"held-out episode {episode} read its subtitle names (names verdict "
-            f"{result.verdict!r}); add it to [names] holdout_episodes and rerun it from names, "
-            "or score it as a tuning episode"
+            f"held-out episode {episode}'s assignments hold name decisions ({', '.join(named)}): "
+            f"its characters stage read subtitle names; {rerun}"
+        )
+    diar = Path(work) / DIARIZE_DIR / "turns.json"
+    if asg.turns is not None and diar.exists() and asg.turns != read_json(diar, Diarization).turns:
+        raise HeldOutNamesError(
+            f"held-out episode {episode}'s assignments record other turns than "
+            f"{DIARIZE_DIR}/turns.json (the names stage's refined turns); {rerun}"
         )
