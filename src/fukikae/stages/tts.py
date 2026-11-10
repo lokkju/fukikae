@@ -97,6 +97,7 @@ from fukikae.cards.auto import (
     clone_backend,
     ensure_assignments,
     extras_voices,
+    repick_blocker,
     stale_cards,
     workspace_cloning,
 )
@@ -1104,12 +1105,15 @@ class TtsStage:
             names = {c.id: c.name for c in reg.characters() if c.name}
             current = {cid: reg.card_for(cid, cfg.target_language) for cid in speaking}
             todo = [cid for cid, a in current.items() if a is None or a.card_id is None]
-            # stock stand-ins made while the clone backend couldn't run: replaced once it can
+            # stock stand-ins made while the clone backend couldn't run: replaced once it can,
+            # so they build the clone source only when cloning works now
             fallback = [
                 cid
                 for cid, a in current.items()
                 if a is not None and a.chosen_by == FALLBACK_BY and not a.locked
             ]
+            if fallback and repick_blocker(cfg) is not None:
+                fallback = []
             # clone cards whose references the subtitle names now contradict (D29 #4)
             stale = stale_cards(
                 Workspace(ep.workspace_root), reg, store, speaking, cfg.target_language,
