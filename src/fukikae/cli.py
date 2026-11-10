@@ -71,7 +71,8 @@ def backends_setup(
     workspace: Path | None = typer.Option(
         None,
         "--workspace",
-        help="Fetch the model this workspace's config names (default: the default profile's).",
+        help="Fetch the model this workspace's config names (default: the default profile's); "
+        "for indextts2_trt, build the engines its [tts.indextts2_trt] asks for.",
     ),
 ) -> None:
     """Fetch a backend's pinned model files: the only step that downloads (ruling CD24). A
@@ -95,15 +96,16 @@ def backends_setup(
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
     if isinstance(cls, type) and issubclass(cls, WorkerSynthesizer):
+        options = _worker_setup_options(name, workspace)
         try:
-            cls.setup(fetch=not no_fetch, force=force)
+            cls.setup(fetch=not no_fetch, force=force, options=options)
         except subprocess.CalledProcessError as e:
             typer.echo(f"error: {' '.join(map(str, e.cmd))} exited with {e.returncode}", err=True)
             raise typer.Exit(1) from e
         except (OSError, BackendUnavailable) as e:  # docker (or uv) missing, docker down
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(1) from e
-        typer.echo(f"{name}: set up in {cls({}, 'cpu').environment_location()}")
+        typer.echo(f"{name}: set up in {cls(options, 'cpu').environment_location()}")
         return
     fetch = getattr(cls, "fetch", None)
     if fetch is None:
@@ -114,6 +116,20 @@ def backends_setup(
         return
     for path in fetch(_setup_options(kinds[0], name, workspace)):
         typer.echo(f"{name}: {path}")
+
+
+def _worker_setup_options(name: str, workspace: Path | None) -> dict[str, object]:
+    """``[tts.<name>]``'s options in ``workspace``'s config (or the default profile's), outside
+    ``device`` and ``force_cpu``: what a cloning backend renders with."""
+    import tempfile
+
+    from fukikae.config import load_config
+    from fukikae.stages.tts import backend_config
+
+    with tempfile.TemporaryDirectory(prefix="fukikae-setup-") as tmp:
+        cfg = load_config(workspace or Path(tmp), None)
+        bc = backend_config(cfg, name)
+    return dict(bc.options) if bc.backend == name else {}
 
 
 def _setup_options(kind: str, name: str, workspace: Path | None) -> dict[str, object]:
