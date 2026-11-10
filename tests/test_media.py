@@ -240,3 +240,37 @@ def test_probe_reads_cue_counts_duration_and_hearing_impaired():
     assert p.subtitles[0] == SubTrack(2, "ass", "eng", "English", True, cues=344)
     assert p.subtitles[1].cues == 508 and p.subtitles[1].hearing_impaired
     assert p.subtitles[2].cues is None
+
+
+def test_cd25_a_dense_typeset_signs_track_cannot_knock_out_the_dialogue(tmp_path):
+    """Fix round 1: a forced typeset signs track with 1200 events (karaoke and signs styled
+    line by line) is no measure of dialogue density."""
+    src = tmp_path / "show S01E12.mkv"
+    signs = SubTrack(3, "ass", "eng", None, True, cues=1200)
+    named = SubTrack(5, "ass", "eng", "Signs", False, cues=1200)
+    dialogue = SubTrack(4, "ass", "eng", None, False, cues=350)
+    assert find_target_subtitles(src, _cd25(signs, dialogue), "en", {}) == (None, dialogue)
+    assert find_target_subtitles(src, _cd25(named, dialogue), "en", {}) == (None, dialogue)
+
+
+def test_cd25_a_lone_forced_signs_track_needs_dialogue_density(tmp_path):
+    """A forced-flagged track counts as dialogue only from 8 cues a minute (E11: 14.4)."""
+    src = tmp_path / "show S01E12.mkv"
+    for cues in (72, 100, 144):  # 3, 4.2 and 6 a minute over 24 minutes
+        lone = SubTrack(3, "ass", "eng", None, True, cues=cues)
+        assert find_target_subtitles(src, _cd25(lone), "en", {}) == (None, None)
+    e11 = SubTrack(2, "ass", "eng", "English", True, cues=344)
+    assert find_target_subtitles(src, _cd25(e11, duration=1428.0), "en", {}) == (None, e11)
+
+
+def test_cd25_full_subtitles_with_songs_are_dialogue(tmp_path):
+    src = tmp_path / "show S01E12.mkv"
+    for title in ("Full Subtitles (incl. Songs)", "Dialogue + Songs", "Complete (Songs)"):
+        full = SubTrack(4, "ass", "eng", title, False, cues=350)
+        assert find_target_subtitles(src, _cd25(full), "en", {}) == (None, full), title
+        thin = SubTrack(4, "ass", "eng", title, False, cues=40)
+        assert find_target_subtitles(src, _cd25(thin), "en", {}) == (None, None), title
+        unknown = SubTrack(4, "ass", "eng", title, False)
+        assert find_target_subtitles(src, _cd25(unknown), "en", {}) == (None, None), title
+    songs = SubTrack(4, "ass", "eng", "Songs", False, cues=350)
+    assert find_target_subtitles(src, _cd25(songs), "en", {}) == (None, None)
