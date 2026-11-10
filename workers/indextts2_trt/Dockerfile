@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # The IndexTTS2 TensorRT worker image (D28 lever 2). Built locally by
 # `fukikae backends setup indextts2_trt` and never pushed anywhere. It holds what the host
-# doesn't: OpenMPI 4 (TensorRT-LLM links libmpi.so.40 and needs orted for its singleton init),
+# doesn't: OpenMPI 4 (TensorRT-LLM links libmpi.so.40 and needs orted for its singleton init), a C
+# compiler (Triton, which TensorRT-LLM imports, builds a small helper at first use),
 # Python 3.12 and this directory's uv.lock synced into /opt/venv, and upstream index-tts at the
 # pinned commit in /opt/index-tts (on PYTHONPATH, which gives both `indextts` and
 # `backends.trt`). Models, engines and fukikae's own source are mounted at run time; nothing in
@@ -11,7 +12,7 @@ FROM ghcr.io/astral-sh/uv:0.12.21@sha256:a7aed3216253ee804de3e2d8afa5073baa1a177
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libopenmpi3t64 openmpi-bin ca-certificates \
+ && apt-get install -y --no-install-recommends libopenmpi3t64 openmpi-bin ca-certificates gcc libc6-dev \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /usr/local/bin/uv
@@ -43,7 +44,8 @@ ENV PATH=/opt/venv/bin:$PATH \
     HF_HUB_DISABLE_TELEMETRY=1 \
     DO_NOT_TRACK=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    NUMBA_CACHE_DIR=/tmp/numba-cache
 
 # The text normalizers build their grammars on first use and cache them (the Chinese one beside
 # its code, the English one under XDG_CACHE_HOME), where the unprivileged worker can't write:

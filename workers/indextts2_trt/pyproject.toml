@@ -43,9 +43,18 @@ dependencies = [
     "tqdm==4.67.1",
     "transformers==4.51.3",
     "WeTextProcessing==1.3.0",
+    # indextts's GPT module imports its tokenizer, which needs these since the TRT backend's
+    # list was written (index-tts's own pyproject has them; versions from workers/indextts2)
+    "openai-whisper==20250625",
+    "fugashi==1.5.2",
+    "unidic-lite==1.0.8",
     "tensorrt-llm==0.21.0",
-    "onnx==1.19.1",
-    "onnxscript==0.5.6",
+    # The ONNX exporters as of upstream's verification (2026-08-04, inside its onnx<1.21 range):
+    # onnx-ir 1.x wraps the version converter's refusal in an error torch 2.7 doesn't catch, and
+    # older onnxscript can't translate the DiT's reflect pad with a symbolic width.
+    "onnx==1.20.1",
+    "onnxscript==0.7.1",
+    "onnx-ir==0.2.1",
     "polygraphy==0.49.26",
     # TensorRT-LLM 0.21 imports `from cuda import cuda, cudart`, which cuda-python 13 dropped
     "cuda-python==12.9.0",
