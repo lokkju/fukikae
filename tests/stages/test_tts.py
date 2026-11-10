@@ -1247,3 +1247,23 @@ def test_prepare_cue_without_a_checked_card_uses_the_engines(ep):
     job = tts.prepare_cue(cue, natsu, ENGINE_CFG, store, who="Natsu")
     assert job.cls is FakeEngine and job.backend_cfg.backend == "fake_fast"
     assert tts.prepare_cue(cue, natsu, CFG, store, who="Natsu").cls is FakeSynth
+
+
+def test_a_card_below_the_clone_floor_builds_the_clone_source(ep, monkeypatch):
+    """D32: no card is new, stale or a stand-in, but character 1's automatic clone card is
+    under the clone floor: the clone source is built and the shortfall handed on, so
+    ensure_assignments can re-pick it or flag it."""
+    from fukikae.cards.auto import Shortfall
+
+    _two_cards(ep)
+    seen: dict = {}
+    short = {1: Shortfall("abc", (6.3,))}
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.below_floor", lambda *_, **__: short)
+    monkeypatch.setattr(
+        "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
+    )
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
+                        lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    assert seen["cloning"] == "c" and seen["short"] == short
