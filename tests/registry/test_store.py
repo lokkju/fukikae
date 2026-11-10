@@ -263,7 +263,7 @@ def test_v1_registry_migrates_voice_into_history(tmp_path: Path):
         # a migrated voice keeps the character curated, as a v1 voice did
         assert reg.protected_actors() == {1, 2}
     con = sqlite3.connect(p)
-    assert con.execute("SELECT version FROM schema_version").fetchall() == [(2,)]
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
     assert con.execute("SELECT voice FROM characters").fetchall() == [(None,), (None,)]
     con.close()
     with Registry(p) as reg:  # reopening migrates nothing twice
@@ -290,11 +290,11 @@ def test_failed_migration_leaves_the_v1_file_untouched(tmp_path: Path, monkeypat
     con.close()
 
 
-def test_fresh_registry_is_schema_2(tmp_path: Path):
+def test_fresh_registry_is_schema_3(tmp_path: Path):
     p = tmp_path / "r.sqlite"
     Registry(p).close()
     con = sqlite3.connect(p)
-    assert con.execute("SELECT version FROM schema_version").fetchall() == [(2,)]
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
     con.close()
 
 
@@ -533,8 +533,10 @@ def test_merged_history_is_in_time_order(reg: Registry, monkeypatch):
     reg.assign_card(c2, "en", B16, by="assign", locked=True)  # earlier, higher row id
     notes: list[str] = []
     reg.merge_actors(a1, a2, report=notes)
-    assert [h.card_id for h in reg.card_history(c1, "en")] == [B16, A16]
-    assert _cur(reg, c1, "en").card_id == A16 and _cur(reg, c1, "en").n == 2
+    # rows keep their id order (n); by_time shows them by when they were assigned
+    assert [h.card_id for h in reg.card_history(c1, "en")] == [A16, B16]
+    assert [h.card_id for h in reg.card_history(c1, "en", by_time=True)] == [B16, A16]
+    assert _cur(reg, c1, "en").card_id == A16 and _cur(reg, c1, "en").n == 1
     assert any(A16 in n and B16 in n and "stays in history" in n for n in notes)
 
 
@@ -621,3 +623,66 @@ def test_restock_is_not_curation_and_is_guarded_like_auto(reg: Registry):
     with pytest.raises(ProtectedAssignmentError, match="imported"):
         reg.assign_card(z, "en", d, by="restock", locked=False)
     assert reg.assign_card(z, "en", d, by="restock", locked=False, override=True).card_id == d
+
+
+def test_merge_with_lock_rows_on_both_sides_keeps_the_operator_card_curated(reg: Registry):
+    """A2: after a merge interleaves rows, a lock/unlock row still says how its own card was
+    chosen, so auto never replaces the operator's card."""
+    a1, keep = reg.create_actor_with_character(unit(1, 0))
+    a2, drop = reg.create_actor_with_character(unit(0, 1))
+    reg.assign_card(drop, "en", B16, by="assign", locked=False)  # operator, earliest
+    reg.assign_card(keep, "en", A16, by="auto", locked=False)
+    reg.lock_card(keep, "en", True)
+    reg.lock_card(drop, "en", True)
+    reg.lock_card(keep, "en", False)
+    reg.lock_card(drop, "en", False)
+    reg.merge_actors(a1, a2)
+    cur = _cur(reg, keep, "en")
+    assert cur.card_id == B16 and cur.chosen_by == "assign" and not cur.locked
+    with pytest.raises(ProtectedAssignmentError):
+        reg.assign_card(keep, "en", C16, by="auto", locked=False)
+
+
+def test_merge_does_not_over_protect_an_auto_card_after_lock_rows(reg: Registry):
+    a1, keep = reg.create_actor_with_character(unit(1, 0))
+    a2, drop = reg.create_actor_with_character(unit(0, 1))
+    reg.assign_card(keep, "en", A16, by="assign", locked=False)
+    reg.assign_card(drop, "en", B16, by="auto", locked=False)
+    reg.lock_card(drop, "en", True)
+    reg.lock_card(drop, "en", False)
+    reg.merge_actors(a1, a2)
+    # keep's curated card wins; drop's auto card (via its unlock row) reads as auto in history
+    rows = reg.card_history(keep, "en")
+    assert [h.chosen_by for h in rows if h.card_id == B16] == ["auto", "auto", "auto"]
+
+
+def test_history_rows_are_numbered_in_id_order(reg: Registry, monkeypatch):
+    """A9: a clock step backwards never reorders one character's rows."""
+    import fukikae.registry.store as store
+
+    times = iter(["2026-11-08T10:00:03.000000+00:00", "2026-11-08T10:00:01.000000+00:00"])
+    monkeypatch.setattr(store, "_now", lambda: next(times, "2026-11-08T10:00:02.000000+00:00"))
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    reg.assign_card(cid, "en", B16, by="assign", locked=True)
+    assert [(h.n, h.card_id) for h in reg.card_history(cid, "en")] == [(1, A16), (2, B16)]
+    assert _cur(reg, cid, "en").card_id == B16 and _cur(reg, cid, "en").n == 2
+    assert reg.revert_card(cid, "en", None).card_id == A16
+
+
+def test_v2_registry_migrates_to_3_with_chosen_by(tmp_path: Path):
+    p = tmp_path / "r.sqlite"
+    with Registry(p) as reg:
+        cid = _char(reg)
+        reg.assign_card(cid, "en", A16, by="assign", locked=False)
+        reg.lock_card(cid, "en", True)
+    con = sqlite3.connect(p)
+    con.execute("ALTER TABLE card_history DROP COLUMN chosen_by")
+    con.execute("UPDATE schema_version SET version = 2")
+    con.commit()
+    con.close()
+    with Registry(p) as reg:
+        assert [h.chosen_by for h in reg.card_history(cid, "en")] == ["assign", "assign"]
+    con = sqlite3.connect(p)
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
+    con.close()
