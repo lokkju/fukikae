@@ -941,3 +941,41 @@ def test_export_with_nothing_exportable_fails_and_writes_nothing(tmp_path: Path)
     assert not out.exists()
     assert "no character" in r.output and "fukikae registry rename" in r.output
     assert f"character {cid}" in r.output  # what was left out, and why
+
+
+def test_list_flags_cards_cloned_from_turns_names_now_give_someone_else(tmp_path: Path):
+    """D29 #4: `voices list` names each clone card with references the subtitles now name
+    otherwise; a curated one points at `voices clone`, an automatic one at the next tts run."""
+    from tests.cards.test_auto import (
+        NAMED_EP,
+        NATSU_CLUSTERS,
+        NATSU_NAMES,
+        NATSU_TURNS,
+        _auto_clone,
+        _named_episode,
+    )  # fmt: skip
+
+    ws, natsu, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        _, other = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))
+        clusters = [{**c, "character_id": natsu if c["character_id"] == 1 else other}
+                    for c in NATSU_CLUSTERS]  # fmt: skip
+        _named_episode(ws.root, NAMED_EP, NATSU_TURNS, clusters, names=NATSU_NAMES)
+        _auto_clone(reg, store, natsu, [(NAMED_EP, 30.0, 35.0)], by="assign", locked=True)
+        _auto_clone(reg, store, other, [(NAMED_EP, 0.0, 5.0)])
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 0, r.output
+    flags = [ln for ln in r.output.splitlines() if "was cloned from" in ln]
+    assert flags == [
+        f"character {natsu} (Natsu)'s card (assign) was cloned from turns now named WENDY; "
+        "`fukikae voices clone` replaces it",
+        f"character {other}'s card (auto) was cloned from turns now named NATSU; "
+        "the next tts run re-picks it",
+    ]
+
+
+def test_list_without_names_prints_no_flags(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    assert invoke("assign", str(ws.root), "Natsu", store.put(parse_card(STOCK_CARD))).exit_code == 0
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 0 and "was cloned from" not in r.output
