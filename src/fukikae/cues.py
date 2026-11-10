@@ -8,6 +8,11 @@ reaches twice ``max_cue_s`` with no such punctuation ends at the next word anywa
 Word-level ASR output (Qwen3's forced aligner especially) drops punctuation from the words,
 though the segment text keeps it; the punctuation between two words of the segment text is
 put back on the word before it, so cues keep their sentence ends and the translator sees them.
+
+The subtitle path (`assign_subtitle_speakers`) gives each subtitle cue the diarize cluster that
+overlaps it most; when the names stage used the same track's Name column (D27), a cue whose own
+Name keys a speaker the characters stage decided by name (`name_map`) is spoken by that speaker
+instead, unless the names stage hid the line or the cue lies under a sub-cluster a lock kept.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ import math
 import re
 import unicodedata
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import replace
 
 from fukikae.models import (
@@ -31,6 +36,7 @@ from fukikae.models import (
     Turn,
     Word,
 )
+from fukikae.names.normalize import parse_name
 from fukikae.subtitles import Cue, filter_cue, spoken_text
 
 # Speakable characters per second of the target language at normal speed.
@@ -342,6 +348,53 @@ def merge_layers(cues: list[Cue]) -> list[Cue]:
     return out
 
 
+# A key's speaker on the subtitle path: (character id, None) or (None, extra label).
+type NameSpeaker = tuple[int | None, str | None]
+
+
+def name_map(assignments: Assignments) -> dict[str, NameSpeaker]:
+    """Name key -> speaker from the characters stage's name decisions (``source = "name"``):
+    the key's character, or for a named extra (``extra``, no character) the extra label of
+    the key's sub-cluster with the most clean seconds (lowest label on a tie), so one named
+    extra keeps one voice across clusters. Lock decisions are left out: a lock keeps the speech
+    under its sub-cluster, never the key's other cues; ambiguous keys never carry a name."""
+    out: dict[str, NameSpeaker] = {}
+    extras: dict[str, list[ClusterAssignment]] = defaultdict(list)
+    for a in assignments.clusters:
+        if a.source != "name" or a.name is None:
+            continue
+        if a.character_id is not None and a.status not in ("extra", "review"):
+            out.setdefault(a.name, (a.character_id, None))
+        elif a.status == "extra":
+            extras[a.name].append(a)
+    for key, group in extras.items():
+        if key not in out:
+            best = min(group, key=lambda a: (-a.clean_seconds, a.cluster))
+            out[key] = (None, best.cluster)
+    return dict(sorted(out.items()))
+
+
+def _hidden(
+    cue: Cue, key: str | None, hidden: Collection[tuple[float, float, str | None]], offset_s: float
+) -> bool:
+    """Whether a hidden names line is this cue: one with the cue's own key whose span the cue,
+    moved back by ``offset_s`` (names lines are in audio time), overlaps by at least half the
+    shorter of the two. A hidden line of another name said at the same time hides nothing."""
+    start, end = cue.start - offset_s, cue.end - offset_s
+    for a, b, k in hidden:
+        if k != key:
+            continue
+        ov = min(end, b) - max(start, a)
+        if ov > 0 and ov >= 0.5 * min(end - start, b - a):
+            return True
+    return False
+
+
+def _parent(label: str) -> str:
+    """The diarize cluster a names sub-cluster label (``<cluster>~<slug>``) refines."""
+    return label.split("~", 1)[0]
+
+
 def assign_subtitle_speakers(
     cues: list[Cue],
     turns: list[Turn],
@@ -353,10 +406,20 @@ def assign_subtitle_speakers(
     max_speed: float,
     rules: Sequence[str],
     cps: float | None = None,
+    name_map: Mapping[str, NameSpeaker] | None = None,
+    hidden: Collection[tuple[float, float, str | None]] = (),
+    offset_s: float = 0.0,
 ) -> list[DubCue]:
     """Dub cues from target-language subtitle cues (the subtitle-first path).
 
-    The speaker is the diarize cluster with the largest overlap (see ``_subtitle_cluster``);
+    With ``name_map`` (the names stage read this very track's names; `name_map` builds it
+    from the assignments), a cue whose own Name (``parse_name(cue.name).key``) is in the map
+    is spoken by that speaker, unless it is one of the ``hidden`` names lines (start, end, key
+    in audio time: the cue is moved back by the names stage's ``offset_s`` to compare, and only
+    a line of the cue's own key hides it) or the cluster under it belongs to a parent diarize
+    cluster a lock kept any of (operator state beats names). Any other cue's speaker is the
+    diarize cluster with the largest overlap (see ``_subtitle_cluster``), looked up with the
+    cue moved back by ``offset_s`` too, since turns are in audio time;
     ``source_text`` and ``text`` are both the cue's spoken text, so a cue is spoken verbatim
     unless the translate stage condenses it. A cue the filter catches keeps ``skip`` set to its
     rule; a furigana event is skipped as ``ruby`` and one with nothing left to say as ``empty``,
@@ -366,13 +429,21 @@ def assign_subtitle_speakers(
     by_cluster = {a.cluster: a for a in assignments.clusters}
     words = [w for seg in transcript.segments for w in (seg.words or [])] if transcript else []
     singing = [e for e in (tags.events if tags else []) if e.label == "singing"]
+    locked_parents = {_parent(a.cluster) for a in assignments.clusters if a.source == "lock"}
     out: list[DubCue] = []
     for cue in merge_layers(cues):
-        cluster = _subtitle_cluster(cue, turns, words)
+        heard = replace(cue, start=cue.start - offset_s, end=cue.end - offset_s)
+        cluster = _subtitle_cluster(heard if offset_s else cue, turns, words)
         if cluster is None:
             character_id, extra = None, "unknown"
         else:
             character_id, extra = _who(Turn(start=0, end=0, speaker=cluster), by_cluster)
+        if name_map:
+            key = parse_name(cue.name).key if cue.name else None
+            locked = cluster is not None and _parent(cluster) in locked_parents
+            hit = name_map.get(key) if key is not None else None
+            if hit is not None and not locked and not _hidden(cue, key, hidden, offset_s):
+                character_id, extra = hit
         if character_id is not None:
             speaker = names.get(character_id) or f"char{character_id}"
         else:

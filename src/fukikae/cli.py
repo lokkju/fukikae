@@ -9,6 +9,7 @@ import typer
 from fukikae import __version__
 from fukikae.cards.cli import voices_app
 from fukikae.eval.cli import eval_app
+from fukikae.names.cli import names_app
 from fukikae.registry.cli import registry_app
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ def main(
 app.add_typer(eval_app, name="eval")
 app.add_typer(registry_app, name="registry")
 app.add_typer(voices_app, name="voices")
+app.add_typer(names_app, name="names")
 
 backends_app = typer.Typer(help="Inspect installed model backends.", no_args_is_help=True)
 app.add_typer(backends_app, name="backends")
@@ -157,6 +159,7 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
     from fukikae.stages.extract import ExtractStage
     from fukikae.stages.language import LanguageStage
     from fukikae.stages.mix import MixStage
+    from fukikae.stages.names import NamesStage
     from fukikae.stages.separate import SeparateStage
     from fukikae.stages.tag import TagStage, tag_enabled
     from fukikae.stages.timefit import TimefitStage
@@ -169,6 +172,7 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
         LanguageStage(),
         AsrStage(),
         DiarizeStage(),
+        NamesStage(cfg),
         CharactersStage(),
     ]
     tags = tag_enabled(cfg)

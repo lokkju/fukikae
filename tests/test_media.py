@@ -7,6 +7,7 @@ from fukikae.media import (
     SubTrack,
     choose_audio_track,
     extract_subtitle,
+    extract_subtitles,
     find_target_subtitles,
     probe,
     run_ffmpeg,
@@ -158,6 +159,26 @@ def test_extract_subtitle_round_trip(tmp_path):
     assert extract_subtitle(mkv, track, tmp_path / "x.srt").name == "x.ass"
 
 
+@pytest.mark.ffmpeg
+def test_extract_subtitles_reads_several_tracks_in_one_pass(tmp_path):
+    srts = []
+    for i, text in enumerate(("Hello.", "Hallo.")):
+        srt = tmp_path / f"in{i}.srt"
+        srt.write_text(f"1\n00:00:01,000 --> 00:00:02,000\n{text}\n", encoding="utf-8")
+        srts.append(srt)
+    mkv = tmp_path / "in.mkv"
+    run_ffmpeg(
+        ["-f", "lavfi", "-i", "anullsrc=d=3", "-i", str(srts[0]), "-i", str(srts[1]),
+         "-map", "0", "-map", "1", "-map", "2", "-c:a", "aac", "-c:s", "ass", str(mkv)]
+    )  # fmt: skip
+    a, b = probe(mkv).subtitles
+    outs = extract_subtitles(mkv, [(a, tmp_path / "a"), (b, tmp_path / "o" / "b.srt")])
+    assert [o.name for o in outs] == ["a.ass", "b.ass"]
+    assert "Hello." in outs[0].read_text(encoding="utf-8")
+    assert "Hallo." in outs[1].read_text(encoding="utf-8")
+    assert extract_subtitles(mkv, []) == []
+
+
 # -- ruling CD25: the dialogue track, never forced or signs-and-songs-only ------------------
 
 
@@ -299,3 +320,22 @@ def test_cd25_full_subtitles_with_signs_are_dialogue(tmp_path):
         assert find_target_subtitles(src, _cd25(unknown), "en", {}) == (None, None), title
     signs = SubTrack(4, "ass", "eng", "Signs", False, cues=350)
     assert find_target_subtitles(src, _cd25(signs), "en", {}) == (None, None)
+
+
+def test_extract_subtitles_removes_its_files_when_ffmpeg_fails(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from fukikae import media
+
+    def fail(args: list[str]) -> None:
+        for a in args:
+            if a.endswith(".ass"):
+                Path(a).write_text("half", encoding="utf-8")
+        raise media.MediaError("ffmpeg failed")
+
+    monkeypatch.setattr(media, "run_ffmpeg", fail)
+    a = media.SubTrack(index=2, codec="ass", language="eng", title=None, forced=False, cues=1)
+    b = media.SubTrack(index=3, codec="ass", language="ger", title=None, forced=False, cues=1)
+    with pytest.raises(media.MediaError):
+        media.extract_subtitles(tmp_path / "in.mkv", [(a, tmp_path / "a"), (b, tmp_path / "b")])
+    assert list(tmp_path.iterdir()) == []

@@ -210,6 +210,28 @@ def parse_ass_cues(text: str) -> list[Cue]:
     return cues
 
 
+def parse_ass_styles(text: str) -> set[str]:
+    """The style names declared in an ASS/SSA file's ``[V4+ Styles]`` (or ``[V4 Styles]``)
+    section; empty for any other format."""
+    fields = ["name"]
+    styles: set[str] = set()
+    in_styles = False
+    for raw in text.splitlines():
+        row = raw.strip()
+        if row.startswith("["):
+            in_styles = row.casefold() in ("[v4+ styles]", "[v4 styles]")
+        elif not in_styles:
+            continue
+        elif row.casefold().startswith("format:"):
+            fields = [f.strip().casefold() for f in row.split(":", 1)[1].split(",")]
+        elif row.casefold().startswith("style:"):
+            parts = [p.strip() for p in row.split(":", 1)[1].split(",")]
+            d = dict(zip(fields, parts, strict=False))
+            if d.get("name"):
+                styles.add(d["name"])
+    return styles
+
+
 def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
