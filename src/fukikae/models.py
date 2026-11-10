@@ -157,15 +157,15 @@ class DubCues(BaseModel):
 
 
 class TtsPlanCue(BaseModel):
-    """One cue in ``07-tts/plan.json``. A rendered cue has a ``card_id``, its cache ``key`` (of the
-    wav in ``07-tts``), ``seconds`` (that wav's length, silence trimmed) and ``slot`` (the
-    cue's length); ``rendered_seconds`` is the render at the card's own rate, before any
-    rate fit, and ``rate_factor`` the speed-up the fit asked for (1.0 when none). ``passed``
-    is what the backend got beyond the card and the text, and ``neutral_only`` says the
-    backend takes no delivery at all. ``retry_seed`` and ``suspect`` are the render guards'.
-    ``skipped`` says why a cue has no audio (``skip: ...`` or ``error: ...`` from translate,
-    or ``no text``). Nothing here depends on the run that wrote it, so the same audio always
-    gives the same file."""
+    """One cue in ``07-tts/plan.json``. A rendered cue has a ``card_id``, its cache ``key`` (of
+    the wav in ``07-tts``), ``seconds`` (that wav's length, silence trimmed and internal pauses
+    capped, D33) and ``slot`` (the cue's length); ``rendered_seconds`` is the render at the
+    card's own rate (pauses capped too), before any rate fit, and ``rate_factor`` the speed-up
+    the fit asked for (1.0 when none). ``passed`` is what the backend got beyond the card and
+    the text, and ``neutral_only`` says the backend takes no delivery at all. ``retry_seed``
+    and ``suspect`` are the render guards'. ``skipped`` says why a cue has no audio (``skip:
+    ...`` or ``error: ...`` from translate, or ``no text``). Nothing here depends on the run
+    that wrote it, so the same audio always gives the same file."""
 
     cue_id: str
     character_id: int | None

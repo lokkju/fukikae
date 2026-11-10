@@ -332,14 +332,15 @@ def test_cli_reports_a_bad_spec_and_a_used_folder(tmp_path):
 
 def test_tts_ab_reuses_the_stage_fitted_render(tmp_path):
     """B4: a cue the tts stage already rendered for its slot (its plan's key derives from
-    this job's render key) is reused from the cache, not rendered again at another rate."""
+    this job's render key, with its pauses capped, D33) is reused from the cache, not rendered
+    again at another rate."""
     from types import SimpleNamespace
 
     from fukikae.artifacts import write_json
     from fukikae.cards.card import parse_card
     from fukikae.eval.ab import Candidate, _Renderer
     from fukikae.models import TtsPlan, TtsPlanCue
-    from fukikae.stages.tts import fitted_key
+    from fukikae.stages.tts import capped_key, fitted_key
     from fukikae.workspace import Workspace
     from tests.cards.test_card import STOCK_CARD
 
@@ -348,9 +349,9 @@ def test_tts_ab_reuses_the_stage_fitted_render(tmp_path):
     card = parse_card(STOCK_CARD)
     job = SimpleNamespace(
         cue=SimpleNamespace(id="c0001"), card_id="a" * 16, card=card, key="k" * 16,
-        backend_cfg=None, cls=None,
+        backend_cfg=None, cls=None, max_pause_ms=200,
     )  # fmt: skip
-    final = fitted_key(job.key, 1.15)
+    final = capped_key(fitted_key(job.key, 1.15), 200)
     cache = ws.root / ".fukikae" / "tts-cache"
     cache.mkdir(parents=True)
     (cache / f"{final}.wav").write_bytes(b"RIFF")
