@@ -295,8 +295,12 @@ def show(
             if c.actor_id == actor_id:
                 typer.echo(
                     f"  character {c.id}: {c.name or '-'}"
+                    + (f" (name by {c.name_by})" if c.name and c.name_by else "")
                     + (f" (external id {c.external_id})" if c.external_id else "")
                 )
+                aliases = reg.aliases(c.id)
+                if aliases:
+                    typer.echo("    aliases: " + ", ".join(f"{a.alias} ({a.by})" for a in aliases))
         for eid, n in reg.episode_counts(actor_id).items():
             typer.echo(f"  {eid}: {n} exemplars")
 
@@ -312,18 +316,109 @@ def rename(
         help="The character's id in an outside source (an AniDB character id); '' clears it.",
     ),
 ) -> None:
-    """Name a character; its episodes' characters stage reruns next time."""
+    """Name a character (an operator name, which subtitles never replace) and make it answer to
+    the name's key; its episodes' characters stage reruns next time."""
     ws = Workspace(workspace)
     with _open(workspace) as reg:
         char = next((c for c in reg.characters() if c.id == character_id), None)
         if char is None:
             raise _fail(f"no character {character_id}")
         with reg.transaction():
-            reg.rename_character(character_id, name)
+            warning = reg.rename_character(character_id, name)
             if external_id is not None:
                 reg.set_character_external_id(character_id, external_id or None)
         affected = list(reg.episode_counts(char.actor_id))
+    if warning:
+        typer.echo(f"warning: {warning}")
     _stale(ws, affected)
+
+
+def _episodes_with_key(ws: Workspace, key: str) -> list[str]:
+    """Episodes whose names stage used a line of this key."""
+    from fukikae.artifacts import read_json
+    from fukikae.names.inputs import names_path
+    from fukikae.names.models import NamesResult
+
+    out = []
+    episodes = ws.root / ".fukikae" / "episodes"
+    for work in sorted(episodes.iterdir()) if episodes.is_dir() else []:
+        path = names_path(work)
+        if not path.is_file():
+            continue
+        try:
+            r = read_json(path, NamesResult)
+        except ValueError:
+            continue
+        if r.used and any(ln.key == key for ln in r.visible_lines()):
+            out.append(work.name)
+    return out
+
+
+@registry_app.command("alias")
+def alias(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    character: str | None = typer.Argument(
+        None, metavar="[CHARACTER]", help="Character id or name; omit to list every alias."
+    ),
+    name: str | None = typer.Argument(
+        None,
+        metavar="[NAME]",
+        help="A subtitle Name as written (NATSU, MAKAROV (WRAITH)); omit to list the "
+        "character's aliases.",
+    ),
+    remove: bool = typer.Option(False, "--remove", help="Remove the alias instead."),
+    replace: bool = typer.Option(
+        False, "--replace", help="Move the key from another character's operator alias."
+    ),
+) -> None:
+    """Make a character answer to a subtitle name (an operator alias), remove one, or list them.
+
+    NAME is keyed as the names stage keys a subtitle Name; a name that keys nobody (two
+    speakers such as NATSU/ZEREF, a group word, a sign) is refused. An operator alias moves a
+    subtitles alias of the same key and another operator's only with --replace; it may never
+    be another character's name."""
+    from fukikae.registry.store import AliasConflictError, alias_key
+
+    ws = Workspace(workspace)
+    with _open(workspace) as reg:
+        target = None
+        if character is not None:
+            try:
+                target = reg.character_by_ref(character)
+            except ValueError as e:
+                raise _fail(str(e)) from e
+        if name is None:
+            if remove or replace:
+                raise _fail("--remove and --replace need a NAME")
+            typer.echo("alias	character	by	language")
+            for a in reg.aliases(None if target is None else target.id):
+                typer.echo(f"{a.alias}	{a.character_id}	{a.by}	{a.language or '-'}")
+            return
+        assert target is not None
+        key = alias_key(name)
+        if key is None:
+            raise _fail(
+                f"{name!r} names nobody (two speakers, a group word, a sign or a song, or blank); "
+                "only a single speaker's name can be an alias"
+            )
+        before = reg.character_for_key(key) if not remove else None
+        if remove:
+            held = next((a for a in reg.aliases() if a.alias == key), None)
+            if held is None:
+                raise _fail(f"no alias {key!r}")
+            if held.character_id != target.id:
+                raise _fail(f"{key!r} is character {held.character_id}'s alias, not {target.id}'s")
+            reg.remove_alias(key)
+            typer.echo(f"character {target.id}: alias {key!r} removed")
+        else:
+            try:
+                got = reg.add_alias(target.id, key, by="operator", replace=replace)
+            except AliasConflictError as e:
+                raise _fail(str(e)) from e
+            typer.echo(f"character {target.id}: answers to {got.alias!r} (operator)")
+        actors = {target.actor_id} | ({before.actor_id} if before is not None else set())
+        affected = {e for aid in actors for e in reg.episode_counts(aid)}
+    _stale(ws, sorted(affected | set(_episodes_with_key(ws, key))))
 
 
 @registry_app.command("merge")

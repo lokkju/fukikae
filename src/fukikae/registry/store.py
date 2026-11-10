@@ -2,7 +2,9 @@
 
 Actors own the voice embeddings; characters belong to an actor and get one assigned character
 card per target language (schema 2), with every assignment kept in ``card_history``.
-Embeddings are stored as float32 bytes.
+Embeddings are stored as float32 bytes. Schema 4 records who set a character's name
+(``characters.name_by``: ``operator``, ``subs`` or NULL) and the keys a character answers to
+(``character_aliases``), so subtitle names map onto characters (D27).
 """
 
 from __future__ import annotations
@@ -17,15 +19,21 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
 from fukikae.config import normalize_language
 from fukikae.names.normalize import fold as _fold
+from fukikae.names.normalize import parse_name
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# Who set a character's name (schema 4) and who set an alias.
+NAME_BY = frozenset({"operator", "subs"})
+AliasBy = Literal["operator", "subs"]
 
 # `by` values of an assignment; `import:<pack title>` is the one with a suffix. `migrated`
 # (the schema-1 voice note) and `lock`/`unlock` rows are written by the registry itself.
@@ -60,7 +68,8 @@ CREATE TABLE IF NOT EXISTS characters (
     name TEXT,
     voice TEXT, -- schema 1's free-text voice, always NULL from schema 2 (card_assignments)
     locked INTEGER NOT NULL DEFAULT 0,
-    external_id TEXT
+    external_id TEXT,
+    name_by TEXT -- who set `name`: 'operator', 'subs' or NULL (schema 4)
 );
 CREATE TABLE IF NOT EXISTS exemplars (
     id INTEGER PRIMARY KEY,
@@ -98,6 +107,14 @@ CREATE TABLE IF NOT EXISTS card_assignments (
     history_id INTEGER NOT NULL REFERENCES card_history(id),
     PRIMARY KEY (character_id, target_language)
 );
+CREATE TABLE IF NOT EXISTS character_aliases (
+    alias TEXT PRIMARY KEY, -- a folded name key (names.normalize.parse_name)
+    character_id INTEGER NOT NULL REFERENCES characters(id),
+    by TEXT NOT NULL, -- 'operator' | 'subs'
+    language TEXT, -- the subtitle track's language, informational
+    created TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS character_aliases_character ON character_aliases(character_id);
 CREATE INDEX IF NOT EXISTS card_history_character ON card_history(character_id, target_language);
 CREATE INDEX IF NOT EXISTS exemplars_actor ON exemplars(actor_id);
 CREATE INDEX IF NOT EXISTS exemplars_episode ON exemplars(episode);
@@ -120,6 +137,19 @@ class Character:
     name: str | None
     external_id: str | None
     locked: bool
+    name_by: str | None = None  # 'operator', 'subs' or None (no name)
+
+
+@dataclass(frozen=True)
+class Alias:
+    """A key a character answers to (schema 4). ``by`` is ``operator`` (``registry alias``,
+    ``registry rename``, the 3-to-4 migration) or ``subs`` (the characters stage)."""
+
+    alias: str
+    character_id: int
+    by: str
+    language: str | None
+    created: str  # ISO 8601, UTC
 
 
 @dataclass(frozen=True)
@@ -147,6 +177,18 @@ class RegistrySchemaError(RuntimeError):
 
 class ProtectedAssignmentError(ValueError):
     """An automatic assignment or an import would replace a locked or operator-chosen card."""
+
+
+class AliasConflictError(ValueError):
+    """An alias key another character answers to (by alias or by name), and the caller may not
+    take it."""
+
+
+def alias_key(name: str) -> str | None:
+    """The key a name answers to, as the names stage keys a subtitle Name (``parse_name``):
+    ``MAKAROV(WRAITH)`` is ``makarov (wraith)``. None for a name that keys nobody (two speakers,
+    a group word, a sign or song value, blank)."""
+    return parse_name(name).key
 
 
 @dataclass(frozen=True)
@@ -262,6 +304,8 @@ class Registry:
                     self._migrate_1_to_2(con)
                 if row[0] <= 2:
                     self._migrate_2_to_3(con)
+                if row[0] <= 3:
+                    self._migrate_3_to_4(con)
 
     def _migrate_1_to_2(self, con: sqlite3.Connection) -> None:
         """Schema 1 to 2: ``characters.external_id``, the card tables (already created by
@@ -312,6 +356,43 @@ class Registry:
                 earlier.append((card, by))
             con.execute("UPDATE card_history SET chosen_by = ? WHERE id = ?", (chosen, hid))
         con.execute("UPDATE schema_version SET version = 3")
+
+    def _migrate_3_to_4(self, con: sqlite3.Connection) -> None:
+        """Schema 3 to 4: ``characters.name_by`` and ``character_aliases`` (the table already
+        created by ``_SCHEMA``). Every existing name was set by ``registry rename``, so it is
+        marked ``operator`` and its key (``alias_key``) becomes an operator alias; when two
+        names share a key the lower character id keeps it and the other is logged. A name that
+        keys nobody (``NATSU/HAPPY``) gets no alias. Safe to run twice."""
+        cols = {r[1] for r in con.execute("PRAGMA table_info(characters)")}
+        if "name_by" not in cols:
+            con.execute("ALTER TABLE characters ADD COLUMN name_by TEXT")
+        con.execute(
+            "UPDATE characters SET name_by = 'operator' WHERE name IS NOT NULL AND name_by IS NULL"
+        )
+        now = _now()
+        for cid, name in con.execute(
+            "SELECT id, name FROM characters WHERE name IS NOT NULL ORDER BY id"
+        ).fetchall():
+            key = alias_key(name)
+            if key is None:
+                continue
+            held = con.execute(
+                "SELECT character_id FROM character_aliases WHERE alias = ?", (key,)
+            ).fetchone()
+            if held is None:
+                con.execute(
+                    "INSERT INTO character_aliases(alias, character_id, by, language, created)"
+                    " VALUES (?, ?, 'operator', NULL, ?)",
+                    (key, cid, now),
+                )
+            elif held[0] != cid:
+                log.warning(
+                    "registry migration: character %d's name %r keys %r, which character %d "
+                    "already answers to; it stays with character %d (`fukikae registry alias` "
+                    "moves it)",
+                    cid, name, key, held[0], held[0],
+                )  # fmt: skip
+        con.execute("UPDATE schema_version SET version = 4")
 
     def _normalize_card_languages(self, con: sqlite3.Connection) -> None:
         """Rewrite ``card_history`` and ``card_assignments`` language keys the way reads
@@ -387,9 +468,161 @@ class Registry:
 
     def characters(self) -> list[Character]:
         rows = self._con.execute(
-            "SELECT id, actor_id, name, external_id, locked FROM characters ORDER BY id"
+            "SELECT id, actor_id, name, external_id, locked, name_by FROM characters ORDER BY id"
         ).fetchall()
-        return [Character(r[0], r[1], r[2], r[3], bool(r[4])) for r in rows]
+        return [Character(r[0], r[1], r[2], r[3], bool(r[4]), r[5]) for r in rows]
+
+    def _character(self, con: sqlite3.Connection, character_id: int) -> Character | None:
+        r = con.execute(
+            "SELECT id, actor_id, name, external_id, locked, name_by FROM characters WHERE id = ?",
+            (character_id,),
+        ).fetchone()
+        return None if r is None else Character(r[0], r[1], r[2], r[3], bool(r[4]), r[5])
+
+    # aliases (schema 4)
+
+    def aliases(self, character_id: int | None = None) -> list[Alias]:
+        """Every alias, or one character's, by key."""
+        sql = "SELECT alias, character_id, by, language, created FROM character_aliases"
+        args: tuple[int, ...] = ()
+        if character_id is not None:
+            sql += " WHERE character_id = ?"
+            args = (character_id,)
+        return [Alias(*r) for r in self._con.execute(sql + " ORDER BY alias", args).fetchall()]
+
+    def character_for_key(self, key: str) -> Character | None:
+        """The character a name key answers to: the alias table first, then a character whose
+        name keys to it (``alias_key``). ValueError naming both when two names answer."""
+        key = _fold(key)
+        con = self._con
+        row = con.execute(
+            "SELECT character_id FROM character_aliases WHERE alias = ?", (key,)
+        ).fetchone()
+        if row is not None:
+            return self._character(con, row[0])
+        named = [c for c in self.characters() if c.name is not None and alias_key(c.name) == key]
+        if len(named) > 1:
+            listed = ", ".join(f"{c.id} ({c.name})" for c in named)
+            raise ValueError(
+                f"name key {key!r} answers to several characters: {listed}; "
+                "`fukikae registry alias` says which"
+            )
+        return named[0] if named else None
+
+    def _name_holder(self, con: sqlite3.Connection, key: str, besides: int) -> Character | None:
+        """Another character whose own name keys to ``key``."""
+        for r in con.execute(
+            "SELECT id FROM characters WHERE name IS NOT NULL AND id != ? ORDER BY id", (besides,)
+        ).fetchall():
+            c = self._character(con, r[0])
+            if c is not None and c.name is not None and alias_key(c.name) == key:
+                return c
+        return None
+
+    def _add_alias(
+        self,
+        con: sqlite3.Connection,
+        character_id: int,
+        key: str,
+        by: str,
+        language: str | None,
+        replace: bool,
+    ) -> Alias:
+        if by not in NAME_BY:
+            raise ValueError(f"alias by must be one of {', '.join(sorted(NAME_BY))}, not {by!r}")
+        key = _fold(key)
+        if not key:
+            raise ValueError("an alias needs a name")
+        self._require_character(con, character_id)
+        holder = self._name_holder(con, key, character_id)
+        if holder is not None:
+            raise AliasConflictError(
+                f"{key!r} is character {holder.id}'s name ({holder.name}); rename that "
+                "character or merge the two first"
+            )
+        row = con.execute(
+            "SELECT alias, character_id, by, language, created FROM character_aliases"
+            " WHERE alias = ?",
+            (key,),
+        ).fetchone()
+        if row is not None:
+            cur = Alias(*row)
+            if cur.character_id == character_id:
+                if by == "operator" and cur.by != "operator":  # raised, never lowered
+                    con.execute(
+                        "UPDATE character_aliases SET by = 'operator' WHERE alias = ?", (key,)
+                    )
+                    return Alias(cur.alias, cur.character_id, "operator", cur.language, cur.created)
+                return cur
+            if by == "subs":
+                raise AliasConflictError(
+                    f"{key!r} is character {cur.character_id}'s alias ({cur.by}); a subtitle "
+                    "name never moves an alias"
+                )
+            if cur.by == "operator" and not replace:
+                raise AliasConflictError(
+                    f"{key!r} is character {cur.character_id}'s operator alias; pass --replace "
+                    "to move it"
+                )
+            con.execute("DELETE FROM character_aliases WHERE alias = ?", (key,))
+        alias = Alias(key, character_id, by, language, _now())
+        con.execute(
+            "INSERT INTO character_aliases(alias, character_id, by, language, created)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (alias.alias, alias.character_id, alias.by, alias.language, alias.created),
+        )
+        return alias
+
+    def add_alias(
+        self,
+        character_id: int,
+        key: str,
+        by: AliasBy,
+        language: str | None = None,
+        replace: bool = False,
+    ) -> Alias:
+        """Make ``character_id`` answer to ``key`` (folded). Never a key that is another
+        character's name. A ``subs`` alias never moves an existing alias; an ``operator``
+        alias moves a ``subs`` one and another operator's only with ``replace``
+        (AliasConflictError otherwise). The character's own alias is kept, raised to
+        ``operator`` when an operator sets it, never lowered."""
+        with self._tx() as con:
+            return self._add_alias(con, character_id, key, by, language, replace)
+
+    def remove_alias(self, key: str) -> None:
+        """Delete an alias (KeyError when no character answers to it by alias)."""
+        with self._tx() as con:
+            cur = con.execute("DELETE FROM character_aliases WHERE alias = ?", (_fold(key),))
+            if cur.rowcount == 0:
+                raise KeyError(key)
+
+    def name_character(
+        self, character_id: int, display: str, key: str, language: str | None
+    ) -> None:
+        """Subtitles name an unnamed, uncurated character: ``name = display``, ``name_by =
+        'subs'`` and a ``subs`` alias for ``key``, all or nothing. ValueError when the
+        character has a name (subtitles never rename), is curated (`_is_curated`: an external
+        id, a locked or operator-chosen or imported card) or is locked, or its actor is
+        locked; AliasConflictError when another character answers to ``key``."""
+        with self._tx() as con:
+            c = self._character(con, character_id)
+            if c is None:
+                raise KeyError(character_id)
+            if c.name is not None:
+                raise ValueError(
+                    f"character {character_id} is named {c.name!r} (by {c.name_by or 'operator'})"
+                    "; subtitles never rename a character"
+                )
+            actor_locked = con.execute(
+                "SELECT locked FROM actors WHERE id = ?", (c.actor_id,)
+            ).fetchone()[0]
+            if c.locked or actor_locked or self._is_curated(con, character_id):
+                raise ValueError(f"character {character_id} is curated or locked; not naming it")
+            con.execute(
+                "UPDATE characters SET name = ?, name_by = 'subs' WHERE id = ?",
+                (display, character_id),
+            )
+            self._add_alias(con, character_id, key, "subs", language, False)
 
     def character_by_ref(self, ref: str) -> Character:
         """A character by id, or by name case- and width-insensitively ("ＮＡＴＳＵ" finds
@@ -896,12 +1129,16 @@ class Registry:
     def _fold_character(
         self, con: sqlite3.Connection, drop: int, keep: int, report: list[str]
     ) -> None:
-        """Fold character ``drop`` into ``keep``: its card history (`_fold_cards`) and its
-        external id when keep has none. Keep's own external id wins a conflict."""
+        """Fold character ``drop`` into ``keep``: its aliases, its card history (`_fold_cards`)
+        and its external id when keep has none. Keep's own external id wins a conflict."""
         ids = dict(
             con.execute("SELECT id, external_id FROM characters WHERE id IN (?, ?)", (drop, keep))
         )
         theirs, mine = ids.get(drop), ids.get(keep)
+        # Alias keys are unique, so drop's keys can't collide with keep's: they all move.
+        con.execute(
+            "UPDATE character_aliases SET character_id = ? WHERE character_id = ?", (keep, drop)
+        )
         if theirs is not None and mine is None:
             con.execute("UPDATE characters SET external_id = ? WHERE id = ?", (theirs, keep))
         elif theirs is not None and theirs != mine:
@@ -949,11 +1186,39 @@ class Registry:
                 (keep, lang, card[0], hid),
             )
 
-    def rename_character(self, character_id: int, name: str) -> None:
+    def rename_character(
+        self, character_id: int, name: str, by: AliasBy = "operator"
+    ) -> str | None:
+        """Set a character's name and ``name_by``, and make it answer to the name's key
+        (``alias_key``) with an alias ``by`` the same. Earlier aliases stay, so the keys of
+        old names keep resolving. When another character answers to the key (by alias or by
+        name) the alias is skipped and the warning returned; a name that keys nobody adds
+        none."""
+        if by not in NAME_BY:
+            raise ValueError(f"name by must be one of {', '.join(sorted(NAME_BY))}, not {by!r}")
         with self._tx() as con:
-            cur = con.execute("UPDATE characters SET name = ? WHERE id = ?", (name, character_id))
+            cur = con.execute(
+                "UPDATE characters SET name = ?, name_by = ? WHERE id = ?",
+                (name, by, character_id),
+            )
             if cur.rowcount == 0:
                 raise KeyError(character_id)
+            key = alias_key(name)
+            if key is None:
+                return None
+            held = con.execute(
+                "SELECT character_id, by FROM character_aliases WHERE alias = ?", (key,)
+            ).fetchone()
+            if held is not None and held[0] != character_id:  # a rename never moves an alias
+                return (
+                    f"character {character_id} named {name!r}, but no alias added: {key!r} is "
+                    f"character {held[0]}'s alias ({held[1]}); `fukikae registry alias` moves it"
+                )
+            try:
+                self._add_alias(con, character_id, key, by, None, False)
+            except AliasConflictError as e:
+                return f"character {character_id} named {name!r}, but no alias added: {e}"
+            return None
 
     def set_actor(
         self, actor_id: int, name: str | None = None, external_id: str | None = None
@@ -1009,6 +1274,7 @@ class Registry:
                     self._fold_character(con, cid, target, notes)
                 else:
                     self._delete_character_cards(con, cid)
+                    con.execute("DELETE FROM character_aliases WHERE character_id = ?", (cid,))
             con.execute("DELETE FROM characters WHERE actor_id = ?", (drop,))
             con.execute("DELETE FROM actors WHERE id = ?", (drop,))
             self._recompute(con, keep)
@@ -1065,6 +1331,7 @@ class Registry:
                     continue
                 for cid in cids:
                     self._delete_character_cards(con, cid)
+                    con.execute("DELETE FROM character_aliases WHERE character_id = ?", (cid,))
                 con.execute("DELETE FROM characters WHERE actor_id = ?", (aid,))
                 con.execute("DELETE FROM actors WHERE id = ?", (aid,))
                 deleted.append(aid)
