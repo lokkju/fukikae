@@ -19,7 +19,8 @@ with ``pass_fds``), so the lock stays held until the last of them exits, even wh
 itself is killed and a child outlives it.
 
 Once the lock is taken, ``leftover_jobs`` scans ``/proc`` for fukikae TTS workers and
-fukikae-started llama-servers still running on that card (by command line, and the card from
+fukikae-started llama-servers still running on that card (by their argv array, whole arguments
+only, and the card from
 the process's ``CUDA_VISIBLE_DEVICES`` when it can be read), so a leftover from a run that died
 is named in the error. It doesn't depend on NVML, which can't see processes in another pid
 namespace; our own descendants are never leftovers.
@@ -86,12 +87,35 @@ def held_fds() -> tuple[int, ...]:
 # -- /proc -------------------------------------------------------------------------------------
 
 
-def _cmdline(pid: int) -> str:
+def _argv(pid: int) -> list[str]:
+    """The process's argv array (empty when it can't be read)."""
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
-            return f.read().replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
+            raw = f.read()
     except OSError:
-        return ""
+        return []
+    return [a.decode("utf-8", errors="replace") for a in raw.split(b"\0")[:-1]] if raw else []
+
+
+def _is_job(argv: list[str]) -> bool:
+    """A fukikae TTS worker (``-m`` followed by exactly ``WORKER_MARK``) or a fukikae-started
+    llama-server (``argv[0]``'s basename is ``llama-server`` and its ``--api-key-file`` is one
+    of our per-run key files). Whole arguments only: a ``bash -c "... <module> ..."``, a grep
+    or an editor that mentions either one is not a job."""
+    if any(a == "-m" and b == WORKER_MARK for a, b in zip(argv, argv[1:], strict=False)):
+        return True
+    if not argv or os.path.basename(argv[0]) != "llama-server":
+        return False
+    keys = [b for a, b in zip(argv, argv[1:], strict=False) if a == "--api-key-file"]
+    keys += [a.partition("=")[2] for a in argv if a.startswith("--api-key-file=")]
+    return any(os.path.basename(k).startswith(LLAMA_MARK) for k in keys)
+
+
+def _proc_pids() -> list[int]:
+    try:
+        return sorted(int(p) for p in os.listdir("/proc") if p.isdigit())
+    except OSError:
+        return []
 
 
 def _ppid(pid: int) -> int | None:
@@ -163,15 +187,12 @@ def leftover_jobs(index: int) -> list[tuple[int, str]]:
     that are not this process's own."""
     me = os.getpid()
     out: list[tuple[int, str]] = []
-    try:
-        pids = sorted(int(p) for p in os.listdir("/proc") if p.isdigit())
-    except OSError:
-        return out
     _UNREADABLE.clear()
-    for pid in pids:
-        cmd = _cmdline(pid)
-        if not cmd or not (WORKER_MARK in cmd or ("llama-server" in cmd and LLAMA_MARK in cmd)):
+    for pid in _proc_pids():
+        argv = _argv(pid)
+        if not _is_job(argv):
             continue
+        cmd = " ".join(argv)
         if _ours(pid, me) or not _on_card(pid, index):
             continue
         out.append((pid, cmd))

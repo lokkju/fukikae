@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -98,39 +99,55 @@ def test_another_gpu_has_its_own_lock(tmp_path):
         holder.wait()
 
 
-def _detached(tmp_path: Path, argv_mark: list[str], cuda: str | None) -> int:
-    """Start a sleeper that is not our descendant (its parent exits), with ``argv_mark`` on
-    its command line, and return its pid."""
+def _detached(
+    tmp_path: Path,
+    started: set[int],
+    argv: list[str],
+    cuda: str | None,
+    executable: str | None = None,
+) -> int:
+    """Start ``argv`` so that it is not our descendant (its parent exits), add its pid to the
+    pids the leftover scan may see (``started``), and return it. ``executable`` runs in place
+    of ``argv[0]``, which then is only the name the process shows."""
     env = _env(tmp_path)
     env.pop("CUDA_VISIBLE_DEVICES", None)
     if cuda is not None:
         env["CUDA_VISIBLE_DEVICES"] = cuda
     launcher = (
-        "import subprocess, sys; "
-        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', *sys.argv[1:]],"
-        " start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,"
-        " stderr=subprocess.DEVNULL); print(p.pid)"
+        "import json, subprocess, sys; a = json.loads(sys.argv[1]); "
+        "p = subprocess.Popen(a['argv'], executable=a['exe'], start_new_session=True,"
+        " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL);"
+        " print(p.pid)"
     )
+    spec = json.dumps({"argv": argv, "exe": executable})
     out = subprocess.run(
-        [sys.executable, "-c", launcher, *argv_mark], capture_output=True, text=True, env=env,
+        [sys.executable, "-c", launcher, spec], capture_output=True, text=True, env=env,
         check=True, timeout=30,
     )  # fmt: skip
     pid = int(out.stdout.strip())
+    started.add(pid)
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and not gpulock._cmdline(pid):
+    while time.monotonic() < deadline and not gpulock._argv(pid):
         time.sleep(0.02)
     return pid
 
 
+_SLEEP = [sys.executable, "-c", "import time; time.sleep(60)"]
+
+
 @pytest.mark.parametrize(
-    "mark",
+    ("argv", "exe"),
     [
-        ["-m", "fukikae.backends.tts.worker", "indextts2"],
-        ["llama-server", "--api-key-file", "/run/user/0/fukikae-llama-key-abc"],
+        ([*_SLEEP, "-m", "fukikae.backends.tts.worker", "indextts2"], None),
+        (
+            ["llama-server", "-c", "import time; time.sleep(60)", "--api-key-file",
+             "/run/user/0/fukikae-llama-key-abc"],
+            sys.executable,
+        ),
     ],
-)
-def test_a_leftover_is_found_by_its_command_line_and_named(tmp_path, mark):
-    pid = _detached(tmp_path, mark, "0")
+)  # fmt: skip
+def test_a_leftover_is_found_by_its_command_line_and_named(tmp_path, started_pids, argv, exe):
+    pid = _detached(tmp_path, started_pids, argv, "0", exe)
     try:
         found = gpulock.leftover_jobs(0)
         assert pid in [p for p, _ in found]
@@ -142,9 +159,43 @@ def test_a_leftover_is_found_by_its_command_line_and_named(tmp_path, mark):
         os.kill(pid, signal.SIGKILL)
 
 
-def test_leftovers_on_another_card_or_the_cpu_are_not_ours(tmp_path):
-    other = _detached(tmp_path, ["-m", "fukikae.backends.tts.worker", "x"], "1")
-    cpu = _detached(tmp_path, ["-m", "fukikae.backends.tts.worker", "x"], "")
+def test_a_shell_that_only_mentions_the_worker_is_not_a_leftover(tmp_path, started_pids):
+    """The scan reads the argv array: a ``bash -c "... fukikae.backends.tts.worker ..."`` (or a
+    grep, an editor) names the module inside one argument and is not a worker."""
+    pid = _detached(
+        tmp_path, started_pids,
+        ["bash", "-c", "sleep 60; : python -m fukikae.backends.tts.worker x"], "0",
+    )  # fmt: skip
+    try:
+        assert pid not in [p for p, _ in gpulock.leftover_jobs(0)]
+    finally:
+        os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize(
+    ("argv", "job"),
+    [
+        (["/usr/bin/python3", "-m", "fukikae.backends.tts.worker", "indextts2"], True),
+        (["python", "-u", "-m", "fukikae.backends.tts.worker"], True),
+        (["python", "-m", "fukikae.backends.tts.worker.extra"], False),
+        (["python", "fukikae.backends.tts.worker"], False),
+        (["bash", "-c", "python -m fukikae.backends.tts.worker x"], False),
+        (["/opt/bin/llama-server", "--api-key-file", "/run/k/fukikae-llama-key-ab"], True),
+        (["llama-server", "--api-key-file=/run/k/fukikae-llama-key-ab"], True),
+        (["llama-server", "--api-key-file", "/run/k/other-key"], False),
+        (["llama-server", "/run/k/fukikae-llama-key-ab"], False),
+        (["vim", "llama-server", "--api-key-file", "/run/k/fukikae-llama-key-ab"], False),
+        ([], False),
+    ],
+)
+def test_a_job_is_recognised_by_its_argv(argv, job):
+    assert gpulock._is_job(argv) is job
+
+
+def test_leftovers_on_another_card_or_the_cpu_are_not_ours(tmp_path, started_pids):
+    worker = [*_SLEEP, "-m", "fukikae.backends.tts.worker", "x"]
+    other = _detached(tmp_path, started_pids, worker, "1")
+    cpu = _detached(tmp_path, started_pids, worker, "")
     try:
         found = [p for p, _ in gpulock.leftover_jobs(0)]
         assert other not in found and cpu not in found
@@ -153,14 +204,15 @@ def test_leftovers_on_another_card_or_the_cpu_are_not_ours(tmp_path):
         os.kill(cpu, signal.SIGKILL)
 
 
-def test_our_own_children_are_not_leftovers(tmp_path):
+def test_our_own_children_are_not_leftovers(tmp_path, started_pids):
     child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)", "fukikae.backends.tts.worker"],
+        [sys.executable, "-c", "import time; time.sleep(30)", "-m", "fukikae.backends.tts.worker"],
         env=_env(tmp_path, CUDA_VISIBLE_DEVICES="0"),
     )  # fmt: skip
+    started_pids.add(child.pid)
     try:
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and "worker" not in gpulock._cmdline(child.pid):
+        while time.monotonic() < deadline and gpulock.WORKER_MARK not in gpulock._argv(child.pid):
             time.sleep(0.02)
         assert child.pid not in [p for p, _ in gpulock.leftover_jobs(0)]
     finally:
@@ -269,8 +321,8 @@ def test_unreadable_environs_are_warned_about_once_per_scan(monkeypatch, caplog)
         raise PermissionError("denied")
 
     monkeypatch.setattr(gpulock, "_read_environ", denied)
-    monkeypatch.setattr(gpulock.os, "listdir", lambda _p: ["101", "102", "self"])
-    monkeypatch.setattr(gpulock, "_cmdline", lambda _pid: f"python -m {gpulock.WORKER_MARK} x")
+    monkeypatch.setattr(gpulock, "_proc_pids", lambda: [101, 102])
+    monkeypatch.setattr(gpulock, "_argv", lambda _pid: ["python", "-m", gpulock.WORKER_MARK])
     monkeypatch.setattr(gpulock, "_ours", lambda _pid, _me: False)
     with caplog.at_level(logging.WARNING, logger="fukikae.gpulock"):
         assert gpulock.leftover_jobs(0) == []
