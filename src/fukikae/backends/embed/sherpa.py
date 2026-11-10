@@ -97,7 +97,7 @@ class SherpaEmbedder:
 
 class CampplusEmbedder(SherpaEmbedder):
     name: ClassVar[str] = "campplus"
-    dim: ClassVar[int] = 512
+    dim: ClassVar[int] = 192  # measured on Fairy Tail E12 (the model card's 512 is not this file)
     default_file: ClassVar[str] = "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
 
 

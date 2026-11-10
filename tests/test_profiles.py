@@ -85,8 +85,9 @@ TYPICAL = (
 @pytest.mark.parametrize("text", ["", TYPICAL])
 def test_no_profile_resolves_as_before(tmp_path, text):
     c = _ws(tmp_path, text)
-    # The shipped default profile now names embed, diarize and separation (Task 9).
-    kinds = ["asr", "align", "lid", "translate", "tts"]
+    # The shipped default profile now names embed, diarize and separation (Task 9), and
+    # translate (character-cards Task 4) and tts (Task 6).
+    kinds = ["asr", "align", "lid"]
     for kind in kinds:
         for lang, pair in ((None, None), ("ko", None), ("ja", "ja-en"), ("ko", "ko-en")):
             want = _old_resolve(c.raw, kind, lang, pair)
@@ -125,9 +126,9 @@ SHIPPED = ("default", "anime", "live-action")
 @pytest.mark.parametrize("name", SHIPPED)
 def test_every_profile_table_names_its_backend(name):
     for kind, table in cfgmod.load_profile(name).items():
-        # [registry] holds plain numbers; [resolve] selects its matcher by `matcher`, as
-        # [characters] does (Ruling R17), so neither names a `backend`.
-        if kind == "registry":
+        # [registry], [timefit] and [mix] hold plain settings (no model behind them); [resolve]
+        # selects its matcher by `matcher`, as [characters] does (Ruling R17).
+        if kind in ("registry", "timefit", "mix"):
             continue
         key = "matcher" if kind in ("characters", "resolve") else "backend"
         assert isinstance(table, dict) and table.get(key), f"{name}: [{kind}] lacks {key}"

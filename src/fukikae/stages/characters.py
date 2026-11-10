@@ -16,9 +16,10 @@ leaves the registry as it was, and a rerun never counts an exemplar twice.
 When there is no earlier run to pin to (the first run, a deleted ``assignments.json``, or
 ``rematch``), actors whose exemplars all came from this episode are deleted before
 matching, so the episode is judged against the rest of the series and never against its
-own earlier result. An actor someone has curated (locked, named, or with a named or voiced
-character) is kept. On a pinned rerun such actors stay matchable, and are deleted only if
-no cluster claims them again. The registry database lives in the workspace and is shared
+own earlier result. An actor someone has curated (locked, named, or with a curated
+character: named, with an external id, or with a hand-assigned or locked card) is kept. On
+a pinned rerun such actors stay matchable, and are deleted only if no cluster claims them
+again. The registry database lives in the workspace and is shared
 state outside the manifest's fingerprinting.
 
 Matching is ``[characters] matcher`` (resolved like a backend: workspace over profile, with

@@ -1,3 +1,4 @@
+import os
 import shutil
 import stat
 import subprocess
@@ -10,6 +11,25 @@ import pytest
 def _isolated_ledger(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
     """Every test writes ledger rows to a temp file, never the operator's results.jsonl."""
     monkeypatch.setenv("FUKIKAE_RESULTS", str(tmp_path_factory.mktemp("ledger") / "results.jsonl"))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_gpu_locks(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+    """Every test takes GPU locks in a temp dir, never the operator's runtime dir."""
+    monkeypatch.setenv("FUKIKAE_LOCK_DIR", str(tmp_path_factory.mktemp("gpulocks")))
+
+
+@pytest.fixture(autouse=True)
+def started_pids(monkeypatch: pytest.MonkeyPatch) -> set[int]:
+    """The GPU lock's leftover scan sees only the processes a test started and added here,
+    so the suite doesn't fail while a real fukikae job runs on the machine."""
+    from fukikae import gpulock
+
+    pids: set[int] = set()
+    monkeypatch.setattr(
+        gpulock, "_proc_pids", lambda: sorted(p for p in pids if os.path.exists(f"/proc/{p}"))
+    )
+    return pids
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:

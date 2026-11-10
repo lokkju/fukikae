@@ -18,3 +18,32 @@ backend = "wespeaker"
 
 [characters]
 matcher = "centroid"   # the per-episode stage; joint is a batch command, `fukikae registry resolve`
+
+[translate]   # character-cards Task 4: a managed llama-server on gpu_device with Qwen3-8B Q6_K
+backend = "openai_compat"
+mode = "managed"
+model = "Qwen/Qwen3-8B-GGUF"
+file = "Qwen3-8B-Q6_K.gguf"
+revision = "7c41481f57cb95916b40956ab2f0b139b296d974"
+max_speed = 1.25
+source = "auto"
+subs_condense = true
+
+[tts]   # Kokoro: stock voices (extras, and characters under 6 s of clean speech)
+backend = "kokoro"
+clone_backend = "indextts2"   # D24: the operator's listening verdict (Task 11)
+
+[timefit]   # character-cards Task 7: rate (tts) and time-stretch share max_speedup; then borrowed silence
+max_speedup = 1.25
+max_slowdown = 0.9
+borrow_silence_ms = 400
+
+[mix]   # character-cards Task 7: original vocals kept outside dub cues; songs (detector, subtitles, tags) untouched
+keep_original_vocals = true
+fade_ms = 40
+match_dialogue = true
+protect_bgm = false   # SenseVoice marks BGM under ordinary dialogue (Task 3 review)
+detect_songs = true
+
+[tts.indextts2]   # D26: TF32 for the diffusion decoder, 12% faster a line and inside the eval gate
+tf32 = true

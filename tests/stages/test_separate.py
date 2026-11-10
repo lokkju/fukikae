@@ -204,3 +204,22 @@ def test_unload_runs_when_load_raises(monkeypatch, fake, ep):
     with pytest.raises(RuntimeError, match="half loaded"):
         SeparateStage().run(ep, Config())
     assert fake.events == ["load", "unload"]
+
+
+@pytest.mark.usefixtures("fake")
+def test_holds_the_gpu_lock_while_the_model_lives(monkeypatch, ep):
+    """Ruling CD15: the lock is taken before the VRAM check and let go after unload."""
+    from fukikae import gpulock
+
+    monkeypatch.setattr(separate, "device_string", lambda _cfg: "cuda:0")
+    order: list[Any] = []
+    monkeypatch.setattr(
+        separate, "free_mb", lambda _d: order.append(("vram", gpulock.held_fds())) or 99999
+    )
+    monkeypatch.setattr(
+        FakeSeparator, "load", lambda _self: order.append(("load", gpulock.held_fds()))
+    )
+    SeparateStage().run(ep, Config())
+    assert [k for k, _ in order] == ["vram", "load"]
+    assert all(fds for _, fds in order)
+    assert gpulock.held_fds() == ()

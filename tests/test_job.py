@@ -172,3 +172,120 @@ def test_external_source_fingerprinted_by_stat(ep, cfg):
     ep.source.write_bytes(b"media, longer")
     assert cache_key(S({}), ep, cfg) != k1
     assert not (ep.workspace_root / ".fukikae").exists()
+
+
+def test_missing_optional_input_key_does_not_depend_on_the_workspace_path(tmp_path, cfg):
+    """A copied or moved workspace isn't stale because an optional input (glossary.toml) is
+    absent: the missing file is named relative to the workspace (ruling CD6)."""
+
+    class S(FakeA):
+        def inputs(self, ep):
+            return [ep.workspace_root / "glossary.toml", ep.work / "maybe.json"]
+
+    keys = []
+    for name in ("one", "two"):
+        root = tmp_path / name / "ws"
+        ep = Episode(
+            source=tmp_path / "s.mkv", id="e1", work=root / ".fukikae" / "episodes" / "e1",
+            workspace_root=root,
+        )  # fmt: skip
+        keys.append(cache_key(S({}), ep, cfg))
+    assert keys[0] == keys[1]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "glossary.toml").write_text("[terms]\n")
+    assert cache_key(S({}), ep, cfg) != keys[1]
+
+
+# ---- several episodes: the CPU tail overlaps the next episode's head (D26) ----------------
+
+import threading  # noqa: E402
+
+from fukikae.job import run_episodes  # noqa: E402
+
+
+def _eps(tmp_path, n):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    return [
+        Episode(source=tmp_path / f"s{i}.mkv", id=f"e{i}", work=ws / f"e{i}", workspace_root=ws)
+        for i in range(1, n + 1)
+    ]
+
+
+class Head(FakeA):
+    def __init__(self, counts, events):
+        super().__init__(counts)
+        self.events = events
+
+    def run(self, ep, cfg):
+        self.events.append(f"head {ep.id}")
+        if ep.id == "e2":
+            self.started_e2.set()
+        super().run(ep, cfg)
+
+    started_e2 = threading.Event()
+
+
+class Tail(FakeB):
+    def __init__(self, counts, events, fail_on=None):
+        super().__init__(counts)
+        self.events = events
+        self.fail_on = fail_on
+        self.overlapped = False
+
+    def run(self, ep, cfg):
+        if ep.id == "e1":  # the tail of e1 waits for e2's head: they overlap
+            self.overlapped = Head.started_e2.wait(timeout=10)
+        self.events.append(f"tail {ep.id}")
+        if ep.id == self.fail_on:
+            raise RuntimeError(f"tail {ep.id} broke")
+        super().run(ep, cfg)
+
+
+def test_run_episodes_overlaps_a_tail_with_the_next_head(tmp_path):
+    eps = _eps(tmp_path, 3)
+    cfg = make_cfg(eps[0].workspace_root, "x")
+    Head.started_e2 = threading.Event()
+    counts: dict = {}
+    events: list[str] = []
+    tail = Tail(counts, events)
+    results = run_episodes(eps, cfg, [Head(counts, events), tail], tail=("b",))
+    assert tail.overlapped
+    assert {e: r.ran for e, r in results.items()} == {e.id: ["a", "b"] for e in eps}
+    assert all(r.error is None for r in results.values())
+    # heads in order, tails in order; outputs are what a sequential run writes
+    assert [x for x in events if x.startswith("head")] == ["head e1", "head e2", "head e3"]
+    assert [x for x in events if x.startswith("tail")] == ["tail e1", "tail e2", "tail e3"]
+    for e in eps:
+        assert (e.work / "b.txt").read_text() == "x!"
+        assert run_stages(e, cfg, [FakeA(counts), FakeB(counts)]) == []  # manifests complete
+
+
+def test_run_episodes_stops_starting_heads_after_a_failure(tmp_path):
+    eps = _eps(tmp_path, 3)
+    cfg = make_cfg(eps[0].workspace_root, "x")
+    Head.started_e2 = threading.Event()
+    Head.started_e2.set()
+    counts: dict = {}
+    events: list[str] = []
+    stages = [Head(counts, events), Tail(counts, events, "e1")]
+    results = run_episodes(eps, cfg, stages, tail=("b",))
+    assert isinstance(results["e1"].error, RuntimeError)
+    assert "e3" not in results or results["e3"].ran == []
+    assert "head e3" not in events
+
+
+def test_run_episodes_honours_from_and_to(tmp_path):
+    eps = _eps(tmp_path, 2)
+    cfg = make_cfg(eps[0].workspace_root, "x")
+    Head.started_e2 = threading.Event()
+    Head.started_e2.set()
+    counts: dict = {}
+    events: list[str] = []
+    stages = [Head(counts, events), Tail(counts, events)]
+    results = run_episodes(eps, cfg, stages, tail=("b",), to_stage="a")
+    assert {e: r.ran for e, r in results.items()} == {"e1": ["a"], "e2": ["a"]}
+    results = run_episodes(eps, cfg, stages, tail=("b",), from_stage="b")
+    assert {e: r.ran for e, r in results.items()} == {"e1": ["b"], "e2": ["b"]}
+    results = run_episodes(eps, cfg, stages, tail=("b",), from_stage="a")
+    assert {e: r.ran for e, r in results.items()} == {"e1": ["a", "b"], "e2": ["a", "b"]}

@@ -15,7 +15,9 @@ dependencies = [
     "pyyaml>=6.0.3",
     "scikit-learn>=1.9.1",
     "scipy>=1.18.1",
+    "tomli-w>=1.2.0",
     "typer>=0.15.0",
+    "zstandard>=0.23",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +47,15 @@ wavlm = [
 dialogue = [
     "dbs",
 ]
+sensevoice = [
+    "funasr>=1.2",
+]
+kokoro = [
+    "kokoro>=0.9.4",
+    "misaki[en]",
+    # misaki's English G2P loads this spaCy model and would otherwise try to pip-install it
+    "en-core-web-sm",
+]
 
 [project.entry-points."fukikae.backends.asr"]
 faster_whisper = "fukikae.backends.asr.faster_whisper:FasterWhisperTranscriber"
@@ -69,6 +80,22 @@ campplus = "fukikae.backends.embed.sherpa:CampplusEmbedder"
 eres2netv2 = "fukikae.backends.embed.sherpa:Eres2netv2Embedder"
 titanet = "fukikae.backends.embed.sherpa:TitanetEmbedder"
 fusion = "fukikae.backends.embed.fusion:FusionEmbedder"
+
+[project.entry-points."fukikae.backends.tag"]
+sensevoice = "fukikae.backends.tag.sensevoice:SenseVoiceTagger"
+emotion2vec = "fukikae.backends.tag.emotion2vec:Emotion2vecTagger"
+
+[project.entry-points."fukikae.backends.tts"]
+kokoro = "fukikae.backends.tts.kokoro:KokoroSynthesizer"
+# runs in its own environment, workers/indextts2 (README, "Cloning backends")
+indextts2 = "fukikae.backends.tts.indextts2:IndexTts2Synthesizer"
+# runs in its own environment, workers/cosyvoice3 (README, "Cloning backends")
+cosyvoice3 = "fukikae.backends.tts.cosyvoice3:CosyVoice3Synthesizer"
+# runs in its own environment, workers/qwen3tts (README, "Cloning backends")
+qwen3_tts = "fukikae.backends.tts.qwen3_tts:Qwen3TtsSynthesizer"
+
+[project.entry-points."fukikae.backends.translate"]
+openai_compat = "fukikae.backends.translate.openai_compat:OpenAICompatTranslator"
 
 [project.entry-points."fukikae.backends.separation"]
 demucs = "fukikae.backends.separation.demucs:DemucsSeparator"
@@ -137,4 +164,5 @@ pythonVersion = "3.12"
 typeCheckingMode = "basic"
 
 [tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 dbs = { git = "https://github.com/JusperLee/Dynamic-Band-Splitting.git", rev = "ff526463a58ee0278e7bd05c4b8bce112b743e34" }

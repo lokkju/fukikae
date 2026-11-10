@@ -293,7 +293,10 @@ def show(
         )
         for c in reg.characters():
             if c.actor_id == actor_id:
-                typer.echo(f"  character {c.id}: {c.name or '-'}")
+                typer.echo(
+                    f"  character {c.id}: {c.name or '-'}"
+                    + (f" (external id {c.external_id})" if c.external_id else "")
+                )
         for eid, n in reg.episode_counts(actor_id).items():
             typer.echo(f"  {eid}: {n} exemplars")
 
@@ -303,6 +306,11 @@ def rename(
     workspace: Path = typer.Argument(..., help="Workspace directory."),
     character_id: int = typer.Argument(..., metavar="CHARACTER", help="Character id."),
     name: str = typer.Argument(..., metavar="NAME", help="New name."),
+    external_id: str | None = typer.Option(
+        None,
+        "--external-id",
+        help="The character's id in an outside source (an AniDB character id); '' clears it.",
+    ),
 ) -> None:
     """Name a character; its episodes' characters stage reruns next time."""
     ws = Workspace(workspace)
@@ -310,7 +318,10 @@ def rename(
         char = next((c for c in reg.characters() if c.id == character_id), None)
         if char is None:
             raise _fail(f"no character {character_id}")
-        reg.rename_character(character_id, name)
+        with reg.transaction():
+            reg.rename_character(character_id, name)
+            if external_id is not None:
+                reg.set_character_external_id(character_id, external_id or None)
         affected = list(reg.episode_counts(char.actor_id))
     _stale(ws, affected)
 
@@ -324,11 +335,14 @@ def merge(
     """Merge actor DROP into actor KEEP; DROP's characters fold into KEEP's first one."""
     ws = Workspace(workspace)
     with _open(workspace) as reg:
+        notes: list[str] = []
         try:
             affected = list(reg.episode_counts(drop))
-            chars = reg.merge_actors(keep, drop)
+            chars = reg.merge_actors(keep, drop, report=notes)
         except (KeyError, ValueError) as e:
             raise _fail(f"cannot merge {drop} into {keep}: {e!r}") from e
+    for line in notes:
+        typer.echo(line)
     for eid in affected:
         _remap_assignments(ws, eid, {drop: keep}, character_map=chars)
     _stale(ws, affected)
@@ -638,8 +652,9 @@ def resolve(
     their assignments.
 
     Every listed episode needs a done diarize stage. Actors only these episodes made are
-    replaced (unless locked, named or voiced); every other actor is matched against and
-    never merged with another. One registry transaction; assignments.json written after it.
+    replaced (unless curated: locked, named, or hand-voiced); every other actor is matched
+    against and never merged with another. One registry transaction; assignments.json
+    written after it.
     """
     from fukikae.errors import user_errors
     from fukikae.eval.identity.cli import parse_options

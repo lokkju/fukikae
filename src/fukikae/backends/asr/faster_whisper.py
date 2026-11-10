@@ -46,6 +46,37 @@ def _device_parts(device: str) -> tuple[str, int]:
     return "cpu", 0
 
 
+def _decoding(options: dict[str, Any]) -> dict[str, Any]:
+    """The decoding options set (none: faster-whisper's own defaults). ``temperature`` is one
+    number (no fallback sampling, so a pass is deterministic) or a list; ``beam_size``,
+    ``condition_on_previous_text`` and ``hallucination_silence_threshold`` (seconds) pass
+    through."""
+    out: dict[str, Any] = {}
+    if "temperature" in options:
+        t = options["temperature"]
+        temps = list(t) if isinstance(t, (list, tuple)) else [t]
+        if not temps or not all(
+            isinstance(x, (int, float)) and not isinstance(x, bool) and 0 <= x <= 1 for x in temps
+        ):
+            raise ValueError(f"faster_whisper temperature must be in [0, 1], got {t!r}")
+        out["temperature"] = [float(x) for x in temps]
+    if "beam_size" in options:
+        b = options["beam_size"]
+        if isinstance(b, bool) or not isinstance(b, int) or b < 1:
+            raise ValueError(f"faster_whisper beam_size must be a positive integer, got {b!r}")
+        out["beam_size"] = b
+    if "condition_on_previous_text" in options:
+        out["condition_on_previous_text"] = bool(options["condition_on_previous_text"])
+    if "hallucination_silence_threshold" in options:
+        h = options["hallucination_silence_threshold"]
+        if isinstance(h, bool) or not isinstance(h, (int, float)) or h <= 0:
+            raise ValueError(
+                f"faster_whisper hallucination_silence_threshold must be > 0 s, got {h!r}"
+            )
+        out["hallucination_silence_threshold"] = float(h)
+    return out
+
+
 class FasterWhisperTranscriber:
     name: ClassVar[str] = "faster_whisper"
     kind: ClassVar[str] = "asr"
@@ -61,6 +92,7 @@ class FasterWhisperTranscriber:
         default = "float16" if device.startswith("cuda") else "int8"
         self.compute_type: str = str(options.get("compute_type", default))
         self.vad_filter: bool = bool(options.get("vad_filter", True))
+        self.decoding: dict[str, Any] = _decoding(options)
         self._model: Any = None
 
     @property
@@ -106,7 +138,10 @@ class FasterWhisperTranscriber:
             _read_wav16k(audio),
             language=language,
             vad_filter=self.vad_filter,
-            word_timestamps=False,
+            # faster-whisper applies the hallucination guard only with word timing; the
+            # words are still not trusted or returned
+            word_timestamps="hallucination_silence_threshold" in self.decoding,
+            **self.decoding,
         )
         out = [
             Segment(start=float(s.start), end=float(s.end), text=s.text.strip())

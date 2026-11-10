@@ -2,3 +2,11 @@
 python = "3.12"
 uv = "latest"
 ffmpeg = "latest"
+# llama-server for the translate stage's managed mode (character-cards Task 4)
+# The CUDA 12.8 build (driver 580 runs it) plus its separate cudart asset, unpacked beside it.
+"github:ggml-org/llama.cpp" = { version = "b12201", asset_pattern = "llama-b12201-bin-ubuntu-cuda-12.8-x64.tar.gz", checksum = "sha256:afbb0c9f796fd04c3696bcb72903d9509c1ab40df3a3e33d2dfa870787d3cf11", postinstall = "{{config_root}}/.mise/scripts/llama-cudart b12201 12.8 db17380427c3431e290ed1654d9eafbf4f73f523f431cf1a869929a5161fa82a" }
+
+[env]
+# Use uv.lock as committed: `uv run` and `uv sync` never re-resolve it online (a URL dependency,
+# en-core-web-sm, would otherwise be fetched on every run). Run `uv lock` explicitly to update.
+UV_FROZEN = "1"

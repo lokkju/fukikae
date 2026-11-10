@@ -44,6 +44,7 @@ from fukikae.backends.base import Embedder
 from fukikae.backends.loader import create
 from fukikae.config import BackendConfig
 from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, Diarization
 from fukikae.registry.store import Exemplar, ReembedResult, Registry
 from fukikae.workspace import Workspace
@@ -133,7 +134,8 @@ def plan(ws: Workspace) -> ReembedPlan:
         actors = reg.actors()
         p.centroid_dims = Counter(len(a.centroid) for a in actors if a.centroid is not None)
         p.projection_dims = [(s.series, s.kind, int(s.matrix.shape[0])) for s in reg.projections()]
-        named_chars = {c.actor_id for c in reg.characters() if c.name or c.voice}
+        curated = reg.curated_characters()
+        named_chars = {c.actor_id for c in reg.characters() if c.id in curated}
     p.exemplar_dims = Counter(len(e.embedding) for e in exemplars)
     p.old = {e.id: e.embedding for e in exemplars}
     holders = {e.actor_id for e in exemplars}
@@ -144,7 +146,7 @@ def plan(ws: Workspace) -> ReembedPlan:
         if a.name:
             tags.append(f"named {a.name}")
         elif a.id in named_chars:
-            tags.append("named or voiced character")
+            tags.append("curated character")
         p.fixed[a.id] = (", ".join(tags), len(a.centroid))
         p.centroids[a.id] = a.centroid
     by_ep: dict[str, dict[str | None, list[Exemplar]]] = {}
@@ -206,25 +208,28 @@ def run(ws: Workspace, p: ReembedPlan) -> ReembedResult:
     embedder = cast(Embedder, create("embed", p.embedder, device))
     new: dict[int, np.ndarray] = {}
     if p.work:
-        if device.startswith("cuda"):
-            wait_for_vram(cfg.gpu_device, embedder.vram_mb, runctx.vram_timeout_s, query=free_mb)
-        embedder.load()
-        try:
-            for eid, groups in p.work.items():
-                spans = [s for _, ss in groups for s in ss]
-                rows = np.asarray(
-                    embedder.embed(ws.work_dir(eid) / "01-separate" / "vocals_16k.wav", spans),
-                    dtype=np.float32,
+        with gpu_job(cfg.gpu_device, device, "registry reembed"):  # ruling CD15
+            if device.startswith("cuda"):
+                wait_for_vram(
+                    cfg.gpu_device, embedder.vram_mb, runctx.vram_timeout_s, query=free_mb
                 )
-                if rows.shape != (len(spans), p.dim):
-                    raise ValueError(
-                        f"{eid}: the embedder returned {rows.shape} for {len(spans)} spans, "
-                        f"expected ({len(spans)}, {p.dim})"
+            embedder.load()
+            try:
+                for eid, groups in p.work.items():
+                    spans = [s for _, ss in groups for s in ss]
+                    rows = np.asarray(
+                        embedder.embed(ws.work_dir(eid) / "01-separate" / "vocals_16k.wav", spans),
+                        dtype=np.float32,
                     )
-                ids = [i for idl, _ in groups for i in idl]
-                new.update(zip(ids, rows, strict=True))
-        finally:
-            embedder.unload()
+                    if rows.shape != (len(spans), p.dim):
+                        raise ValueError(
+                            f"{eid}: the embedder returned {rows.shape} for {len(spans)} spans, "
+                            f"expected ({len(spans)}, {p.dim})"
+                        )
+                    ids = [i for idl, _ in groups for i in idl]
+                    new.update(zip(ids, rows, strict=True))
+            finally:
+                embedder.unload()
     keep = {a for a, (_, d) in p.fixed.items() if d == p.dim}
     mapped: dict[int, np.ndarray] = {}
     for d in sorted({d for _, d in p.fixed.values() if d != p.dim}):
