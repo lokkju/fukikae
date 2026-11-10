@@ -1,0 +1,69 @@
+# The IndexTTS2 TensorRT worker environment (D28 lever 2, an opt-in trial). Unlike the other
+# workers it runs in a container: TensorRT-LLM 0.21 links OpenMPI (libmpi.so.40 and orted), a
+# system package the host doesn't carry, so the Dockerfile beside this file builds a local image
+# (never pushed) with OpenMPI and this project synced into /opt/venv from the lock. fukikae
+# talks to it through `docker run -i` with the same JSON-lines protocol as a local worker
+# (fukikae.backends.tts.indextts2_trt).
+#
+# The dependencies are upstream index-tts's backends/trt/pyproject.toml at the pinned commit
+# (impl_indextts2.CODE_REVISION), at its pins, minus the serving stack (PyTriton, tritonclient,
+# websockets), DeepSpeed and onnxruntime (only its ONNX self-checks use it). The index-tts code
+# itself, `indextts` and `backends.trt`, is not a dependency: the image clones it at the pinned
+# commit and puts it on PYTHONPATH, as upstream's run.sh does.
+[project]
+name = "fukikae-worker-indextts2-trt"
+version = "0"
+requires-python = "==3.12.*"
+dependencies = [
+    "accelerate==1.8.1",
+    "cn2an==0.5.22",
+    "cython==3.0.7",
+    "descript-audiotools==0.7.2",
+    "tensorboard==2.9.1",
+    "einops==0.8.1",
+    "ffmpeg-python==0.2.0",
+    "g2p-en==2.1.0",
+    "jieba==0.42.1",
+    "json5==0.10.0",
+    "librosa==0.10.2.post1",
+    "matplotlib==3.8.2",
+    "modelscope==1.27.0",
+    "munch==4.0.0",
+    "numba==0.61.2",
+    "numpy==1.26.2",
+    "omegaconf==2.3.0",
+    "opencv-python==4.9.0.80",
+    "pandas==2.3.2",
+    "safetensors==0.5.2",
+    "sentencepiece==0.2.1",
+    "textstat==0.7.10",
+    "tokenizers==0.21.0",
+    "torch==2.7.1",
+    "torchaudio==2.7.1",
+    "tqdm==4.67.1",
+    "transformers==4.51.3",
+    "WeTextProcessing==1.3.0",
+    "tensorrt-llm==0.21.0",
+    "onnx==1.19.1",
+    "onnxscript==0.5.6",
+    "polygraphy==0.49.26",
+    # TensorRT-LLM 0.21 imports `from cuda import cuda, cudart`, which cuda-python 13 dropped
+    "cuda-python==12.9.0",
+    # TensorRT-LLM pulls datasets, whose latest pyarrow needs NumPy 2; TensorRT-LLM needs NumPy 1
+    "pyarrow==19.0.1",
+]
+
+[tool.uv]
+package = false
+# descript-audiotools and tensorboard declare protobuf<3.20; TensorRT-LLM needs protobuf>=4.
+# Upstream's override; the image sets PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python for it.
+override-dependencies = ["protobuf>=4.25,<6"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
