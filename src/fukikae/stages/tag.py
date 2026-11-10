@@ -156,6 +156,9 @@ class TagStage:
         return "cuda" if "cuda" in getattr(cls, "devices", ()) else "cpu"
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
+        # Both devices are keyed: emotion2vec scores differently on CPU and CUDA (FT S01E12:
+        # 271 of 537 emotion confidences differ, by up to 0.0043; SenseVoice's events and
+        # every label match), and a confidence is the tts plan's emotion_vector weight.
         bc, ebc, device, emotion_device = self._backend_cfg(cfg)
         return {
             "backend": bc.backend,
