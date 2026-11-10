@@ -237,7 +237,64 @@ def test_registry_split_accepts_a_sub_cluster_label(tmp_path):
     got = {c.cluster: c for c in read_json(path, Assignments).clusters}
     assert got["SPEAKER_08"].actor_id == 1
     moved = got["SPEAKER_08~happy"]
-    assert moved.actor_id not in (None, 1) and moved.name == "happy"
+    # the operator's split is a voice decision now: the name no longer governs this label
+    assert moved.actor_id not in (None, 1)
+    assert (moved.name, moved.source) == (None, "voice")
     with Registry(ws.registry_path) as reg:
         assert reg.cluster_actors(eid, "SPEAKER_08~happy") == [moved.actor_id]
         assert reg.cluster_actors(eid, "SPEAKER_08") == [1]
+
+
+def _lock_ws(tmp_path):
+    """Actor 1 (character 1) has exemplars in S01E01; S01E02's assignments name actor 1 without
+    exemplars (a rowless remainder); S01E03's name character 2's actor 2; each episode has a
+    characters record."""
+    import numpy as np
+
+    from fukikae.artifacts import write_json
+    from fukikae.job import load_manifest
+    from fukikae.models import Assignments, ClusterAssignment
+    from fukikae.workspace import Episode
+
+    ws = _alias_ws(tmp_path)
+    rows = np.array([[1.0, 0.0]], dtype=np.float32)
+    with Registry(ws.registry_path) as reg:
+        reg.add_exemplars(1, "S01E01", "S0", rows, 10.0)
+    now = datetime.now(UTC)
+    eps = {}
+    for eid, (aid, cid) in {"S01E01": (1, 1), "S01E02": (1, 1), "S01E03": (2, 2)}.items():
+        work = ws.work_dir(eid)
+        path = work / "05-characters" / "assignments.json"
+        path.parent.mkdir(parents=True)
+        c = ClusterAssignment(
+            cluster="S0", actor_id=aid, character_id=cid, score=None, clean_seconds=10.0,
+            status="matched",
+        )  # fmt: skip
+        write_json(path, Assignments(episode=eid, threshold=0.8, clusters=[c]))
+        ep = Episode(source=tmp_path / eid, id=eid, work=work, workspace_root=ws.root)
+        save_manifest(
+            ep, Manifest(stages={"characters": StageRecord(key="k", status="done", started=now)})
+        )
+        eps[eid] = ep
+
+    def stale() -> set[str]:
+        return {e for e, ep in eps.items() if "characters" not in load_manifest(ep).stages}
+
+    return ws, stale
+
+
+def test_registry_lock_marks_characters_stale_where_the_actor_is_named(tmp_path):
+    ws, stale = _lock_ws(tmp_path)
+    r = runner.invoke(app, ["registry", "lock", str(ws.root), "1"])
+    assert r.exit_code == 0, r.output
+    assert stale() == {"S01E01", "S01E02"}
+    assert "S01E01" in r.output and "S01E02" in r.output
+
+
+def test_registry_lock_character_marks_characters_stale_where_it_is_named(tmp_path):
+    ws, stale = _lock_ws(tmp_path)
+    r = runner.invoke(app, ["registry", "lock", str(ws.root), "2", "--character"])
+    assert r.exit_code == 0, r.output
+    assert stale() == {"S01E03"}
+    r = runner.invoke(app, ["registry", "lock", str(ws.root), "2", "--character", "--unlock"])
+    assert r.exit_code == 0, r.output

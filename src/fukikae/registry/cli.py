@@ -121,7 +121,10 @@ def _remap_assignments(
 ) -> None:
     """Keep an episode's assignments.json in step with a merge or split.
 
-    Pinning copies actor and character ids from it, so stale ids would survive a rerun.
+    Pinning copies actor and character ids from it, so stale ids would survive a rerun. A
+    split (``character``) also makes the split label a voice decision (``source = "voice"``,
+    no ``name``): the operator has overruled whatever name put it there, and the label's pin
+    to the new actor and character then carries over like any acoustic one.
     """
     from fukikae.artifacts import read_json, write_json
     from fukikae.models import Assignments
@@ -135,11 +138,13 @@ def _remap_assignments(
         if only_cluster is not None and c.cluster != only_cluster:
             out.append(c)
             continue
-        upd: dict[str, int | None] = {}
+        upd: dict[str, int | str | None] = {}
         if c.actor_id in actor_map:
             upd["actor_id"] = actor_map[c.actor_id]
         if character is not None and c.cluster == only_cluster:
             upd["character_id"] = character[1]
+            upd["source"] = "voice"
+            upd["name"] = None
         if character_map and c.character_id in character_map:
             upd["character_id"] = character_map[c.character_id]
         out.append(c.model_copy(update=upd))
@@ -489,17 +494,28 @@ def lock(
     ),
 ) -> None:
     """Lock an actor's centroid (or unlock it); with --character, lock a character, which keeps
-    the speech its clusters hold whatever subtitle names say, and is never named by them."""
+    the speech its clusters hold whatever subtitle names say, and is never named by them. The
+    characters stage reruns next time for the actor's episodes and every episode whose
+    assignments name the actor or character."""
+    from fukikae.registry.usage import episodes_naming
+
     what = "character" if character else "actor"
+    ws = Workspace(workspace)
     with _open(workspace) as reg:
         try:
             if character:
                 reg.lock_character(actor_id, not unlock)
+                owner = next(c.actor_id for c in reg.characters() if c.id == actor_id)
+                users = episodes_naming(ws.root, (), (actor_id,))
             else:
                 reg.lock_actor(actor_id, not unlock)
+                owner = actor_id
+                users = episodes_naming(ws.root, (actor_id,))
         except KeyError as e:
             raise _fail(f"no {what} {actor_id}") from e
+        affected = set(reg.episode_counts(owner)) | set(users)
     typer.echo(f"{what} {actor_id}: {'unlocked' if unlock else 'locked'}")
+    _stale(ws, sorted(affected))
 
 
 @registry_app.command("actor")
