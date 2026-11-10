@@ -271,30 +271,18 @@ def _pack_toml(series: SeriesInfo, title: str, author: str, notes: str) -> dict[
     return d
 
 
-def export_pack(
+def export_selection(
     reg: Registry,
     store: CardStore,
-    series: SeriesInfo,
-    out: Path,
     *,
     characters: list[int] | None,
     languages: list[str] | None,
     no_clips: bool,
-    title: str,
-    author: str,
-    notes: str = "",
-) -> ExportReport:
-    """Write the current cards of ``characters`` (default all) in ``languages`` (default all)
-    to ``out``, a new directory or, when ``out`` ends in ``.tar.zst``, an archive. Unnamed
-    characters, cards missing from the store or their sidecars, characters whose key another
-    character shares, and with ``no_clips`` cards that need audio, are left out and listed.
-    A clip over ``CLIP_MAX_S`` refuses the export. Nothing is written unless it all succeeds."""
-    title = _plain_text(title, "pack title", TITLE_CAP, required=True)
-    if printable(title) != title:
-        raise PackError("pack title must not hold control characters")
-    out = Path(out)
-    if out.exists() or out.is_symlink():
-        raise PackError(f"{out} already exists; export to a new path")
+) -> tuple[list[CastEntry], dict[str, Card], list[tuple[str, str]]]:
+    """The rows ``export_pack`` writes: (cast entries, every card they need by id, blends
+    included, and what was left out with why). Unnamed characters, names that normalise to
+    nothing, keys two characters share, unreadable cards, cards missing sidecars and, with
+    ``no_clips``, cards that need audio are left out."""
     wanted = set(characters) if characters is not None else None
     left_out: list[tuple[str, str]] = []
     rows: list[tuple[CharacterKey, str, str]] = []
@@ -345,6 +333,36 @@ def export_pack(
         cards.update(mine)
         cast.append(CastEntry(key, lang, cid))
 
+    return cast, cards, left_out
+
+
+def export_pack(
+    reg: Registry,
+    store: CardStore,
+    series: SeriesInfo,
+    out: Path,
+    *,
+    characters: list[int] | None,
+    languages: list[str] | None,
+    no_clips: bool,
+    title: str,
+    author: str,
+    notes: str = "",
+) -> ExportReport:
+    """Write the current cards of ``characters`` (default all) in ``languages`` (default all)
+    to ``out``, a new directory or, when ``out`` ends in ``.tar.zst``, an archive. Unnamed
+    characters, cards missing from the store or their sidecars, characters whose key another
+    character shares, and with ``no_clips`` cards that need audio, are left out and listed.
+    A clip over ``CLIP_MAX_S`` refuses the export. Nothing is written unless it all succeeds."""
+    title = _plain_text(title, "pack title", TITLE_CAP, required=True)
+    if printable(title) != title:
+        raise PackError("pack title must not hold control characters")
+    out = Path(out)
+    if out.exists() or out.is_symlink():
+        raise PackError(f"{out} already exists; export to a new path")
+    cast, cards, left_out = export_selection(
+        reg, store, characters=characters, languages=languages, no_clips=no_clips
+    )
     files: dict[str, Path | bytes] = {}
     for cid, card in sorted(cards.items()):
         files[f"cards/{cid}.toml"] = dump_card(card).encode("utf-8")

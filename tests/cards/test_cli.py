@@ -638,11 +638,89 @@ def test_voices_clone_checks_the_card_before_assigning(tmp_path: Path, monkeypat
     (ws.root / "fukikae.toml").write_text('source_language = "ja"\n')
 
     def refuse(*_, **__):
-        raise CardError("indextts2 refuses this card")
+        raise CardError(
+            "1 (Natsu): card x: indextts2 refuses this card; assign another card with "
+            "`fukikae voices assign`"
+        )
 
     monkeypatch.setattr("fukikae.cards.cli._check_clone_card", refuse)
     r = invoke("clone", str(ws.root), "Natsu", "--clip", str(_clip(tmp_path / "a.wav")),
                "--transcript", "あ")  # fmt: skip
     assert r.exit_code == 1 and "refuses" in r.output
+    assert "voices assign" not in r.output and "nothing was assigned" in r.output
     with Registry(ws.registry_path) as reg:
         assert reg.card_for(cid, "en") is None
+    assert not list((ws.root / ".fukikae" / "cards").glob("*.toml"))  # the refused card is gone
+
+
+# -- fix round 2: export fingerprints, failures, rows, --no-record --------------------------
+
+
+def _assigned_kokoro(tmp_path: Path) -> tuple[Workspace, int, CardStore, str]:
+    ws, cid, store = setup(tmp_path)
+    card_id = store.put(_kokoro_card())
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", card_id, by="assign", locked=True)
+    return ws, cid, store, card_id
+
+
+def test_export_survives_a_render_failure(tmp_path: Path, monkeypatch):
+    ws, _, store, card_id = _assigned_kokoro(tmp_path)
+
+    def crash(*_):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr("fukikae.cards.cli._verify", crash)
+    monkeypatch.setattr("fukikae.cards.auto.clone_problem", lambda *_: None)
+    written: list[int] = []
+    monkeypatch.setattr(
+        "fukikae.cards.cli._export_pack", lambda *_, **__: written.append(1) or _Report()
+    )
+    r = invoke("export", str(ws.root), "-o", str(tmp_path / "p"))
+    assert r.exit_code == 0, r.output
+    assert "could not run (RuntimeError: CUDA out of memory)" in r.output and written == [1]
+    r = invoke("export", str(ws.root), "-o", str(tmp_path / "p2"), "--require-fingerprints")
+    assert r.exit_code == 1 and written == [1]
+    assert store.get(card_id).voice.fingerprint is None
+
+
+def test_export_no_record_lists_without_rendering(tmp_path: Path, monkeypatch):
+    ws, _, _, card_id = _assigned_kokoro(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr("fukikae.cards.cli._verify", _fake_verify(calls))
+    monkeypatch.setattr("fukikae.cards.auto.clone_problem", lambda *_: None)
+    written: list[int] = []
+    monkeypatch.setattr(
+        "fukikae.cards.cli._export_pack", lambda *_, **__: written.append(1) or _Report()
+    )
+    r = invoke("export", str(ws.root), "-o", str(tmp_path / "p"), "--no-record")
+    assert r.exit_code == 0, r.output
+    assert not calls and written == [1]
+    assert f"without a fingerprint: Natsu en card {card_id} (--no-record)" in r.output
+    r = invoke(
+        "export", str(ws.root), "-o", str(tmp_path / "p2"), "--no-record",
+        "--require-fingerprints",
+    )  # fmt: skip
+    assert r.exit_code == 1 and written == [1]
+
+
+def test_export_fingerprints_exactly_the_rows_it_exports(tmp_path: Path, monkeypatch):
+    """Two characters sharing a name are left out of the pack, so neither is rendered."""
+    ws, cid, store, _ = _assigned_kokoro(tmp_path)
+    from fukikae.cards.stock import revision, stock_card
+
+    other = store.put(stock_card("kokoro", "am_adam", "en", revision("kokoro")))
+    with Registry(ws.registry_path) as reg:
+        _, twin = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))
+        reg.rename_character(twin, "NATSU")
+        reg.assign_card(twin, "en", other, by="assign", locked=True)
+        _, third = reg.create_actor_with_character(np.array([0.5, 0.5], dtype=np.float32))
+        reg.rename_character(third, "Happy")
+        reg.assign_card(third, "en", other, by="assign", locked=True)
+    calls: list[str] = []
+    monkeypatch.setattr("fukikae.cards.cli._verify", _fake_verify(calls))
+    monkeypatch.setattr("fukikae.cards.auto.clone_problem", lambda *_: None)
+    monkeypatch.setattr("fukikae.cards.cli._export_pack", lambda *_, **__: _Report())
+    r = invoke("export", str(ws.root), "-o", str(tmp_path / "p"))
+    assert r.exit_code == 0, r.output
+    assert calls == ["am_adam"]  # Happy's card only; the two Natsus are left out

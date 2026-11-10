@@ -32,7 +32,7 @@ from fukikae.workspace import Workspace
 
 if TYPE_CHECKING:
     from fukikae.backends.base import Embedder, Synthesizer
-    from fukikae.cards.packs import CopyReport
+    from fukikae.cards.packs import CastEntry, CopyReport
     from fukikae.cards.verify import SynthSource, VerifyResult
     from fukikae.config import Config
     from fukikae.registry.store import CardAssignment, Character, Registry
@@ -212,6 +212,8 @@ def assign(
 
 
 CLIP_SECONDS = (3.0, 30.0)
+# Automatic stock cards restock re-pins; a clone stand-in keeps its mark so it is still upgraded.
+AUTO_STOCK_BY = ("auto", "auto-fallback", "restock")
 
 
 def _check_clone_card(store: CardStore, card_id: str, who: str, language: str) -> None:
@@ -302,8 +304,17 @@ def clone(
                 references=(ref,),
             ),
         )
+        existed = store.has(card_id(card))
         card_ref = store.put(card)
-        _check_clone_card(store, card_ref, _label(char), language)
+        try:
+            _check_clone_card(store, card_ref, _label(char), language)
+        except CardError as e:
+            if not existed:  # a card nothing refers to stays out of the store
+                store.card_path(card_ref).unlink(missing_ok=True)
+            why = str(e).split("; assign another card", 1)[0]
+            raise _fail(
+                f"the clone card from {clip.name} is refused ({why}); nothing was assigned"
+            ) from e
         a = reg.assign_card(char.id, language, card_ref, by="assign", locked=True)
         _echo(
             f"{_label(char)} {language}: clone card {card_ref} of {cls.name} from {clip.name} "
@@ -389,7 +400,7 @@ def restock(
         for char in reg.characters():
             a = reg.card_for(char.id, language)
             # CD9: automatic and restocked cards only; never a locked or curated one
-            if a is None or a.card_id is None or a.locked or a.chosen_by not in ("auto", "restock"):
+            if a is None or a.card_id is None or a.locked or a.chosen_by not in AUTO_STOCK_BY:
                 continue
             if not store.has(a.card_id):
                 continue
@@ -414,7 +425,8 @@ def restock(
                 continue
             new_id = store.put(new)
             n = reg.assign_card(
-                char.id, language, new_id, by="restock", locked=False,
+                char.id, language, new_id,
+                by="auto-fallback" if a.chosen_by == "auto-fallback" else "restock", locked=False,
                 note=f"restocked from card {a.card_id}",
             ).n  # fmt: skip
             _echo(f"restocked {what}: card {new_id} (history row {n})")
@@ -724,6 +736,9 @@ def export(
         "--require-fingerprints",
         help="Refuse to export when a card has no fingerprint and none can be recorded here.",
     ),
+    no_record: bool = typer.Option(
+        False, "--no-record", help="Don't render to record missing fingerprints; list them."
+    ),
 ) -> None:
     """Write the characters' current cards to a pack. Packs carry names and external ids,
     never registry ids; unnamed characters are left out and listed. A card without a
@@ -738,7 +753,12 @@ def export(
         ids = None
         if characters is not None:
             ids = [reg.character_by_ref(c).id for c in _csv(characters) or []]
-        missing = _fingerprint_for_export(cfg, reg, store, ids, _csv(langs), no_clips)
+        from fukikae.cards.packs import export_selection
+
+        cast_rows, _, _ = export_selection(
+            reg, store, characters=ids, languages=_csv(langs), no_clips=no_clips
+        )
+        missing = _fingerprint_for_export(cfg, store, cast_rows, record=not no_record)
         for label, card_id, why in missing:
             _echo(f"without a fingerprint: {label} card {card_id} ({why})")
         if missing and require_fingerprints:
@@ -765,51 +785,49 @@ def _export_pack(*args: Any, **kwargs: Any) -> Any:
 
 
 def _fingerprint_for_export(
-    cfg: Config,
-    reg: Registry,
-    store: CardStore,
-    ids: list[int] | None,
-    langs: list[str] | None,
-    no_clips: bool,
+    cfg: Config, store: CardStore, rows: list[CastEntry], *, record: bool
 ) -> list[tuple[str, str, str]]:
-    """Record a fingerprint for every card the export will carry that has none (CD26), each
-    on its backend under the GPU lock; returns (character, card id, why) for those whose
-    backend can't run here (``clone_problem``) or whose recording failed."""
+    """Record a fingerprint for every card among the export's own ``rows`` that has none
+    (CD26), each on its backend under the GPU lock; returns (character, card id, why) for
+    those left without one: ``record`` off, a backend that can't run here
+    (``clone_problem``), or a render that failed."""
     from fukikae.backends import loader
     from fukikae.cards import auto
+    from fukikae.cards.packs import printable
     from fukikae.config import ConfigError
 
     missing: list[tuple[str, str, str]] = []
     done: set[str] = set()
-    for char in reg.characters():
-        if (ids is not None and char.id not in ids) or not char.name:
+    for row in rows:
+        if row.card in done or not store.has(row.card):
             continue
-        for lang in reg.card_languages(char.id):
-            if langs is not None and lang not in langs:
-                continue
-            a = reg.card_for(char.id, lang)
-            if a is None or a.card_id is None or a.card_id in done or not store.has(a.card_id):
-                continue
-            card = store.get(a.card_id)
-            if card.voice.fingerprint is not None or (no_clips and card.voice.references):
-                continue
-            done.add(a.card_id)
-            label = f"{_label(char)} {lang}"
-            try:
-                cls = loader.backend_class("tts", card.voice.backend)
-                why = auto.clone_problem(cast("type[Synthesizer]", cls), cfg)
-            except (ConfigError, loader.BackendUnavailable) as e:
-                why = str(e)
-            if why is not None:
-                missing.append((label, a.card_id, why))
-                continue
+        done.add(row.card)
+        card = store.get(row.card)
+        if card.voice.fingerprint is not None:
+            continue
+        label = f"{printable(row.key.name)} {row.target_language}"
+        if not record:
+            missing.append((label, row.card, "--no-record"))
+            continue
+        try:
+            cls = loader.backend_class("tts", card.voice.backend)
+            why = auto.clone_problem(cast("type[Synthesizer]", cls), cfg)
+        except (ConfigError, loader.BackendUnavailable) as e:
+            why = str(e)
+        if why is not None:
+            missing.append((label, row.card, why))
+            continue
+        try:
             res, new = _verify(cfg, store, card, True)
-            if res.status != "recorded":
-                missing.append((label, a.card_id, f"{res.status}: {res.detail}"))
-                continue
-            if store.put(new) != a.card_id:  # pragma: no cover - the fingerprint is outside the id
-                raise _fail(f"recording changed card {a.card_id}'s id; nothing was stored")
-            _echo(f"{label}: recorded a fingerprint for card {a.card_id}")
+        except Exception as e:  # noqa: BLE001 - a crash, timeout or OOM leaves one card unprinted
+            missing.append((label, row.card, f"could not run ({type(e).__name__}: {e})"))
+            continue
+        if res.status != "recorded":
+            missing.append((label, row.card, f"{res.status}: {res.detail}"))
+            continue
+        if store.put(new) != row.card:  # pragma: no cover - the fingerprint is outside the id
+            raise _fail(f"recording changed card {row.card}'s id; nothing was stored")
+        _echo(f"{label}: recorded a fingerprint for card {row.card}")
     return missing
 
 
