@@ -47,11 +47,12 @@ def test_split_turn_keeps_short_turns_whole_and_splits_long_ones():
     assert parts == [(0.0, 30.0), (30.0, 60.0), (60.0, 65.0)]
 
 
-def test_defaults_are_cpu_with_a_pinned_revision():
+def test_defaults_are_the_gpu_with_a_pinned_revision():
     t = SenseVoiceTagger({}, "cpu")
     assert (t.model, t.revision) == ("FunAudioLLM/SenseVoiceSmall", DEFAULT_REVISION)
     assert len(DEFAULT_REVISION) == 40
-    assert SenseVoiceTagger.vram_mb == 0
+    # D26: the GPU by default (the tag stage falls back to the CPU without one)
+    assert SenseVoiceTagger.default_device == "cuda" and SenseVoiceTagger.vram_mb > 0
     assert SenseVoiceTagger.devices == {"cpu", "cuda"}
 
 
