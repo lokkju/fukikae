@@ -7,11 +7,14 @@ ratio on the separated vocals (``snr_db``: the RMS of the loudest half of the tu
 frames over the RMS of its quietest tenth) and taken greedily, up to 3 clips and 20 s. Before
 the length check, the character's clean turns at most ``JOIN_GAP_S`` (0.6 s) apart with no
 other turn in the gap are joined, up to 12 s (D32 #1), so speech cut into fragments can still
-make a reference; a joined turn that fails a check falls back to its pieces. A turn that a
+make a reference; a run of fragments is split where a check fails, keeping the longest valid
+joins (`_split`). A turn that a
 scored emotion source labels non-neutral (``tags.emotion_backend`` set, confidence at least
 0.5) ranks after every other eligible turn: it is taken only when the rest fall short of the
 clone floor (``FLOOR_CLIPS`` clips and ``FLOOR_S`` seconds: 2 and 10 s, D32 #2), and then
-only until that is reached. SenseVoice's labels carry no score and demote nothing; unlabelled
+only until that is reached. When the 3-clip cap stops that fill short of a floor the
+episode's turns can reach, the best combination of up to 3 clips that reaches it replaces the
+greedy picks (`pick_references`). SenseVoice's labels carry no score and demote nothing; unlabelled
 and low-confidence turns rank by SNR alone. Whenever a chosen reference is scored
 non-neutral, ``reference_report`` says "references may carry emotion: <labels>", and
 ``clone_card`` records the labels in ``[meta] reference_emotions`` (outside the card id),
@@ -27,10 +30,11 @@ separated song vocals are clean and loud, so they would otherwise rank first.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 import tempfile
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -290,27 +294,66 @@ def share_inside(start: float, end: float, spans: Sequence[tuple[float, float]])
 
 
 def _chains(
-    clean: Sequence[tuple[float, float]],
-    blockers: Sequence[tuple[float, float]],
-    gap: float,
-    longest: float,
+    clean: Sequence[tuple[float, float]], blockers: Sequence[tuple[float, float]], gap: float
 ) -> list[list[tuple[float, float]]]:
-    """``clean`` (sorted) cut into runs of turns at most ``gap`` apart, with no ``blockers``
-    span inside a gap, each run no longer than ``longest`` from its first start to its end."""
+    """``clean`` (sorted) cut into runs of turns at most ``gap`` apart (overlapping turns are
+    0 apart), with no ``blockers`` span inside a gap. `_split` decides where a run joins."""
     out: list[list[tuple[float, float]]] = []
     for s, e in clean:
         if out:
             run = out[-1]
-            head, tail = run[0][0], max(b for _, b in run)
-            if (
-                s - tail <= gap
-                and max(e, tail) - head <= longest
-                and not any(a < s and b > tail for a, b in blockers)
-            ):
+            tail = max(b for _, b in run)
+            if s - tail <= gap and not any(a < s and b > tail for a, b in blockers):
                 run.append((s, e))
                 continue
         out.append([(s, e)])
     return out
+
+
+def _split(
+    run: Sequence[tuple[float, float]],
+    pick: Callable[[float, float, bool], RefPick | None],
+    longest: float,
+) -> list[RefPick]:
+    """The references a run of fragments (`_chains`) makes: the run cut into consecutive
+    pieces, each one joined turn (``pick(start, end, joined)``, no longer than ``longest``),
+    a turn alone, or dropped, cut where the most seconds of speech end up in references, then
+    fewest references (longer joins). So a run whose whole join fails a check is split at the
+    failing gap with its valid sub-joins kept, and a short last piece joins its neighbour when
+    another split keeps it. A turn that overlaps the end of the piece before it is dropped
+    rather than cut into a reference that repeats that audio. Ties go to the longest join that
+    starts earliest, so the result is deterministic."""
+    n = len(run)
+    memo: dict[tuple[int, int], RefPick | None] = {}
+    # best[i]: ((seconds, -references), picks) over run[i:]
+    best: list[tuple[tuple[float, int], list[RefPick]]] = [((0.0, 0), [])] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        ends: list[float] = []
+        end = -math.inf
+        for j in range(i, n):
+            end = max(end, run[j][1])
+            if end - run[i][0] > longest:
+                break
+            ends.append(end)
+        chosen = None
+        for j in range(len(ends) - 1, -1, -1):
+            j_abs, end = i + j, ends[j]
+            if (i, j_abs) not in memo:
+                memo[(i, j_abs)] = pick(run[i][0], end, j_abs > i)
+            p = memo[(i, j_abs)]
+            if p is None:
+                continue
+            k = j_abs + 1
+            while k < n and run[k][0] < end:
+                k += 1  # a turn overlapping this piece's end is dropped
+            (secs, neg), rest = best[k]
+            score = (round(secs + p.seconds, 3), neg - 1)
+            if chosen is None or score > chosen[0]:
+                chosen = (score, [p, *rest])
+        if chosen is None or best[i + 1][0] > chosen[0]:
+            chosen = best[i + 1]
+        best[i] = chosen
+    return best[0][1]
 
 
 def eligible_references(
@@ -334,8 +377,8 @@ def eligible_references(
     ``exclude`` and ``foreign``) at most ``join_gap`` apart (`JOIN_GAP_S`) are joined, when no
     other turn (another speaker's, or one of the speaker's own that isn't clean) falls in the
     gap and the result stays within ``each[1]`` (D32 #1). A joined turn is checked like any
-    other (``exclude`` and ``foreign`` over its gaps, its transcript, its text rate); one that
-    fails falls back to its pieces, each checked alone."""
+    other (``exclude`` and ``foreign`` over its gaps, its transcript, its text rate); where
+    one fails, `_split` cuts the run at the failing gap and keeps the valid sub-joins."""
     from scipy.io import wavfile
 
     mine = {speaker} if isinstance(speaker, str) else set(speaker)
@@ -383,13 +426,17 @@ def eligible_references(
     blockers += [sp for sp in spans if not clean(*sp)]
     blockers += [(t.start, t.end) for t in dropped]
     eligible: list[RefPick] = []
-    for run in _chains(good, blockers, join_gap, each[1]):
-        joined = pick(run[0][0], max(b for _, b in run), True) if len(run) > 1 else None
-        if joined is not None:
-            eligible.append(joined)
-            continue
-        eligible += [p for p in (pick(s, e) for s, e in run) if p is not None]
+    for run in _chains(good, blockers, join_gap):
+        eligible += _split(run, pick, each[1])
     return sorted(eligible, key=rank_key)
+
+
+def reaches_floor(
+    clips: Sequence[float], floor_s: float = FLOOR_S, floor_clips: int = FLOOR_CLIPS
+) -> bool:
+    """Whether clips of these lengths (seconds) reach ``floor_clips`` clips and ``floor_s``
+    seconds, the seconds judged at the tenth every report prints (9.96 s is 10.0 s)."""
+    return len(clips) >= floor_clips and round(sum(clips), 1) >= floor_s
 
 
 def meets_floor(picks: Sequence[RefPick]) -> bool:
@@ -402,13 +449,18 @@ def floor_shortfall(clips: Sequence[float]) -> str | None:
     when they reach it. Seconds are judged at the tenth every report prints (9.97 s is
     10.0 s), so a card the log calls 10.0 s is never said to be under 10 s."""
     seconds = sum(clips)
-    if len(clips) >= FLOOR_CLIPS and round(seconds, 1) >= FLOOR_S:
+    if reaches_floor(clips):
         return None
     n = len(clips)
     return (
         f"{n} clip{'' if n == 1 else 's'} and {seconds:.1f} s, under the floor of "
         f"{FLOOR_CLIPS} clips and {FLOOR_S:g} s"
     )
+
+
+# `pick_references`' search for a floor the clip cap stopped the greedy fill short of reads
+# this many of the best-ranked turns (C(64, 3) is 41,664 combinations).
+SEARCH_POOL = 64
 
 
 def pick_references(
@@ -421,19 +473,63 @@ def pick_references(
 ) -> list[RefPick] | None:
     """The greedy CD5 fill over ``ranked`` (``eligible_references``' order): up to ``count``
     clips and ``total[1]`` seconds, scored non-neutral turns only to make up the floor
-    (``floor_clips`` clips and ``total[0]`` seconds, D32 #2); None under ``min_total``. Under
-    the floor the best picks there are still returned (`meets_floor` tells)."""
+    (``floor_clips`` clips and ``total[0]`` seconds, D32 #2, judged at a tenth as
+    `reaches_floor` does); None under ``min_total``.
+
+    When the clip cap stops the fill short of the floor, the combinations of ``floor_clips``
+    to ``count`` of the `SEARCH_POOL` best-ranked turns within ``total[1]`` that reach it are
+    searched (`_floor_combination`). Under the floor the best picks there are are still
+    returned (`meets_floor` tells)."""
     picks: list[RefPick] = []
     used = 0.0
+    capped = False
     for p in ranked:
         if len(picks) >= count:
+            capped = True
             break
-        if p.emotion is not None and used >= total[0] and len(picks) >= floor_clips:
+        if p.emotion is not None and reaches_floor(
+            [q.seconds for q in picks], total[0], floor_clips
+        ):
             break  # scored non-neutral turns only make up a shortfall
         if used + p.seconds <= total[1]:
             picks.append(p)
             used += p.seconds
+    if capped and not reaches_floor([q.seconds for q in picks], total[0], floor_clips):
+        found = _floor_combination(ranked, picks, count, total, floor_clips)
+        if found is not None:
+            picks = found
+            used = sum(p.seconds for p in picks)
     return picks if used >= min_total else None
+
+
+def _floor_combination(
+    ranked: Sequence[RefPick],
+    greedy: Sequence[RefPick],
+    count: int,
+    total: tuple[float, float],
+    floor_clips: int,
+) -> list[RefPick] | None:
+    """The best combination of ``floor_clips`` to ``count`` of the `SEARCH_POOL` best-ranked
+    turns within ``total[1]`` seconds that reaches the floor, in rank order; None when none
+    does. Best is dropping the fewest of the greedy fill's neutral picks (none, when any
+    combination keeps them all: the floor wins only when it must), then the highest-ranked
+    clips (rank positions compared in order)."""
+    pool = list(ranked[:SEARCH_POOL])
+    secs = [p.seconds for p in pool]
+    longest = sorted(secs, reverse=True)[:count]
+    if not reaches_floor(longest, total[0], floor_clips):
+        return None  # no combination can reach it
+    neutral = {i for i, p in enumerate(pool) if p.emotion is None and p in greedy}
+    best: tuple[int, tuple[int, ...]] | None = None
+    for k in range(floor_clips, count + 1):
+        for combo in itertools.combinations(range(len(pool)), k):
+            seconds = sum(secs[i] for i in combo)
+            if seconds > total[1] or round(seconds, 1) < total[0]:
+                continue
+            key = (len(neutral.difference(combo)), combo)
+            if best is None or key < best:
+                best = key
+    return None if best is None else [pool[i] for i in best[1]]
 
 
 def select_references(
