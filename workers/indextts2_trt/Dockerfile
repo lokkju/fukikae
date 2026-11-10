@@ -11,8 +11,13 @@ FROM ghcr.io/astral-sh/uv:0.12.21@sha256:a7aed3216253ee804de3e2d8afa5073baa1a177
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867
 
+# Versions pinned to what noble and noble-updates served on 2026-11-10. A pin that comes from
+# -updates or -security leaves the index when Ubuntu supersedes it; the build then fails at this
+# step, and the fix is the new version here (a new project digest, so new engines too).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libopenmpi3t64 openmpi-bin ca-certificates gcc libc6-dev \
+ && apt-get install -y --no-install-recommends \
+      libopenmpi3t64=4.1.6-7ubuntu2 openmpi-bin=4.1.6-7ubuntu2 \
+      ca-certificates=20260816ubuntu0.24.04.2 gcc=4:13.2.0-7ubuntu1 libc6-dev=2.39-0ubuntu8.9 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /usr/local/bin/uv
