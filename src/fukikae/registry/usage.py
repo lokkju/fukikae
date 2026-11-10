@@ -1,9 +1,11 @@
-"""The actors other episodes' ``assignments.json`` still name.
+"""The actors other episodes' ``assignments.json`` still name, and the episodes that name them.
 
-A rowless remainder (a names-used episode's unnamed speech with no embedding rows of its own,
-Ruling R1) takes its parent cluster's acoustic match and adds no exemplar to that actor. When
-every exemplar the actor has comes from another episode, rebuilding that episode (the
-characters stage, or `registry resolve`) leaves it with none, and pruning it would leave the
+A rowless remainder (a names-used episode's unnamed speech with no embedding rows of its own)
+adds no exemplar to the actor it is given: under the Task 11 ruling amending R1, the character
+holding at least 60% of its parent cluster's named seconds, or, when the parent has no named
+sub-cluster, the parent's acoustic match. When every exemplar the actor has comes from
+another episode, rebuilding that episode (the characters stage, or `registry resolve`) leaves
+it with none, and pruning it would leave the
 remainder's episode naming an actor and character that no longer exist. Both prune only
 orphans outside this set.
 """
