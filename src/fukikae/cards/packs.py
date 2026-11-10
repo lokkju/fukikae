@@ -56,8 +56,8 @@ import tomli_w
 
 from fukikae.cards.card import Card, CardError, card_id, dump_card, parse_card, sidecars
 from fukikae.cards.store import SIDECAR_DIRS, CardStore, SidecarKind, _atomic_write
-from fukikae.config import SERIES_ID_KEYS, SeriesInfo
-from fukikae.registry.store import Registry, replace_refusal
+from fukikae.config import LANGUAGE_TAG, SERIES_ID_KEYS, SeriesInfo
+from fukikae.registry.store import EXTERNAL_ID_CAP, Registry, replace_refusal
 
 PACK_FORMAT = 1
 CLIP_MAX_S = 30.0
@@ -66,13 +66,12 @@ SIDECAR_EXT = {"clip": ".wav", "latent": ".npy", "vector": ".npy"}
 _KIND_OF_DIR = {d: k for k, d in SIDECAR_DIRS.items()}
 _PACK_KEYS = frozenset({"format", "series_title", "title", "author", "notes", *SERIES_ID_KEYS})
 _CAST_KEYS = frozenset({"name", "external_id", "target_language", "card"})
-_LANG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")
+_LANG = LANGUAGE_TAG
 _CARD_FILE = re.compile(r"cards/([0-9a-f]{16})\.toml")
 _SIDECAR_FILE = re.compile(r"(clips|latents|vectors)/([0-9a-f]{64})(\.[a-z0-9]+)")
 TITLE_CAP = 100
 NAME_CAP = 200
 TEXT_CAPS = {"series_title": 300, "author": 200, "notes": 2000}
-EXTERNAL_ID_CAP = 100
 VECTOR_MAX_DIM = 8192
 
 
@@ -271,6 +270,33 @@ def _pack_toml(series: SeriesInfo, title: str, author: str, notes: str) -> dict[
     return d
 
 
+def _row_refusal(key: CharacterKey, lang: str) -> str | None:
+    """Why import would refuse this cast row (``_read_cast``'s checks), or None."""
+    try:
+        _plain_text(key.name, "name", NAME_CAP, required=True)
+        if key.external_id is not None:
+            _external_id(key.external_id, "external id")
+    except PackError as e:
+        return f"{e}; import would refuse it"
+    if not _LANG.fullmatch(lang):
+        return (
+            f"target language {printable(lang)!r} is not a language tag such as 'en' or "
+            "'pt-BR'; import would refuse it"
+        )
+    return None
+
+
+def _check_pack_fields(series: SeriesInfo, author: str, notes: str) -> None:
+    """Refuse pack-level fields import would refuse (``_read_meta``'s checks)."""
+    if series.title:
+        _plain_text(series.title, "series_title", TEXT_CAPS["series_title"])
+    _plain_text(author, "author", TEXT_CAPS["author"])
+    _plain_text(notes, "notes", TEXT_CAPS["notes"])
+    for key in SERIES_ID_KEYS:
+        if key in series.ids:
+            _external_id(series.ids[key], f"[series] {key}")
+
+
 def export_selection(
     reg: Registry,
     store: CardStore,
@@ -312,7 +338,11 @@ def export_selection(
     cast: list[CastEntry] = []
     cards: dict[str, Card] = {}
     for key, lang, cid in rows:
-        what = f"{key.name} {lang} card {cid}"
+        what = f"{printable(key.name)[:60]} {printable(lang)} card {cid}"
+        why = _row_refusal(key, lang)
+        if why is not None:
+            left_out.append((what, why))
+            continue
         if seen[(normalize_name(key.name), key.external_id, lang)] > 1:
             left_out.append((what, "another character has the same name; rename one or give "
                                    "them external ids"))  # fmt: skip
@@ -322,6 +352,13 @@ def export_selection(
             _with_blends(store, cid, mine)
         except CardError as e:
             left_out.append((what, f"not readable from the card store: {e}"))
+            continue
+        if mine[cid].target_language != lang:
+            card_lang = printable(mine[cid].target_language)
+            left_out.append(
+                (what, f"the card is for {card_lang!r}, not this assignment's language; import "
+                       "would refuse it")
+            )  # fmt: skip
             continue
         if no_clips and _needs_clips(mine[cid], mine):
             left_out.append((what, "needs audio clips (a clone); --no-clips leaves it out"))
@@ -357,6 +394,7 @@ def export_pack(
     title = _plain_text(title, "pack title", TITLE_CAP, required=True)
     if printable(title) != title:
         raise PackError("pack title must not hold control characters")
+    _check_pack_fields(series, author, notes)
     out = Path(out)
     if out.exists() or out.is_symlink():
         raise PackError(f"{out} already exists; export to a new path")

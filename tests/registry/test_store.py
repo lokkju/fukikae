@@ -686,3 +686,16 @@ def test_v2_registry_migrates_to_3_with_chosen_by(tmp_path: Path):
     con = sqlite3.connect(p)
     assert con.execute("SELECT version FROM schema_version").fetchall() == [(3,)]
     con.close()
+
+
+@pytest.mark.parametrize("bad", ["9" * 101, "a\x1bb", "   "])
+def test_character_external_id_is_validated(reg: Registry, bad: str):
+    cid = _char(reg)
+    with pytest.raises(ValueError, match="external id"):
+        reg.set_character_external_id(cid, bad)
+
+
+def test_character_external_id_is_stripped(reg: Registry):
+    cid = _char(reg)
+    reg.set_character_external_id(cid, " 1234 ")
+    assert reg.characters()[0].external_id == "1234"
