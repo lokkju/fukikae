@@ -92,6 +92,7 @@ from fukikae.backends.identity import identity_key
 from fukikae.backends.tts import worker
 from fukikae.backends.tts.remote import WorkerSynthesizer
 from fukikae.cards.auto import (
+    FALLBACK_BY,
     character_spans,
     clone_backend,
     ensure_assignments,
@@ -868,7 +869,7 @@ class TtsStage:
         store = CardStore(ep.workspace_root)
         self._prepared += self._assign(
             ep, cfg, cues, store, ep.work / "01-separate" / "vocals.wav"
-        )[2]
+        )[2]  # its flags are worked out again by run(), which records them
 
     def inputs(self, ep: Episode) -> list[Path]:
         cfg = self._config(ep)
@@ -929,7 +930,9 @@ class TtsStage:
         default_bc, _ = stage_settings(cfg)
         speedup = max_speedup(cfg)
 
-        cards, names, report = self._assign(ep, cfg, cues, store, vocals)
+        cards, names, report, flags = self._assign(ep, cfg, cues, store, vocals)
+        for line in flags:
+            log.warning("tts: %s", line)
         report = self._prepared + report
         self._prepared = []
         extra_cards = self._extra_cards(cues, cfg, store, default_bc.backend)
@@ -1048,6 +1051,7 @@ class TtsStage:
                 rendered=fresh,
                 cached=cached,
                 report=report,
+                flags=flags,
                 rate_estimated=rates.estimated,
                 rate_refits=rates.refits,
             ),
@@ -1082,30 +1086,38 @@ class TtsStage:
     @classmethod
     def _assign(
         cls, ep: Episode, cfg: Config, cues: list[DubCue], store: CardStore, vocals: Path
-    ) -> tuple[dict[int, str], dict[int, str], list[str]]:
-        """(character -> card id, character -> name, report lines), after giving every
-        character with a cue to speak (not all skipped or errored) and no card one. New lines
-        are appended to ``07-tts/assignments.log``."""
+    ) -> tuple[dict[int, str], dict[int, str], list[str], list[str]]:
+        """(character -> card id, character -> name, report lines, flag lines), after giving
+        every character with a cue to speak (not all skipped or errored) and no card one, and
+        re-picking stale automatic cards. The report lines are the cards assigned, appended to
+        ``07-tts/assignments.log``; the flags (curated cards the subtitle names contradict,
+        episodes skipped for stale assignments) changed nothing and go only to ``run.json``."""
         speaking = sorted(
             {c.character_id for c in cues if c.character_id is not None and cls._skipped(c) is None}
         )
         if not speaking:
-            return {}, {}, []
+            return {}, {}, [], []
         asg_path = ep.work / "05-characters" / "assignments.json"
         spans = character_spans(read_json(asg_path, Assignments)) if asg_path.exists() else {}
+        flags: list[str] = []
         with Registry(Workspace(ep.workspace_root).registry_path) as reg:
             names = {c.id: c.name for c in reg.characters() if c.name}
-            todo = [
+            current = {cid: reg.card_for(cid, cfg.target_language) for cid in speaking}
+            todo = [cid for cid, a in current.items() if a is None or a.card_id is None]
+            # stock stand-ins made while the clone backend couldn't run: replaced once it can
+            fallback = [
                 cid
-                for cid in speaking
-                if (a := reg.card_for(cid, cfg.target_language)) is None or a.card_id is None
+                for cid, a in current.items()
+                if a is not None and a.chosen_by == FALLBACK_BY and not a.locked
             ]
             # clone cards whose references the subtitle names now contradict (D29 #4)
             stale = stale_cards(
-                Workspace(ep.workspace_root), reg, store, speaking, cfg.target_language
-            )
-            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if todo or stale else None
-            if todo:  # the gender estimate never reads a theme song or tagged singing
+                Workspace(ep.workspace_root), reg, store, speaking, cfg.target_language,
+                notes=flags,
+            )  # fmt: skip
+            work = bool(todo or stale or fallback)
+            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if work else None
+            if work:  # the gender estimate never reads a theme song or tagged singing
                 exclude = _song_spans(ep, cfg)
                 spans = {
                     cid: [(s, e) for s, e in sp if not any(a < e and s < b for a, b in exclude)]
@@ -1119,6 +1131,7 @@ class TtsStage:
                 vocals,
                 cloning=cloning,
                 stale=stale,
+                flags=flags,
             )
             cards: dict[int, str] = {}
             for cid in speaking:
@@ -1133,7 +1146,7 @@ class TtsStage:
                 for line in report:
                     log.info("tts: %s", line)
                     f.write(f"{stamp} {ep.id} {cfg.target_language}: {line}\n")
-        return cards, names, report
+        return cards, names, report, flags
 
     @staticmethod
     def _extra_cards(

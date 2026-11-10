@@ -198,7 +198,9 @@ class TtsPlan(BaseModel):
 class TtsRun(BaseModel):
     """What one tts run did, ``07-tts/run.json``; not a stage output, so nothing downstream
     depends on it. ``report`` holds the lines of the cards this run assigned (they are also
-    appended to ``07-tts/assignments.log`` and kept as history notes)."""
+    appended to ``07-tts/assignments.log`` and kept as history notes). ``flags`` holds what
+    the run noticed but changed nothing for (a curated card the subtitle names contradict, an
+    episode skipped because its assignments are older than its names); only here."""
 
     schema_version: int = 1
     episode: str
@@ -207,6 +209,7 @@ class TtsRun(BaseModel):
     rendered: list[str]
     cached: list[str]
     report: list[str] = []
+    flags: list[str] = []
     # D26: cues rendered first at an estimated rate, and those of them rendered once more.
     rate_estimated: int = 0
     rate_refits: int = 0
