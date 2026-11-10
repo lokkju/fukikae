@@ -91,7 +91,7 @@ tests/
   registry/test_store.py, test_cli.py, test_resolve.py, test_reembed.py (extended)
   cards/test_auto.py (extended), test_cues.py (extended)
   eval/test_names.py, eval/identity/ (extended)
-docs/results/2026-11-1x-subtitle-speaker-names.md   # Task 11
+docs/results/2026-11-10-subtitle-speaker-names.md   # Task 11
 ```
 
 ---
@@ -785,10 +785,12 @@ git -C $REPO commit -m "feat(names): names scan and show, eval names with held-o
 ### Task 11: Fairy Tail evaluation, results doc and ledger
 
 **Files:**
-- Create: `docs/results/2026-11-1x-subtitle-speaker-names.md` (dated the day it is written), `scripts/names-eval/run_arms.sh` (the exact commands, committed for reproducibility)
+- Create: `docs/results/2026-11-10-subtitle-speaker-names.md` (dated the day it is written), `scripts/names-eval/run_arms.sh` (the exact commands, committed for reproducibility)
 - Modify: the execution ledger (rulings with numbers)
 
 No code changes. CPU only, except the optional en E11 run.
+
+As run (2026-11-10): copies under `~/fukikae-scratch/names-t11/<language>-<arm>/` built by `scripts/names-eval/make_arm.sh`, the commands in `scripts/names-eval/run_arms.sh`, ledger tags `t11-names-<language>-<arm>` (exported to `docs/results/2026-11-10-subtitle-speaker-names.jsonl`). Per the Task 10 review, the ceiling arm is scored with `--ceiling S01E14`, protocol B tunes on all four episodes, and the en set has E11 (D29 #7). Results and deviations: `docs/results/2026-11-10-subtitle-speaker-names.md`.
 
 - [ ] **Step 1: Workspaces.** `cp -al ~/fukikae-scratch/t12/fairytail ~/fukikae-ws/t-names/ft-ja-<arm>` for arms `baseline`, `names`, `ceiling`, `hidden`, `hidden-base`. Stage outputs are written by rename, so hard links are safe for them; the files changed in place are not. In each copy, replace `.fukikae/registry`, `.fukikae/hashcache.json` and `fukikae.toml` with real copies (`cp -a --remove-destination <t12 file> <copy file>`) and check `stat -c %h` prints 1 for each before anything runs. Then set `[names]` per the spec's protocols in the copy's `fukikae.toml`.
 - [ ] **Step 2: Scan.** `mise -C $REPO exec -- uv run --directory $REPO fukikae names scan ~/fukikae-ws/t-names/ft-ja-names` records each episode's verdict (expect `full` on E11 to E14, E11 via its forced-flagged full track). Paste the table into the results doc.
@@ -800,7 +802,7 @@ No code changes. CPU only, except the optional en E11 run.
 - [ ] **Step 8: Commit**
 
 ```bash
-git -C $REPO add docs/results/2026-11-1x-subtitle-speaker-names.md scripts/names-eval/run_arms.sh
+git -C $REPO add docs/results/2026-11-10-subtitle-speaker-names.md scripts/names-eval/run_arms.sh
 git -C $REPO commit -m "docs(results): subtitle speaker names on Fairy Tail E11-E14, held-out and hidden-line protocols"
 ```
 

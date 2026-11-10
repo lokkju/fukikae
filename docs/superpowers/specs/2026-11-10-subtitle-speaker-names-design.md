@@ -226,7 +226,7 @@ Scored with the existing harness: `fukikae eval identity <ws> --from-assignments
 - *reference purity*: per character, the share of its auto-picked reference seconds (`character_references` over the workspace's episodes, computed, not rendered) whose ground-truth label (60% cover) is the character's modal name. This is the measure of the actual failure: Natsu cloned from Wendy is a purity failure.
 - *coverage*: named share, sub-clusters per episode, cut turns, dropped row seconds, unvoiced lines.
 
-Rows go to the results ledger with `stage = "names"` (GT2-additive), tags naming the arm, and the identity harness's own rows beside them. Results in `docs/results/2026-11-1x-subtitle-speaker-names.md`. Every threshold here (0.5, 0.6, 0.5 s, 0.3 s, 5 s, 90%, 80%) is fixed by this spec before any run; a defect found on E14 is a ruling with its numbers, never a retune on E14.
+Rows go to the results ledger with `stage = "names"` (GT2-additive), tags naming the arm, and the identity harness's own rows beside them. Results in `docs/results/2026-11-10-subtitle-speaker-names.md`. Every threshold here (0.5, 0.6, 0.5 s, 0.3 s, 5 s, 90%, 80%) is fixed by this spec before any run; a defect found on E14 is a ruling with its numbers, never a retune on E14.
 
 ## Calls I made (for the operator to check)
 
