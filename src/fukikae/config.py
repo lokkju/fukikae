@@ -7,7 +7,7 @@ import tomllib
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 _DEFAULT_USER_CONFIG = object()
 _RESERVED = ("backend", "lang", "pair")
@@ -68,6 +68,115 @@ class RegistrySettings:
     match_threshold: float = 0.6
 
 
+NAMES_USES = ("auto", "on", "off")
+NamesUse = Literal["auto", "on", "off"]
+
+
+@dataclass(frozen=True)
+class NamesSettings:
+    """`[names]`: a settings table with no backend (exempt from R3 like `[resolve]`). The
+    defaults equal `names.detect.MIN_COVERAGE` and `names.align.TURN_SHARE` (a test pins
+    them; config can't import those modules, which import config)."""
+
+    use: NamesUse = "auto"
+    file: str | None = None  # an operator-supplied names file; `{episode}` replaced
+    track: int | None = None  # a subtitle stream index
+    min_coverage: float = 0.5
+    turn_share: float = 0.6
+    min_new_seconds: float = 5.0
+    align: bool = True
+    # evaluation only
+    holdout_episodes: tuple[str, ...] = ()
+    hide_fraction: float = 0.0
+    hide_seed: int = 0
+
+
+def _number(table: dict[str, Any], key: str, default: float, lo: float, hi: float) -> float:
+    value = table.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int | float) or not lo <= value <= hi:
+        raise ConfigError(f"[names] {key} must be a number from {lo:g} to {hi:g}, not {value!r}")
+    return float(value)
+
+
+def _positive(table: dict[str, Any], key: str, default: float, hi: float) -> float:
+    value = _number(table, key, default, 0.0, hi)
+    if value <= 0:
+        raise ConfigError(f"[names] {key} must be above 0 and at most {hi:g}, not {value!r}")
+    return value
+
+
+_EPISODE_ID = re.compile(r"[Ss](\d+)[Ee](\d+)")
+_SLUG_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")  # workspace.episode_id without SxxEyy
+
+
+def canonical_episode_id(text: str) -> str | None:
+    """``S%02dE%02d`` for an id spelled ``s1e3``, ``S01E03`` and the like (the form
+    ``workspace.episode_id`` gives an episode), else None."""
+    m = _EPISODE_ID.fullmatch(text.strip())
+    return None if m is None else f"S{int(m[1]):02d}E{int(m[2]):02d}"
+
+
+def names_settings(table: Any) -> NamesSettings:
+    """`[names]` checked: unknown keys, wrong types and out-of-range values are a ConfigError."""
+    if table is None:
+        return NamesSettings()
+    if not isinstance(table, dict):
+        raise ConfigError(f"[names] must be a table, not {table!r}")
+    allowed = set(NamesSettings.__dataclass_fields__)
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"[names] has unknown key(s) {', '.join(unknown)}; "
+            f"allowed: {', '.join(sorted(allowed))}"
+        )
+    use = table.get("use", "auto")
+    if use not in NAMES_USES:
+        raise ConfigError(f"[names] use must be one of {', '.join(NAMES_USES)}, not {use!r}")
+    file = table.get("file")
+    if file is not None and (not isinstance(file, str) or not file):
+        raise ConfigError(f"[names] file must be a path, not {file!r}")
+    track = table.get("track")
+    if track is not None and (isinstance(track, bool) or not isinstance(track, int) or track < 0):
+        raise ConfigError(
+            f"[names] track must be a subtitle stream index (a number from 0), not {track!r}"
+        )
+    align = table.get("align", True)
+    if not isinstance(align, bool):
+        raise ConfigError(f"[names] align must be true or false, not {align!r}")
+    holdout = table.get("holdout_episodes", [])
+    if not isinstance(holdout, list) or not all(isinstance(e, str) for e in holdout):
+        raise ConfigError(
+            f"[names] holdout_episodes must be a list of episode ids, not {holdout!r}"
+        )
+    canonical: list[str] = []
+    for e in holdout:
+        eid = canonical_episode_id(e)
+        if eid is None and _SLUG_ID.fullmatch(e) and not _EPISODE_ID.search(e):
+            eid = e  # workspace.episode_id's slug, for a file named without SxxEyy
+        if eid is None:
+            raise ConfigError(
+                f"[names] holdout_episodes: {e!r} is not an episode id like S01E14 (or the "
+                "slug a file named without SxxEyy gets, such as ova-2)"
+            )
+        if eid not in canonical:
+            canonical.append(eid)
+    seed = table.get("hide_seed", 0)
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ConfigError(f"[names] hide_seed must be a whole number, not {seed!r}")
+    return NamesSettings(
+        use=cast(NamesUse, use),
+        file=file,
+        track=track,
+        min_coverage=_number(table, "min_coverage", 0.5, 0.0, 1.0),
+        turn_share=_positive(table, "turn_share", 0.6, 1.0),
+        min_new_seconds=_number(table, "min_new_seconds", 5.0, 0.0, float("inf")),
+        align=align,
+        holdout_episodes=tuple(canonical),
+        hide_fraction=_number(table, "hide_fraction", 0.0, 0.0, 0.9),
+        hide_seed=seed,
+    )
+
+
 @dataclass(frozen=True)
 class SeriesInfo:
     """The workspace's `[series]` table: the title and genre the results ledger records."""
@@ -88,6 +197,7 @@ class Config:
     profile: str = "default"
     profile_raw: dict[str, Any] = field(default_factory=dict)
     series: SeriesInfo = field(default_factory=lambda: SeriesInfo("", "default", {}))
+    names: NamesSettings = field(default_factory=NamesSettings)
 
     def resolve(
         self,
@@ -249,4 +359,5 @@ def load_config(
         profile=profile,
         profile_raw=profile_raw,
         series=_series(raw.get("series"), workspace, profile),
+        names=names_settings(raw.get("names")),
     )

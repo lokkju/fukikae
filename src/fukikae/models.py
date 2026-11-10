@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, SerializerFunctionWrapHandler, model_serializer
 
 
 class Word(BaseModel):
@@ -72,12 +72,29 @@ class Separation(BaseModel):
 
 
 class ClusterAssignment(BaseModel):
+    """One (refined) cluster's character. ``name`` is the subtitle name key a names-stage
+    sub-cluster stands for, and ``source`` how it got its character: ``voice`` (pinned or
+    matched acoustically), ``name`` (by its name key) or ``lock`` (kept by a locked actor
+    against its name). Both are left out of the JSON at their defaults, so assignments written
+    without names are byte-identical to those written before the fields existed."""
+
     cluster: str
     actor_id: int | None
     character_id: int | None
     score: float | None
     clean_seconds: float
     status: Literal["matched", "new", "extra", "pinned", "review"]
+    name: str | None = None
+    source: Literal["voice", "name", "lock"] = "voice"
+
+    @model_serializer(mode="wrap")
+    def _omit_defaults(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        out: dict[str, Any] = handler(self)
+        if self.name is None:
+            out.pop("name", None)
+        if self.source == "voice":
+            out.pop("source", None)
+        return out
 
 
 class Assignments(BaseModel):
@@ -181,7 +198,9 @@ class TtsPlan(BaseModel):
 class TtsRun(BaseModel):
     """What one tts run did, ``07-tts/run.json``; not a stage output, so nothing downstream
     depends on it. ``report`` holds the lines of the cards this run assigned (they are also
-    appended to ``07-tts/assignments.log`` and kept as history notes)."""
+    appended to ``07-tts/assignments.log`` and kept as history notes). ``flags`` holds what
+    the run noticed but changed nothing for (a curated card the subtitle names contradict, an
+    episode skipped because its assignments are older than its names); only here."""
 
     schema_version: int = 1
     episode: str
@@ -190,6 +209,7 @@ class TtsRun(BaseModel):
     rendered: list[str]
     cached: list[str]
     report: list[str] = []
+    flags: list[str] = []
     # D26: cues rendered first at an estimated rate, and those of them rendered once more.
     rate_estimated: int = 0
     rate_refits: int = 0

@@ -1,7 +1,9 @@
 """Re-embed the registry after an embedder change (Ruling R19): `fukikae registry reembed`.
 
-Each exemplar is one row of its episode cluster's ``04-diarize/clusters.npz`` (the characters
-stage, `registry cluster` and `registry resolve` add a cluster's rows in order). Its span is
+Each exemplar is one row of its episode cluster's ``clusters.npz`` (the characters stage,
+`registry cluster` and `registry resolve` add a cluster's rows in order): the identity
+inputs' (``04c-names`` when names were used, so a ``<cluster>~<slug>`` sub-cluster is found
+there), else ``04-diarize``'s (exemplars from a run before names). Its span is
 the same row of ``<cluster>/spans``, so the configured embedder can embed it again from the
 episode's separated stem (``01-separate/vocals_16k.wav``, what the diarize stage embeds).
 
@@ -33,8 +35,9 @@ the actors, and changes nothing.
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import ExitStack
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 
@@ -46,6 +49,7 @@ from fukikae.config import BackendConfig
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, Diarization
+from fukikae.names.inputs import DIARIZE_DIR, identity_inputs
 from fukikae.registry.store import Exemplar, ReembedResult, Registry
 from fukikae.workspace import Workspace
 
@@ -86,40 +90,65 @@ class ReembedPlan:
         return sum(len(s) for groups in self.work.values() for _, s in groups)
 
 
+def _check_cluster(
+    z: Any, cluster: str, exs: list[Exemplar], same_turns: bool
+) -> tuple[list[tuple[float, float]], str | None]:
+    """The cluster's spans in one clusters.npz, or why its exemplars don't come from it."""
+    if cluster not in {str(x) for x in z["labels"]}:
+        return [], f"cluster {cluster} is not in its clusters.npz"
+    spans = [(float(a), float(b)) for a, b in np.asarray(z[f"{cluster}/spans"]).reshape(-1, 2)]
+    rows = np.asarray(z[f"{cluster}/embeddings"], dtype=np.float32)
+    stored = np.stack([e.embedding for e in exs])
+    same_rows = stored.shape == rows.shape and np.allclose(stored, rows, atol=1e-6)
+    if len(spans) != len(exs) or not (same_rows or same_turns):
+        return [], (
+            f"cluster {cluster} no longer matches its {len(exs)} exemplars (diarize "
+            "re-ran since they were added)"
+        )
+    return spans, None
+
+
 def _check_episode(
     ws: Workspace, eid: str, groups: dict[str | None, list[Exemplar]]
 ) -> tuple[list[tuple[list[int], list[tuple[float, float]]]], str | None]:
-    """The episode's (exemplar ids, spans) per cluster, or the reason it cannot be done."""
+    """The episode's (exemplar ids, spans) per cluster, or the reason it cannot be done.
+
+    A cluster is looked up first in the identity inputs (`identity_inputs`: the names stage's
+    ``04c-names`` pair when names were used, holding the ``<cluster>~<slug>`` sub-clusters and
+    the remainders), then in ``04-diarize``'s pair, which holds the exemplars of a run from
+    before names were used; the first pair whose rows (or recorded turns) match is used."""
     work = ws.work_dir(eid)
-    turns_path = work / "04-diarize" / "turns.json"
-    npz = work / "04-diarize" / "clusters.npz"
     stem = work / "01-separate" / "vocals_16k.wav"
-    missing = [p.relative_to(work).as_posix() for p in (turns_path, npz, stem) if not p.exists()]
+    identity = identity_inputs(work)[:2]
+    diarize = (work / DIARIZE_DIR / "turns.json", work / DIARIZE_DIR / "clusters.npz")
+    pairs = [identity] + ([diarize] if diarize != identity else [])
+    needed = {p for pair in pairs[:1] for p in pair} | {stem}
+    missing = [p.relative_to(work).as_posix() for p in sorted(needed) if not p.exists()]
     if missing:
         return [], f"missing {', '.join(missing)}"
     recorded = None
     assignments = work / "05-characters" / "assignments.json"
     if assignments.exists():
         recorded = read_json(assignments, Assignments).turns
-    same_turns = recorded is not None and recorded == read_json(turns_path, Diarization).turns
     out: list[tuple[list[int], list[tuple[float, float]]]] = []
-    with np.load(npz) as z:
-        labels = {str(x) for x in z["labels"]}
+    with ExitStack() as stack:
+        opened = [
+            (stack.enter_context(np.load(npz)), recorded is not None
+             and recorded == read_json(turns_path, Diarization).turns)
+            for turns_path, npz in pairs
+            if turns_path.exists() and npz.exists()
+        ]  # fmt: skip
         for cluster, exs in sorted(groups.items(), key=lambda kv: str(kv[0])):
-            if cluster is None or cluster not in labels:
+            if cluster is None:
                 return [], f"cluster {cluster} is not in its clusters.npz"
-            spans = [
-                (float(a), float(b)) for a, b in np.asarray(z[f"{cluster}/spans"]).reshape(-1, 2)
-            ]
-            rows = np.asarray(z[f"{cluster}/embeddings"], dtype=np.float32)
-            stored = np.stack([e.embedding for e in exs])
-            same_rows = stored.shape == rows.shape and np.allclose(stored, rows, atol=1e-6)
-            if len(spans) != len(exs) or not (same_rows or same_turns):
-                return [], (
-                    f"cluster {cluster} no longer matches its {len(exs)} exemplars (diarize "
-                    "re-ran since they were added)"
-                )
-            out.append(([e.id for e in exs], spans))
+            why: str | None = None
+            for z, same_turns in opened:
+                spans, why = _check_cluster(z, cluster, exs, same_turns)
+                if why is None:
+                    out.append(([e.id for e in exs], spans))
+                    break
+            if why is not None:
+                return [], why
     return out, None
 
 

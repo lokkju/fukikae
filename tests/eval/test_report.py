@@ -28,6 +28,7 @@ def test_headline_metrics():
         "identity": "fraction",
         "embedder": "nc_overall",
         "tts": "speaker_similarity",
+        "names": "cue_accuracy",
     }
 
 

@@ -924,6 +924,204 @@ def test_the_retry_seed_wraps_at_32_bits():
     assert tts.retry_seed(41) == 42
 
 
+def test_a_stale_card_builds_the_clone_source_and_reaches_ensure_assignments(ep, monkeypatch):
+    """D29 #4: every speaking character has a card, but character 1's references are stale,
+    so the stage builds the clone source anyway and hands ensure_assignments the stale list."""
+    _two_cards(ep)
+    stale = {1: [{"episode": "e1", "start": 0.0, "end": 2.5, "overlap": 1.0, "names": []}]}
+    seen: dict = {}
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: stale)
+    monkeypatch.setattr(
+        "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
+    )
+
+    def ensure(*_, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments", ensure)
+    store = CardStore(ep.workspace_root)
+    TtsStage._assign(ep, CFG, CUES, store, ep.work / "01-separate" / "vocals.wav")
+    assert seen["cloning"] == "c" and seen["stale"] == stale
+
+
+def _auto_card(ep: Episode, character: int, voice: str, by: str = "auto") -> str:
+    """An unlocked automatic stock card for ``character``."""
+    cid = CardStore(ep.workspace_root).put(parse_card(_stock(voice)))
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.assign_card(character, "en", cid, by=by, locked=False)
+    return cid
+
+
+STALE_1 = {1: [{"episode": "e1", "start": 0.0, "end": 2.5, "overlap": 1.0, "names": ["lucy"]}]}
+
+
+def test_a_stale_card_alone_keeps_songs_out_of_the_gender_estimate(ep, monkeypatch):
+    """Nothing is new, but a stale re-pick may fall back to a stock voice, whose gender
+    estimate must not read a theme song either."""
+    _two_cards(ep)
+    seen: dict = {}
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: STALE_1)
+    monkeypatch.setattr("fukikae.stages.tts.workspace_cloning", lambda *_, **__: None)
+    monkeypatch.setattr("fukikae.stages.tts._song_spans", lambda *_: [(0.0, 1.0)])
+
+    def ensure(_reg, _store, _cfg, spans, *_, **__):
+        seen["spans"] = spans
+        return []
+
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments", ensure)
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    assert seen["spans"] == {1: [], 2: [(3.0, 5.0)]}
+
+
+def test_an_auto_fallback_card_builds_the_clone_source(ep, monkeypatch):
+    """Every speaking character has a card, none stale, but character 1's is the stock
+    stand-in made while the clone backend couldn't run: the clone source is built so
+    ensure_assignments can replace it."""
+    _auto_card(ep, 1, "am_adam", by="auto-fallback")
+    _assign(ep, 2, _stock("af_heart"))
+    seen: dict = {}
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.repick_blocker", lambda _cfg: None)
+    monkeypatch.setattr(
+        "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
+    )
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
+                        lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    assert seen["cloning"] == "c"
+    # locked, it is never replaced, so nothing is built
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.lock_card(1, "en", True)
+    seen.clear()
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    assert seen["cloning"] is None
+
+
+def test_an_auto_fallback_card_builds_nothing_while_cloning_still_cant_run(ep, monkeypatch):
+    """Final review B #6: the stand-in is upgraded only when cloning works; while the clone
+    backend still can't run (repick_blocker says why), no clone source is built for it."""
+    _auto_card(ep, 1, "am_adam", by="auto-fallback")
+    _assign(ep, 2, _stock("af_heart"))
+    seen: dict = {}
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.repick_blocker", lambda _cfg: "no clone backend")
+
+    def cloning(*_, **__):
+        raise AssertionError("built a clone source no one can use")
+
+    monkeypatch.setattr("fukikae.stages.tts.workspace_cloning", cloning)
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
+                        lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    assert seen["cloning"] is None
+
+
+def test_flags_go_to_run_json_not_to_the_assignments_log(ep, monkeypatch):
+    """A flag changes nothing: it is recorded in run.json for this run only, never appended
+    to assignments.log, and prepare() doesn't carry it into the run's report."""
+    _two_cards(ep)
+
+    def ensure(*_, flags=None, **__):
+        assert flags is not None
+        flags.append("character 1's card was cloned from turns now named LUCY")
+        return []
+
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **kw: kw["notes"].append(
+        "e0: its assignments.json is older than its names") or {})  # fmt: skip
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments", ensure)
+    stage = TtsStage(CFG)
+    for _ in range(2):
+        stage.prepare(ep, CFG)
+        stage.run(ep, CFG)
+        assert _run(ep).flags == [
+            "e0: its assignments.json is older than its names",
+            "character 1's card was cloned from turns now named LUCY",
+        ]
+        assert _run(ep).report == []
+    assert not (ep.work / "07-tts" / "assignments.log").exists()
+
+
+def test_a_re_pick_in_prepare_changes_the_tts_key(ep, monkeypatch):
+    """prepare() runs before the key: a stale automatic card re-picked there is in the key
+    the run records, so the re-picked character renders again."""
+    old = _auto_card(ep, 1, "am_adam")
+    _assign(ep, 2, _stock("af_heart"))
+    stage = TtsStage(CFG)
+    before = stage.config_key(CFG, ep)
+    assert before["cards"]["1"] == old
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: STALE_1)
+    monkeypatch.setattr("fukikae.stages.tts.workspace_cloning", lambda *_, **__: None)
+
+    def ensure(reg, store, *_, **__):
+        new = store.put(parse_card(_stock("bm_george")))
+        reg.assign_card(1, "en", new, by="auto", locked=False, note="re-picked")
+        return [f"character 1: re-picked, card {new}"]
+
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments", ensure)
+    stage.prepare(ep, CFG)
+    after = stage.config_key(CFG, ep)
+    assert after["cards"]["1"] != old and after["cards"]["2"] == before["cards"]["2"]
+    assert after != before
+
+
+def test_a_second_run_after_a_re_pick_is_a_no_op(ep, monkeypatch):
+    """F10: the first run re-picks character 1's stale automatic card and renders its cues;
+    the new card isn't stale, so a second prepare and run changes no card, keeps the key and
+    renders nothing. ensure_assignments re-picks only what it is handed as stale, as the real
+    one does."""
+    old = _auto_card(ep, 1, "am_adam")
+    _assign(ep, 2, _stock("af_heart"))
+
+    def stale(_ws, reg, *_a, **_k):
+        card = reg.card_for(1, "en")
+        return STALE_1 if card is not None and card.card_id == old else {}
+
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", stale)
+    monkeypatch.setattr("fukikae.stages.tts.workspace_cloning", lambda *_, **__: None)
+    picks: list[str] = []
+
+    def ensure(reg, store, *_, stale=None, **__):
+        if not stale:
+            return []
+        new = store.put(parse_card(_stock("bf_emma")))
+        reg.assign_card(1, "en", new, by="auto", locked=False, note="re-picked")
+        picks.append(new)
+        return [f"character 1: re-picked, card {new}"]
+
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments", ensure)
+    stage = TtsStage(CFG)
+    stage.prepare(ep, CFG)
+    key = stage.config_key(CFG, ep)
+    assert key["cards"]["1"] != old
+    stage.run(ep, CFG)
+    assert _run(ep).report and _run(ep).rendered
+    FakeSynth.CALLS.clear()
+    stage = TtsStage(CFG)
+    stage.prepare(ep, CFG)
+    assert stage.config_key(CFG, ep) == key
+    stage.run(ep, CFG)
+    assert FakeSynth.CALLS == []
+    assert _run(ep).rendered == [] and _run(ep).report == []
+    assert len(picks) == 1
+
+
+def test_a_run_json_written_before_flags_loads(ep):
+    """F10: run.json from before the flags field (and the D26 counters) reads with defaults."""
+    import json
+
+    from fukikae.models import TtsRun
+
+    path = ep.work / "07-tts" / "run.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "schema_version": 1, "episode": "S01E01", "finished": "2026-11-01T00:00:00Z",
+        "renders": 2, "rendered": ["c0001"], "cached": ["c0002"], "report": ["a line"],
+    }), encoding="utf-8")  # fmt: skip
+    got = read_json(path, TtsRun)
+    assert got.flags == [] and got.report == ["a line"] and got.rate_refits == 0
+
+
 def test_jobs_render_grouped_by_card_in_cue_order_within_each(ep):
     """D28: a backend's jobs render one card at a time (cards in order of first appearance,
     each card's cues in cue order), so a cloning backend conditions on each speaker once."""

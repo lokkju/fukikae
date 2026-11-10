@@ -5,6 +5,7 @@ from typing import Any
 
 import typer
 
+from fukikae.names.inputs import identity_inputs
 from fukikae.workspace import Episode, Workspace
 
 registry_app = typer.Typer(help="Manage the series character registry.", no_args_is_help=True)
@@ -39,7 +40,7 @@ def rematch(
         for n in ("extract", "separate", "language", "asr", "diarize")
         if n not in records or records[n].status != "done"
     ]
-    if missing or any(not p.exists() for p in stage.inputs(ep)):
+    if missing or any(not p.exists() for p in identity_inputs(ep.work)[:2]):
         typer.echo(
             f"error: {ep.id}: earlier stages not done ({', '.join(missing) or 'diarize outputs'}); "
             f"run `fukikae run` first",
@@ -120,7 +121,10 @@ def _remap_assignments(
 ) -> None:
     """Keep an episode's assignments.json in step with a merge or split.
 
-    Pinning copies actor and character ids from it, so stale ids would survive a rerun.
+    Pinning copies actor and character ids from it, so stale ids would survive a rerun. A
+    split (``character``) also makes the split label a voice decision (``source = "voice"``,
+    no ``name``): the operator has overruled whatever name put it there, and the label's pin
+    to the new actor and character then carries over like any acoustic one.
     """
     from fukikae.artifacts import read_json, write_json
     from fukikae.models import Assignments
@@ -134,11 +138,13 @@ def _remap_assignments(
         if only_cluster is not None and c.cluster != only_cluster:
             out.append(c)
             continue
-        upd: dict[str, int | None] = {}
+        upd: dict[str, int | str | None] = {}
         if c.actor_id in actor_map:
             upd["actor_id"] = actor_map[c.actor_id]
         if character is not None and c.cluster == only_cluster:
             upd["character_id"] = character[1]
+            upd["source"] = "voice"
+            upd["name"] = None
         if character_map and c.character_id in character_map:
             upd["character_id"] = character_map[c.character_id]
         out.append(c.model_copy(update=upd))
@@ -183,7 +189,11 @@ def cluster(
     not_done = []
     for ep in eps:
         rec = load_manifest(ep).stages.get("diarize")
-        if rec is None or rec.status != "done" or any(not p.exists() for p in stage.inputs(ep)):
+        if (
+            rec is None
+            or rec.status != "done"
+            or any(not p.exists() for p in identity_inputs(ep.work)[:2])
+        ):
             not_done.append(ep.id)
     if not_done:
         raise _fail(f"diarize stage not done for {', '.join(not_done)}; run `fukikae run` first")
@@ -194,7 +204,7 @@ def cluster(
                 "the registry already has actors; batch seeding needs an empty one. "
                 "Use per-episode matching (`fukikae run`, `registry rematch`)."
             )
-        loaded = {ep.id: load_clusters(stage.inputs(ep)[1]) for ep in eps}
+        loaded = {ep.id: load_clusters(identity_inputs(ep.work)[1]) for ep in eps}
         _same_dims(
             {
                 e: next((r.shape[1] for r in rows.values() if len(r)), 0)
@@ -232,7 +242,7 @@ def cluster(
             reg.recompute_centroid(aid)
 
     for ep in eps:
-        turns_path = stage.inputs(ep)[0]
+        turns_path = identity_inputs(ep.work)[0]
         turns = read_json(turns_path, Diarization)
         evs, _ = loaded[ep.id]
         out = []
@@ -295,8 +305,12 @@ def show(
             if c.actor_id == actor_id:
                 typer.echo(
                     f"  character {c.id}: {c.name or '-'}"
+                    + (f" (name by {c.name_by})" if c.name and c.name_by else "")
                     + (f" (external id {c.external_id})" if c.external_id else "")
                 )
+                aliases = reg.aliases(c.id)
+                if aliases:
+                    typer.echo("    aliases: " + ", ".join(f"{a.alias} ({a.by})" for a in aliases))
         for eid, n in reg.episode_counts(actor_id).items():
             typer.echo(f"  {eid}: {n} exemplars")
 
@@ -312,18 +326,117 @@ def rename(
         help="The character's id in an outside source (an AniDB character id); '' clears it.",
     ),
 ) -> None:
-    """Name a character; its episodes' characters stage reruns next time."""
+    """Name a character (an operator name, which subtitles never replace) and make it answer to
+    the name's key; its episodes' characters stage reruns next time, and so does every episode
+    whose names stage used that key."""
+    from fukikae.registry.store import alias_key
+
     ws = Workspace(workspace)
     with _open(workspace) as reg:
         char = next((c for c in reg.characters() if c.id == character_id), None)
         if char is None:
             raise _fail(f"no character {character_id}")
         with reg.transaction():
-            reg.rename_character(character_id, name)
+            warning = reg.rename_character(character_id, name)
             if external_id is not None:
                 reg.set_character_external_id(character_id, external_id or None)
         affected = list(reg.episode_counts(char.actor_id))
-    _stale(ws, affected)
+    if warning:
+        typer.echo(f"warning: {warning}")
+    key = alias_key(name)
+    users = _episodes_with_key(ws, key) if key is not None else []
+    _stale(ws, sorted(set(affected) | set(users)))
+
+
+def _episodes_with_key(ws: Workspace, key: str) -> list[str]:
+    """Episodes whose names stage used a line of this key."""
+    from fukikae.artifacts import read_json
+    from fukikae.names.inputs import names_path
+    from fukikae.names.models import NamesResult
+
+    out = []
+    episodes = ws.root / ".fukikae" / "episodes"
+    for work in sorted(episodes.iterdir()) if episodes.is_dir() else []:
+        path = names_path(work)
+        if not path.is_file():
+            continue
+        try:
+            r = read_json(path, NamesResult)
+        except ValueError:
+            continue
+        if r.used and any(ln.key == key for ln in r.visible_lines()):
+            out.append(work.name)
+    return out
+
+
+@registry_app.command("alias")
+def alias(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    character: str | None = typer.Argument(
+        None, metavar="[CHARACTER]", help="Character id or name; omit to list every alias."
+    ),
+    name: str | None = typer.Argument(
+        None,
+        metavar="[NAME]",
+        help="A subtitle Name as written (NATSU, MAKAROV (WRAITH)); omit to list the "
+        "character's aliases.",
+    ),
+    remove: bool = typer.Option(False, "--remove", help="Remove the alias instead."),
+    replace: bool = typer.Option(
+        False, "--replace", help="Move the key from another character's operator alias."
+    ),
+) -> None:
+    """Make a character answer to a subtitle name (an operator alias), remove one, or list them.
+
+    NAME is keyed as the names stage keys a subtitle Name; a name that keys nobody (two
+    speakers such as NATSU/ZEREF, a group word, a sign) is refused. An operator alias moves a
+    subtitles alias of the same key and another operator's only with --replace; it may never
+    be another character's name."""
+    from fukikae.registry.store import AliasConflictError, alias_key
+
+    ws = Workspace(workspace)
+    with _open(workspace) as reg:
+        target = None
+        if character is not None:
+            try:
+                target = reg.character_by_ref(character)
+            except ValueError as e:
+                raise _fail(str(e)) from e
+        if name is None:
+            if remove or replace:
+                raise _fail("--remove and --replace need a NAME")
+            typer.echo("alias\tcharacter\tby\tlanguage")
+            for a in reg.aliases(None if target is None else target.id):
+                typer.echo(f"{a.alias}\t{a.character_id}\t{a.by}\t{a.language or '-'}")
+            return
+        assert target is not None
+        key = alias_key(name)
+        if key is None:
+            raise _fail(
+                f"{name!r} names nobody (two speakers, a group word, a sign or a song, or blank); "
+                "only a single speaker's name can be an alias"
+            )
+        try:
+            before = reg.character_for_key(key) if not remove else None
+        except ValueError as e:  # two characters' names share the key
+            raise _fail(str(e)) from e
+        if remove:
+            held = next((a for a in reg.aliases() if a.alias == key), None)
+            if held is None:
+                raise _fail(f"no alias {key!r}")
+            if held.character_id != target.id:
+                raise _fail(f"{key!r} is character {held.character_id}'s alias, not {target.id}'s")
+            reg.remove_alias(key)
+            typer.echo(f"character {target.id}: alias {key!r} removed")
+        else:
+            try:
+                got = reg.add_alias(target.id, key, by="operator", replace=replace)
+            except AliasConflictError as e:
+                raise _fail(str(e)) from e
+            typer.echo(f"character {target.id}: answers to {got.alias!r} (operator)")
+        actors = {target.actor_id} | ({before.actor_id} if before is not None else set())
+        affected = {e for aid in actors for e in reg.episode_counts(aid)}
+    _stale(ws, sorted(affected | set(_episodes_with_key(ws, key))))
 
 
 @registry_app.command("merge")
@@ -372,16 +485,37 @@ def split(
 @registry_app.command("lock")
 def lock(
     workspace: Path = typer.Argument(..., help="Workspace directory."),
-    actor_id: int = typer.Argument(..., metavar="ID", help="Actor id."),
+    actor_id: int = typer.Argument(
+        ..., metavar="ID", help="Actor id (character id with --character)."
+    ),
     unlock: bool = typer.Option(False, "--unlock", help="Unlock instead."),
+    character: bool = typer.Option(
+        False, "--character", help="ID is a character: lock it against subtitle names."
+    ),
 ) -> None:
-    """Lock an actor's centroid (or unlock it)."""
+    """Lock an actor's centroid (or unlock it); with --character, lock a character, which keeps
+    the speech its clusters hold whatever subtitle names say, and is never named by them. The
+    characters stage reruns next time for the actor's episodes and every episode whose
+    assignments name the actor or character."""
+    from fukikae.registry.usage import episodes_naming
+
+    what = "character" if character else "actor"
+    ws = Workspace(workspace)
     with _open(workspace) as reg:
         try:
-            reg.lock_actor(actor_id, not unlock)
+            if character:
+                reg.lock_character(actor_id, not unlock)
+                owner = next(c.actor_id for c in reg.characters() if c.id == actor_id)
+                users = episodes_naming(ws.root, (), (actor_id,))
+            else:
+                reg.lock_actor(actor_id, not unlock)
+                owner = actor_id
+                users = episodes_naming(ws.root, (actor_id,))
         except KeyError as e:
-            raise _fail(f"no actor {actor_id}") from e
-    typer.echo(f"actor {actor_id}: {'unlocked' if unlock else 'locked'}")
+            raise _fail(f"no {what} {actor_id}") from e
+        affected = set(reg.episode_counts(owner)) | set(users)
+    typer.echo(f"{what} {actor_id}: {'unlocked' if unlock else 'locked'}")
+    _stale(ws, sorted(affected))
 
 
 @registry_app.command("actor")
@@ -403,7 +537,6 @@ def _worked_episodes(ws: Workspace, episodes: str) -> list[Episode]:
     """The listed episodes (SxxEyy codes or media paths), each with a done diarize stage in
     this workspace; anything else is refused as not an episode of this workspace."""
     from fukikae.job import load_manifest
-    from fukikae.stages.characters import CharactersStage
 
     refs = [e.strip() for e in episodes.split(",") if e.strip()]
     if not refs:
@@ -418,7 +551,7 @@ def _worked_episodes(ws: Workspace, episodes: str) -> list[Episode]:
         if (
             rec is None
             or rec.status != "done"
-            or any(not p.exists() for p in CharactersStage().inputs(ep))
+            or any(not p.exists() for p in identity_inputs(ep.work)[:2])
         ):
             raise _fail(
                 f"{ref}: not an episode of this workspace with a done diarize stage "
@@ -455,9 +588,12 @@ def adapt(
 ) -> None:
     """Fit the series' LDA projection from labeled episodes, replacing the previous one.
 
-    Each episode's diarization clean spans are labeled from its subtitles (as `eval identity`
-    labels them) and the labeled rows of its clusters.npz, the embeddings the characters
-    stage matches, train the projection. `[characters] matcher = "lda"` then matches in it.
+    Each episode's identity clusters (the names stage's sub-clusters when names were used,
+    else the diarizer's) have their clean spans labeled from its subtitles (as `eval identity`
+    labels them), and the labeled rows of the matching clusters.npz, the embeddings the
+    characters stage matches, train the projection. A row a names cut moved keeps its old span,
+    which is no longer a clean span of the refined turns, so it trains nothing.
+    `[characters] matcher = "lda"` then matches in it.
     Leave the held-out episode(s) out: a projection must never be fit on an episode it
     later resolves for evaluation.
     """
@@ -493,12 +629,13 @@ def adapt(
                 force=force,
                 label=f"{gt} speaker lines in {ep.id} ({path.name})",
             )
-            turns = read_json(ep.work / "04-diarize" / "turns.json", Diarization).turns
+            turns_path, npz_path, _ = identity_inputs(ep.work)  # names' sub-clusters when used
+            turns = read_json(turns_path, Diarization).turns
             label_of = {
                 (s.cluster, round(s.start, 6), round(s.end, 6)): s.label
                 for s in diarization_segments(ep.id, turns, lines)
             }
-            with np.load(ep.work / "04-diarize" / "clusters.npz") as z:
+            with np.load(npz_path) as z:
                 for cluster in [str(c) for c in z["labels"]]:
                     emb = np.asarray(z[f"{cluster}/embeddings"], dtype=np.float32)
                     if len(emb):
@@ -688,3 +825,5 @@ def resolve(
         f"{' (' + ', '.join(map(str, s.new_actors)) + ')' if s.new_actors else ''}, "
         f"{s.extras} extras; pruned {', '.join(map(str, s.pruned)) or 'none'}"
     )
+    for note in s.notes:
+        typer.echo(f"  {note}")
