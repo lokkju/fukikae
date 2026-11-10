@@ -13,10 +13,16 @@ falls back to the backend's ``default_device`` (SenseVoice and emotion2vec: cuda
 the backend can use it. cuda means the configured GPU under the GPU lock (ruling CD15), and the
 CPU when there is no usable GPU. ``device`` is never a backend option; the preferences (not the
 card found) are in the key.
+
+Keys are checked (C9), whether or not the stage is on: ``[tag]`` takes its stage keys and the
+events backend's ``option_keys``, ``[tag.emotion]`` ``device`` and the emotion backend's, so a
+typo (``enable = true``) is an error instead of tagging silently left off. For a backend that
+declares no ``option_keys`` only near-misses of the stage keys are refused.
 """
 
 from __future__ import annotations
 
+import difflib
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -35,14 +41,66 @@ from fukikae.workspace import Episode
 _sleep = time.sleep
 
 
-def tag_enabled(cfg: Config) -> bool:
-    """`[tag] enabled`, workspace over profile; false when neither sets it."""
-    value: Any = False
+STAGE_KEYS = ("backend", "enabled", "device", "emotion_backend", "emotion", "lang", "pair")
+
+
+def _merged(cfg: Config) -> dict[str, Any]:
+    """``[tag]``, the workspace's keys over the profile's (``[tag.emotion]`` merged too)."""
+    out: dict[str, Any] = {}
     for source in (cfg.profile_raw, cfg.raw):
         table = source.get("tag")
-        if isinstance(table, dict) and "enabled" in table:
-            value = table["enabled"]
-    return value is True
+        if not isinstance(table, dict):
+            continue
+        for k, v in table.items():
+            if k == "emotion" and isinstance(v, dict) and isinstance(out.get(k), dict):
+                out[k] = {**out[k], **v}
+            else:
+                out[k] = v
+    return out
+
+
+def _option_keys(backend: Any) -> frozenset[str] | None:
+    if not isinstance(backend, str) or not backend:
+        return None
+    try:
+        cls = backend_class("tag", backend)
+    except Exception:  # noqa: BLE001 - an unknown backend fails at create(), with its message
+        return None
+    keys = getattr(cls, "option_keys", None)
+    return frozenset(keys) if keys is not None else None
+
+
+def _check_keys(table: dict[str, Any], stage: tuple[str, ...], backend: Any, where: str) -> None:
+    allowed = _option_keys(backend)
+    for key in table:
+        if key in stage or (allowed is not None and key in allowed):
+            continue
+        near = difflib.get_close_matches(key, [*stage, *(allowed or ())], n=1, cutoff=0.75)
+        if allowed is None and not near:
+            continue  # a backend that lists no options: its own code checks them
+        hint = f"; did you mean {near[0]!r}?" if near else ""
+        takes = ", ".join(sorted({*stage, *(allowed or ())} - {"lang", "pair"}))
+        raise ConfigError(f"{where} has no key {key!r}{hint} (it takes: {takes})")
+
+
+def check_tag_config(cfg: Config) -> None:
+    """Refuse unknown ``[tag]`` and ``[tag.emotion]`` keys and a non-boolean ``enabled``."""
+    t = _merged(cfg)
+    if not t:
+        return
+    if "enabled" in t and not isinstance(t["enabled"], bool):
+        raise ConfigError(f"[tag] enabled must be true or false, not {t['enabled']!r}")
+    _check_keys(t, STAGE_KEYS, t.get("backend"), "[tag]")
+    emotion = t.get("emotion")
+    if isinstance(emotion, dict):
+        _check_keys(emotion, ("device",), t.get("emotion_backend"), "[tag.emotion]")
+
+
+def tag_enabled(cfg: Config) -> bool:
+    """`[tag] enabled`, workspace over profile; false when neither sets it. The ``[tag]``
+    keys are checked first (``check_tag_config``)."""
+    check_tag_config(cfg)
+    return _merged(cfg).get("enabled", False) is True
 
 
 class TagStage:
@@ -58,6 +116,7 @@ class TagStage:
     def _backend_cfg(cfg: Config) -> tuple[BackendConfig, BackendConfig | None, str, str | None]:
         """(events backend, emotion backend or None, events device, emotion device or None):
         the device preferences, ``cpu`` or ``cuda``."""
+        check_tag_config(cfg)
         bc = cfg.resolve("tag")
         skip = ("enabled", "device", "emotion_backend", "emotion")
         options = {k: v for k, v in bc.options.items() if k not in skip}

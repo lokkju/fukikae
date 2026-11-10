@@ -46,6 +46,8 @@ class Emotion2vecTagger:
     default_device: ClassVar[str | None] = "cuda"
     vram_mb: ClassVar[int] = 2500
     extra: ClassVar[str] = "sensevoice"  # funasr, shared with SenseVoice
+    # the [tag.emotion] options it reads; the tag stage refuses any other key (C9)
+    option_keys: ClassVar[frozenset[str]] = frozenset({"model", "revision"})
 
     def __init__(self, options: dict[str, Any], device: str) -> None:
         self.model: str = str(options.get("model", DEFAULT_MODEL))
