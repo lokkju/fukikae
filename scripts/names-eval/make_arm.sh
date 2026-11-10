@@ -2,7 +2,9 @@
 # make_arm.sh <source workspace> <arm workspace> <names toml fragment>
 # A fresh arm copy: hard links for the immutable stage outputs (audio, stems, ASR, diarize,
 # mix), real copies of everything a stage or the registry writes, and a [names] table appended
-# to the copy's fukikae.toml. Refuses when a copied file still has more than one link.
+# to the copy's fukikae.toml. Refuses when fukikae.toml, the registry, the hash cache, the
+# cards, a manifest or a 05-characters file still has more than one link; the other copied
+# directories are not checked.
 set -euo pipefail
 src=$1 dst=$2 frag=$3
 rm -rf "$dst"
