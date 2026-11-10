@@ -200,24 +200,35 @@ TEXT_SUBTITLE_CODECS = frozenset({"ass", "ssa", "subrip", "srt", "webvtt", "mov_
 SIDECAR_SUFFIXES = (".ass", ".ssa", ".srt", ".vtt")
 
 
+def _subtitle_dest(track: SubTrack, out: Path) -> Path:
+    ass = track.codec in ("ass", "ssa")
+    out = Path(out)
+    stem = out.with_suffix("") if out.suffix.casefold() in SIDECAR_SUFFIXES else out
+    return stem.with_name(stem.name + (".ass" if ass else ".srt"))
+
+
 def extract_subtitle(source: Path, track: SubTrack, out: Path) -> Path:
     """The subtitle stream at ``track`` written to ``out`` plus ``.ass`` for an ASS/SSA track,
     copied as is, else ``.srt`` (a subtitle suffix already on ``out`` is replaced, any other
     dot in the name kept: ``subs.en`` -> ``subs.en.ass``). Returns the written path."""
-    ass = track.codec in ("ass", "ssa")
-    out = Path(out)
-    stem = out.with_suffix("") if out.suffix.casefold() in SIDECAR_SUFFIXES else out
-    dest = stem.with_name(stem.name + (".ass" if ass else ".srt"))
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    run_ffmpeg(
-        [
-            "-i", str(Path(source).resolve()),
-            "-map", f"0:{track.index}",
-            "-c:s", "copy" if ass else "srt",
-            str(dest),
-        ]
-    )  # fmt: skip
-    return dest
+    return extract_subtitles(source, [(track, out)])[0]
+
+
+def extract_subtitles(source: Path, wanted: list[tuple[SubTrack, Path]]) -> list[Path]:
+    """``extract_subtitle`` for several tracks in one ffmpeg pass over the source (each pass
+    reads the whole file). Returns the written paths in order; nothing runs for none."""
+    if not wanted:
+        return []
+    args = ["-i", str(Path(source).resolve())]
+    dests: list[Path] = []
+    for track, out in wanted:
+        dest = _subtitle_dest(track, out)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        ass = track.codec in ("ass", "ssa")
+        args += ["-map", f"0:{track.index}", "-c:s", "copy" if ass else "srt", str(dest)]
+        dests.append(dest)
+    run_ffmpeg(args)
+    return dests
 
 
 def _text_track(track: SubTrack) -> bool:

@@ -7,6 +7,7 @@ from fukikae.media import (
     SubTrack,
     choose_audio_track,
     extract_subtitle,
+    extract_subtitles,
     find_target_subtitles,
     probe,
     run_ffmpeg,
@@ -156,6 +157,26 @@ def test_extract_subtitle_round_trip(tmp_path):
     out = extract_subtitle(mkv, track, tmp_path / "out" / "subs.en")
     assert out.name == "subs.en.ass" and "Hello." in out.read_text(encoding="utf-8")
     assert extract_subtitle(mkv, track, tmp_path / "x.srt").name == "x.ass"
+
+
+@pytest.mark.ffmpeg
+def test_extract_subtitles_reads_several_tracks_in_one_pass(tmp_path):
+    srts = []
+    for i, text in enumerate(("Hello.", "Hallo.")):
+        srt = tmp_path / f"in{i}.srt"
+        srt.write_text(f"1\n00:00:01,000 --> 00:00:02,000\n{text}\n", encoding="utf-8")
+        srts.append(srt)
+    mkv = tmp_path / "in.mkv"
+    run_ffmpeg(
+        ["-f", "lavfi", "-i", "anullsrc=d=3", "-i", str(srts[0]), "-i", str(srts[1]),
+         "-map", "0", "-map", "1", "-map", "2", "-c:a", "aac", "-c:s", "ass", str(mkv)]
+    )  # fmt: skip
+    a, b = probe(mkv).subtitles
+    outs = extract_subtitles(mkv, [(a, tmp_path / "a"), (b, tmp_path / "o" / "b.srt")])
+    assert [o.name for o in outs] == ["a.ass", "b.ass"]
+    assert "Hello." in outs[0].read_text(encoding="utf-8")
+    assert "Hallo." in outs[1].read_text(encoding="utf-8")
+    assert extract_subtitles(mkv, []) == []
 
 
 # -- ruling CD25: the dialogue track, never forced or signs-and-songs-only ------------------
