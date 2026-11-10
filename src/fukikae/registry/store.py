@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # `by` values of an assignment; `import:<pack title>` is the one with a suffix. `migrated`
 # (the schema-1 voice note) and `lock`/`unlock` rows are written by the registry itself.
@@ -79,7 +79,9 @@ CREATE TABLE IF NOT EXISTS card_history (
     assigned TEXT NOT NULL,
     by TEXT NOT NULL,
     locked INTEGER NOT NULL DEFAULT 0,
-    note TEXT
+    note TEXT,
+    chosen_by TEXT -- how the row's card was chosen: `by`, or on a lock/unlock row the
+                   -- chosen_by of the assignment it locked (schema 3, written at insert)
 );
 CREATE TABLE IF NOT EXISTS card_assignments (
     character_id INTEGER NOT NULL REFERENCES characters(id),
@@ -115,8 +117,10 @@ class Character:
 @dataclass(frozen=True)
 class CardAssignment:
     """One card_history row; ``n`` numbers a (character, target language)'s rows from 1, in
-    ``(assigned, id)`` order. ``chosen_by`` is how its card was chosen: ``by`` itself, except
-    on a ``lock``/``unlock`` row, which keeps the ``by`` of the row before it."""
+    row id (insertion) order, never wall-clock order. ``chosen_by`` is how its card was
+    chosen: ``by`` itself, except on a ``lock``/``unlock`` row, which records the chosen_by
+    of the assignment it locked, stored when the row is written (schema 3) so a merge that
+    interleaves two characters' rows can't change it."""
 
     n: int
     character_id: int
@@ -246,8 +250,11 @@ class Registry:
                     f"registry {path} has schema version {row[0]}, "
                     f"newer than this fukikae supports ({SCHEMA_VERSION}); upgrade fukikae"
                 )
-            elif row[0] == 1:
-                self._migrate_1_to_2(con)
+            else:
+                if row[0] == 1:
+                    self._migrate_1_to_2(con)
+                if row[0] <= 2:
+                    self._migrate_2_to_3(con)
 
     def _migrate_1_to_2(self, con: sqlite3.Connection) -> None:
         """Schema 1 to 2: ``characters.external_id``, the card tables (already created by
@@ -271,6 +278,31 @@ class Registry:
             )
         con.execute("UPDATE characters SET voice = NULL")
         con.execute("UPDATE schema_version SET version = 2")
+
+    def _migrate_2_to_3(self, con: sqlite3.Connection) -> None:
+        """Schema 2 to 3: ``card_history.chosen_by``. A non-lock row's is its ``by``; a
+        lock/unlock row's is that of the latest earlier non-lock row (by id) with the same
+        card for that character and language, else of the latest earlier non-lock row, else
+        ``auto``."""
+        cols = {r[1] for r in con.execute("PRAGMA table_info(card_history)")}
+        if "chosen_by" not in cols:
+            con.execute("ALTER TABLE card_history ADD COLUMN chosen_by TEXT")
+        rows = con.execute(
+            "SELECT id, character_id, target_language, card_id, by FROM card_history"
+            " ORDER BY character_id, target_language, id"
+        ).fetchall()
+        seen: dict[tuple[int, str], list[tuple[str | None, str]]] = {}
+        for hid, char, lang, card, by in rows:
+            earlier = seen.setdefault((char, lang), [])
+            if by in _LOCK_BY:
+                chosen = next((b for c, b in reversed(earlier) if c == card), None)
+                if chosen is None:
+                    chosen = earlier[-1][1] if earlier else "auto"
+            else:
+                chosen = by
+                earlier.append((card, by))
+            con.execute("UPDATE card_history SET chosen_by = ? WHERE id = ?", (chosen, hid))
+        con.execute("UPDATE schema_version SET version = 3")
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
@@ -336,15 +368,13 @@ class Registry:
         self, con: sqlite3.Connection, character_id: int, target_language: str
     ) -> list[tuple[int, CardAssignment]]:
         rows = con.execute(
-            "SELECT id, card_id, assigned, by, locked, note FROM card_history"
-            " WHERE character_id = ? AND target_language = ? ORDER BY assigned, id",
+            "SELECT id, card_id, assigned, by, locked, note, chosen_by FROM card_history"
+            " WHERE character_id = ? AND target_language = ? ORDER BY id",
             (character_id, target_language),
         ).fetchall()
         out: list[tuple[int, CardAssignment]] = []
-        chosen = "auto"
         for n, r in enumerate(rows, start=1):
-            if r[3] not in _LOCK_BY:
-                chosen = r[3]
+            chosen = r[6] or r[3]
             out.append(
                 (
                     r[0],
@@ -355,9 +385,14 @@ class Registry:
             )
         return out
 
-    def card_history(self, character_id: int, target_language: str) -> list[CardAssignment]:
-        """Every assignment of this character in this target language, oldest first."""
-        return [h for _, h in self._history_rows(self._con, character_id, target_language)]
+    def card_history(
+        self, character_id: int, target_language: str, *, by_time: bool = False
+    ) -> list[CardAssignment]:
+        """Every assignment of this character in this target language, in row order (``n``).
+        ``by_time`` sorts the same rows (each keeping its ``n``) by when they were assigned,
+        for display after a merge has interleaved two characters' rows."""
+        rows = [h for _, h in self._history_rows(self._con, character_id, target_language)]
+        return sorted(rows, key=lambda h: (h.assigned, h.n)) if by_time else rows
 
     def _current(
         self, con: sqlite3.Connection, character_id: int, target_language: str
@@ -658,13 +693,16 @@ class Registry:
         by: str,
         locked: bool,
         note: str | None = None,
+        chosen_by: str | None = None,
     ) -> CardAssignment:
-        """Write a history row and make it the current assignment."""
+        """Write a history row and make it the current assignment. ``chosen_by`` defaults to
+        ``by``; a lock/unlock row passes the locked assignment's own."""
         cur = con.execute(
             "INSERT INTO card_history(character_id, target_language, card_id, assigned, by,"
-            " locked, note) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (character_id, target_language, card_id, _now(), by, int(locked), note),
-        )
+            " locked, note, chosen_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (character_id, target_language, card_id, _now(), by, int(locked), note,
+             chosen_by or by),
+        )  # fmt: skip
         con.execute(
             "INSERT INTO card_assignments(character_id, target_language, card_id, history_id)"
             " VALUES (?, ?, ?, ?) ON CONFLICT(character_id, target_language) DO UPDATE SET"
@@ -775,6 +813,7 @@ class Registry:
                 current.card_id,
                 "lock" if locked else "unlock",
                 locked,
+                chosen_by=current.chosen_by,
             )
 
     def set_character_external_id(self, character_id: int, external_id: str | None) -> None:

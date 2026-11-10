@@ -439,7 +439,7 @@ def history(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _L
     """List a character's card assignments for the target language, numbered from 1."""
     with _session(workspace, lang) as (reg, _, language):
         char = reg.character_by_ref(character)
-        rows = reg.card_history(char.id, language)
+        rows = reg.card_history(char.id, language, by_time=True)
         if not rows:
             _echo(f"{_label(char)} {language}: no history")
             return
