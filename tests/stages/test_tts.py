@@ -515,13 +515,26 @@ def test_config_key_has_cards_extras_and_model_identity(ep):
     key = TtsStage(CFG).config_key(CFG, ep)
     assert key["cards"] == {"1": natsu, "2": lucy}
     assert set(key["extras"]) == {"S5", "S9"}
-    assert key["identity"] == {"fake": {"model": "fake-model", "revision": "r"}}
+    assert key["identity"] == {
+        "fake": {"options": {}, "identity": {"model": "fake-model", "revision": "r"}}
+    }
     assert key["max_speedup"] == 1.25
     inputs = TtsStage(CFG).inputs(ep)
     assert ep.work / "06-translate" / "cues.en.json" in inputs
     assert ep.work / "01-separate" / "vocals.wav" in inputs
     store = CardStore(ep.workspace_root)
     assert store.card_path(natsu) in inputs and store.card_path(lucy) in inputs
+
+
+def test_stage_key_holds_each_backend_tables_options(ep):
+    """C1: flipping an option in [tts.<backend>] (tf32, fp16, a qwen mode) changes the stage
+    key, so renders made with the old setting are never kept."""
+    _two_cards(ep)
+    on = Config(raw={"tts": {"backend": "fake", "fake": {"tf32": True}}})
+    off = Config(raw={"tts": {"backend": "fake", "fake": {"tf32": False}}})
+    key_on, key_off = TtsStage(on).config_key(on, ep), TtsStage(off).config_key(off, ep)
+    assert key_on != key_off
+    assert key_on["identity"]["fake"]["options"] == {"tf32": True}
 
 
 def test_cue_key_hashes_what_is_passed_not_the_delivery_record():

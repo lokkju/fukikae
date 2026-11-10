@@ -35,7 +35,7 @@ class IndexTts2Synthesizer(WorkerSynthesizer):
     # (72 renders, 9 cards; per card 11.1 to 18.3); 14.3 is the render-weighted mean of the two.
     speech_cps: ClassVar[dict[str, float]] = {"en": 14.3}
     # Fast inference (D26; impl_indextts2 has what each does and what was measured). Options are
-    # in the cache key.
+    # in each cue's cache key and in the tts stage key, so changing one re-renders.
     option_keys: ClassVar[frozenset[str]] = frozenset({"fp16", "tf32"})
     cpu_refusal: ClassVar[str | None] = (
         "IndexTTS2 on the CPU runs in fp32, takes about 9 GB of RAM and minutes per line "
