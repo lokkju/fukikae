@@ -19,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 
+from fukikae.config import normalize_language
+
 SCHEMA_VERSION = 3
 
 # `by` values of an assignment; `import:<pack title>` is the one with a suffix. `migrated`
@@ -369,6 +371,7 @@ class Registry:
     def _history_rows(
         self, con: sqlite3.Connection, character_id: int, target_language: str
     ) -> list[tuple[int, CardAssignment]]:
+        target_language = normalize_language(target_language)
         rows = con.execute(
             "SELECT id, card_id, assigned, by, locked, note, chosen_by FROM card_history"
             " WHERE character_id = ? AND target_language = ? ORDER BY id",
@@ -399,6 +402,7 @@ class Registry:
     def _current(
         self, con: sqlite3.Connection, character_id: int, target_language: str
     ) -> CardAssignment | None:
+        target_language = normalize_language(target_language)
         row = con.execute(
             "SELECT history_id FROM card_assignments WHERE character_id = ?"
             " AND target_language = ?",
@@ -698,7 +702,9 @@ class Registry:
         chosen_by: str | None = None,
     ) -> CardAssignment:
         """Write a history row and make it the current assignment. ``chosen_by`` defaults to
-        ``by``; a lock/unlock row passes the locked assignment's own."""
+        ``by``; a lock/unlock row passes the locked assignment's own. Language keys are
+        case-normalized (``EN`` is ``en``), as cards are."""
+        target_language = normalize_language(target_language)
         cur = con.execute(
             "INSERT INTO card_history(character_id, target_language, card_id, assigned, by,"
             " locked, note, chosen_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

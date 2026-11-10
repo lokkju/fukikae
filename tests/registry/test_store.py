@@ -699,3 +699,11 @@ def test_character_external_id_is_stripped(reg: Registry):
     cid = _char(reg)
     reg.set_character_external_id(cid, " 1234 ")
     assert reg.characters()[0].external_id == "1234"
+
+
+def test_assignment_language_keys_are_case_normalized(reg: Registry):
+    cid = _char(reg)
+    reg.assign_card(cid, "EN", A16, by="auto", locked=False)
+    assert _cur(reg, cid, "en").card_id == A16
+    assert reg.card_languages(cid) == ["en"]
+    assert reg.card_for(cid, "En") is not None

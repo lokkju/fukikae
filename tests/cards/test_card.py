@@ -573,8 +573,10 @@ def test_style_at_the_caps_loads_and_keeps_its_id():
 
 
 def test_caps_leave_existing_card_ids_alone():
-    # ids computed before the style caps existed (CD1): a card within the caps keeps its id
-    assert card_id(parse_card(SPEC_CARD)) == "31a12ee8813d8ba9"
+    # ids computed before the style caps existed (CD1): a card within the caps keeps its id.
+    # SPEC_CARD's id changed once, in the final review (A5, before any id was shared): it
+    # spells [voice.post] defaults and an empty notes, which no longer reach the id.
+    assert card_id(parse_card(SPEC_CARD)) == "6578f2f64e7b00cc"
     styled = _styled('register = "rough"\ncatchphrases = [ { source = "a", target = "" } ]\n')
     assert card_id(parse_card(styled)) == "6f04a42dacae1eca"
 
@@ -684,3 +686,46 @@ def test_clean_style_text_is_untouched_at_load():
     spaced = SPEC_CARD.replace('notes = ""', 'notes = "two  spaces | a pipe\\n  indented"')
     c = parse_card(spaced)
     assert c.style is not None and c.style["notes"] == "two  spaces | a pipe\n  indented"
+
+
+def _variant(old: str, new: str, base: str = STOCK_CARD) -> Card:
+    assert old in base
+    return parse_card(base.replace(old, new))
+
+
+def test_post_keys_at_their_defaults_do_not_change_the_id():
+    """A5: an explicit default in [voice.post] is the same card."""
+    plain = parse_card(STOCK_CARD)
+    spelled = parse_card(STOCK_CARD + '\n[voice.post]\ngain_db = 0.0\neq = "none"\n')
+    assert card_id(spelled) == card_id(plain)
+    assert spelled.voice.post == {}
+    louder = parse_card(STOCK_CARD + "\n[voice.post]\ngain_db = 2.0\n")
+    assert card_id(louder) != card_id(plain)
+
+
+def test_empty_style_strings_do_not_change_the_id():
+    base = STOCK_CARD + '\n[style]\nregister = "rough"\n'
+    with_empty = base + 'notes = ""\ntics = ""\ncatchphrases = []\n'
+    assert card_id(parse_card(with_empty)) == card_id(parse_card(base))
+    assert parse_card(with_empty).style == {"register": "rough"}
+    only_empty = STOCK_CARD + '\n[style]\nnotes = ""\n'
+    assert card_id(parse_card(only_empty)) == card_id(parse_card(STOCK_CARD))
+
+
+def test_language_tags_are_case_normalized_before_hashing():
+    upper = _variant('target_language = "en"', 'target_language = "EN"')
+    assert upper.target_language == "en"
+    assert card_id(upper) == card_id(parse_card(STOCK_CARD))
+    br = _variant('target_language = "en"', 'target_language = "PT-br"')
+    assert br.target_language == "pt-BR"
+    ref = _variant('language = "ja"', 'language = "JA"', SPEC_CARD)
+    assert ref.voice.references[0].language == "ja"
+    assert card_id(ref) == card_id(parse_card(SPEC_CARD))
+
+
+def test_a_card_built_in_code_hashes_like_its_normalized_form():
+    plain = parse_card(STOCK_CARD)
+    built = replace(
+        plain, target_language="EN", voice=replace(plain.voice, post={"gain_db": 0, "eq": "none"})
+    )
+    assert card_id(built) == card_id(plain)
