@@ -7,17 +7,20 @@ did (renders, cache hits, cards it assigned) goes to ``07-tts/run.json``, which 
 output; each automatic assignment is also appended to ``07-tts/assignments.log`` and kept as
 the history row's note.
 
-Before the stage's key is computed (``prepare``, called by the job runner) and again in
-``run``, each character with a cue to speak and no card for the target language gets
-one (``cards.auto.ensure_assignments``, ``by = "auto"``, unlocked; an existing card is never
-replaced): a clone card of ``[tts] clone_backend`` (IndexTTS2 in every profile, D24) from the
-character's reference turns in the workspace's episodes (``cards.auto.workspace_cloning``), or,
-with under 6 s of clean speech or no ``clone_backend``, a gender-matched stock voice of the
-``[tts]`` backend (the F0 estimate skips theme songs and tagged singing). Cues with no
-character (extras, and clusters the characters stage left for review) speak with a stock voice
-from the extras pools, one per label, fixed by first appearance in the episode. Every card is
-then checked (it exists, its backend can honor it at the model revision it names, its sidecars
-are present), so a broken card stops the stage, naming the character, before any model loads.
+Before the stage's key is computed (``prepare``, called by the job runner) and again in ``run``,
+each character with a cue to speak and no card for the target language gets one
+(``cards.auto.ensure_assignments``, ``by = "auto"``, unlocked; an existing card is replaced only
+when stale, below): a clone card of ``[tts] clone_backend`` (IndexTTS2 in every profile, D24)
+from the character's reference turns in the workspace's episodes
+(``cards.auto.workspace_cloning``; name-confirmed turns first when subtitle names were used, and
+an automatic clone card whose references the names now contradict is re-picked,
+``cards.auto.stale_cards``), or, with under 6 s of clean speech or no ``clone_backend``, a
+gender-matched stock voice of the ``[tts]`` backend (the F0 estimate skips theme songs and
+tagged singing). Cues with no character (extras, and clusters the characters stage left for
+review) speak with a stock voice from the extras pools, one per label, fixed by first appearance
+in the episode. Every card is then checked (it exists, its backend can honor it at the model
+revision it names, its sidecars are present), so a broken card stops the stage, naming the
+character, before any model loads.
 
 Renders are cached per cue in ``<workspace>/.fukikae/tts-cache/<key>.wav`` and hard-linked (or
 copied) into ``07-tts``. The key (``cue_key``) hashes the card id, the text, what the backend
@@ -93,6 +96,7 @@ from fukikae.cards.auto import (
     clone_backend,
     ensure_assignments,
     extras_voices,
+    stale_cards,
     workspace_cloning,
 )
 from fukikae.cards.card import Card, CardError, validate_for_backend
@@ -1096,7 +1100,11 @@ class TtsStage:
                 for cid in speaking
                 if (a := reg.card_for(cid, cfg.target_language)) is None or a.card_id is None
             ]
-            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if todo else None
+            # clone cards whose references the subtitle names now contradict (D29 #4)
+            stale = stale_cards(
+                Workspace(ep.workspace_root), reg, store, speaking, cfg.target_language
+            )
+            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if todo or stale else None
             if todo:  # the gender estimate never reads a theme song or tagged singing
                 exclude = _song_spans(ep, cfg)
                 spans = {
@@ -1110,6 +1118,7 @@ class TtsStage:
                 {cid: spans.get(cid, []) for cid in speaking},
                 vocals,
                 cloning=cloning,
+                stale=stale,
             )
             cards: dict[int, str] = {}
             for cid in speaking:

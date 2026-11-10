@@ -14,11 +14,22 @@ speech. A character with less clean speech than the minimum (6 s) gets a stock v
 the gender-matched pool of the ``[tts]`` backend instead, and the report says how much it
 had. Without ``clone_backend`` every automatic card is a stock voice. Extras always speak
 with stock voices.
+
+Subtitle names (D27, D29 #4). In an episode whose names stage used names, a character's
+reference turns are only its name-confirmed ones (`confirmed_labels`: sub-clusters it got by
+name, or by a lock on a key it answers to), never its unnamed remainders and never a span of
+an inner-voice or multi line (``names.excluded``); names-used episodes are tried first, and
+acoustic-only ones only when none yields picks. A clone card with a reference in a names-used
+episode outside the character's name-confirmed turns (`NAME_CONTAINMENT`) is stale
+(`stale_cards`): ``ensure_assignments`` re-picks it, a new card and a new ``auto`` row, when
+the card is automatic (``replace_refusal`` lets ``auto`` replace it: ``auto``,
+``auto-fallback`` or ``restock``, unlocked) and name-confirmed picks exist; a curated or
+imported card is only reported. Without names nothing here changes.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,17 +37,22 @@ from typing import TYPE_CHECKING
 from fukikae.cards.select import FEMALE_ABOVE, MALE_BELOW, gender_of, speaker_f0
 from fukikae.cards.stock import check_stock_voice, pick_stock, revision, stock_card
 from fukikae.cards.store import CardStore
-from fukikae.registry.store import ProtectedAssignmentError
+from fukikae.registry.store import AUTOMATIC_BY, ProtectedAssignmentError, replace_refusal
 
 if TYPE_CHECKING:
     from fukikae.backends.base import Synthesizer
+    from fukikae.cards.card import Card
     from fukikae.cards.select import RefPick
     from fukikae.config import Config
     from fukikae.models import Assignments, DubCue, Tags, Transcript
+    from fukikae.names.models import NamesResult
     from fukikae.registry.store import Registry
     from fukikae.workspace import Workspace
 
 __all__ = [
+    "AUTOMATIC_BY",
+    "NAME_CONTAINMENT",
+    "REPICK_NOTE",
     "CharacterRefs",
     "Cloning",
     "ProtectedAssignmentError",
@@ -44,9 +60,15 @@ __all__ = [
     "character_references",
     "character_spans",
     "clone_backend",
+    "confirmed_labels",
+    "confirmed_spans",
     "ensure_assignments",
     "extras_voices",
     "gender_thresholds",
+    "key_owner",
+    "replace_refusal",
+    "stale_cards",
+    "stale_references",
     "tts_backend",
     "workspace_cloning",
 ]
@@ -54,6 +76,8 @@ __all__ = [
 UNKNOWN_EXTRA = "unknown"
 FALLBACK_BY = "auto-fallback"  # a stock stand-in while the clone backend can't run here
 MIN_CLONE_S = 6.0  # the spec's minimum of clean speech for a clone (pick_references' default)
+NAME_CONTAINMENT = 0.9  # a reference this much inside name-confirmed turns is name-confirmed
+REPICK_NOTE = "re-picked: references not name-confirmed"
 
 
 @dataclass(frozen=True)
@@ -67,6 +91,8 @@ class CharacterRefs:
     episode: str | None = None
     vocals: Path | None = None
     language: str | None = None  # the picks' episode's transcript language
+    confirmed: bool = False  # the picks are name-confirmed turns of a names-used episode
+    names_used: bool = False  # some episode searched used subtitle names
 
 
 @dataclass(frozen=True)
@@ -154,6 +180,15 @@ def _label(reg: Registry, cid: int) -> str:
     return f"{cid} ({name})" if name else str(cid)
 
 
+def _where(refs: Sequence[dict]) -> str:
+    """The stale references as a report phrase: episode, span and the names said over it."""
+    parts = []
+    for r in refs:
+        said = ", ".join(r.get("names") or []) or "no name"
+        parts.append(f"{r['episode']} {r['start']:.2f}-{r['end']:.2f} ({said})")
+    return "; ".join(parts)
+
+
 def ensure_assignments(
     reg: Registry,
     store: CardStore,
@@ -162,40 +197,77 @@ def ensure_assignments(
     vocals: Path,
     *,
     cloning: Cloning | None = None,
+    stale: Mapping[int, Sequence[dict]] | None = None,
 ) -> list[str]:
     """Give every character in ``character_spans`` without a ``cfg.target_language`` card
     one: a clone card when ``cloning`` is given and the character has enough clean speech,
     else a stock card from its gender's pool, most speech first (so the main cast gets the
-    first voices of each pool). Returns one report line per character handled."""
+    first voices of each pool). Returns one report line per character handled.
+
+    ``stale`` (`stale_cards`) lists the characters whose clone card has references the
+    subtitle names contradict. An automatic card (``replace_refusal`` lets ``auto`` replace
+    it) is re-picked from name-confirmed references, a new card with a new ``auto`` row noted
+    `REPICK_NOTE`, when ``cloning`` is usable and such references exist; otherwise it is kept
+    and reported. A curated or imported card is only reported (D29 #4)."""
     language = cfg.target_language
     usable = cloning is not None and cloning.unavailable is None
     todo = []
     fallbacks: set[int] = set()
+    repick: dict[int, str] = {}  # character -> its current card id
+    lines: list[str] = []
     for cid, spans in character_spans.items():
         a = reg.card_for(cid, language)
+        refs = (stale or {}).get(cid)
         if a is None or a.card_id is None:
             todo.append((cid, spans))
         elif usable and a.chosen_by == FALLBACK_BY and not a.locked:
             todo.append((cid, spans))  # the stock stand-in for a clone that couldn't run
             fallbacks.add(cid)
+        elif refs:
+            where = _where(refs)
+            if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
+                lines.append(
+                    f"character {_label(reg, cid)}'s card {a.card_id} ({a.chosen_by}"
+                    f"{', locked' if a.locked else ''}) was cloned from turns the subtitles "
+                    f"now name otherwise: {where}; `fukikae voices clone` replaces it"
+                )
+            elif usable:
+                todo.append((cid, spans))
+                repick[cid] = a.card_id
+            else:
+                lines.append(
+                    f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns the "
+                    f"subtitles now name otherwise ({where}); kept until the clone backend can "
+                    "run and re-pick it"
+                )
     if not todo:
-        return []
+        return lines
     backend = tts_backend(cfg)
     rev = revision(backend)
     male_below, female_above = gender_thresholds(cfg)
     used = _stock_voices_in_use(reg, store, backend, language)
     todo.sort(key=lambda item: (-sum(e - s for s, e in item[1]), item[0]))
-    lines: list[str] = []
     for cid, spans in todo:
         found = cloning.references(cid) if usable else None  # type: ignore[union-attr]
         voice: str | None = None
         by = "auto"
         if cid in fallbacks and not (found is not None and found.picks):
             continue  # still too little speech: the stand-in stays until a clone can be made
+        if cid in repick and not (found is not None and found.picks and found.confirmed):
+            lines.append(
+                f"character {_label(reg, cid)}: card {repick[cid]} is cloned from turns the "
+                f"subtitles now name otherwise ({_where((stale or {})[cid])}), but there are no "
+                "name-confirmed references to re-pick from; kept"
+            )
+            continue
         if found is not None and found.picks:
             new, note = _clone(cloning, found, store, language)  # type: ignore[arg-type]
             if cid in fallbacks:
                 note += "; replaces the stock fallback made while the clone backend couldn't run"
+            if cid in repick:
+                if new == repick[cid]:
+                    continue
+                note = f"{REPICK_NOTE} ({_where((stale or {})[cid])}); {note}"
         else:
             f0, seconds = speaker_f0(vocals, spans)
             gender = gender_of(f0, male_below, female_above)
@@ -254,6 +326,8 @@ def _clone(
     )
     for warning in reference_report(picks):  # ruling CD5
         note += f"; {warning}"
+    if found.names_used and not found.confirmed:
+        note += "; references are not name-confirmed"
     return new, note
 
 
@@ -287,10 +361,25 @@ class EpisodeArtifacts:
     transcript: Transcript
     tags: Tags | None
     vocals: Path
+    names: NamesResult | None = None  # the names stage's result when it used names
+
+
+def used_names(work: Path) -> NamesResult | None:
+    """The episode's ``names.json`` when its names stage used names, else None."""
+    from fukikae.artifacts import read_json
+    from fukikae.names.inputs import names_path
+    from fukikae.names.models import NamesResult
+
+    path = names_path(work)
+    if not path.exists():
+        return None
+    result = read_json(path, NamesResult)
+    return result if result.used else None
 
 
 def episode_artifacts(ws: Workspace, episode: str) -> EpisodeArtifacts | None:
-    """The episode's assignments, transcript, tags and vocals; None when one is missing."""
+    """The episode's assignments, transcript, tags, vocals and used names; None when one of
+    the first four (tags aside) is missing."""
     from fukikae.artifacts import read_json
     from fukikae.models import Assignments, Tags, Transcript
 
@@ -306,7 +395,60 @@ def episode_artifacts(ws: Workspace, episode: str) -> EpisodeArtifacts | None:
         read_json(tr_path, Transcript),
         read_json(tags_path, Tags) if tags_path.exists() else None,
         vocals,
+        used_names(work),
     )
+
+
+# key -> the character id it answers to (None for nobody, or for several at one rank)
+type KeyOwner = Callable[[str], int | None]
+
+
+def key_owner(reg: Registry) -> KeyOwner:
+    """`Registry.character_for_key` as a cached id lookup; an ambiguous key answers nobody."""
+    cache: dict[str, int | None] = {}
+
+    def owner(key: str) -> int | None:
+        if key not in cache:
+            try:
+                c = reg.character_for_key(key)
+            except ValueError:
+                c = None
+            cache[key] = None if c is None else c.id
+        return cache[key]
+
+    return owner
+
+
+def _workspace_owner(ws: Workspace) -> KeyOwner:
+    """`key_owner` over the workspace's registry, opened for each new key; nobody without one."""
+    from fukikae.registry.store import Registry
+
+    cache: dict[str, int | None] = {}
+
+    def owner(key: str) -> int | None:
+        if key not in cache:
+            if not ws.registry_path.exists():
+                cache[key] = None
+            else:
+                with Registry(ws.registry_path) as reg:
+                    cache[key] = key_owner(reg)(key)
+        return cache[key]
+
+    return owner
+
+
+def confirmed_labels(asg: Assignments, cid: int, owner: KeyOwner) -> set[str]:
+    """The character's name-confirmed labels in a names-used episode: sub-clusters it got by
+    name (``source = "name"``), and lock-kept ones whose key it answers to (a lock on a key
+    that names someone else keeps the speech but confirms nothing). Unnamed remainders never
+    count."""
+    out: set[str] = set()
+    for c in asg.clusters:
+        if c.character_id != cid or c.status in ("extra", "review"):
+            continue
+        if c.source == "name" or (c.source == "lock" and c.name and owner(c.name) == cid):
+            out.add(c.cluster)
+    return out
 
 
 def character_candidates(
@@ -315,10 +457,14 @@ def character_candidates(
     cid: int,
     exclusions: dict[str, list[tuple[float, float]]] | None = None,
     loaded: dict[str, EpisodeArtifacts | None] | None = None,
+    owner: KeyOwner | None = None,
 ) -> dict[str, list[RefPick]]:
     """Per episode, the character's eligible reference turns (``eligible_references``, songs
     and singing excluded), ranked. ``exclusions`` caches each episode's excluded spans and
-    ``loaded`` its artifacts, so a caller asking for many characters reads each file once."""
+    ``loaded`` its artifacts, so a caller asking for many characters reads each file once. In
+    an episode whose names were used only its name-confirmed turns (`confirmed_labels`, with
+    ``owner`` answering keys, the workspace's registry by default) are candidates, and the
+    names stage's inner-voice and multi spans are excluded too."""
     from fukikae.cards.select import eligible_references, reference_exclusions
     from fukikae.stages.mix import mix_settings
 
@@ -331,17 +477,25 @@ def character_candidates(
         a = arts[e]
         if a is None:
             continue
-        speakers = {
-            c.cluster
-            for c in a.assignments.clusters
-            if c.character_id == cid and c.status not in ("extra", "review")
-        }
+        if a.names is not None:
+            if owner is None:
+                owner = _workspace_owner(ws)
+            speakers = confirmed_labels(a.assignments, cid, owner)
+        else:
+            speakers = {
+                c.cluster
+                for c in a.assignments.clusters
+                if c.character_id == cid and c.status not in ("extra", "review")
+            }
         if not speakers or not a.assignments.turns:
             continue
         if e not in cache:
             cache[e] = reference_exclusions(ws.work_dir(e), a.tags, mix_settings(ws.config).songs)
+        exclude = cache[e]
+        if a.names is not None:
+            exclude = [*exclude, *((float(x), float(y)) for x, y in a.names.excluded)]
         out[e] = eligible_references(
-            a.assignments.turns, speakers, a.transcript, a.tags, a.vocals, exclude=cache[e]
+            a.assignments.turns, speakers, a.transcript, a.tags, a.vocals, exclude=exclude
         )
     return out
 
@@ -352,10 +506,13 @@ def character_references(
     cid: int,
     exclusions: dict[str, list[tuple[float, float]]] | None = None,
     candidates: Mapping[str, list[RefPick]] | None = None,
-) -> tuple[str, list[RefPick]] | None:
+    named: Collection[str] | None = None,
+) -> tuple[str, list[RefPick], bool] | None:
     """The character's reference clips (``pick_references`` over ``character_candidates``)
-    in the episode where they add up to the most speech, with that episode; None when no
-    episode has enough."""
+    in the episode where they add up to the most speech, with that episode and whether the
+    picks are name-confirmed; None when no episode has enough. Episodes whose names were used
+    (``named``, read from each episode's ``names.json`` by default) are tried first, the
+    others only when none of them yields picks."""
     from fukikae.cards.select import pick_references
 
     found = (
@@ -363,14 +520,122 @@ def character_references(
         if candidates is not None
         else character_candidates(ws, episodes, cid, exclusions)
     )
-    best: tuple[str, list[RefPick]] | None = None
+    if named is None:
+        named = {e for e in episodes if used_names(ws.work_dir(e)) is not None}
+    for confirmed in (True, False):
+        best: tuple[str, list[RefPick]] | None = None
+        for e in episodes:
+            if (e in named) != confirmed:
+                continue
+            picks = pick_references(found[e]) if e in found else None
+            if picks and (
+                best is None or sum(p.seconds for p in picks) > sum(p.seconds for p in best[1])
+            ):
+                best = (e, picks)
+        if best is not None:
+            return best[0], best[1], confirmed
+    return None
+
+
+def confirmed_spans(
+    ws: Workspace,
+    character_id: int,
+    *,
+    episodes: Sequence[str] | None = None,
+    owner: KeyOwner | None = None,
+) -> dict[str, list[tuple[float, float]]]:
+    """Per names-used episode of the workspace (or of ``episodes``), the character's
+    name-confirmed turns (`confirmed_labels`), in time order; an episode that used names but
+    confirms none of its turns maps to an empty list."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments
+
+    if episodes is None:
+        base = ws.root / ".fukikae" / "episodes"
+        episodes = sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
+    owner = owner if owner is not None else _workspace_owner(ws)
+    out: dict[str, list[tuple[float, float]]] = {}
     for e in episodes:
-        picks = pick_references(found[e]) if e in found else None
-        if picks and (
-            best is None or sum(p.seconds for p in picks) > sum(p.seconds for p in best[1])
-        ):
-            best = (e, picks)
-    return best
+        work = ws.work_dir(e)
+        asg_path = work / "05-characters" / "assignments.json"
+        if used_names(work) is None or not asg_path.exists():
+            continue
+        asg = read_json(asg_path, Assignments)
+        labels = confirmed_labels(asg, character_id, owner)
+        out[e] = sorted(
+            (float(t.start), float(t.end)) for t in asg.turns or [] if t.speaker in labels
+        )
+    return out
+
+
+def _inside(start: float, end: float, spans: Sequence[tuple[float, float]]) -> float:
+    """The share of ``start``-``end`` inside the union of ``spans``."""
+    covered, edge = 0.0, start
+    for a, b in sorted(spans):
+        a, b = max(a, edge), min(b, end)
+        if b > a:
+            covered += b - a
+            edge = b
+    return covered / (end - start) if end > start else 1.0
+
+
+def stale_references(
+    card: Card, confirmed: Mapping[str, Sequence[tuple[float, float]]]
+) -> list[dict]:
+    """The card's reference origins in a names-used episode (a key of ``confirmed``) that lie
+    less than `NAME_CONTAINMENT` inside the character's name-confirmed turns there, each as
+    ``{episode, start, end, inside}``; empty for a card with no such reference (a stock card,
+    or references from acoustic-only episodes)."""
+    out: list[dict] = []
+    for ref in card.voice.references:
+        o = ref.origin or {}
+        e, start, end = o.get("episode"), o.get("start"), o.get("end")
+        if not isinstance(e, str) or e not in confirmed or start is None or end is None:
+            continue
+        share = _inside(float(start), float(end), confirmed[e])
+        if share < NAME_CONTAINMENT:
+            out.append({"episode": e, "start": float(start), "end": float(end),
+                        "inside": round(share, 3)})  # fmt: skip
+    return out
+
+
+def _names_over(ws: Workspace, episode: str, start: float, end: float) -> list[str]:
+    """The keys of the episode's visible named lines over ``start``-``end``, most time first."""
+    names = used_names(ws.work_dir(episode))
+    said: dict[str, float] = {}
+    for ln in names.visible_lines() if names is not None else []:
+        ov = min(ln.end, end) - max(ln.start, start)
+        if ln.key and ov > 0:
+            said[ln.key] = said.get(ln.key, 0.0) + ov
+    return sorted(said, key=lambda k: (-said[k], k))
+
+
+def stale_cards(
+    ws: Workspace, reg: Registry, store: CardStore, characters: Iterable[int], language: str
+) -> dict[int, list[dict]]:
+    """Character -> the stale references (`stale_references`, each with the ``names`` said
+    over it) of its current ``language`` card, for the characters whose card has any. Reads
+    nothing more than the registry when no episode of the workspace used names."""
+    base = ws.root / ".fukikae" / "episodes"
+    episodes = sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
+    named = [e for e in episodes if used_names(ws.work_dir(e)) is not None]
+    if not named:
+        return {}
+    owner = key_owner(reg)
+    out: dict[int, list[dict]] = {}
+    for cid in characters:
+        a = reg.card_for(cid, language)
+        if a is None or a.card_id is None or not store.has(a.card_id):
+            continue
+        card = store.get(a.card_id)
+        if not card.voice.references:
+            continue
+        refs = stale_references(card, confirmed_spans(ws, cid, episodes=named, owner=owner))
+        for r in refs:
+            r["names"] = _names_over(ws, r["episode"], r["start"], r["end"])
+        if refs:
+            out[cid] = refs
+    return out
 
 
 def workspace_episodes(ws: Workspace, current: str) -> list[str]:
@@ -442,13 +707,16 @@ def workspace_cloning(root: Path, cfg: Config, current: str) -> Cloning | None:
     def references(cid: int) -> CharacterRefs:
         candidates = character_candidates(ws, episodes, cid, exclusions, loaded)
         seconds = max((sum(p.seconds for p in c) for c in candidates.values()), default=0.0)
-        best = character_references(ws, episodes, cid, candidates=candidates)
+        named = {e for e, a in loaded.items() if a is not None and a.names is not None}
+        best = character_references(ws, episodes, cid, candidates=candidates, named=named)
         if best is None:
-            return CharacterRefs(seconds=round(seconds, 3))
-        e, picks = best
+            return CharacterRefs(seconds=round(seconds, 3), names_used=bool(named))
+        e, picks, confirmed = best
         arts = loaded.get(e)
         language = (arts.transcript.language if arts else None) or fallback
         vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
-        return CharacterRefs(round(seconds, 3), picks, e, vocals, language)
+        return CharacterRefs(
+            round(seconds, 3), picks, e, vocals, language, confirmed, names_used=bool(named)
+        )
 
     return Cloning(backend=cls, source_language=fallback, references=references)

@@ -780,7 +780,7 @@ def _clone_cards(
     cfg: Config,
     store: CardStore,
     cls: type[Any],
-    refs: Mapping[int, tuple[str, list[RefPick]] | None],
+    refs: Mapping[int, tuple[str, list[RefPick], bool] | None],
     source_language: str,
 ) -> dict[int, str]:
     """A clone card of ``cls`` per character with references (put in the store, never
@@ -789,7 +789,7 @@ def _clone_cards(
     for cid, found in sorted(refs.items()):
         if found is None:
             continue
-        e, picks = found
+        e, picks, _ = found
         vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
         card = clone_card(cls, picks, store, vocals, source_language, cfg.target_language, e)
         out[cid] = store.put(card)
@@ -1131,7 +1131,7 @@ def evaluate(
                 f"character {cid}: card {cards[cid]} has a reference with no origin, so its "
                 "held-out exemplars can't be checked against the references"
             )
-        held = heldout_exemplars(cands[cid], found, delivery, exclude=origins)
+        held = heldout_exemplars(cands[cid], found[:2], delivery, exclude=origins)
         if held is None:
             notes.append(
                 f"character {cid}: under {HELDOUT_MIN_S:g} s of held-out speech, so no held-out "
@@ -1152,7 +1152,7 @@ def evaluate(
         card = store.get(card_ref)
         found = refs.get(cid)
         if found is not None:
-            e, picks = found
+            e, picks, _ = found
             sim_source[cid] = "references"
             vocals16 = ws.work_dir(e) / "01-separate" / "vocals_16k.wav"
             if not vocals16.exists():

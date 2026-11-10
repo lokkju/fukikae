@@ -920,3 +920,24 @@ def test_the_retry_seed_wraps_at_32_bits():
     assert tts.retry_seed(2**32 - 1) == 0
     assert tts.retry_seed(None) == 1
     assert tts.retry_seed(41) == 42
+
+
+def test_a_stale_card_builds_the_clone_source_and_reaches_ensure_assignments(ep, monkeypatch):
+    """D29 #4: every speaking character has a card, but character 1's references are stale,
+    so the stage builds the clone source anyway and hands ensure_assignments the stale list."""
+    _two_cards(ep)
+    stale = {1: [{"episode": "e1", "start": 0.0, "end": 2.5, "inside": 0.0, "names": []}]}
+    seen: dict = {}
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: stale)
+    monkeypatch.setattr(
+        "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
+    )
+
+    def ensure(*_, **kw):
+        seen.update(kw)
+        return []
+
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments", ensure)
+    store = CardStore(ep.workspace_root)
+    TtsStage._assign(ep, CFG, CUES, store, ep.work / "01-separate" / "vocals.wav")
+    assert seen["cloning"] == "c" and seen["stale"] == stale
