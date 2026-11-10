@@ -197,6 +197,10 @@ def assign(
                     f"{language!r}; derive a {language!r} card with `fukikae voices derive "
                     f"<workspace> <character> --lang {card.target_language} --to {language}`"
                 )
+            try:
+                _check_assignable(store, card, ref, _label(char), language)
+            except CardError as e:
+                raise _fail(f"{e}; nothing was assigned") from e
             a = reg.assign_card(char.id, language, ref, by="assign", locked=not no_lock)
         except BaseException as e:
             if copied is not None:
@@ -222,6 +226,21 @@ def _check_clone_card(store: CardStore, card_id: str, who: str, language: str) -
     from fukikae.stages.tts import check_card
 
     check_card(store, card_id, who, language)
+
+
+def _check_assignable(store: CardStore, card: Card, card_id: str, who: str, language: str) -> None:
+    """What assign and edit run before assigning (A8): the tts stage's card check, and every
+    sidecar the card names (a fingerprint vector included) present in the store; raises
+    CardError."""
+    from fukikae.stages.tts import check_loaded_card
+
+    check_loaded_card(store, card, card_id, who, language)
+    missing = store.missing_sidecars(card)
+    if missing:
+        raise CardError(
+            f"{who}: card {card_id} names sidecar(s) missing from {store.root}: "
+            f"{', '.join(missing)}; import the pack with them or re-record the fingerprint"
+        )
 
 
 @voices_app.command("clone")
@@ -556,6 +575,10 @@ def edit(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
             new,
             meta={**new.meta, "derived_from": cur.card_id, "created": dt.date.today()},
         )
+        try:
+            _check_assignable(store, new, card_id(new), _label(char), language)
+        except CardError as e:
+            raise _fail(f"the edited card can't be used, nothing changed: {e}") from e
         new_id = store.put(new)
         a = reg.assign_card(char.id, language, new_id, by="edit", locked=True)
         _echo(
@@ -598,7 +621,8 @@ def derive(
                 ]  # renderings are per target language and start empty
         new = Card(
             target_language=to,
-            voice=old.voice,
+            # a fingerprint describes renders of the old card, not this one (A7)
+            voice=replace(old.voice, fingerprint=None),
             style=style,
             meta={**old.meta, "derived_from": cur.card_id, "created": dt.date.today()},
         )
