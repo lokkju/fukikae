@@ -278,3 +278,32 @@ def test_report_lists_collapses_and_suggestions(
     )
     report = autolabel.format_report(result)
     assert "NABARU -> NEBARU" in report
+
+
+def test_auto_label_reads_the_names_stage_clusters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fukikae.names.models import NamesResult
+
+    media = _setup(tmp_path, monkeypatch)
+    root = tmp_path / "ws"
+    work = root / ".fukikae" / "episodes" / "S01E01"
+    (work / "04c-names").mkdir()
+    arrays: dict[str, np.ndarray] = {
+        "labels": np.array(["SPEAKER_00~natsu", "SPEAKER_01"]),
+        "SPEAKER_00~natsu/spans": np.array([[0.0, 4.0], [10.0, 14.0]]),
+        "SPEAKER_01/spans": np.array([[5.0, 9.0]]),
+    }
+    np.savez(work / "04c-names" / "clusters.npz", **arrays)  # type: ignore[arg-type]
+    write_json(
+        work / "04c-names" / "names.json",
+        NamesResult(
+            episode="S01E01", used=True, verdict="full", reason=None, source=None, offset_s=0.0,
+            coverage={}, lines=[], hidden=[], pieces=[], labels={}, unvoiced=[], excluded=[],
+            dropped_row_seconds=0.0, suggestions=[],
+        ),
+    )  # fmt: skip
+    autolabel.auto_label(root, [str(media / "Show - S01E01.mkv")], tmp_path / "out")
+    clips = load_labels(tmp_path / "out" / "labels.yaml")
+    assert {c.cluster for c in clips} == {"SPEAKER_00~natsu", "SPEAKER_01"}
+    assert {c.label for c in clips if c.cluster == "SPEAKER_00~natsu"} == {"NATSU"}

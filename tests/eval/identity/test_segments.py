@@ -82,6 +82,38 @@ def test_segments_reads_the_diarize_stage(tmp_path: Path):
         segments(tmp_path, "S01E02", "diarization", gt)
 
 
+def _used_names(ep_dir: Path, turns: list[Turn]) -> None:
+    from fukikae.names.models import NamesResult
+
+    d = ep_dir / "04c-names"
+    d.mkdir(parents=True)
+    write_json(d / "turns.json", Diarization(backend="fake", turns=turns))
+    write_json(
+        d / "names.json",
+        NamesResult(
+            episode="S01E01", used=True, verdict="full", reason=None, source=None, offset_s=0.0,
+            coverage={}, lines=[], hidden=[], pieces=[], labels={}, unvoiced=[], excluded=[],
+            dropped_row_seconds=0.0, suggestions=[],
+        ),
+    )  # fmt: skip
+
+
+def test_segments_read_the_names_stage_turns_when_names_were_used(tmp_path: Path):
+    ep_dir = tmp_path / ".fukikae" / "episodes" / "S01E01"
+    (ep_dir / "04-diarize").mkdir(parents=True)
+    write_json(ep_dir / "04-diarize" / "turns.json", Diarization(backend="fake", turns=TURNS))
+    refined = [
+        t.model_copy(update={"speaker": "SPEAKER_00~natsu"}) if t.speaker == "SPEAKER_00" else t
+        for t in TURNS
+    ]
+    _used_names(ep_dir, refined)
+    gt = [G(20.0, 22.0, "Natsu")]
+    got = segments(tmp_path, "S01E01", "diarization", gt)
+    assert [s.cluster for s in got] == ["SPEAKER_01", "SPEAKER_00~natsu"]
+    given = segments(tmp_path, "S01E01", "diarization", gt, turns=TURNS)  # e.g. assignments.turns
+    assert [s.cluster for s in given] == ["SPEAKER_01", "SPEAKER_00"]
+
+
 # ---- asr: sentences from the transcript, split where word-window voices differ ----
 
 

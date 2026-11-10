@@ -205,3 +205,39 @@ def test_registry_lock_character_locks_and_unlocks(tmp_path):
         assert not any(c.locked for c in reg.characters())
     r = runner.invoke(app, ["registry", "lock", str(ws.root), "9", "--character"])
     assert r.exit_code != 0 and "no character 9" in r.output
+
+
+def test_registry_split_accepts_a_sub_cluster_label(tmp_path):
+    import numpy as np
+
+    from fukikae.artifacts import read_json, write_json
+    from fukikae.models import Assignments, ClusterAssignment
+
+    ws = _alias_ws(tmp_path)
+    eid = "S01E01"
+    path = ws.work_dir(eid) / "05-characters" / "assignments.json"
+    path.parent.mkdir(parents=True)
+    rows = np.array([[1.0, 0.0], [0.9, 0.1]], dtype=np.float32)
+    with Registry(ws.registry_path) as reg:
+        reg.add_exemplars(1, eid, "SPEAKER_08~happy", rows, 10.0)
+        reg.add_exemplars(1, eid, "SPEAKER_08", rows, 10.0)
+    clusters = [
+        ClusterAssignment.model_validate(
+            {"cluster": c, "actor_id": 1, "character_id": 1, "score": None,
+             "clean_seconds": 10.0, "status": "matched", **extra}
+        )
+        for c, extra in (("SPEAKER_08~happy", {"name": "happy", "source": "name"}),
+                         ("SPEAKER_08", {}))
+    ]  # fmt: skip
+    write_json(path, Assignments(episode=eid, threshold=0.8, clusters=clusters))
+    r = runner.invoke(
+        app, ["registry", "split", str(ws.root), "--episode", eid, "--cluster", "SPEAKER_08~happy"]
+    )
+    assert r.exit_code == 0, r.output
+    got = {c.cluster: c for c in read_json(path, Assignments).clusters}
+    assert got["SPEAKER_08"].actor_id == 1
+    moved = got["SPEAKER_08~happy"]
+    assert moved.actor_id not in (None, 1) and moved.name == "happy"
+    with Registry(ws.registry_path) as reg:
+        assert reg.cluster_actors(eid, "SPEAKER_08~happy") == [moved.actor_id]
+        assert reg.cluster_actors(eid, "SPEAKER_08") == [1]
