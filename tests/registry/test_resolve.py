@@ -656,3 +656,62 @@ def test_a_rowless_remainder_never_matches_this_runs_named_rows(tmp_path, earlie
     stage, res = _remainder_after_named(tmp_path, earlier=earlier)
     assert stage["SPEAKER_01"] == ("extra", "voice")
     assert res == stage
+
+
+# --- Task 11: an actor another episode's assignments still name is never pruned ---------------
+
+
+def _rowless_claim(tmp_path):
+    """S01E00 made actor X (voice A); S01E02's rowless remainder claimed X by its parent's
+    match and added no exemplar to it, so X's exemplars all come from S01E00. On Fairy Tail,
+    resolving E14 alone then pruned character 2, which E11's and E13's remainders named."""
+    from fukikae.registry.resolve import resolve_episodes
+    from tests.stages.test_characters import NAMES_CFG, write_names
+
+    ws = make_ws(tmp_path, season={})
+    e0 = add_episode(ws, "S01E00", {"S0": (noisy(A, seed=9), 40.0)})
+    CharactersStage().run(e0, NAMES_CFG)
+    e2 = add_episode(ws, "S01E02", {"SPEAKER_07": (noisy(A, seed=3), 40.0)})
+    write_names(
+        e2,
+        {
+            "SPEAKER_07~guard-a": ("SPEAKER_07", "guard a", "role", noisy(A, seed=3), [(0, 30)]),
+            "SPEAKER_07": ("SPEAKER_07", None, "remainder", [], [(30, 40)]),
+        },
+    )
+    CharactersStage().run(e2, NAMES_CFG)
+    resolve_episodes(ws, [e2], threshold=0.6)
+    rem = by_cluster(ws, "S01E02")[0]["SPEAKER_07"]
+    assert rem.status == "matched" and rem.actor_id is not None
+    return ws, e0, rem
+
+
+def _referenced_exist(ws: Workspace, eid: str) -> bool:
+    got, _ = by_cluster(ws, eid)
+    with Registry(ws.registry_path) as reg:
+        actors = {a.id for a in reg.actors()}
+        chars = {c.id for c in reg.characters()}
+    return all(
+        (a.actor_id is None or a.actor_id in actors)
+        and (a.character_id is None or a.character_id in chars)
+        for a in got.values()
+    )
+
+
+def test_resolve_never_prunes_an_actor_another_episodes_assignments_name(tmp_path):
+    from fukikae.registry.resolve import resolve_episodes
+
+    ws, e0, rem = _rowless_claim(tmp_path)
+    resolve_episodes(ws, [e0], threshold=0.6)
+    assert _referenced_exist(ws, "S01E02")
+
+
+def test_characters_stage_never_prunes_an_actor_another_episodes_assignments_name(tmp_path):
+    from tests.stages.test_characters import NAMES_CFG
+
+    ws, e0, rem = _rowless_claim(tmp_path)
+    # S01E00 rediarized: a new label, span and voice, so no pin keeps X and X loses its last
+    # exemplars
+    write_diarize(e0, {"S9": (noisy(C, seed=9), 40.0)}, [(50.0, 58.0, "S9")])
+    CharactersStage().run(e0, NAMES_CFG)
+    assert _referenced_exist(ws, "S01E02")

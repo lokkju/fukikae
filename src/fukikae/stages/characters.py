@@ -88,6 +88,7 @@ from fukikae.registry.projection import (
     projected_tops,
 )
 from fukikae.registry.store import AliasConflictError, Registry
+from fukikae.registry.usage import actors_in_use
 from fukikae.stages.language import LanguageResult
 from fukikae.workspace import Episode, Workspace
 
@@ -476,7 +477,9 @@ class CharactersStage:
 
         result: dict[str, ClusterAssignment] = {}
         with Registry(Workspace(ep.workspace_root).registry_path) as reg, reg.transaction():
-            orphans = reg.delete_episode(ep.id)
+            # an actor another episode's assignments name stays, exemplars or not
+            in_use = actors_in_use(ep.workspace_root, skip={ep.id})
+            orphans = [a for a in reg.delete_episode(ep.id) if a not in in_use]
             known = {a.id for a in reg.actors()}
             # A pin to an actor that no longer exists (deleted by hand) is matched afresh.
             pinned = {k: v for k, v in pinned.items() if v.actor_id in known}
