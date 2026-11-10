@@ -549,6 +549,36 @@ class _CappedStream(io.RawIOBase):
         return len(data)
 
 
+# Header types whose payload tarfile reads into memory before yielding a member: pax (x, g,
+# Solaris X) and GNU long name/link (L, K), plus GNU sparse (S), whose extra headers it
+# also follows. Export writes plain ustar, so a pack never needs any of them.
+_EXTENDED_TYPES = frozenset(
+    {
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+        tarfile.GNUTYPE_SPARSE,
+    }
+)
+
+
+class _UstarOnly(tarfile.TarInfo):
+    """A TarInfo that refuses extended headers as soon as their 512-byte header block is
+    parsed, before tarfile buffers their payload (a 10 KB pack could otherwise make it
+    allocate gigabytes)."""
+
+    def _proc_member(self, tarfile_: tarfile.TarFile) -> tarfile.TarInfo:
+        if self.type in _EXTENDED_TYPES:
+            kind = self.type.decode("ascii", "replace")
+            raise PackError(
+                f"pack member {printable(self.name)!r} is an extended header (type {kind!r}); "
+                "packs are plain ustar archives"
+            )
+        return super()._proc_member(tarfile_)  # pyright: ignore[reportAttributeAccessIssue]
+
+
 def _scan_tar_zst(path: Path, limits: PackLimits, staging: Path | None) -> None:
     """One streaming pass over the archive with every member check; ``staging`` None reads
     and discards the data (the size pass), else copies each member into it."""
@@ -562,7 +592,7 @@ def _scan_tar_zst(path: Path, limits: PackLimits, staging: Path | None) -> None:
         try:
             with dctx.stream_reader(fh, read_across_frames=True) as zr:
                 stream = io.BufferedReader(_CappedStream(zr, cap), buffer_size=1 << 16)
-                with tarfile.open(fileobj=stream, mode="r|") as tf:
+                with tarfile.open(fileobj=stream, mode="r|", tarinfo=_UstarOnly) as tf:
                     for m in tf:
                         name = _member_name(m.name)
                         if not (m.isreg() or m.isdir()) or m.issparse():

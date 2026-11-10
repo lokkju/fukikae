@@ -946,3 +946,29 @@ def test_directory_entries_count_toward_the_file_limit(tmp_path: Path):
         (d / sub).mkdir()
     with pytest.raises(PackError, match="files"):
         read_pack(d, limits=PackLimits(max_files=4))
+
+
+@pytest.mark.parametrize("fmt", [tarfile.PAX_FORMAT, tarfile.GNU_FORMAT])
+def test_tar_zst_refuses_pax_and_gnu_extended_headers(tmp_path: Path, fmt: int):
+    """A3: export writes ustar only; pax (x/g) and GNU (L/K) headers are refused before
+    tarfile reads their payload into memory."""
+    members = good_pack_members(tmp_path)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=fmt) as tf:
+        for info, data in members:
+            tf.addfile(info, io.BytesIO(data) if data is not None else None)
+        long = tarfile.TarInfo("clips/" + "a" * 200 + ".wav")  # needs an extended header
+        tf.addfile(long, io.BytesIO(b""))
+    evil = tmp_path / "evil.tar.zst"
+    evil.write_bytes(zstandard.ZstdCompressor().compress(buf.getvalue()))
+    _import_refused(tmp_path, evil, "extended header")
+
+
+def test_tar_zst_refuses_a_huge_pax_header_without_buffering_it(tmp_path: Path):
+    info = tarfile.TarInfo("PaxHeader")
+    info.type = tarfile.XHDTYPE
+    info.size = 2 * 1024**3  # claims 2 GiB
+    raw = info.tobuf(tarfile.USTAR_FORMAT, "utf-8", "surrogateescape") + b"\0" * 4096
+    evil = tmp_path / "evil.tar.zst"
+    evil.write_bytes(zstandard.ZstdCompressor().compress(raw))
+    _import_refused(tmp_path, evil, "extended header")
