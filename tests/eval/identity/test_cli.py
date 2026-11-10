@@ -398,10 +398,31 @@ def test_identity_rows_tune_and_holdout(tmp_path: Path):
     assert "holdout" not in t.options
     assert t.options["profile"] == "live-action"
     assert t.options["profile_hash"] == options_hash(cfg.profile_raw)
+    # The diarize stage's resolved config: the live-action profile clusters at 0.5.
+    assert t.options["diarize"]["backend"] == "pyannote"
+    assert t.options["diarize"]["options"]["clustering_threshold"] == 0.5
+    assert set(t.options["diarize"]["identity"]) == {"model", "revision"}
     # Tune and holdout of one run share the options hash, so they sit in one matrix row.
     assert t.options_hash == h.options_hash
     assert identity_rows(fake_run(root, holdout=False), cfg, "bbt", None)[0].split == "tune"
     assert len(identity_rows(fake_run(root, holdout=False), cfg, "bbt", None)) == 1
+
+
+def test_identity_rows_hash_follows_the_workspace_diarize_override(tmp_path: Path):
+    from fukikae.config import load_config
+    from fukikae.eval.identity.cli import identity_rows
+
+    base = 'profile = "live-action"\nsource_language = "en"\n[series]\ntitle = "BBT"\n'
+    hashes = []
+    for name, extra in (("a", ""), ("b", "[diarize]\nclustering_threshold = 0.6\n")):
+        root = tmp_path / name
+        root.mkdir()
+        (root / "fukikae.toml").write_text(base + extra)
+        cfg = load_config(root, user_config=None)
+        (row, _) = identity_rows(fake_run(root), cfg, "bbt", None)
+        hashes.append(row.options_hash)
+        assert row.options["diarize"]["options"]["clustering_threshold"] == (0.6 if extra else 0.5)
+    assert hashes[0] != hashes[1]
 
 
 def test_identity_rows_without_nearest_centroid(tmp_path: Path):

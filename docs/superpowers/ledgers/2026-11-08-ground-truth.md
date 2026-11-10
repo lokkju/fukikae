@@ -245,16 +245,16 @@ Workspaces `~/fukikae-ws/t8/ws/<set>-pick`: `cp -al` of the ct 0.5 copy with its
 | bazinga-office PAL | S01E05 | 3, 3 / 0 / 1.00, 39% | pass | 3 / 0 / 1.00 pass |
 | bazinga-office film | S01E05 | 3, 3 / 0 / 1.00, 38% | pass | 3 / 0 / 1.00 pass |
 | grid | S01E05 | 5, 4 / 0 / 0.80, 16% | fail (종이 0.00, no tuning id) | not run |
-| kaze | S01E11 | **pending** (week 3 downloading) | | |
+| kaze | S01E11 | 2, 1 / 1 (りん + 直美) / 0.50, 17% | fail (りん 0.76; 直美 on りん's id) | 1 / 1 / 0.50 fail (りん 0.73) |
 
 - bbt de: on E03, pyannote at 0.5 splits the leads; Leonard stays on the merged tuning id 1 (0.89) and Sheldon's 152 s go to a new actor (0.01 on a tuning id).
 - bazinga-tbbt: Raj has 2 s in E01 and no tuning id; Leslie (22 s in tuning) holds 0.98. Office: Michael, Jim, Pam recur on E05 (Dwight under 5 s).
 - grid: the provisional profile scored 0.80 on E05 with a 새하 + 어진 merge; the pick scores 0.80 with none.
 - The tune rows that the held-out runs write (pipeline, not harness) match the harness sweep's ct 0.5 centroid 0.60 cells on every set (e.g. bbt de 2 / 1 / 0.75, es 3 / 0 / 0.75, grid 1 / 0 / 0.50).
 
-### Kaze E11, pending
+### Kaze E11
 
-`~/fukikae-ws/t8/ws/kaze-pick` exists with E01-E03's characters stage run at the committed profile (no E11, nothing scored); the default profile's tuning registry is Task 7b's in `~/fukikae-ws/kaze-default`. Follow-up, once each, no re-tuning, from the repository root; the onset check (step 3) runs after diarization because it needs E11's vocal stem and turns. Kaze can't show over-merge (one recurring character in tuning).
+Run 2026-11-10 at 0b0265a (main; the profile's identity tables unchanged since `6bb10c2`), once each, no re-tuning (GT15). Week 3 was complete with nothing under incomplete/; EP011 copied through the read-only volume (cmp identical to the share), and the share's EP011 .srt is identical to the one the captions were retimed against. Re-running `eval subalign` on E11 reproduces `aligned/S01E11.ass` byte for byte: text mode, 144 anchors, 100% inliers, offset -0.55 s, scale 1.000033, rms 11 ms, max residual 19 ms. Step 2 ran extract through characters in 187 s. Onsets (step 3): the aligned captions lead by a median +0.41 s by pyannote (20 of 26 gap-led cues matched, IQR +0.13 to +0.58) and +0.38 s by energy VAD (22 matched, IQR +0.16 to +0.61); the raw .srt gives +0.42 / +0.37. That is about 0.1 s above E01-E03's 0.24-0.31 s on 20-odd cues, same sign; I read it as short of the stop condition and went on. Pick: 2 recurring (りん 43.0 s, 直美 8.6 s), 直美 at 1.00 on りん's tuning id 3, りん at 0.76 (4.4 s on new id 7), merge りん + 直美 on id 3 (73% りん, 19% 直美), 1 / 1 / 0.50, coverage 17%, fail. Default: the same merge, りん 0.73, 1 / 1 / 0.50, fail. The predicted merge (直美's nearest-centroid accuracy was 7% in tuning) showed as soon as she recurred. Rows exported to the main JSONL (172 to 176). The commands as scripted:
 
 ```bash
 # 1. Copy EP011 (week 3 must be under complete/tv/, nothing of it under incomplete/)

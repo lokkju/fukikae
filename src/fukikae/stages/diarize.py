@@ -61,6 +61,17 @@ def clean_spans(
     return out
 
 
+def diarize_key(cfg: Config) -> dict[str, Any]:
+    """The ``diarize`` part of the stage key: the resolved backend, its options and its model
+    identity. The identity ledger rows record the same dict."""
+    diar = _resolve(cfg, "diarize", None, "pyannote")
+    return {
+        "backend": diar.backend,
+        "options": diar.options,
+        "identity": identity_key("diarize", diar),
+    }
+
+
 class DiarizeStage:
     name = "diarize"
 
@@ -78,13 +89,9 @@ class DiarizeStage:
         return _resolve(cfg, "diarize", None, "pyannote"), cfg.resolve("embed")
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
-        diar, emb = self._cfgs(cfg)
+        _, emb = self._cfgs(cfg)
         return {
-            "diarize": {
-                "backend": diar.backend,
-                "options": diar.options,
-                "identity": identity_key("diarize", diar),
-            },
+            "diarize": diarize_key(cfg),
             "embed": {
                 "backend": emb.backend,
                 "options": emb.options,
