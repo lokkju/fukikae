@@ -788,3 +788,59 @@ def test_edit_runs_the_stage_card_check(tmp_path: Path, monkeypatch):
     assert r.exit_code == 1 and "seed" in r.output, r.output
     with Registry(ws.registry_path) as reg:
         assert _cur(reg, cid, "en").card_id == a
+
+
+def _assign_with_verify_raising(tmp_path: Path, monkeypatch, exc: BaseException):
+    import fukikae.cards.cli as cards_cli
+
+    ws, cid, store = setup(tmp_path)
+    a = store.put(parse_card(STOCK_CARD))
+
+    def boom(*_a, **_kw):
+        raise exc
+
+    monkeypatch.setattr(cards_cli, "_verify_after", boom)
+    return invoke("assign", str(ws.root), "Natsu", a)
+
+
+def test_session_reports_a_worker_crash_in_one_line(tmp_path: Path, monkeypatch):
+    """A10: RuntimeError from a verify render or a worker crash, OSError and sqlite errors
+    are one-line errors, not tracebacks."""
+    r = _assign_with_verify_raising(tmp_path, monkeypatch, RuntimeError("worker exited with 9"))
+    assert r.exit_code == 1 and "worker exited with 9" in r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
+def test_session_reports_os_errors_in_one_line(tmp_path: Path, monkeypatch):
+    r = _assign_with_verify_raising(tmp_path, monkeypatch, OSError(28, "No space left on device"))
+    assert r.exit_code == 1 and "No space left" in r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
+def test_session_reports_a_broken_registry_in_one_line(tmp_path: Path):
+    ws, _, _ = setup(tmp_path)
+    ws.registry_path.write_bytes(b"this is not a database" * 100)
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 1 and "error:" in r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
+def test_session_reports_a_newer_registry_schema_in_one_line(tmp_path: Path):
+    import sqlite3
+
+    ws, _, _ = setup(tmp_path)
+    con = sqlite3.connect(ws.registry_path)
+    con.execute("UPDATE schema_version SET version = 99")
+    con.commit()
+    con.close()
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 1 and "upgrade fukikae" in r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
+def test_lang_option_is_validated_and_normalized(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    a = store.put(parse_card(STOCK_CARD))
+    assert invoke("assign", str(ws.root), "Natsu", a, "--lang", "EN").exit_code == 0
+    r = invoke("list", str(ws.root), "--lang", "pt_BR")
+    assert r.exit_code == 1 and "pt-BR" in r.output

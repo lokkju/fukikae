@@ -72,22 +72,33 @@ def _fail(msg: str) -> typer.Exit:
 
 @contextmanager
 def _session(workspace: Path, lang: str | None) -> Iterator[tuple[Registry, CardStore, str]]:
-    """The workspace's registry, card store and target language; input errors exit 1."""
+    """The workspace's registry, card store and target language. Input errors, a verify
+    render or worker that crashed (RuntimeError), a registry sqlite can't use and OS errors
+    (a full disk, a permission) exit 1 with one line (A10)."""
+    import sqlite3
+
+    from fukikae.config import check_language
     from fukikae.errors import user_errors
     from fukikae.registry.store import Registry
 
     ws = Workspace(workspace)
     try:
-        language = lang or ws.config.target_language
+        language = check_language(lang, "--lang") if lang else ws.config.target_language
     except user_errors() as e:
         raise _fail(str(e)) from e
-    with Registry(ws.registry_path) as reg:
-        try:
+    try:
+        with Registry(ws.registry_path) as reg:
             yield reg, CardStore(ws.root), language
-        except (CardError, ValueError) as e:
-            raise _fail(str(e)) from e
-        except KeyError as e:
-            raise _fail(f"no character {e.args[0]}") from e
+    except typer.Exit:  # click's Exit is a RuntimeError: a command's own exit passes through
+        raise
+    except (CardError, ValueError) as e:
+        raise _fail(str(e)) from e
+    except KeyError as e:
+        raise _fail(f"no character {e.args[0]}") from e
+    except sqlite3.DatabaseError as e:
+        raise _fail(f"registry {ws.registry_path}: {e}") from e
+    except (RuntimeError, OSError) as e:
+        raise _fail(str(e) or type(e).__name__) from e
 
 
 def _label(c: Character) -> str:
