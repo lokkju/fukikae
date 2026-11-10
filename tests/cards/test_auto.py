@@ -1155,3 +1155,15 @@ def test_a_lock_kept_key_is_not_a_key_the_character_answers_to(tmp_path: Path):
     got = foreign_spans(asg, read_json(names_path(Workspace(root).work_dir("S01E12")), NamesResult),
                         1, lambda _k: None)  # fmt: skip
     assert got == [(20.0, 24.0)]
+
+
+def test_an_engine_is_refused_as_clone_backend_or_tts_backend():
+    """indextts2_trt renders indextts2 cards; it makes none, so it is no clone_backend and no
+    [tts] backend. The message points at [tts] engines."""
+    from fukikae.cards.auto import clone_backend, tts_backend
+    from fukikae.config import ConfigError
+
+    with pytest.raises(ConfigError, match=r"\[tts\] engines"):
+        clone_backend(Config(raw={"tts": {"clone_backend": "indextts2_trt"}}))
+    with pytest.raises(ConfigError, match=r"\[tts\] engines"):
+        tts_backend(Config(raw={"tts": {"backend": "indextts2_trt"}}))

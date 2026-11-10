@@ -605,9 +605,11 @@ def validate_for_backend(
     """
     name = getattr(cls, "name", cls.__name__)
     v = card.voice
-    if v.backend != name:
+    # an engine of another backend (indextts2_trt) renders that backend's cards
+    own = getattr(cls, "card_backend", None) or name
+    if v.backend != own:
         raise CardError(
-            f"card is for backend {v.backend!r}, not {name!r}; "
+            f"card is for backend {v.backend!r}, not {own!r}; "
             "a card renders only on its own backend"
         )
     if v.source not in cls.sources:

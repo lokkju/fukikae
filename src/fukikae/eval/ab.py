@@ -1039,7 +1039,7 @@ class _Renderer:
             reused = self._stage_render(job, work, ws.root / ".fukikae" / "tts-cache")
             if reused is not None:
                 return reused
-        backend = job.card.voice.backend
+        backend = job.cls.name
         k = (cand.name, backend)
         if k not in self.synths:
             # one model at a time: close the others before a new one loads
@@ -1093,6 +1093,15 @@ def pick_scene(
     return best[1], best[1] + seconds
 
 
+def candidate_engines(cand: Candidate) -> dict[str, str]:
+    """``{card backend: engine}`` when the candidate is an engine of another backend's cards
+    (``indextts2_trt``), else nothing."""
+    from fukikae.backends import loader
+
+    card_backend = getattr(loader.backend_class("tts", cand.backend), "card_backend", None)
+    return {card_backend: cand.backend} if card_backend else {}
+
+
 def gather_set(
     spec: SetSpec, *, seed: int, ledger: Path | None, tmp: Path, log: Any = print
 ) -> tuple[list[CueMaterial], list[SceneMaterial], list[str]]:
@@ -1130,6 +1139,9 @@ def gather_set(
     for cand in spec.candidates:
         ccfg = _with_mode(cfg, cand)
         cls = loader.backend_class("tts", cand.backend)
+        card_backend = getattr(cls, "card_backend", None)
+        if card_backend:  # an engine: its card backend's cards, rendered by it
+            cls = loader.backend_class("tts", card_backend)
         sources = getattr(cls, "sources", frozenset())
         if "clone" in sources and "stock" not in sources:
             clone_backends.add(cand.name)
@@ -1160,7 +1172,7 @@ def gather_set(
         for cand in spec.candidates:
             ccfg = cfgs[cand.name]
             checked = {
-                cid: check_card(store, card, who(cid), target)
+                cid: check_card(store, card, who(cid), target, candidate_engines(cand))
                 for cid, card in cards[cand.name].items()
                 if cid in covered
             }
@@ -1355,11 +1367,13 @@ def _scene(
                 who = c.speaker
                 job = prepare_cue(
                     c, card, ccfg, store, who=who,
-                    checked=check_card(store, card, who, cfg.target_language),
+                    checked=check_card(
+                        store, card, who, cfg.target_language, candidate_engines(cand)
+                    ),
                     vocals=vocals, events=events,
                 )  # fmt: skip
                 jobs.append(job)
-            jobs.sort(key=lambda j: (j.card.voice.backend, j.cue.start))
+            jobs.sort(key=lambda j: (j.cls.name, j.cue.start))
             done: dict[str, Rendered] = {}
             for job in jobs:
                 done[job.cue.id] = renderer.render(cand, job, ccfg, ws, store, work=work)

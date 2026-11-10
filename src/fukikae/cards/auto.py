@@ -129,12 +129,26 @@ def clone_backend(cfg: Config) -> str | None:
             name = table["clone_backend"]
     if name is not None and not isinstance(name, str):
         raise ConfigError(f"[tts] clone_backend must be a backend name, not {name!r}")
+    if name:
+        from fukikae.backends.loader import engine_problem
+
+        problem = engine_problem("tts", name, "[tts] clone_backend")
+        if problem:
+            raise ConfigError(problem)
     return name or None
 
 
 def tts_backend(cfg: Config) -> str:
-    """The ``[tts]`` backend: the one automatic cards and extras are made for."""
-    return cfg.resolve("tts").backend
+    """The ``[tts]`` backend: the one automatic cards and extras are made for (never an engine
+    of another backend's cards)."""
+    from fukikae.backends.loader import engine_problem
+    from fukikae.config import ConfigError
+
+    name = cfg.resolve("tts").backend
+    problem = engine_problem("tts", name, "[tts] backend")
+    if problem:
+        raise ConfigError(problem)
+    return name
 
 
 def gender_thresholds(cfg: Config) -> tuple[float, float]:
@@ -846,12 +860,9 @@ def clone_problem(cls: type[Synthesizer], cfg: Config) -> str | None:
     from fukikae.stages.tts import NoUsableGpuError, synth_device
 
     if issubclass(cls, WorkerSynthesizer):
-        inst = cls({}, "cpu")
-        if not inst.interpreter().exists():
-            return f"no worker environment at {inst.venv()}"
-        lock = inst.lock_problem()
-        if lock is not None:
-            return lock
+        problem = cls({}, "cpu").environment_problem()
+        if problem is not None:
+            return problem
     try:
         synth_device(cfg, cls)  # a bad device value or a device the backend lacks raises
     except NoUsableGpuError as e:

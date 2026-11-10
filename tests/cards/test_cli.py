@@ -1035,3 +1035,16 @@ def test_list_skips_an_unreadable_card_with_a_note(tmp_path: Path):
     r = invoke("list", str(ws.root))
     assert r.exit_code == 0, r.output
     assert f"card {card} can't be read" in r.output
+
+
+def test_voices_clone_refuses_an_engine_as_backend(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    (ws.root / "fukikae.toml").write_text('source_language = "ja"\n')
+    clip = _clip(tmp_path / "natsu.wav")
+    r = invoke(
+        "clone", str(ws.root), "Natsu", "--clip", str(clip), "--transcript", "燃えてきた",
+        "--backend", "indextts2_trt",
+    )  # fmt: skip
+    assert r.exit_code == 1 and "[tts] engines" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.card_for(cid, "en") is None

@@ -89,6 +89,9 @@ emotion2vec = "fukikae.backends.tag.emotion2vec:Emotion2vecTagger"
 kokoro = "fukikae.backends.tts.kokoro:KokoroSynthesizer"
 # runs in its own environment, workers/indextts2 (README, "Cloning backends")
 indextts2 = "fukikae.backends.tts.indextts2:IndexTts2Synthesizer"
+# renders indextts2 cards through TensorRT in a local container, workers/indextts2_trt (an
+# opt-in engine: [tts] engines = { indextts2 = "indextts2_trt" })
+indextts2_trt = "fukikae.backends.tts.indextts2_trt:IndexTts2TrtSynthesizer"
 # runs in its own environment, workers/cosyvoice3 (README, "Cloning backends")
 cosyvoice3 = "fukikae.backends.tts.cosyvoice3:CosyVoice3Synthesizer"
 # runs in its own environment, workers/qwen3tts (README, "Cloning backends")

@@ -31,6 +31,7 @@ EXTRAS: dict[str, str] = {
     # Out-of-process backends import without their model; a missing worker environment
     # (`.venvs/<extra>`, from `workers/<extra>`) is reported at load with the setup command.
     "indextts2": "indextts2",
+    "indextts2_trt": "indextts2_trt",
     "cosyvoice3": "cosyvoice3",
     "qwen3_tts": "qwen3tts",
 }
@@ -83,6 +84,25 @@ def backend_class(kind: str, name: str) -> type[Backend]:
         installed = ", ".join(sorted(eps)) or "none"
         raise ConfigError(f"unknown {kind} backend {name!r}; installed: {installed}")
     return _load(kind, name, ep)
+
+
+def engine_problem(kind: str, name: str, where: str) -> str | None:
+    """Why ``name`` can't be named at ``where`` (``[tts] backend``, say): it is an engine that
+    renders another backend's cards (``card_backend``: indextts2_trt renders indextts2's) and
+    makes none of its own. None for a backend of its own, or one that doesn't load here
+    (whatever uses it reports that)."""
+    try:
+        cls = backend_class(kind, name)
+    except Exception:  # noqa: BLE001 - unknown or broken here: its user reports that
+        return None
+    card_backend = getattr(cls, "card_backend", None)
+    if not card_backend or card_backend == name:
+        return None
+    return (
+        f"{where}: {name!r} renders {card_backend!r} cards and makes none of its own; name "
+        f'{card_backend!r} there, and set [{kind}] engines = {{ {card_backend} = "{name}" }} to '
+        f"render those cards with {name!r}"
+    )
 
 
 def create(kind: str, cfg: BackendConfig, device: str) -> Backend:
