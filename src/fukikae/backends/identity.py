@@ -52,6 +52,12 @@ def model_identity(kind: str, cfg: BackendConfig) -> tuple[str | None, str | Non
             fallback,
         )
         revision = cfg.options.get("revision") or getattr(inst, "revision", None)
+        # B3: a worker backend's environment is part of what renders (its own uv.lock), so a
+        # worker env bump changes the identity; the card pin (model_revision) is unchanged
+        lock_revision = getattr(inst, "lock_revision", None)
+        locked = lock_revision() if callable(lock_revision) else None
+        if locked and revision is not None:
+            revision = f"{revision}+lock:{locked}"
         if revision is None and isinstance(model, str) and "/" in model:
             org, _, name = model.partition("/")
             ref = _hub_cache() / f"models--{org}--{name}" / "refs" / "main"

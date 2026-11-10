@@ -263,6 +263,12 @@ class WorkerSynthesizer(Synthesizer):
     def setup_hint(self) -> str:
         return f"fukikae backends setup {self.name}"
 
+    def lock_revision(self) -> str | None:
+        """The first 12 hex of the sha256 of the worker project's ``uv.lock``, for the
+        backend's identity in cache keys (B3); None when there is no lock file."""
+        lock = self.project_dir() / "uv.lock"
+        return lock_digest(lock)[:12] if lock.is_file() else None
+
     def lock_problem(self) -> str | None:
         """Why the environment doesn't match its project's lock, or None when it does."""
         lock = self.project_dir() / "uv.lock"
