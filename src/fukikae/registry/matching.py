@@ -163,7 +163,10 @@ def _intervals(turns: list[Turn]) -> dict[str, list[tuple[float, float]]]:
 
 
 def pin_sources(
-    previous: Assignments, previous_turns: Diarization, current_turns: Diarization
+    previous: Assignments,
+    previous_turns: Diarization,
+    current_turns: Diarization,
+    voice_only: bool = False,
 ) -> dict[str, str]:
     """Map each current cluster that pins to the previous cluster it inherits from.
 
@@ -171,9 +174,15 @@ def pin_sources(
     overlap exceeds half of the current cluster's total turn time; on a tie, its own label
     (a names-stage remainder nested in another cluster's overlapping turn). Only previous
     assignments with a character (matched, new, pinned) are inherited; `extra` and `review`
-    clusters are matched afresh on each run.
+    clusters are matched afresh on each run. With ``voice_only``, only assignments acoustics
+    made (``source = "voice"``) are inherited, never a name or lock decision: the acoustic
+    evidence of a named sub-cluster must not be its own earlier name decision.
     """
-    assigned = {c.cluster for c in previous.clusters if c.character_id is not None}
+    assigned = {
+        c.cluster
+        for c in previous.clusters
+        if c.character_id is not None and (not voice_only or c.source == "voice")
+    }
     prev_iv = _intervals(previous_turns.turns)
     sources: dict[str, str] = {}
     for label, cur in _intervals(current_turns.turns).items():
@@ -193,13 +202,17 @@ def pin_sources(
 
 
 def pin(
-    previous: Assignments, previous_turns: Diarization, current_turns: Diarization
+    previous: Assignments,
+    previous_turns: Diarization,
+    current_turns: Diarization,
+    voice_only: bool = False,
 ) -> dict[str, ClusterAssignment]:
-    """Carry earlier assignments onto the current clusters (see `pin_sources`), as `pinned`. A
-    pin is acoustic: it never carries the name or source of the sub-cluster it came from."""
+    """Carry earlier assignments onto the current clusters (see `pin_sources`, which takes
+    ``voice_only``), as `pinned`. A pin is acoustic: it never carries the name or source of the
+    sub-cluster it came from."""
     prev_by_label = {c.cluster: c for c in previous.clusters}
     update = {"status": "pinned", "name": None, "source": "voice"}
     return {
         cur: prev_by_label[src].model_copy(update={"cluster": cur, **update})
-        for cur, src in pin_sources(previous, previous_turns, current_turns).items()
+        for cur, src in pin_sources(previous, previous_turns, current_turns, voice_only).items()
     }
