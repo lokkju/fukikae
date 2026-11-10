@@ -92,7 +92,10 @@ class SenseVoiceTagger:
     kind: ClassVar[str] = "tag"
     languages: ClassVar[frozenset[str] | Literal["*"]] = "*"
     devices: ClassVar[frozenset[str]] = frozenset({"cpu", "cuda"})
-    vram_mb: ClassVar[int] = 0  # runs on the CPU by default; the stage waits for no VRAM
+    # D26: on the GPU by default (a small model; the CPU took most of the tag stage's 5 min);
+    # the CPU when there is no usable GPU. VRAM measured on Fairy Tail E13 (see the perf report).
+    default_device: ClassVar[str | None] = "cuda"
+    vram_mb: ClassVar[int] = 1500
     extra: ClassVar[str] = "sensevoice"
 
     def __init__(self, options: dict[str, Any], device: str) -> None:

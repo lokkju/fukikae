@@ -5,8 +5,14 @@ Reads ``01-separate/vocals_16k.wav`` and ``04-diarize/turns.json``; writes
 ``emotion_backend`` names a second backend, with its options in ``[tag.emotion]``: then that
 backend's scored emotions replace the first's, which is handed no turns). Off unless
 ``[tag] enabled = true`` (the anime and live-action profiles turn it on); the workspace's table
-wins over the profile's. Runs on the CPU unless ``[tag] device = "cuda"``. ``enabled`` is not a
-backend option, so it stays out of the cache key.
+wins over the profile's. ``enabled`` is not a backend option, so it stays out of the cache key.
+
+Device per backend (D26, like the tts stage's ruling CD14): the emotion backend's is
+``[tag.emotion] device``, then ``[tag] device``; the events backend's is ``[tag] device``; either
+falls back to the backend's ``default_device`` (SenseVoice and emotion2vec: cuda), else cuda when
+the backend can use it. cuda means the configured GPU under the GPU lock (ruling CD15), and the
+CPU when there is no usable GPU. ``device`` is never a backend option; the preferences (not the
+card found) are in the key.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from fukikae import runctx
 from fukikae.artifacts import read_json, write_json
 from fukikae.backends.base import Tagger
 from fukikae.backends.identity import identity_key
-from fukikae.backends.loader import create
+from fukikae.backends.loader import backend_class, create
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
@@ -49,25 +55,49 @@ class TagStage:
         return [ep.work / "04b-tag" / "tags.json"]
 
     @staticmethod
-    def _backend_cfg(cfg: Config) -> tuple[BackendConfig, BackendConfig | None, str]:
-        """(events backend, emotion backend or None, device); `device` serves both."""
+    def _backend_cfg(cfg: Config) -> tuple[BackendConfig, BackendConfig | None, str, str | None]:
+        """(events backend, emotion backend or None, events device, emotion device or None):
+        the device preferences, ``cpu`` or ``cuda``."""
         bc = cfg.resolve("tag")
         skip = ("enabled", "device", "emotion_backend", "emotion")
         options = {k: v for k, v in bc.options.items() if k not in skip}
-        device = str(bc.options.get("device", "cpu"))
+        stage_device = bc.options.get("device")
         name = bc.options.get("emotion_backend")
         if name is not None and not str(name).strip():
             raise ConfigError(
                 "[tag] emotion_backend is empty; leave the key out to use no second backend"
             )
-        emotion = None
+        events = BackendConfig(bc.backend, options)
+        device = TagStage._device(events.backend, stage_device, "[tag] device")
+        emotion, emotion_device = None, None
         if name:
             sub = bc.options.get("emotion")
-            emotion = BackendConfig(str(name), dict(sub) if isinstance(sub, dict) else {})
-        return BackendConfig(bc.backend, options), emotion, device
+            sub = dict(sub) if isinstance(sub, dict) else {}
+            own = sub.pop("device", None)
+            emotion = BackendConfig(str(name), sub)
+            where = "[tag.emotion] device" if own is not None else "[tag] device"
+            emotion_device = TagStage._device(
+                emotion.backend, own if own is not None else stage_device, where
+            )
+        return events, emotion, device, emotion_device
+
+    @staticmethod
+    def _device(backend: str, want: Any, where: str) -> str:
+        if want is not None:
+            if want not in ("cpu", "cuda"):
+                raise ConfigError(f'{where} must be "cpu" or "cuda", not {want!r}')
+            return str(want)
+        try:
+            cls = backend_class("tag", backend)
+        except Exception:  # an unknown backend fails at create(), with its own message
+            return "cpu"
+        default = getattr(cls, "default_device", None)
+        if default:
+            return str(default)
+        return "cuda" if "cuda" in getattr(cls, "devices", ()) else "cpu"
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:  # noqa: ARG002
-        bc, ebc, device = self._backend_cfg(cfg)
+        bc, ebc, device, emotion_device = self._backend_cfg(cfg)
         return {
             "backend": bc.backend,
             "options": bc.options,
@@ -76,6 +106,7 @@ class TagStage:
             "emotion_backend": ebc.backend if ebc else None,
             "emotion_options": ebc.options if ebc else None,
             "emotion_identity": identity_key("tag", ebc) if ebc else None,
+            "emotion_device": emotion_device,
         }
 
     @staticmethod
@@ -98,12 +129,13 @@ class TagStage:
     def run(self, ep: Episode, cfg: Config) -> None:
         audio, turns_path = self.inputs(ep)
         (out,) = self.outputs(ep)
-        bc, ebc, want = self._backend_cfg(cfg)
-        device = device_string(cfg) if want == "cuda" else "cpu"
+        bc, ebc, want, emotion_want = self._backend_cfg(cfg)
+        gpu = device_string(cfg) if "cuda" in (want, emotion_want) else "cpu"
         turns = read_json(turns_path, Diarization).turns
         # With a separate emotion backend the events backend decodes no turns.
-        tags = self._run_one(bc, device, cfg, audio, [] if ebc else turns)
+        tags = self._run_one(bc, gpu if want == "cuda" else "cpu", cfg, audio, [] if ebc else turns)
         if ebc:
+            device = gpu if emotion_want == "cuda" else "cpu"
             scored = self._run_one(ebc, device, cfg, audio, turns)
             tags = tags.model_copy(
                 update={"emotions": scored.emotions, "emotion_backend": scored.backend}

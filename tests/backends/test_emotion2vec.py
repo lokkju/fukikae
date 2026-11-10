@@ -40,11 +40,12 @@ def test_best_emotion_drops_other_and_unknown_winners():
     assert best_emotion({"labels": [], "scores": []}) is None
 
 
-def test_defaults_are_cpu_with_a_pinned_revision():
+def test_defaults_are_the_gpu_with_a_pinned_revision():
     t = Emotion2vecTagger({}, "cpu")
     assert (t.model, t.revision) == (DEFAULT_MODEL, DEFAULT_REVISION)
     assert len(DEFAULT_REVISION) == 40
-    assert Emotion2vecTagger.vram_mb == 0
+    # D26: the GPU by default (the tag stage falls back to the CPU without one)
+    assert Emotion2vecTagger.default_device == "cuda" and Emotion2vecTagger.vram_mb > 0
     assert Emotion2vecTagger.devices == {"cpu", "cuda"}
 
 

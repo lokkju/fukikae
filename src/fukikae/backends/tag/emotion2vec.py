@@ -41,7 +41,10 @@ class Emotion2vecTagger:
     kind: ClassVar[str] = "tag"
     languages: ClassVar[frozenset[str] | Literal["*"]] = "*"
     devices: ClassVar[frozenset[str]] = frozenset({"cpu", "cuda"})
-    vram_mb: ClassVar[int] = 0
+    # D26: on the GPU by default (a small model; the CPU took most of the tag stage's 5 min);
+    # the CPU when there is no usable GPU. VRAM measured on Fairy Tail E13 (see the perf report).
+    default_device: ClassVar[str | None] = "cuda"
+    vram_mb: ClassVar[int] = 2500
     extra: ClassVar[str] = "sensevoice"  # funasr, shared with SenseVoice
 
     def __init__(self, options: dict[str, Any], device: str) -> None:

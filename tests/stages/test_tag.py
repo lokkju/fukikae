@@ -226,3 +226,70 @@ def test_empty_emotion_backend_is_rejected(ep):
         TagStage().config_key(cfg, ep)
     with pytest.raises(ConfigError, match="emotion_backend"):
         TagStage().run(ep, cfg)
+
+
+# ---- device per backend (D26, like ruling CD14) -------------------------------------------
+
+
+class GpuTagger(FakeTagger):
+    devices: ClassVar = frozenset({"cpu", "cuda"})
+    default_device: ClassVar = "cuda"
+    vram_mb: ClassVar[int] = 1000
+
+
+class GpuEmotion(FakeEmotion):
+    devices: ClassVar = frozenset({"cpu", "cuda"})
+    default_device: ClassVar = "cuda"
+    vram_mb: ClassVar[int] = 2000
+
+
+@pytest.fixture
+def gpu(monkeypatch):
+    LOG.clear()
+    classes = {"fake": GpuTagger, "fake-emotion": GpuEmotion}
+    monkeypatch.setattr(tag, "create", lambda _k, bc, dev: classes[bc.backend](bc.options, dev))
+    monkeypatch.setattr(tag, "backend_class", lambda _k, name: classes[name])
+    waits: list[int] = []
+    monkeypatch.setattr(tag, "wait_for_vram", lambda _d, need, *_a, **_k: waits.append(need))
+    monkeypatch.setattr(tag, "device_string", lambda _cfg: "cuda:0")
+    return waits
+
+
+def _inits() -> dict[str, str]:
+    return {e[0]: e[2] for e in LOG if isinstance(e, tuple) and e[0].startswith("init")}
+
+
+def test_tag_backends_default_to_the_gpu_when_they_declare_it(ep, gpu):
+    TagStage().run(ep, EMO_CFG)
+    assert _inits() == {"init": "cuda:0", "init-emotion": "cuda:0"}
+    assert gpu == [1000, 2000]  # each waits for its own VRAM under the GPU lock
+
+
+def test_tag_falls_back_to_the_cpu_without_a_gpu(ep, gpu, monkeypatch):
+    monkeypatch.setattr(tag, "device_string", lambda _cfg: "cpu")
+    TagStage().run(ep, EMO_CFG)
+    assert _inits() == {"init": "cpu", "init-emotion": "cpu"}
+    assert gpu == []
+
+
+@pytest.mark.usefixtures("gpu")
+def test_tag_device_stage_wide_and_per_emotion_backend(ep):
+    raw = EMO_CFG.raw["tag"]
+    TagStage().run(ep, Config(raw={"tag": {**raw, "device": "cpu"}}))
+    assert _inits() == {"init": "cpu", "init-emotion": "cpu"}
+    LOG.clear()
+    cfg = Config(raw={"tag": {**raw, "emotion": {"revision": "abc", "device": "cpu"}}})
+    TagStage().run(ep, cfg)
+    assert _inits() == {"init": "cuda:0", "init-emotion": "cpu"}
+    assert ("init-emotion", {"revision": "abc"}, "cpu") in LOG  # device is no option
+    key = TagStage().config_key(cfg, ep)
+    assert key["emotion_options"] == {"revision": "abc"}
+    assert (key["device"], key["emotion_device"]) == ("cuda", "cpu")
+
+
+@pytest.mark.usefixtures("gpu")
+def test_tag_rejects_an_unknown_device(ep):
+    from fukikae.config import ConfigError
+
+    with pytest.raises(ConfigError, match="device"):
+        TagStage().run(ep, Config(raw={"tag": {**EMO_CFG.raw["tag"], "device": "tpu"}}))
