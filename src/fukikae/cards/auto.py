@@ -388,12 +388,9 @@ def clone_problem(cls: type[Synthesizer], cfg: Config) -> str | None:
     from fukikae.stages.tts import NoUsableGpuError, synth_device
 
     if issubclass(cls, WorkerSynthesizer):
-        inst = cls({}, "cpu")
-        if not inst.interpreter().exists():
-            return f"no worker environment at {inst.venv()}"
-        lock = inst.lock_problem()
-        if lock is not None:
-            return lock
+        problem = cls({}, "cpu").environment_problem()
+        if problem is not None:
+            return problem
     try:
         synth_device(cfg, cls)  # a bad device value or a device the backend lacks raises
     except NoUsableGpuError as e:

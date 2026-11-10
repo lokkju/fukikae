@@ -274,6 +274,7 @@ class WorkerSynthesizer(Synthesizer):
         self.options = dict(options)
         self.device = device
         self.pid: int | None = None
+        self.gpu_index: int | None = None  # the card's nvml index while the worker runs on one
         self._proc: subprocess.Popen[bytes] | None = None
         self._err: _StderrTail | None = None
         self._cwd: Path | None = None
@@ -332,6 +333,31 @@ class WorkerSynthesizer(Synthesizer):
         if recorded.read_text().strip() != lock_digest(lock):
             return f"{self.venv()} was synced from another version of {lock}"
         return None
+
+    def environment_location(self) -> Path | str:
+        """Where the worker's environment lives, for ``fukikae doctor``: its venv here."""
+        return self.venv()
+
+    def environment_problem(self) -> str | None:
+        """Why the worker can't start here (its environment missing, or synced from another
+        lock), or None when it can."""
+        if not self.interpreter().exists():
+            return f"no worker environment at {self.venv()}"
+        return self.lock_problem()
+
+    def check_environment(self) -> None:
+        """``BackendUnavailable`` naming the setup command when the worker can't start."""
+        if not self.interpreter().exists():
+            raise BackendUnavailable(
+                f"tts backend {self.name!r} runs in its own environment, and "
+                f"{self.venv()} does not exist; set it up with `{self.setup_hint()}` "
+                '(README, "Cloning backends")'
+            )
+        problem = self.lock_problem()
+        if problem:
+            raise BackendUnavailable(
+                f"tts backend {self.name!r}: {problem}; set it up again with `{self.setup_hint()}`"
+            )
 
     def worker_env(self, *, online: bool = False) -> dict[str, str]:
         """The allowlisted environment the worker gets (never fukikae's secrets); offline
@@ -392,20 +418,11 @@ class WorkerSynthesizer(Synthesizer):
     def load(self) -> None:
         if self._proc is not None:
             return
-        if not self.interpreter().exists():
-            raise BackendUnavailable(
-                f"tts backend {self.name!r} runs in its own environment, and "
-                f"{self.venv()} does not exist; set it up with `{self.setup_hint()}` "
-                '(README, "Cloning backends")'
-            )
-        problem = self.lock_problem()
-        if problem:
-            raise BackendUnavailable(
-                f"tts backend {self.name!r}: {problem}; set it up again with `{self.setup_hint()}`"
-            )
+        self.check_environment()
         env = self.worker_env()
         if self.device.startswith("cuda"):
             gpu = nvml_index(self.device)
+            self.gpu_index = gpu
             # Ruling CD15: the card's lock, held until the worker is reaped (the worker gets
             # the descriptor too); taking it names a leftover worker or llama-server.
             self._lock.enter_context(gpu_lock(gpu, f"tts worker {self.name}"))
@@ -468,6 +485,7 @@ class WorkerSynthesizer(Synthesizer):
     def _stop(self) -> None:
         proc, self._proc = self._proc, None
         self.pid = None
+        self.gpu_index = None
         if proc is not None:
             try:
                 if proc.stdin is not None and not proc.stdin.closed:
