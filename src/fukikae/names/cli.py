@@ -7,7 +7,8 @@ reads one episode's ``names.json``, the characters stage's ``names-report.json``
 ``assignments.json``, the registry and the card store, and prints the verdict, coverage, keys
 and where each went, cuts, unvoiced lines, voice disagreements, alias and merge suggestions,
 stale or flagged clone cards, and characters still holding exemplars from episodes run without
-names. Neither command writes anything but the scan cache.
+names. Neither command writes anything but the scan cache, with one exception: opening the
+registry may migrate its database to the current schema, which is a write.
 """
 
 from __future__ import annotations
