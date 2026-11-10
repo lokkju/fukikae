@@ -990,10 +990,10 @@ class _Renderer:
     def _stage_render(self, job: RenderJob, work: Path, cache: Path) -> Rendered | None:
         """The tts stage's own render of this cue (B4), when its plan in ``work`` holds the
         same card and a key derived from this job's render key (at the card's rate, a fitted
-        rate, or a guard retry) and that wav is still in the cache."""
+        rate, or a guard retry, with its pauses capped) and that wav is still in the cache."""
         from fukikae.artifacts import read_json
         from fukikae.models import TtsPlan
-        from fukikae.stages.tts import fitted_key, retry_key
+        from fukikae.stages.tts import capped_key, fitted_key, retry_key
 
         if work not in self.plans:
             path = work / "07-tts" / "plan.json"
@@ -1011,6 +1011,7 @@ class _Renderer:
         if pc.retry_seed is not None:
             retries = {retry_key(k, pc.retry_seed) for k in firsts}
             allowed |= retries | {fitted_key(k, pc.rate_factor) for k in retries}
+        allowed |= {capped_key(k, job.max_pause_ms) for k in allowed}  # what plays (D33)
         wav = cache / f"{pc.key}.wav"
         if pc.key not in allowed or not wav.exists():
             return None
