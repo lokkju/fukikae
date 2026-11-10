@@ -525,6 +525,17 @@ def identity_rows(run: IdentityRun, cfg: Config, test_set: str, tag: str | None)
             detail={
                 "merges": [list(m) for m in score.merges],
                 "nc": dict(nc),
+                # each recurring character's share of its speech on its modal id
+                "characters": [
+                    {
+                        "name": c.name,
+                        "modal_id": c.modal_id,
+                        "share": round(c.share, 4),
+                        "passing": c.passing,
+                    }
+                    for c in score.characters
+                    if c.recurring
+                ],
                 **({"ceiling": True} if split == "ceiling" else {}),
             },
             workspace=st.get("workspace"),

@@ -383,7 +383,15 @@ def test_identity_rows_tune_and_holdout(tmp_path: Path):
         "strict_fraction": 0.5, "weighted_share": 0.7, "coverage": 0.4, "verdict": "fail",
         "nc_overall": 0.8,
     }  # fmt: skip
-    assert t.detail == {"merges": [["B", "C", 3]], "nc": {"A": 1.0, "(overall)": 0.8}}
+    assert {k: v for k, v in t.detail.items() if k != "characters"} == {
+        "merges": [["B", "C", 3]], "nc": {"A": 1.0, "(overall)": 0.8},
+    }  # fmt: skip
+    # each recurring character's share on its modal id (the results docs' per-character tables)
+    assert t.detail["characters"] == [
+        {"name": c.name, "modal_id": 1, "share": c.share, "passing": c.passing}
+        for c in run.tune.characters
+        if c.recurring
+    ]
     assert h.metrics["fraction"] == 0.5 and h.metrics["nc_overall"] == 0.6
     assert h.metrics["clean"] == 1 and h.metrics["merges"] == 0
     assert "workspace" not in t.options and "tune" not in t.options
