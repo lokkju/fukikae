@@ -23,7 +23,8 @@ Speech-weighted (cue seconds), per split:
 - ``ceiling``: episodes the operator names with ``--ceiling``, scored as held out but without
   that check, against the tuning episodes' modal map: protocol A's ceiling arm, graded on its
   own input and labelled so.
-- ``hidden`` (protocol B): only the cues of lines ``[names] hide_fraction`` withheld; under
+- ``hidden`` (protocol B): only the cues of lines ``[names] hide_fraction`` withheld (a cue
+  counts when a hidden line of its own key overlaps it, `cues._hidden`'s test); under
   ``use = "off"`` the same lines are drawn again from the ground-truth track, so the baseline
   arm scores the same cues. When ``names.json`` records its track, the lines it hid must be the
   lines the ground-truth track gives the same draw, or the run refuses (the two arms would
@@ -40,7 +41,8 @@ from Wendy's turns is a purity failure.
 Ground-truth lines are compared with turns and references only after
 ``groundtruth.check_alignment`` against the episode's identity turns (the offset the identity
 harness applies; ``--force`` scores a track that doesn't line up); cues and lines are compared
-in subtitle time.
+in subtitle time. Cues are attributed to turns moved by the names stage's offset where names
+were used, else by that alignment shift (Fairy Tail's are all 0.0).
 
 Coverage (named share, sub-clusters, cut turns, dropped row seconds, unvoiced and hidden lines)
 comes from each episode's ``names.json``. Rows go to the results ledger with ``stage =
@@ -76,6 +78,7 @@ BACKEND = "subtitle-names"
 SPLIT_ORDER = ("tune", "holdout", "ceiling", "hidden")
 
 type Spans = list[tuple[float, float]]
+type KeyedSpans = list[tuple[float, float, str | None]]  # (start, end, name key)
 
 
 @dataclass
@@ -207,11 +210,6 @@ def characters_per_name(modal: dict[int, str]) -> dict[str, int]:
     return dict(sorted(Counter(modal.values()).items()))
 
 
-def _overlaps(a: tuple[float, float], b: tuple[float, float]) -> bool:
-    ov = min(a[1], b[1]) - max(a[0], b[0])
-    return ov > 0 and ov >= 0.5 * min(a[1] - a[0], b[1] - b[0])
-
-
 @dataclass
 class _Episode:
     id: str
@@ -220,13 +218,13 @@ class _Episode:
     gt: list[GroundTruthLine]  # subtitle (cue) time
     gt_path: Path
     names: NamesResult | None
-    hidden: Spans  # hidden lines in cue time
+    hidden: KeyedSpans  # hidden lines in cue time, with their keys
     shift: float = 0.0  # the alignment offset: turn time = cue time - shift
     gt_audio: list[GroundTruthLine] = field(default_factory=list)  # in turn time
 
     @property
     def hidden_audio(self) -> Spans:
-        return [(a - self.shift, b - self.shift) for a, b in self.hidden]
+        return [(a - self.shift, b - self.shift) for a, b, _ in self.hidden]
 
     @property
     def names_used(self) -> bool:
@@ -259,7 +257,10 @@ def attributed_cues(
     ws: Workspace, cfg: Config, e: _Episode, warnings: list[str] | None = None
 ) -> list[DubCue]:
     """The ground-truth track's cues attributed the subtitle path's way, honouring the names
-    stage's hidden lines and its offset; a held-out or names-off episode gets no name map.
+    stage's hidden lines and its offset; a held-out or names-off episode gets no name map and
+    its cues are moved back by the alignment shift instead (the subtitle path would use none,
+    but every arm should be graded on aligned turns, so a names arm doesn't win by its
+    offset alone).
     The subtitle path's settings come from ``TranslateStage.settings``; when they can't be
     read, the stage's defaults stand in and a line goes to ``warnings``."""
     from fukikae.artifacts import read_json
@@ -286,7 +287,7 @@ def attributed_cues(
             )
     nm = None
     hidden: list[tuple[float, float, str | None]] = []
-    offset = 0.0
+    offset = e.shift
     n = e.names
     if n is not None and n.used and (n.source or {}).get("how") != "other-language":
         nm = name_map(e.asg) or None
@@ -300,9 +301,9 @@ def attributed_cues(
     )  # fmt: skip
 
 
-def _track_hidden(cfg: Config, eid: str, gt_path: Path) -> Spans | None:
-    """The lines ``[names] hide_fraction`` draws from the ground-truth track, in cue time; None
-    when the track can't carry names."""
+def _track_hidden(cfg: Config, eid: str, gt_path: Path) -> KeyedSpans | None:
+    """The lines ``[names] hide_fraction`` draws from the ground-truth track, in cue time, with
+    their keys; None when the track can't carry names."""
     from fukikae.names import detect
     from fukikae.stages.names import hide_lines
 
@@ -312,11 +313,16 @@ def _track_hidden(cfg: Config, eid: str, gt_path: Path) -> Spans | None:
         return None
     lines, _ = got
     ids = set(hide_lines(lines, s.hide_fraction, s.hide_seed, eid))
-    return sorted((ln.start, ln.end) for ln in lines if ln.id in ids)
+    return sorted(((ln.start, ln.end, ln.key) for ln in lines if ln.id in ids), key=_span_order)
 
 
-def _hidden_spans(cfg: Config, eid: str, gt_path: Path, names: NamesResult | None) -> Spans:
-    """The lines ``[names] hide_fraction`` withheld, in cue time: from ``names.json`` when the
+def _span_order(x: tuple[float, float, str | None]) -> tuple[float, float, str]:
+    return x[0], x[1], x[2] or ""
+
+
+def _hidden_spans(cfg: Config, eid: str, gt_path: Path, names: NamesResult | None) -> KeyedSpans:
+    """The lines ``[names] hide_fraction`` withheld, in cue time, with their keys (a cue is
+    hidden only by a line of its own key, as `cues._hidden` has it): from ``names.json`` when the
     stage read names, else drawn again from the ground-truth track with the same seed (the
     baseline arm), else none.
 
@@ -326,13 +332,16 @@ def _hidden_spans(cfg: Config, eid: str, gt_path: Path, names: NamesResult | Non
     if names is not None and names.used:
         visible = {ln.id for ln in names.visible_lines()}
         o = names.offset_s
-        out = sorted((ln.start + o, ln.end + o) for ln in names.lines if ln.id not in visible)
+        out = sorted(
+            ((ln.start + o, ln.end + o, ln.key) for ln in names.lines if ln.id not in visible),
+            key=_span_order,
+        )
         src = names.source or {}
         if out and (src.get("track") is not None or src.get("file")):
             drawn = _track_hidden(cfg, eid, gt_path) or []
             same = len(drawn) == len(out) and all(
                 abs(a - c) <= HIDDEN_MATCH_S and abs(b - d) <= HIDDEN_MATCH_S
-                for (a, b), (c, d) in zip(out, drawn, strict=True)
+                for (a, b, _), (c, d, _) in zip(out, drawn, strict=True)
             )
             if not same:
                 where = (
@@ -492,6 +501,7 @@ def names_eval(
     the ``ceiling`` episodes (held out without `check_held_out`, labelled a ceiling)."""
     from fukikae.artifacts import read_json
     from fukikae.cards.auto import checked_names
+    from fukikae.cues import _hidden, merge_layers
     from fukikae.eval.autolabel import speech_turns
     from fukikae.eval.groundtruth import check_alignment
     from fukikae.eval.groundtruth.base import load_alias_file
@@ -499,6 +509,8 @@ def names_eval(
     from fukikae.models import Assignments
     from fukikae.names.inputs import check_held_out, names_path
     from fukikae.names.models import NamesResult
+    from fukikae.names.normalize import parse_name
+    from fukikae.subtitles import read_cues
     from fukikae.workspace import Workspace
 
     if gt_kind != "ass":
@@ -549,7 +561,8 @@ def names_eval(
     for eid in every:
         e = eps[eid]
         split = "tune" if eid in ids else "holdout" if eid in hold_ids else "ceiling"
-        for c in attributed_cues(ws, cfg, e, warnings):
+        raw = merge_layers(read_cues(e.gt_path))  # one per attributed cue, in order
+        for c, rc in zip(attributed_cues(ws, cfg, e, warnings), raw, strict=True):
             if c.skip is not None or not c.text or c.end <= c.start:
                 continue
             key = cue_key(e.gt, c.start, c.end)
@@ -558,7 +571,8 @@ def names_eval(
             ok = c.character_id is not None and modal.get(c.character_id) == key
             seconds = c.end - c.start
             tallies[split].add(key, seconds, ok)
-            if any(_overlaps((c.start, c.end), h) for h in e.hidden):
+            own = parse_name(rc.name).key if rc.name else None
+            if _hidden(rc, own, e.hidden, 0.0):  # the subtitle path's test; both in cue time
                 tallies["hidden"].add(key, seconds, ok)
                 if eid not in hidden_eps:
                     hidden_eps.append(eid)
@@ -681,6 +695,8 @@ def names_rows(run: NamesRun, cfg: Config, test_set: str, tag: str | None) -> li
                 "modal": {str(k): v for k, v in run.modal.items()},
                 "characters_per_name": per_name,
                 "gt": run.settings["gt"],
+                "hide_fraction": run.settings["names"]["hide_fraction"],
+                "hide_seed": run.settings["names"]["hide_seed"],
             },
             workspace=run.settings["workspace"],
             tag=tag,
