@@ -17,6 +17,9 @@ _MULTI = re.compile(r"[&/,]|\band\b", re.IGNORECASE)
 # A slot in one scene: the name ends in one letter or up to two digits after a space, with an
 # optional trailing period (`PRINCE A.`).
 _ROLE = re.compile(r"\s(?:[^\W\d_]|\d{1,2})\.?$")
+# ASS override blocks (`{\\i1}`) go before keying; any other braces lose the brace characters
+# only (`{NATSU}` is NATSU).
+_OVERRIDE = re.compile(r"\{\\[^}]*\}")
 GROUP_WORDS = frozenset({"all", "everyone", "both", "crowd", "together", "all together"})
 
 # suggest_aliases: both keys this long, the rare one under RARE_MAX_LINES lines, the common one
@@ -69,8 +72,13 @@ def display_name(canonical: str) -> str:
     return " ".join(words)
 
 
+def strip_tags(name: str) -> str:
+    """The Name without ASS override blocks or stray braces."""
+    return re.sub(r"[{}]", "", _OVERRIDE.sub("", name))
+
+
 def parse_name(raw: str) -> ParsedName:
-    stripped = raw.strip()
+    stripped = strip_tags(raw).strip()
     inner = bool(_THOUGHT.search(stripped))
     canonical = canonical_name(stripped)
     key = fold(canonical)

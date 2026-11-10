@@ -62,9 +62,9 @@ def _norm_lang(code: str | None) -> str | None:
 _ISO3_TO_1 = {v: k for k, v in _ISO1_TO_3.items()}
 
 
-def normalize_language(code: str | None) -> str | None:
+def iso3_language(code: str | None) -> str | None:
     """A language code as the ISO 639-2 form ``dialogue_track`` matches (``en``, ``ger`` ->
-    ``eng``, ``deu``)."""
+    ``eng``, ``deu``). Not ``config.normalize_language``, which keeps a tag's own form."""
     return _norm_lang(code)
 
 
