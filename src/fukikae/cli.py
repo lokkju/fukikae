@@ -95,7 +95,7 @@ def backends_setup(
         except subprocess.CalledProcessError as e:
             typer.echo(f"error: {' '.join(map(str, e.cmd))} exited with {e.returncode}", err=True)
             raise typer.Exit(1) from e
-        typer.echo(f"{name}: set up in {cls({}, 'cpu').venv()}")
+        typer.echo(f"{name}: set up in {cls({}, 'cpu').environment_location()}")
         return
     fetch = getattr(cls, "fetch", None)
     if fetch is None:
