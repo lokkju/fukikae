@@ -31,6 +31,7 @@ EXTRAS: dict[str, str] = {
     # Out-of-process backends import without their model; a missing worker environment
     # (`.venvs/<extra>`, from `workers/<extra>`) is reported at load with the setup command.
     "indextts2": "indextts2",
+    "indextts2_trt": "indextts2_trt",
     "cosyvoice3": "cosyvoice3",
     "qwen3_tts": "qwen3tts",
 }
