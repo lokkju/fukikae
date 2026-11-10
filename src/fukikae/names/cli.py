@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from fukikae.config import Config
     from fukikae.models import Assignments
     from fukikae.names.detect import TrackChoice, Verdict
-    from fukikae.names.models import NamedLine, NamesReport, NamesResult
+    from fukikae.names.models import KeyDecision, NamedLine, NamesReport, NamesResult
     from fukikae.registry.store import Registry
     from fukikae.workspace import Episode, Workspace
 
@@ -302,6 +302,39 @@ def _fallback_decisions(result: NamesResult, asg: Assignments) -> NamesReport:
     return NamesReport(episode=result.episode, keys=keys, lines=[])
 
 
+def _stale_decision(
+    d: KeyDecision, asg: Assignments, reg: Registry | None, ws: Workspace, episode: str
+) -> str | None:
+    """Why a `names-report.json` entry no longer describes the episode, or None: its character
+    is gone from the registry, or the current assignments give its sub-clusters (or its
+    lock-kept ones) to another character, as after a `registry merge` or `split`."""
+    clusters = {c.cluster: c for c in asg.clusters}
+    why: list[str] = []
+    known = {c.id for c in reg.characters()} if reg is not None else None
+    wanted = {lb: d.character_id for lb in d.labels if lb not in d.locked}
+    wanted.update(d.locked)
+    if known is not None:
+        gone = sorted({c for c in wanted.values() if c is not None and c not in known})
+        why += [f"character {c} is gone from the registry" for c in gone]
+    moved: dict[int | None, list[str]] = defaultdict(list)
+    for lb, cid in sorted(wanted.items()):
+        a = clusters.get(lb)
+        if d.how in ("extra", "ambiguous") and lb not in d.locked:
+            continue
+        now = a.character_id if a is not None else None
+        if now != cid:
+            moved[now].append(lb)
+    for now, labels in sorted(moved.items(), key=lambda kv: (kv[0] is None, kv[0] or 0)):
+        who = f"character {now}" if now is not None else "nobody"
+        why.append(f"the assignments give {', '.join(labels)} to {who}")
+    if not why:
+        return None
+    return (
+        f"stale: {'; '.join(why)}; rerun the characters stage "
+        f"(`fukikae run {ws.root} {episode} --from characters`)"
+    )
+
+
 def _disagreements(
     ws: Workspace, episode: str, asg: Assignments, reg: Registry
 ) -> list[tuple[float, str]]:
@@ -518,6 +551,9 @@ def show_episode(ws: Workspace, ref: str) -> list[str]:
             if d.locked and d.how != "lock":
                 kept = ", ".join(f"{lb} on {_char(reg, c)}" for lb, c in sorted(d.locked.items()))
                 line += f"; kept by lock: {kept}"
+            stale = _stale_decision(d, asg, reg, ws, ep.id) if rpath.exists() else None
+            if stale is not None:
+                line += f" [{stale}]"
             out.append(line)
         cuts: dict[int, list] = defaultdict(list)
         for p in result.pieces:
