@@ -105,6 +105,8 @@ The workspaces were scratch copies: `~/fukikae-scratch/t12/fairytail` (anime pro
 
 Against the E12 tuning row (held-out 0.304, ceiling 0.536, WER 0.074, fit 0.889, emotion 0.31), the held-out similarity is higher and so is its ceiling. Held-out similarity covers only 2 characters, so it is as noisy as the n = 3 rows. WER is worse, and most of that comes from character 1, a high-pitched comic voice: WER 0.24 and 9 cps against 13 to 16 for the others. Nothing in this row was re-tuned afterwards.
 
+The production cards overlap this row. They drew some clips from E14 (characters 1, 2, 7, 13 and 15), because the Fairy Tail copy had E14's artifacts before the dubs ran. The eval builds its own clone cards from E14 with the same CD5 rules, so for the two characters with a held-out figure (2 and 13) its references and the production references come from the same episode, and partly from the same turns. The held-out exemplars still exclude the eval's own picks and every rendered cue's delivery span (CD17), so the 0.449 is not similarity to the prompt. It does mean E14 is no longer a clean test of the production voices: what was cloned from E14 is scored on E14. The row measures IndexTTS2 cloning from one episode and speaking that episode's lines. That is what the production path does for a character first heard in that episode; it is not a cross-episode generalisation figure.
+
 ## Operator notes
 
 ### The female-sounding characters 3 and 2 (FT E12 cue02 and cue06)
@@ -154,9 +156,9 @@ The vocative comma is correct English. IndexTTS2 renders it as a 170 ms silence 
 ## Ruling CD25: target subtitles mean the dialogue track
 
 `media.dialogue_track` picks the embedded target-language subtitle track for `source = "auto"`:
-- a track titled signs, songs or forced is never chosen;
-- a track with fewer than 3 cues a minute, or under 40% of the densest track of the language, is signs-and-songs-sized and skipped;
-- a forced flag is believed unless the track is dialogue-sized by both measures;
+- a track titled signs or forced is never chosen, nor one titled songs unless the title also says full, dialogue or complete ("Full Subtitles (incl. Songs)"); such a track still needs a known, dialogue-sized count;
+- a track with fewer than 3 cues a minute, or under 40% of the densest plausible dialogue track (unflagged, title not ruling it out), is skipped, so a typeset signs track with a thousand styled events never sets the bar;
+- a forced flag is believed unless the track reaches 8 cues a minute as well as the measures above;
 - a flagged track of unknown size is skipped;
 - plain tracks win over CC/SDH, then unflagged tracks win.
 
@@ -172,10 +174,17 @@ On Fairy Tail:
 - **The German dub budget.** German lines are longer than the slots of the English original they replaced. The translator ends 40 to 51% of BBT cues over budget. After rate fit, time-stretch at the 1.25 cap, and up to 63 s of borrowed silence per episode, 48 to 55 lines an episode still play past their slot (22 to 29 s in all).
 - **Anime voice merging.** Diarization and the characters stage merge voices, as above (Natsu with Happy, Charle and Wendy), and a clone copies whatever voice dominates its references. That is why the female-sounding lines persist. Fixing it is identity work.
 - **The female-sounding characters.** The selection fix removes no-speech turns but cannot fix merged identities. Characters 2 and 3 still sound female on Natsu's and Young Makarov's lines.
-- **Fingerprints.** Automatic clone cards are not fingerprinted when they are made, because that would load the clone model during the stage's key computation. `voices verify --record` (or `voices export`) records one later. This departs from the plan text, which asked for `verify_card(record=True)` at assignment.
+- **Fingerprints (ruling CD26).** Automatic clone cards are not fingerprinted when they are made, because that would load the clone model during the stage's key computation. `voices export` records a fingerprint for every exported card that lacks one: one render of the test script on the card's backend, under the GPU lock. When that backend can't run on the machine, export lists the cards it ships without one, and `--require-fingerprints` refuses the export instead. `voices verify --record` records one at any time. This departs from the plan text, which asked for `verify_card(record=True)` at assignment.
 - **`voices clone` takes `--transcript`.** It runs no ASR pass of its own, which also departs from the plan.
 - **Unpinned runtime downloads.** Ten older backends still download an unpinned model on a cache miss: ASR (qwen3, faster_whisper), alignment (qwen3, wav2vec2), pyannote diarization, dialogue separation, and the wespeaker, ecapa, wavlm and sherpa embedders. This is open follow-up work; pinning them changes cache keys.
 - **Unknown-gender stock voices.** A stock fallback for a character in the anime profile's unknown band (165 to 300 Hz) alternates pools starting with the female one.
+
+## Follow-ups
+
+- **D26 (done):** the performance task: tf32, the tag stage on the GPU, overlapping consecutive episodes, and a rate estimate before the first render. Its timings and the eval gate are in the ledger. The wall times above predate it.
+- **D27 (proposed next):** subtitle speaker names for identity. On the subtitle path with named lines (Crunchyroll ASS), use the names to split or check characters, which is the fix for the merged voices described above.
+- **D28 (pending with the operator):** further IndexTTS2 speed levers.
+- The ten older backends that download on a cache miss (above).
 
 ## How to run it
 
