@@ -62,10 +62,14 @@ def check_held_out(work: Path, episode: str) -> None:
     if path.exists():
         result = read_json(path, NamesResult)
         if result.verdict not in HELD_OUT_VERDICTS:
+            what = (
+                "its subtitles (verdict none)"
+                if result.verdict == "none"
+                else f"its subtitle names (names verdict {result.verdict!r})"
+            )
             raise HeldOutNamesError(
-                f"held-out episode {episode} read its subtitle names (names verdict "
-                f"{result.verdict!r}); add it to [names] holdout_episodes and rerun it from "
-                "names, or score it as a tuning episode"
+                f"held-out episode {episode} read {what}; add it to [names] holdout_episodes "
+                "and rerun it from names, or score it as a tuning episode"
             )
     asg_path = Path(work) / "05-characters" / "assignments.json"
     if not asg_path.exists():
