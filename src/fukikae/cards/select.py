@@ -394,14 +394,15 @@ def eligible_references(
 
 def meets_floor(picks: Sequence[RefPick]) -> bool:
     """Whether the picks reach the clone floor: `FLOOR_CLIPS` clips and `FLOOR_S` seconds."""
-    return len(picks) >= FLOOR_CLIPS and sum(p.seconds for p in picks) >= FLOOR_S - 1e-9
+    return floor_shortfall([p.seconds for p in picks]) is None
 
 
 def floor_shortfall(clips: Sequence[float]) -> str | None:
     """How clips of these lengths (seconds) fall short of the clone floor, as a phrase; None
-    when they reach it."""
+    when they reach it. Seconds are judged at the tenth every report prints (9.97 s is
+    10.0 s), so a card the log calls 10.0 s is never said to be under 10 s."""
     seconds = sum(clips)
-    if len(clips) >= FLOOR_CLIPS and seconds >= FLOOR_S - 1e-9:
+    if len(clips) >= FLOOR_CLIPS and round(seconds, 1) >= FLOOR_S:
         return None
     n = len(clips)
     return (

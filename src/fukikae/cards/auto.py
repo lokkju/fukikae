@@ -812,8 +812,16 @@ def _best(
 
 
 def _episode_key(picks: Sequence[RefPick]) -> tuple[bool, float]:
-    """An episode's picks rank by reaching the clone floor (D32), then by seconds."""
-    return meets_floor(picks), sum(p.seconds for p in picks)
+    """An episode's picks rank by reaching the clone floor (D32), then by the seconds picked
+    before any floor filling: the picks up to the first scored non-neutral one taken past
+    `MIN_CLONE_S`, which are the picks the rule before D32 made. So filling an episode with
+    non-neutral turns never moves a character that already reached the floor to it."""
+    used = 0.0
+    for p in picks:
+        if p.emotion is not None and used >= MIN_CLONE_S:
+            break
+        used += p.seconds
+    return meets_floor(picks), used
 
 
 def character_references(

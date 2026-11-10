@@ -432,3 +432,13 @@ def test_under_the_floor_the_best_picks_are_still_returned(tmp_path):
         floor_shortfall([p.seconds for p in picks])
         == "1 clip and 6.3 s, under the floor of 2 clips and 10 s"
     )
+
+
+def test_the_floor_is_judged_at_the_tenth_of_a_second_every_message_shows():
+    """3 clips of 9.97 s print as 10.0 s: they reach the floor, as the report says."""
+    from fukikae.cards.select import floor_shortfall
+
+    assert floor_shortfall([3.526, 3.291, 3.156]) is None
+    assert floor_shortfall([3.5, 3.0, 3.44]) == (
+        "3 clips and 9.9 s, under the floor of 2 clips and 10 s"
+    )
