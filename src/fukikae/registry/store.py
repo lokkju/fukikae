@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from fukikae.config import normalize_language
+from fukikae.names.normalize import fold as _fold
 
 log = logging.getLogger(__name__)
 
@@ -191,11 +192,6 @@ def _to_blob(v: np.ndarray) -> bytes:
 
 def _from_blob(b: bytes | None) -> np.ndarray | None:
     return None if b is None else np.frombuffer(b, dtype=np.float32).copy()
-
-
-def _fold(text: str) -> str:
-    """Case- and width-insensitive form of a name (NFKC, then casefold)."""
-    return unicodedata.normalize("NFKC", text).casefold().strip()
 
 
 def _now() -> str:
