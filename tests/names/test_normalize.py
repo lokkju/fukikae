@@ -58,3 +58,10 @@ def test_eval_still_imports_moved_names():
     from fukikae.eval.groundtruth.base import check_alignment  # noqa: F401
 
     assert c("ERZA/I") == "ERZA"
+
+
+def test_override_tags_are_stripped_before_keying():
+    assert parse_name("{NATSU}").key == "natsu"
+    assert parse_name("{\\i1}NATSU").key == "natsu"
+    assert parse_name("LUCY {\\i1}").key == "lucy"
+    assert parse_name("LUCY {\\i1}").raw == "LUCY {\\i1}"

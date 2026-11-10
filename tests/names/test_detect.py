@@ -314,3 +314,63 @@ def test_ass_path_assesses(tmp_path: Path):
     p.write_text(ass(NAMED_EPISODE))
     v, lines = assess_path(p, SPEECH)
     assert v.level == "full" and len(lines) == len(NAMED_EPISODE)
+
+
+# ---- review carries (Task 2) ----
+
+
+def test_blank_outline_layer_joins_the_named_text_layer():
+    lines = [
+        *[(a, b, s, "", "{\\bord6}" + t) for a, b, s, _, t in NAMED_EPISODE[:1]],
+        *NAMED_EPISODE,
+    ]
+    got = dialogue_lines(cues(lines))
+    assert len(got) == len(NAMED_EPISODE) and got[0].key == "natsu"
+    v, _ = assess(got, STYLES, SPEECH)
+    assert v.share == 1.0
+
+
+def test_layers_group_by_key_not_raw_name():
+    got = dialogue_lines(
+        cues([(10, 12, "Default", "NATSU", "Hey!"), (10, 12.2, "Default", "Natsu ", "Hey!")])
+    )
+    assert [(ln.key, ln.end) for ln in got] == [("natsu", 12.2)]
+
+
+def test_configured_track_equal_to_target_is_offered_once(probe_with_en_and_de):
+    got = candidate_tracks(SOURCE, probe_with_en_and_de, cfg("en", names={"track": 2}))
+    assert [c.track.index for c in got if c.track] == [2, 3, 4]
+    assert [c.how for c in got] == ["track", "other-language", "other-language"]
+
+
+def test_configured_file_equal_to_target_sidecar_is_offered_once(tmp_path: Path):
+    src = tmp_path / "S01E03.mkv"
+    side = tmp_path / "S01E03.en.ass"
+    side.write_text(ass(NAMED_EPISODE))
+    got = candidate_tracks(src, ProbeResult(), cfg("en", names={"file": "S01E03.en.ass"}))
+    assert [(c.how, c.file) for c in got] == [("file", side)]
+
+
+def test_non_numeric_names_track_is_a_media_error(probe_with_en_and_de):
+    with pytest.raises(MediaError, match="track"):
+        candidate_tracks(SOURCE, probe_with_en_and_de, cfg(names={"track": "eng"}))
+
+
+def test_episode_placeholder_without_an_episode_is_an_error(tmp_path: Path, probe_with_en_and_de):
+    with pytest.raises(MediaError, match="no episode was given"):
+        candidate_tracks(
+            tmp_path / "x.mkv", probe_with_en_and_de, cfg(names={"file": "{episode}.ass"})
+        )
+
+
+def test_unapplied_offset_reports_the_share_the_decision_accepted():
+    # Lines 0.1 s late: the best offset gains under 0.1 of overlap, so nothing is applied, and
+    # the verdict reports the share the pass decision accepted (the best offset's).
+    from fukikae.names.align import alignment
+
+    lines = dialogue_lines(cues(shift(NAMED_EPISODE, 0.1)))
+    rep = alignment(lines, SPEECH)
+    assert rep.best_offset_s == pytest.approx(0.1) and rep.share_at_offset > rep.overlap_share
+    v, got = assess(lines, STYLES, SPEECH)
+    assert v.offset_s == 0.0 and got[0].start == lines[0].start
+    assert v.align_share == pytest.approx(rep.share_at_offset)
