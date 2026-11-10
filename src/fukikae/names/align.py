@@ -298,7 +298,7 @@ def attribute(
     visible = [ln for ln in lines if ln.id not in hidden]
     keyed = [ln for ln in visible if ln.key is not None]
     by_turn = _assign_lines(turns, visible)
-    staged: list[tuple[Turn, float, float, str | None, list[int]]] = []
+    staged: list[tuple[int, Turn, float, float, str | None, list[int]]] = []
     for i, t in enumerate(turns):
         mine = by_turn.get(i, [])
         dur = t.end - t.start
@@ -319,8 +319,8 @@ def attribute(
             spans = [(t.start, t.end, best if named else None)]
         for a, b, key in spans:
             ids = sorted(ln.id for ln in mine if _overlap(ln.start, ln.end, a, b) > 0)
-            staged.append((t, a, b, key, ids))
-    clash = _slug_clashes((t.speaker, key) for t, _, _, key, _ in staged if key is not None)
+            staged.append((i, t, a, b, key, ids))
+    clash = _slug_clashes((t.speaker, key) for _, t, _, _, key, _ in staged if key is not None)
     pieces = [
         Piece(
             start=a,
@@ -331,8 +331,9 @@ def attribute(
             else label_for(t.speaker, key, hashed=(t.speaker, key) in clash),
             key=key,
             line_ids=ids,
+            turn=i,
         )
-        for t, a, b, key, ids in staged
+        for i, t, a, b, key, ids in staged
     ]
     unvoiced = [ln.id for ln in keyed if _voiced(ln, turns) < UNVOICED_S - 1e-9]
     return pieces, sorted(unvoiced)

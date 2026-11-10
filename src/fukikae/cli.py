@@ -157,6 +157,7 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
     from fukikae.stages.extract import ExtractStage
     from fukikae.stages.language import LanguageStage
     from fukikae.stages.mix import MixStage
+    from fukikae.stages.names import NamesStage
     from fukikae.stages.separate import SeparateStage
     from fukikae.stages.tag import TagStage, tag_enabled
     from fukikae.stages.timefit import TimefitStage
@@ -169,6 +170,7 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
         LanguageStage(),
         AsrStage(),
         DiarizeStage(),
+        NamesStage(cfg),
         CharactersStage(),
     ]
     tags = tag_enabled(cfg)
