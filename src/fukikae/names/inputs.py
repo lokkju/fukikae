@@ -74,9 +74,10 @@ def check_held_out(work: Path, episode: str) -> None:
     rerun = f"rerun it from names (`fukikae run <ws> {episode} --from names`) before grading it"
     named = sorted(c.cluster for c in asg.clusters if c.name is not None or c.source == "name")
     if named:
+        shown = ", ".join(named[:4]) + (f" and {len(named) - 4} more" if len(named) > 4 else "")
         raise HeldOutNamesError(
-            f"held-out episode {episode}'s assignments hold name decisions ({', '.join(named)}): "
-            f"its characters stage read subtitle names; {rerun}"
+            f"held-out episode {episode}'s assignments hold name decisions ({shown}): its "
+            f"characters stage read subtitle names; {rerun}"
         )
     diar = Path(work) / DIARIZE_DIR / "turns.json"
     if asg.turns is not None and diar.exists() and asg.turns != read_json(diar, Diarization).turns:
