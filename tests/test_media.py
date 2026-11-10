@@ -274,3 +274,28 @@ def test_cd25_full_subtitles_with_songs_are_dialogue(tmp_path):
         assert find_target_subtitles(src, _cd25(unknown), "en", {}) == (None, None), title
     songs = SubTrack(4, "ass", "eng", "Songs", False, cues=350)
     assert find_target_subtitles(src, _cd25(songs), "en", {}) == (None, None)
+
+
+def test_cd25_an_untitled_dense_typeset_track_neither_sets_the_bar_nor_wins(tmp_path):
+    """Fix round 2: an untitled, unflagged typeset track with 1200 events (50 a minute) is
+    capped at 30 a minute for the bar, and ranks after a plausible dialogue track."""
+    src = tmp_path / "show S01E12.mkv"
+    typeset = SubTrack(3, "ass", "eng", None, False, cues=1200)
+    dialogue = SubTrack(4, "ass", "eng", None, False, cues=350)
+    assert find_target_subtitles(src, _cd25(typeset, dialogue), "en", {}) == (None, dialogue)
+    # a dialogue track at 12 a minute stays above 40% of the capped bar (12 of 30)
+    slower = SubTrack(4, "ass", "eng", None, False, cues=290)
+    assert find_target_subtitles(src, _cd25(typeset, slower), "en", {}) == (None, slower)
+
+
+def test_cd25_full_subtitles_with_signs_are_dialogue(tmp_path):
+    src = tmp_path / "show S01E12.mkv"
+    for title in ("Full Subtitles (incl. Signs)", "Dialogue + Signs"):
+        full = SubTrack(4, "ass", "eng", title, False, cues=350)
+        assert find_target_subtitles(src, _cd25(full), "en", {}) == (None, full), title
+        thin = SubTrack(4, "ass", "eng", title, False, cues=40)
+        assert find_target_subtitles(src, _cd25(thin), "en", {}) == (None, None), title
+        unknown = SubTrack(4, "ass", "eng", title, False)
+        assert find_target_subtitles(src, _cd25(unknown), "en", {}) == (None, None), title
+    signs = SubTrack(4, "ass", "eng", "Signs", False, cues=350)
+    assert find_target_subtitles(src, _cd25(signs), "en", {}) == (None, None)

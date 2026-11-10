@@ -251,24 +251,26 @@ def find_target_subtitles(
 
 
 # Ruling CD25: the subtitle path reads dialogue subtitles.
-# - A title naming signs or forced is never dialogue; nor is one naming songs, unless it also
-#   says full, dialogue or complete ("Full Subtitles (incl. Songs)"), and then only when its
-#   cue count is known and dialogue-sized.
+# - A title naming forced is never dialogue; nor is one naming signs or songs, unless it also
+#   says full, dialogue or complete ("Full Subtitles (incl. Signs)", "Dialogue + Songs"), and
+#   then only when its cue count is known and dialogue-sized.
 # - Dialogue-sized: at least DIALOGUE_MIN_PER_MINUTE cues a minute and DIALOGUE_SHARE of the
-#   densest plausible dialogue track (unflagged, title not ruling it out), so a typeset signs
-#   track with a thousand styled events never sets the bar.
+#   densest plausible dialogue track (unflagged, title not ruling it out), its rate capped at
+#   DIALOGUE_BAR_CAP_PER_MINUTE, so a typeset signs track with a thousand styled events never
+#   sets the bar; a track denser than the cap ranks after the plausible ones.
 # - A forced flag is believed unless the track reaches FORCED_DIALOGUE_MIN_PER_MINUTE as well
 #   (FT E11's only English track is flagged forced and carries every line at 14.4 a minute);
 #   a flagged track of unknown size is skipped.
 # - Among dialogue tracks a plain one wins over closed captions (CC, SDH, or the
 #   hearing_impaired disposition: sound descriptions), then an unflagged one, then stream order.
-NOT_DIALOGUE_TITLE = re.compile(r"\b(signs?|forced)\b", re.IGNORECASE)
-SONGS_TITLE = re.compile(r"\b(songs?|lyrics|karaoke)\b", re.IGNORECASE)
+NOT_DIALOGUE_TITLE = re.compile(r"\bforced\b", re.IGNORECASE)
+SONGS_TITLE = re.compile(r"\b(signs?|songs?|lyrics|karaoke)\b", re.IGNORECASE)
 FULL_TITLE = re.compile(r"\b(full|dialogue|dialog|complete)\b", re.IGNORECASE)
 CAPTIONS_TITLE = re.compile(r"\b(cc|sdh)\b", re.IGNORECASE)
 DIALOGUE_MIN_PER_MINUTE = 3.0
 FORCED_DIALOGUE_MIN_PER_MINUTE = 8.0
 DIALOGUE_SHARE = 0.4
+DIALOGUE_BAR_CAP_PER_MINUTE = 30.0
 
 
 def _per_minute(track: SubTrack, duration: float | None) -> float | None:
@@ -283,7 +285,7 @@ def _title_rules_out(title: str | None) -> str | None:
     if NOT_DIALOGUE_TITLE.search(t):
         return f"its title {title!r} says it is not the dialogue"
     if SONGS_TITLE.search(t) and not FULL_TITLE.search(t):
-        return f"its title {title!r} says it holds songs only"
+        return f"its title {title!r} says it holds signs or songs only"
     return None
 
 
@@ -300,7 +302,7 @@ def dialogue_track(probe_result: ProbeResult, language: str | None) -> SubTrack 
         if not t.forced and _title_rules_out(t.title) is None
         and (r := rates[t.index]) is not None
     ]  # fmt: skip
-    densest = max(plausible, default=0.0)
+    densest = min(max(plausible, default=0.0), DIALOGUE_BAR_CAP_PER_MINUTE)
     keep: list[SubTrack] = []
     for t in tracks:
         rate = rates[t.index]
@@ -311,7 +313,7 @@ def dialogue_track(probe_result: ProbeResult, language: str | None) -> SubTrack 
         elif why is None and rate is None and t.forced:
             why = "it is flagged forced and its cue count is unknown"
         elif why is None and rate is None and SONGS_TITLE.search(t.title or ""):
-            why = f"its title {t.title!r} mentions songs and its cue count is unknown"
+            why = f"its title {t.title!r} mentions signs or songs and its cue count is unknown"
         if why is not None:
             log.info("subtitle track %d (%s): skipped, %s", t.index, t.language, why)
             continue
@@ -326,7 +328,11 @@ def dialogue_track(probe_result: ProbeResult, language: str | None) -> SubTrack 
     def captions(t: SubTrack) -> bool:
         return t.hearing_impaired or bool(CAPTIONS_TITLE.search(t.title or ""))
 
-    keep.sort(key=lambda t: (captions(t), t.forced, tracks.index(t)))
+    def too_dense(t: SubTrack) -> bool:
+        rate = rates[t.index]
+        return rate is not None and rate > DIALOGUE_BAR_CAP_PER_MINUTE
+
+    keep.sort(key=lambda t: (captions(t), t.forced, too_dense(t), tracks.index(t)))
     return keep[0] if keep else None
 
 
