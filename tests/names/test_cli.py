@@ -350,3 +350,24 @@ def test_no_merge_hint_when_both_characters_are_one_actor(tmp_path: Path):
         con.execute("UPDATE characters SET actor_id = ? WHERE id = ?", (actors[natsu], leftover))
     con.close()
     assert _merge_hints(root) == []
+
+
+def test_show_marks_report_entries_the_registry_or_assignments_no_longer_hold(cli_ws: Path):
+    """F7: names-report.json is written by the characters stage; a later `registry merge`
+    folds NABARU's character into NEBARU's and remaps the assignments, so the report's
+    character for nabaru no longer exists and show marks the entry stale."""
+    _run_names(cli_ws, "S01E01")
+    with Registry(Workspace(cli_ws).registry_path) as reg:
+        neb = reg.character_for_key("nebaru")
+        nab = reg.character_for_key("nabaru")
+    assert neb is not None and nab is not None
+    r = runner.invoke(app, ["registry", "merge", str(cli_ws), str(neb.actor_id), str(nab.actor_id)])
+    assert r.exit_code == 0, r.output
+    r = runner.invoke(app, ["names", "show", str(cli_ws), "S01E01"])
+    assert r.exit_code == 0, r.output
+    (line,) = [ln for ln in r.output.splitlines() if ln.startswith("  nabaru ")]
+    assert f"stale: character {nab.id} is gone from the registry" in line
+    assert f"the assignments give {', '.join(['SPEAKER_00~nabaru'])} to character {neb.id}" in line
+    assert "fukikae run" in line
+    (ok,) = [ln for ln in r.output.splitlines() if ln.startswith("  lucy ")]
+    assert "stale" not in ok
