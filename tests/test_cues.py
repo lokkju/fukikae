@@ -346,3 +346,22 @@ def test_zero_length_subtitle_events_are_skipped_as_empty():
     cues = [Cue(1.0, 1.0, "Hi."), Cue(2.0, 1.5, "Odd."), Cue(2.0, 3.0, "Fine.")]
     got = _subs(cues, turns, [_cluster("S0", 3)])
     assert [c.skip for c in got] == ["empty", "empty", None]
+
+
+def test_layered_identical_subtitle_events_are_one_cue():
+    """C8: typeset ASS draws a line as several events (an outline layer, a text layer, or the
+    same line split where it touches); they are spoken once."""
+    turns = [Turn(start=0.0, end=10.0, speaker="S0")]
+    cues = [
+        Cue(1.0, 3.0, "Hi there."),
+        Cue(1.0, 3.0, "{\\bord3}Hi there."),
+        Cue(3.0, 4.0, "Hi there."),
+        Cue(2.0, 2.5, "Other."),
+        Cue(6.0, 7.0, "Hi there."),  # later and apart: said again
+    ]
+    got = _subs(cues, turns, [_cluster("S0", 3)])
+    assert [(c.start, c.end, c.source_text) for c in got] == [
+        (1.0, 4.0, "Hi there."),
+        (2.0, 2.5, "Other."),
+        (6.0, 7.0, "Hi there."),
+    ]
