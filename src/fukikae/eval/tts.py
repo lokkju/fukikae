@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import math
 import random
 import shutil
@@ -948,10 +949,18 @@ def floor_clips(
         ]
         step = max(1, len(ok) // limit) if ok else 1
         picks = [((c.start, c.end), c.text) for c in ok[::step][:limit]]
-    return [
-        (_write_clip(wav, span, out_dir / f"{episode}-{span[0]:.2f}.16k.wav"), text)
-        for span, text in picks
-    ]
+    # B2: named by the vocals' bytes and the exact span, so a clip is never reused stale
+    h = hashlib.sha256()
+    with vocals.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    source = h.hexdigest()
+
+    def name(span: tuple[float, float]) -> str:
+        key = hashlib.sha256(f"{source}:{span[0]:.3f}:{span[1]:.3f}".encode()).hexdigest()[:12]
+        return f"{episode}-{span[0]:.2f}-{key}.16k.wav"
+
+    return [(_write_clip(wav, span, out_dir / name(span)), text) for span, text in picks]
 
 
 @contextlib.contextmanager
