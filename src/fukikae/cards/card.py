@@ -35,6 +35,8 @@ from typing import TYPE_CHECKING, Any
 
 import tomli_w
 
+from fukikae.config import normalize_language
+
 if TYPE_CHECKING:
     from fukikae.backends.base import Synthesizer
 
@@ -51,6 +53,9 @@ SOURCE_FIELDS = {
 
 # Named [voice.post] eq presets; only "none" exists so far.
 EQ_PRESETS = frozenset({"none"})
+# [voice.post] defaults (CD1, frozen): a key at its default is left out of the card, so
+# spelling it never changes the id.
+POST_DEFAULTS: dict[str, Any] = {"gain_db": 0.0, "eq": "none"}
 
 _SHA_REF = re.compile(r"sha256:[0-9a-f]{64}")
 _CARD_ID = re.compile(r"[0-9a-f]{16}")
@@ -272,7 +277,7 @@ def _parse_reference(raw: Any) -> Reference:
     return Reference(
         clip=_sha_ref(_require(t, "clip", where), "clip", where),
         transcript=_str(_require(t, "transcript", where), "transcript", where),
-        language=_str(_require(t, "language", where), "language", where),
+        language=normalize_language(_str(_require(t, "language", where), "language", where)),
         origin=origin,
     )
 
@@ -306,7 +311,17 @@ def _parse_post(raw: Any) -> dict[str, Any]:
         post["gain_db"] = _float(t["gain_db"], "gain_db", where)
     if "eq" in t:
         post["eq"] = _str(t["eq"], "eq", where)
-    return post
+    return _post_without_defaults(post)
+
+
+def _post_without_defaults(post: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in post.items() if k not in POST_DEFAULTS or v != POST_DEFAULTS[k]}
+
+
+def _style_without_empties(style: dict[str, Any]) -> dict[str, Any]:
+    """``[style]`` without empty strings or empty catchphrase lists: an empty field is the
+    same card as no field."""
+    return {k: v for k, v in style.items() if v not in ("", [], ())}
 
 
 def _parse_fingerprint(raw: Any) -> Fingerprint:
@@ -427,7 +442,7 @@ def _parse_style(raw: Any, strip_tokens: bool = True) -> dict[str, Any]:
         else:
             cap = STYLE_CAPS.get(key, STYLE_TEXT_CAP)
             style[key] = _capped(clean(_str(value, key, where)), cap, f"[style] {key}")
-    return style
+    return _style_without_empties(style)
 
 
 def parse_card(text: str, *, strip_tokens: bool = True) -> Card:
@@ -440,6 +455,7 @@ def parse_card(text: str, *, strip_tokens: bool = True) -> Card:
         raise CardError(f"card is not valid TOML: {e}") from e
     _check_keys(raw, _TOP_KEYS, "the top level")
     target = _str(_require(raw, "target_language", "the top level"), "target_language", "card")
+    target = normalize_language(target)
     if not target:
         raise CardError("target_language must not be empty")
     voice = _parse_voice(_require(raw, "voice", "the card ([voice])"))
@@ -478,6 +494,8 @@ def _voice_dict(v: Voice, *, fingerprint: bool, identity: bool = False) -> dict[
             d[key] = float(value)
     for key in ("blend", "options", "post"):
         value = getattr(v, key)
+        if key == "post":
+            value = _post_without_defaults(value)
         if value != getattr(_VOICE_DEFAULTS, key):
             d[key] = _norm_free(value, f"[voice.{key}]", identity=identity)
     if "blend" in d:
@@ -497,7 +515,7 @@ def _reference_dict(r: Reference, *, identity: bool = False) -> dict[str, Any]:
     rd: dict[str, Any] = {
         "clip": r.clip,
         "transcript": _nfc(r.transcript),
-        "language": _nfc(r.language),
+        "language": normalize_language(_nfc(r.language)),
     }
     if r.origin is not None:
         rd["origin"] = _norm_free(r.origin, "[[voice.references]] origin", identity=identity)
@@ -510,12 +528,13 @@ def _fingerprint_dict(f: Fingerprint) -> dict[str, Any]:
 
 def _card_dict(card: Card, *, identity: bool) -> dict[str, Any]:
     """Every Card field is handled here; an empty style is no style."""
-    d: dict[str, Any] = {"target_language": _nfc(card.target_language)}
+    d: dict[str, Any] = {"target_language": normalize_language(_nfc(card.target_language))}
     if card.meta and not identity:
         d["meta"] = card.meta
     d["voice"] = _voice_dict(card.voice, fingerprint=not identity, identity=identity)
-    if card.style:
-        d["style"] = _norm_free(card.style, "[style]")
+    style = _style_without_empties(card.style or {})
+    if style:
+        d["style"] = _norm_free(style, "[style]")
     return d
 
 
