@@ -125,7 +125,10 @@ def _current(reg: Registry, char: Character, lang: str) -> CardAssignment:
 def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
     """List every character with its card for the target language, then each clone card
     cloned from turns the subtitle names now give someone else (D29 #4): the next tts run
-    re-picks an automatic one; a curated or imported one stays until `voices clone`."""
+    re-picks an automatic one; a curated or imported one stays until `voices clone`. Then
+    each automatic clone card under the clone floor (2 clips, 10 s; D32): re-picked by the
+    next tts run when a better pick exists, else flagged for review."""
+    from fukikae.cards import auto
     from fukikae.cards.auto import AUTOMATIC_BY, repick_blocker, replace_refusal, stale_cards
 
     with _session(workspace, lang) as (reg, store, language):
@@ -161,6 +164,9 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
             _echo(
                 f"character {_label(c)}'s card ({a.chosen_by}) was cloned from turns {now}; {fix}"
             )
+        rest = [c.id for c in chars if c.id not in stale]  # a stale card's line says it all
+        for line in auto.floor_lines(ws, reg, store, rest, language):
+            _echo(line)
         for note in notes:
             _echo(note)
 

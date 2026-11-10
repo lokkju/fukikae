@@ -4,14 +4,19 @@ and reference clips for clone cards.
 Reference selection (``select_references``, ruling CD5): a character's turns that overlap no
 other speaker's turn, last 3 to 12 s and have an ASR transcript are ranked by signal-to-noise
 ratio on the separated vocals (``snr_db``: the RMS of the loudest half of the turn's 20 ms
-frames over the RMS of its quietest tenth) and taken greedily, up to 3 clips and 20 s. A turn
-that a scored emotion source labels non-neutral (``tags.emotion_backend`` set, confidence at
-least 0.5) ranks after every other eligible turn: it is taken only when the rest fall short of
-``min_total`` (6 s), and then only until that is reached. SenseVoice's labels carry no score
-and demote nothing; unlabelled and low-confidence turns rank by SNR alone. Whenever a chosen
-reference is scored non-neutral, ``reference_report`` says "references may carry emotion:
-<labels>", and ``clone_card`` records the labels in ``[meta] reference_emotions`` (outside
-the card id), which ``fukikae voices show`` prints. Under ``min_total`` there is no clone.
+frames over the RMS of its quietest tenth) and taken greedily, up to 3 clips and 20 s. Before
+the length check, the character's clean turns at most ``JOIN_GAP_S`` (0.6 s) apart with no
+other turn in the gap are joined, up to 12 s (D32 #1), so speech cut into fragments can still
+make a reference; a joined turn that fails a check falls back to its pieces. A turn that a
+scored emotion source labels non-neutral (``tags.emotion_backend`` set, confidence at least
+0.5) ranks after every other eligible turn: it is taken only when the rest fall short of the
+clone floor (``FLOOR_CLIPS`` clips and ``FLOOR_S`` seconds: 2 and 10 s, D32 #2), and then
+only until that is reached. SenseVoice's labels carry no score and demote nothing; unlabelled
+and low-confidence turns rank by SNR alone. Whenever a chosen reference is scored
+non-neutral, ``reference_report`` says "references may carry emotion: <labels>", and
+``clone_card`` records the labels in ``[meta] reference_emotions`` (outside the card id),
+which ``fukikae voices show`` prints. Under ``min_total`` (6 s) there is no clone; between it
+and the floor the best picks are still a clone, which ``cards.auto`` flags for review.
 A turn whose transcript is far sparser than the speaker's usual text rate and sparse in
 absolute terms (``SPARSE_*``: one word over five seconds) is mostly someone else, effort
 sounds or silence, and is no reference either. Turns overlapping ``exclude``
@@ -261,6 +266,53 @@ def rank_key(p: RefPick) -> tuple[bool, float, float]:
     return (p.emotion is not None, -p.snr_db, p.start)
 
 
+# D32 #1: a character's adjacent turns this close together, with no other speaker's turn
+# between them, are joined into one candidate before the length check, so speech the
+# diarizer (or the subtitle names) cut into fragments can still make a reference.
+JOIN_GAP_S = 0.6
+# D32 #2: a clone wants at least this many clips and ``total[0]`` (10 s) of speech.
+FLOOR_CLIPS = 2
+FLOOR_S = 10.0
+# A turn with this share of it under speech the subtitle names give someone else is no
+# reference (``foreign``; auto.STALE_OVERLAP is the same rule for cards).
+FOREIGN_MAX = 0.1
+
+
+def share_inside(start: float, end: float, spans: Sequence[tuple[float, float]]) -> float:
+    """The share of ``start``-``end`` inside the union of ``spans``."""
+    covered, edge = 0.0, start
+    for a, b in sorted(spans):
+        a, b = max(a, edge), min(b, end)
+        if b > a:
+            covered += b - a
+            edge = b
+    return covered / (end - start) if end > start else 1.0
+
+
+def _chains(
+    clean: Sequence[tuple[float, float]],
+    blockers: Sequence[tuple[float, float]],
+    gap: float,
+    longest: float,
+) -> list[list[tuple[float, float]]]:
+    """``clean`` (sorted) cut into runs of turns at most ``gap`` apart, with no ``blockers``
+    span inside a gap, each run no longer than ``longest`` from its first start to its end."""
+    out: list[list[tuple[float, float]]] = []
+    for s, e in clean:
+        if out:
+            run = out[-1]
+            head, tail = run[0][0], max(b for _, b in run)
+            if (
+                s - tail <= gap
+                and max(e, tail) - head <= longest
+                and not any(a < s and b > tail for a, b in blockers)
+            ):
+                run.append((s, e))
+                continue
+        out.append([(s, e)])
+    return out
+
+
 def eligible_references(
     turns: list[Turn],
     speaker: str | Collection[str],
@@ -270,16 +322,27 @@ def eligible_references(
     *,
     each: tuple[float, float] = (3.0, 12.0),
     exclude: Sequence[tuple[float, float]] = (),
+    foreign: Sequence[tuple[float, float]] = (),
+    join_gap: float = JOIN_GAP_S,
 ) -> list[RefPick]:
     """Every turn of the speaker that could be a reference (no overlap with another speaker,
-    within ``each``, outside ``exclude``, with an ASR transcript), in ``rank_key`` order.
-    ``select_references`` picks from this list; eval tts draws held-out exemplars from it
-    (ruling CD17)."""
+    within ``each``, outside ``exclude``, under `FOREIGN_MAX` of it in ``foreign``, with an
+    ASR transcript), in ``rank_key`` order. ``select_references`` picks from this list; eval
+    tts draws held-out exemplars from it (ruling CD17).
+
+    Before the length check, the speaker's clean turns (overlapping no other speaker, outside
+    ``exclude`` and ``foreign``) at most ``join_gap`` apart (`JOIN_GAP_S`) are joined, when no
+    other turn (another speaker's, or one of the speaker's own that isn't clean) falls in the
+    gap and the result stays within ``each[1]`` (D32 #1). A joined turn is checked like any
+    other (``exclude`` and ``foreign`` over its gaps, its transcript, its text rate); one that
+    fails falls back to its pieces, each checked alone."""
     from scipy.io import wavfile
 
     mine = {speaker} if isinstance(speaker, str) else set(speaker)
     others = [t for t in turns if t.speaker not in mine]
     own = sorted((t for t in turns if t.speaker in mine), key=lambda t: (t.start, t.end))
+    dropped = [t for t in own if foreign and share_inside(t.start, t.end, foreign) >= FOREIGN_MAX]
+    own = [t for t in own if t not in dropped]
     lang = transcript.language
     rates = [
         text_units(turn_text(transcript, t.start, t.end), lang) / (t.end - t.start)
@@ -290,42 +353,81 @@ def eligible_references(
     median = float(np.median(rates)) if rates else 0.0
     rate, data = wavfile.read(vocals, mmap=True)
     rate = int(rate)
-    eligible: list[RefPick] = []
-    for t in own:
-        start, end = round(t.start, 3), round(t.end, 3)
+
+    def pick(start: float, end: float, joined: bool = False) -> RefPick | None:
         if not each[0] <= end - start <= each[1]:
-            continue
+            return None
         if any(o.start < end and start < o.end for o in others):
-            continue
+            return None
         if any(a < end and start < b for a, b in exclude):
-            continue
+            return None
+        if joined and foreign and share_inside(start, end, foreign) >= FOREIGN_MAX:
+            return None  # a single turn was checked (unrounded) when ``dropped`` was made
         text = turn_text(transcript, start, end)
         if not text:
-            continue
+            return None
         if _sparse(text_units(text, lang) / (end - start), median, lang):
             log.debug("%.2f-%.2f: text too sparse for a reference (%r)", start, end, text)
-            continue
+            return None
         snr = snr_db(_samples(data, rate, start, end), rate)
-        eligible.append(RefPick(start, end, text, round(snr, 2), _emotion(tags, start, end)))
+        return RefPick(start, end, text, round(snr, 2), _emotion(tags, start, end))
+
+    def clean(s: float, e: float) -> bool:
+        return not any(o.start < e and s < o.end for o in others) and not any(
+            a < e and s < b for a, b in exclude
+        )
+
+    spans = [(round(t.start, 3), round(t.end, 3)) for t in own]
+    good = [sp for sp in spans if clean(*sp)]
+    blockers = [(o.start, o.end) for o in others]
+    blockers += [sp for sp in spans if not clean(*sp)]
+    blockers += [(t.start, t.end) for t in dropped]
+    eligible: list[RefPick] = []
+    for run in _chains(good, blockers, join_gap, each[1]):
+        joined = pick(run[0][0], max(b for _, b in run), True) if len(run) > 1 else None
+        if joined is not None:
+            eligible.append(joined)
+            continue
+        eligible += [p for p in (pick(s, e) for s, e in run) if p is not None]
     return sorted(eligible, key=rank_key)
+
+
+def meets_floor(picks: Sequence[RefPick]) -> bool:
+    """Whether the picks reach the clone floor: `FLOOR_CLIPS` clips and `FLOOR_S` seconds."""
+    return len(picks) >= FLOOR_CLIPS and sum(p.seconds for p in picks) >= FLOOR_S - 1e-9
+
+
+def floor_shortfall(clips: Sequence[float]) -> str | None:
+    """How clips of these lengths (seconds) fall short of the clone floor, as a phrase; None
+    when they reach it."""
+    seconds = sum(clips)
+    if len(clips) >= FLOOR_CLIPS and seconds >= FLOOR_S - 1e-9:
+        return None
+    n = len(clips)
+    return (
+        f"{n} clip{'' if n == 1 else 's'} and {seconds:.1f} s, under the floor of "
+        f"{FLOOR_CLIPS} clips and {FLOOR_S:g} s"
+    )
 
 
 def pick_references(
     ranked: Sequence[RefPick],
     *,
     count: int = 3,
-    total: tuple[float, float] = (10.0, 20.0),
+    total: tuple[float, float] = (FLOOR_S, 20.0),
     min_total: float = 6.0,
+    floor_clips: int = FLOOR_CLIPS,
 ) -> list[RefPick] | None:
     """The greedy CD5 fill over ``ranked`` (``eligible_references``' order): up to ``count``
-    clips and ``total[1]`` seconds, scored non-neutral turns only to make up ``min_total``;
-    None under ``min_total``."""
+    clips and ``total[1]`` seconds, scored non-neutral turns only to make up the floor
+    (``floor_clips`` clips and ``total[0]`` seconds, D32 #2); None under ``min_total``. Under
+    the floor the best picks there are still returned (`meets_floor` tells)."""
     picks: list[RefPick] = []
     used = 0.0
     for p in ranked:
         if len(picks) >= count:
             break
-        if p.emotion is not None and used >= min_total:
+        if p.emotion is not None and used >= total[0] and len(picks) >= floor_clips:
             break  # scored non-neutral turns only make up a shortfall
         if used + p.seconds <= total[1]:
             picks.append(p)
@@ -341,14 +443,15 @@ def select_references(
     vocals: Path,
     *,
     count: int = 3,
-    total: tuple[float, float] = (10.0, 20.0),
+    total: tuple[float, float] = (FLOOR_S, 20.0),
     each: tuple[float, float] = (3.0, 12.0),
     min_total: float = 6.0,
     exclude: Sequence[tuple[float, float]] = (),
 ) -> list[RefPick] | None:
     """Reference clips for the speaker (one diarize label, or several of one character), in
     the order taken; None when they add up to less than ``min_total`` seconds. ``total[0]``
-    is the preferred minimum (the spec's 10 to 20 s); the greedy fill stops at ``total[1]``."""
+    is the preferred minimum (the spec's 10 to 20 s), the floor's seconds with 2 clips (D32);
+    the greedy fill stops at ``total[1]``."""
     ranked = eligible_references(
         turns, speaker, transcript, tags, vocals, each=each, exclude=exclude
     )
