@@ -1,5 +1,6 @@
 import wave
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -406,7 +407,7 @@ def test_clone_backend_is_no_backend_option():
     assert "clone_backend" not in backend_config(cfg, "kokoro").options
 
 
-def test_workspace_cloning_reads_the_episode_artifacts(tmp_path: Path):
+def test_workspace_cloning_reads_the_episode_artifacts(tmp_path: Path, monkeypatch):
     """The production clone source: the character's eligible turns in the workspace's
     episodes (CD5 ranking), the current episode's transcript language as the source
     language, and the clean-speech seconds for the stock fallback's report."""
@@ -446,13 +447,94 @@ def test_workspace_cloning_reads_the_episode_artifacts(tmp_path: Path):
         work / "03-asr" / "transcript.json",
         Transcript(language="ja", backend="x", word_timing=False, segments=segs),
     )
+    monkeypatch.setattr("fukikae.cards.auto.clone_problem", lambda *_: None)
     cfg = Config(raw={"tts": {"backend": "kokoro", "clone_backend": "indextts2"}})
     cloning = workspace_cloning(root, cfg, "S01E12")
     assert cloning is not None
     assert cloning.backend.name == "indextts2" and cloning.source_language == "ja"
     one = cloning.references(1)
     assert one.picks is not None and one.episode == "S01E12" and one.seconds == 15.0
-    assert one.vocals == work / "01-separate" / "vocals.wav"
+    assert one.vocals == work / "01-separate" / "vocals.wav" and one.language == "ja"
     two = cloning.references(2)
     assert two.picks is None and two.seconds == 4.0
     assert workspace_cloning(root, CFG, "S01E12") is None
+
+
+# -- fix round 1: no clone card before the clone backend can run -----------------------------
+
+
+def test_unusable_clone_backend_falls_back_to_stock_naming_setup(tmp_path: Path, vocals: Path):
+    from fukikae.cards.auto import Cloning
+    from tests.cards.test_select import CloneSynth
+
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    asked: list[int] = []
+
+    def find(cid: int):
+        asked.append(cid)
+        raise AssertionError("no references are read for an unusable backend")
+
+    cloning = Cloning(
+        backend=CloneSynth, source_language="ja", references=find,
+        unavailable="no worker environment at /x/.venvs/clonefake",
+    )  # fmt: skip
+    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=cloning)
+    cur = reg.card_for(a, "en")
+    assert cur is not None and cur.card_id is not None and not asked
+    assert store.get(cur.card_id).voice.source == "stock"
+    assert "clonefake is not usable" in line and "fukikae backends setup clonefake" in line
+    assert "no worker environment" in line
+    reg.close()
+
+
+def test_clone_problem_needs_the_worker_env_and_its_lock(tmp_path: Path, monkeypatch):
+    from fukikae.backends import loader
+    from fukikae.backends.tts import remote
+    from fukikae.cards.auto import clone_problem
+
+    cls = cast(Any, loader.backend_class("tts", "indextts2"))
+    cfg = Config(raw={"tts": {"backend": "kokoro", "clone_backend": "indextts2"}})
+    monkeypatch.setenv("FUKIKAE_WORKER_CHECKOUT", str(tmp_path))
+    why = clone_problem(cls, cfg)
+    assert why is not None and "worker environment" in why
+    venv = tmp_path / ".venvs" / cls.extra
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").write_text("")
+    project = tmp_path / "workers" / cls.extra
+    project.mkdir(parents=True)
+    (project / "uv.lock").write_text("lock v1")
+    assert "lock hash" in (clone_problem(cls, cfg) or "")
+    remote.record_lock(project, venv)
+    monkeypatch.setattr("fukikae.stages.tts.synth_device", lambda *_: "cuda:0")
+    assert clone_problem(cls, cfg) is None
+    (project / "uv.lock").write_text("lock v2")
+    assert "another version" in (clone_problem(cls, cfg) or "")
+
+
+def test_clone_problem_needs_the_default_device(monkeypatch):
+    from fukikae.backends import loader
+    from fukikae.cards.auto import clone_problem
+    from fukikae.config import ConfigError
+
+    cls = cast(Any, loader.backend_class("tts", "indextts2"))
+    cfg = Config(raw={"tts": {"backend": "kokoro", "clone_backend": "indextts2"}})
+    monkeypatch.setattr(type(cls({}, "cpu")), "lock_problem", lambda _self: None)
+    monkeypatch.setattr(type(cls({}, "cpu")), "interpreter", lambda _self: Path("/bin/sh"))
+
+    def no_gpu(*_):
+        raise ConfigError("indextts2 found no usable GPU")
+
+    monkeypatch.setattr("fukikae.stages.tts.synth_device", no_gpu)
+    assert "no usable GPU" in (clone_problem(cls, cfg) or "")
+
+
+def test_workspace_cloning_reports_an_unusable_backend(tmp_path: Path, monkeypatch):
+    from fukikae.cards.auto import workspace_cloning
+
+    monkeypatch.setenv("FUKIKAE_WORKER_CHECKOUT", str(tmp_path))
+    cfg = Config(raw={"tts": {"backend": "kokoro", "clone_backend": "indextts2"}})
+    cloning = workspace_cloning(tmp_path / "ws", cfg, "S01E01")
+    assert (
+        cloning is not None and cloning.unavailable and "worker environment" in cloning.unavailable
+    )

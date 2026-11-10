@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from fukikae.backends.base import Synthesizer
     from fukikae.cards.select import RefPick
     from fukikae.config import Config
-    from fukikae.models import Assignments, DubCue
+    from fukikae.models import Assignments, DubCue, Tags, Transcript
     from fukikae.registry.store import Registry
     from fukikae.workspace import Workspace
 
@@ -65,6 +65,7 @@ class CharacterRefs:
     picks: list[RefPick] | None = None
     episode: str | None = None
     vocals: Path | None = None
+    language: str | None = None  # the picks' episode's transcript language
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,7 @@ class Cloning:
     backend: type[Synthesizer]
     source_language: str
     references: Callable[[int], CharacterRefs]
+    unavailable: str | None = None  # why the backend can't run here: stock for everyone
 
 
 def clone_backend(cfg: Config) -> str | None:
@@ -179,7 +181,8 @@ def ensure_assignments(
     todo.sort(key=lambda item: (-sum(e - s for s, e in item[1]), item[0]))
     lines: list[str] = []
     for cid, spans in todo:
-        found = cloning.references(cid) if cloning is not None else None
+        usable = cloning is not None and cloning.unavailable is None
+        found = cloning.references(cid) if usable else None  # type: ignore[union-attr]
         voice: str | None = None
         if found is not None and found.picks:
             new, note = _clone(cloning, found, store, language)  # type: ignore[arg-type]
@@ -199,6 +202,13 @@ def ensure_assignments(
                 note = (
                     f"{found.seconds:.1f} s of clean speech, under {MIN_CLONE_S:.0f} s; "
                     f"stock voice {voice}: {note}"
+                )
+            elif cloning is not None and cloning.unavailable is not None:
+                name = cloning.backend.name
+                note = (
+                    f"clone backend {name} is not usable ({cloning.unavailable}); stock voice "
+                    f"{voice}: {note}. Run `fukikae backends setup {name}`; this card stays "
+                    "until `fukikae voices assign` replaces it"
                 )
         try:
             reg.assign_card(cid, language, new, by="auto", locked=False, note=note)
@@ -220,8 +230,9 @@ def _clone(
     picks, episode, vocals = found.picks or [], found.episode, found.vocals
     assert episode is not None and vocals is not None
     card = clone_card(
-        cloning.backend, picks, store, vocals, cloning.source_language, language, episode
-    )
+        cloning.backend, picks, store, vocals, found.language or cloning.source_language,
+        language, episode,
+    )  # fmt: skip
     new = store.put(card)
     clips = ", ".join(f"{p.start:.2f}-{p.end:.2f}" for p in picks)
     seconds = sum(p.seconds for p in picks)
@@ -257,42 +268,69 @@ def extras_voices(cues: Iterable[DubCue], cfg: Config) -> dict[str, str]:
 # -- the production clone source -------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class EpisodeArtifacts:
+    """What reference selection reads from one episode's work dir."""
+
+    assignments: Assignments
+    transcript: Transcript
+    tags: Tags | None
+    vocals: Path
+
+
+def episode_artifacts(ws: Workspace, episode: str) -> EpisodeArtifacts | None:
+    """The episode's assignments, transcript, tags and vocals; None when one is missing."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments, Tags, Transcript
+
+    work = ws.work_dir(episode)
+    asg_path = work / "05-characters" / "assignments.json"
+    tr_path = work / "03-asr" / "transcript.json"
+    vocals = work / "01-separate" / "vocals.wav"
+    if not (asg_path.exists() and tr_path.exists() and vocals.exists()):
+        return None
+    tags_path = work / "04b-tag" / "tags.json"
+    return EpisodeArtifacts(
+        read_json(asg_path, Assignments),
+        read_json(tr_path, Transcript),
+        read_json(tags_path, Tags) if tags_path.exists() else None,
+        vocals,
+    )
+
+
 def character_candidates(
     ws: Workspace,
     episodes: Sequence[str],
     cid: int,
     exclusions: dict[str, list[tuple[float, float]]] | None = None,
+    loaded: dict[str, EpisodeArtifacts | None] | None = None,
 ) -> dict[str, list[RefPick]]:
     """Per episode, the character's eligible reference turns (``eligible_references``, songs
-    and singing excluded), ranked. ``exclusions`` caches each episode's excluded spans."""
-    from fukikae.artifacts import read_json
+    and singing excluded), ranked. ``exclusions`` caches each episode's excluded spans and
+    ``loaded`` its artifacts, so a caller asking for many characters reads each file once."""
     from fukikae.cards.select import eligible_references, reference_exclusions
-    from fukikae.models import Assignments, Tags, Transcript
     from fukikae.stages.mix import mix_settings
 
     cache = exclusions if exclusions is not None else {}
+    arts = loaded if loaded is not None else {}
     out: dict[str, list[RefPick]] = {}
     for e in episodes:
-        work = ws.work_dir(e)
-        asg_path = work / "05-characters" / "assignments.json"
-        tr_path = work / "03-asr" / "transcript.json"
-        vocals = work / "01-separate" / "vocals.wav"
-        if not (asg_path.exists() and tr_path.exists() and vocals.exists()):
+        if e not in arts:
+            arts[e] = episode_artifacts(ws, e)
+        a = arts[e]
+        if a is None:
             continue
-        asg = read_json(asg_path, Assignments)
         speakers = {
-            a.cluster
-            for a in asg.clusters
-            if a.character_id == cid and a.status not in ("extra", "review")
+            c.cluster
+            for c in a.assignments.clusters
+            if c.character_id == cid and c.status not in ("extra", "review")
         }
-        if not speakers or not asg.turns:
+        if not speakers or not a.assignments.turns:
             continue
-        tags_path = work / "04b-tag" / "tags.json"
-        tags = read_json(tags_path, Tags) if tags_path.exists() else None
         if e not in cache:
-            cache[e] = reference_exclusions(work, tags, mix_settings(ws.config).songs)
+            cache[e] = reference_exclusions(ws.work_dir(e), a.tags, mix_settings(ws.config).songs)
         out[e] = eligible_references(
-            asg.turns, speakers, read_json(tr_path, Transcript), tags, vocals, exclude=cache[e]
+            a.assignments.turns, speakers, a.transcript, a.tags, a.vocals, exclude=cache[e]
         )
     return out
 
@@ -331,18 +369,39 @@ def workspace_episodes(ws: Workspace, current: str) -> list[str]:
     return [current, *(e for e in others if e != current)]
 
 
+def clone_problem(cls: type[Synthesizer], cfg: Config) -> str | None:
+    """Why ``cls`` can't render here, or None: a worker backend needs its environment set up
+    from its current lock (``fukikae backends setup``), and every backend its device (for
+    IndexTTS2, a usable GPU). Checked before any clone card is made or assigned."""
+    from fukikae.backends.tts.remote import WorkerSynthesizer
+    from fukikae.config import ConfigError
+    from fukikae.stages.tts import synth_device
+
+    if issubclass(cls, WorkerSynthesizer):
+        inst = cls({}, "cpu")
+        if not inst.interpreter().exists():
+            return f"no worker environment at {inst.venv()}"
+        lock = inst.lock_problem()
+        if lock is not None:
+            return lock
+    try:
+        synth_device(cfg, cls)
+    except ConfigError as e:
+        return str(e)
+    return None
+
+
 def workspace_cloning(root: Path, cfg: Config, current: str) -> Cloning | None:
     """The clone branch for an episode of the workspace at ``root``, or None when ``[tts]
     clone_backend`` is unset: references from the character's turns in every episode the
-    workspace has processed so far (the current one first), the source language the current
-    episode's transcript names (else ``source_language``)."""
+    workspace has processed so far (the current one first), each card's source language the
+    transcript language of the episode its clips come from. When the backend can't run here
+    (``clone_problem``), the result says why and every new character gets a stock voice."""
     from typing import cast
 
-    from fukikae.artifacts import read_json
     from fukikae.backends import loader
     from fukikae.backends.base import Synthesizer
     from fukikae.config import ConfigError
-    from fukikae.models import Transcript
     from fukikae.workspace import Workspace
 
     name = clone_backend(cfg)
@@ -351,25 +410,35 @@ def workspace_cloning(root: Path, cfg: Config, current: str) -> Cloning | None:
     cls = cast(type[Synthesizer], loader.backend_class("tts", name))
     if "clone" not in getattr(cls, "sources", ()):
         raise ConfigError(f"[tts] clone_backend {name!r} makes no clone voices")
+
+    def nothing(_cid: int) -> CharacterRefs:
+        return CharacterRefs(seconds=0.0)
+
+    problem = clone_problem(cls, cfg)
+    if problem is not None:
+        return Cloning(cls, cfg.source_language or "", nothing, unavailable=problem)
     ws = Workspace(root)
     episodes = workspace_episodes(ws, current)
-    tr_path = ws.work_dir(current) / "03-asr" / "transcript.json"
-    language = read_json(tr_path, Transcript).language if tr_path.exists() else None
-    language = language or cfg.source_language
-    if not language:
+    loaded: dict[str, EpisodeArtifacts | None] = {}
+    exclusions: dict[str, list[tuple[float, float]]] = {}
+    here = episode_artifacts(ws, current)
+    loaded[current] = here
+    fallback = (here.transcript.language if here else None) or cfg.source_language
+    if not fallback:
         raise ConfigError(
             f"{current}: no transcript language and no source_language for the clone references"
         )
-    exclusions: dict[str, list[tuple[float, float]]] = {}
 
     def references(cid: int) -> CharacterRefs:
-        candidates = character_candidates(ws, episodes, cid, exclusions)
+        candidates = character_candidates(ws, episodes, cid, exclusions, loaded)
         seconds = max((sum(p.seconds for p in c) for c in candidates.values()), default=0.0)
         best = character_references(ws, episodes, cid, candidates=candidates)
         if best is None:
             return CharacterRefs(seconds=round(seconds, 3))
         e, picks = best
+        arts = loaded.get(e)
+        language = (arts.transcript.language if arts else None) or fallback
         vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
-        return CharacterRefs(round(seconds, 3), picks, e, vocals)
+        return CharacterRefs(round(seconds, 3), picks, e, vocals, language)
 
-    return Cloning(backend=cls, source_language=language, references=references)
+    return Cloning(backend=cls, source_language=fallback, references=references)
