@@ -792,7 +792,8 @@ def export(
     ),
 ) -> None:
     """Write the characters' current cards to a pack. Packs carry names and external ids,
-    never registry ids; unnamed characters are left out and listed. A card without a
+    never registry ids; unnamed characters are left out and listed, and when that leaves
+    nothing to export, nothing is written and it exits 1. A card without a
     fingerprint gets one first (ruling CD26: one render of the test script on its backend);
     when its backend can't run here the card is exported without one and listed, or, with
     --require-fingerprints, nothing is written."""
@@ -806,9 +807,16 @@ def export(
             ids = [reg.character_by_ref(c).id for c in _csv(characters) or []]
         from fukikae.cards.packs import export_selection
 
-        cast_rows, _, _ = export_selection(
+        cast_rows, _, left_out = export_selection(
             reg, store, characters=ids, languages=_csv(langs), no_clips=no_clips
         )
+        if not cast_rows:
+            for what, why in left_out:
+                _echo(f"left out: {what}: {why}")
+            raise _fail(
+                "no character has a card that can be exported; nothing was written (packs "
+                "match characters by name: name them with `fukikae registry rename`)"
+            )
         missing = _fingerprint_for_export(cfg, store, cast_rows, record=not no_record)
         for label, card_id, why in missing:
             _echo(f"without a fingerprint: {label} card {card_id} ({why})")

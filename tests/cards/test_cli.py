@@ -922,3 +922,22 @@ def test_a_card_edited_in_place_is_still_called_that(tmp_path: Path):
     store.card_path(STALE_ID).write_text(STOCK_CARD.replace("af_heart", "af_bella"))
     with pytest.raises(CardError, match="never edited in place"):
         store.get(STALE_ID)
+
+
+def test_export_with_nothing_exportable_fails_and_writes_nothing(tmp_path: Path):
+    """Every character with a card is unnamed (or the filters leave nothing): no 0-card
+    pack, exit 1, and the way to fix it."""
+    root = tmp_path / "ws"
+    root.mkdir()
+    ws = Workspace(root)
+    store = CardStore(root)
+    card_id = store.put(parse_card(STOCK_CARD))
+    with Registry(ws.registry_path) as reg:
+        _, cid = reg.create_actor_with_character(np.array([1.0, 0.0], dtype=np.float32))
+        reg.assign_card(cid, "en", card_id, by="assign", locked=True)
+    out = tmp_path / "pack"
+    r = invoke("export", str(root), "-o", str(out), "--no-record")
+    assert r.exit_code == 1, r.output
+    assert not out.exists()
+    assert "no character" in r.output and "fukikae registry rename" in r.output
+    assert f"character {cid}" in r.output  # what was left out, and why
