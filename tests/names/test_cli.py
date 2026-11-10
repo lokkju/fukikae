@@ -306,3 +306,47 @@ def test_scan_cache_refreshes_when_the_source_is_replaced_in_place(cli_ws: Path,
     os.utime(ep.source, ns=(st.st_atime_ns, st.st_mtime_ns))  # same mtime
     _scan_tracks(ep, ws, [choice])
     assert len(calls) == 2
+
+
+def _merge_hints(root: Path) -> list[str]:
+    r = runner.invoke(app, ["names", "show", str(root), "S01E14"])
+    assert r.exit_code == 0, r.output
+    return [ln for ln in r.output.splitlines() if "registry merge" in ln]
+
+
+def test_the_merge_hint_folds_the_leftover_into_the_named_character(tmp_path: Path):
+    """Running the hint's command keeps the named character (Natsu) and folds the leftover
+    into it: KEEP is Natsu's actor, DROP the leftover's."""
+    root, reg, (leftover, natsu, _) = _merge_ws(tmp_path)
+    reg.close()
+    (hint,) = _merge_hints(root)
+    keep, drop = hint.split("`fukikae registry merge ")[1].split("`")[0].split()[1:]
+    r = runner.invoke(app, ["registry", "merge", str(root), keep, drop])
+    assert r.exit_code == 0, r.output
+    with Registry(Workspace(root).registry_path) as reg:
+        chars = {c.id: c for c in reg.characters()}
+    assert leftover not in chars and chars[natsu].name == "Natsu"
+
+
+def test_no_merge_hint_for_a_remainder_under_min_new_seconds(tmp_path: Path):
+    """A remainder shorter than [names] min_new_seconds (5 s) is too little voice to say two
+    characters are one."""
+    root, reg, _ = _merge_ws(tmp_path)
+    reg.close()
+    (root / "fukikae.toml").write_text(
+        (root / "fukikae.toml").read_text() + "[names]\nmin_new_seconds = 5.5\n"
+    )
+    assert _merge_hints(root) == []
+
+
+def test_no_merge_hint_when_both_characters_are_one_actor(tmp_path: Path):
+    import sqlite3
+
+    root, reg, (leftover, natsu, _) = _merge_ws(tmp_path)
+    actors = {c.id: c.actor_id for c in reg.characters()}
+    reg.close()
+    con = sqlite3.connect(Workspace(root).registry_path)
+    with con:
+        con.execute("UPDATE characters SET actor_id = ? WHERE id = ?", (actors[natsu], leftover))
+    con.close()
+    assert _merge_hints(root) == []
