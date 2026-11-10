@@ -411,6 +411,70 @@ def test_rate_fit_follows_the_timefit_max_speedup(ep):
     assert c.rate_factor == pytest.approx(1.1)
 
 
+def _natsu_rates() -> list[float]:
+    return [r for t, _, r in FakeSynth.CALLS if t == "natsu one"]
+
+
+def test_rate_estimate_renders_once_at_the_estimated_rate(ep, monkeypatch):
+    """D26: a cue the estimate puts over its slot is rendered once, already faster."""
+    _two_cards(ep)
+    monkeypatch.setattr(FakeSynth, "speech_cps", {"en": 4.0}, raising=False)
+    # Every line at 4 cps: the estimate is right (natsu one, 9 characters: 2.25 s)
+    FakeSynth.DUR = {c.text: len(c.text) / 4.0 for c in CUES if c.text}
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert _natsu_rates() == [pytest.approx(1.125)]
+    assert c.rate_factor == pytest.approx(1.125) and c.seconds == pytest.approx(2.0, abs=1e-3)
+    run = _run(ep)
+    assert run.rate_estimated >= 1 and run.rate_refits == 0
+    FakeSynth.CALLS.clear()
+    TtsStage(CFG).run(ep, CFG)  # cached: the estimate is the same, nothing renders
+    assert FakeSynth.CALLS == []
+    assert {c.cue_id: c for c in _plan(ep).cues}["c0001"].rate_factor == pytest.approx(1.125)
+
+
+def test_rate_estimate_that_misses_long_renders_once_more(ep, monkeypatch):
+    _two_cards(ep)
+    monkeypatch.setattr(FakeSynth, "speech_cps", {"en": 4.0}, raising=False)
+    FakeSynth.DUR = {"natsu one": 3.0}  # 2.67 s at 1.125: over the slot by more than the margin
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert _natsu_rates() == [pytest.approx(1.125), pytest.approx(1.25)]
+    assert c.rate_factor == pytest.approx(1.25) and _run(ep).rate_refits >= 1
+
+
+def test_rate_estimate_within_the_margin_is_kept(ep, monkeypatch):
+    _two_cards(ep)
+    monkeypatch.setattr(FakeSynth, "speech_cps", {"en": 4.0}, raising=False)
+    FakeSynth.DUR = {"natsu one": 2.4}  # 2.13 s at 1.125: over by 7%, timefit's to absorb
+    TtsStage(CFG).run(ep, CFG)
+    assert _natsu_rates() == [pytest.approx(1.125)]
+
+
+def test_rate_estimate_that_misses_short_renders_slower(ep, monkeypatch):
+    """An estimate that sped a line up for nothing is undone: no needless speed-up."""
+    _two_cards(ep)
+    monkeypatch.setattr(FakeSynth, "speech_cps", {"en": 4.0}, raising=False)
+    FakeSynth.DUR = {"natsu one": 1.5}  # 1.33 s at 1.125: it fitted at the card's rate
+    TtsStage(CFG).run(ep, CFG)
+    c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
+    assert _natsu_rates() == [pytest.approx(1.125), pytest.approx(1.0)]
+    assert c.rate_factor == 1.0 and c.seconds == pytest.approx(1.5, abs=1e-3)
+
+
+def test_rate_estimate_learns_the_cards_own_speech_rate(ep, monkeypatch):
+    """After three renders the card's measured rate replaces the backend's figure."""
+    cues = [_cue(i, 1, f"line {i} " + "x" * 10) for i in range(1, 4)]  # 17 chars each
+    cues.append(_cue(4, 1, "line 4 " + "x" * 20))  # 27 characters
+    _write_cues(ep, cues)
+    _assign(ep, 1, _stock("am_adam"))
+    monkeypatch.setattr(FakeSynth, "speech_cps", {"en": 30.0}, raising=False)  # far too fast
+    FakeSynth.DUR = {c.text: len(c.text) / 10.0 for c in cues if c.text}  # the card: 10 cps
+    TtsStage(CFG).run(ep, CFG)
+    long = [r for t, _, r in FakeSynth.CALLS if t == cues[3].text]
+    assert long == [pytest.approx(1.25)]  # 2.7 s for a 2 s slot: capped, one render
+
+
 def test_one_backend_loaded_at_a_time(ep):
     _assign(ep, 1, _stock("am_adam"))
     _assign(ep, 2, _stock("af_heart", backend="fake2"))

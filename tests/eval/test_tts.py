@@ -787,13 +787,19 @@ def test_stage_and_eval_render_the_same_audio_under_the_same_key(tmp_path):
     TtsStage(cfg).run(ep, cfg)
     plan = {c.cue_id: c for c in read_json(ep.work / "07-tts" / "plan.json", TtsPlan).cues}
     folder = a / ".fukikae" / "eval" / "tts" / "fake-r1"
+    compared = 0
     for cue_id in ("c0001", "c0002", "c0003"):
         (render,) = [p for p in folder.glob(f"S01E11-{cue_id}.*.wav") if ".16k." not in p.name]
         key = render.name.split(".")[1]
         cached = b / ".fukikae" / "tts-cache" / f"{key}.wav"
-        assert cached.read_bytes() == render.read_bytes()
+        # Eval scores the render at the card's rate; the stage makes it unless the rate
+        # estimate (D26) rendered the cue faster from the start.
+        if plan[cue_id].rate_factor == 1.0 or cached.exists():
+            assert cached.read_bytes() == render.read_bytes()
+            compared += 1
         if plan[cue_id].rate_factor == 1.0:
             assert plan[cue_id].key == key
+    assert compared
 
 
 # ---- cloning backends (Task 9) ------------------------------------------------------------

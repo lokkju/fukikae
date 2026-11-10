@@ -190,6 +190,9 @@ class TtsRun(BaseModel):
     rendered: list[str]
     cached: list[str]
     report: list[str] = []
+    # D26: cues rendered first at an estimated rate, and those of them rendered once more.
+    rate_estimated: int = 0
+    rate_refits: int = 0
 
 
 class FitReportCue(BaseModel):
