@@ -549,11 +549,16 @@ def _subtract(spans: Iterable[tuple[float, float]], cut: Iterable[tuple[float, f
 
 def _answers(asg: Assignments, cid: int, owner: KeyOwner) -> Callable[[str], bool]:
     """Whether the character answers to a key in this episode: a sub-cluster of that key went
-    to it (by name, or kept by a lock), or the registry gives it the key."""
+    to it by name, or the registry gives it the key. A sub-cluster a lock kept on it doesn't
+    count: the lock keeps that speech whatever its name, but the key stays someone else's
+    (its turns are subtracted from `foreign_spans` instead)."""
     mine = {
         c.name
         for c in asg.clusters
-        if c.character_id == cid and c.name and c.status not in ("extra", "review")
+        if c.character_id == cid
+        and c.name
+        and c.source == "name"
+        and c.status not in ("extra", "review")
     }
     return lambda key: key in mine or owner(key) == cid
 

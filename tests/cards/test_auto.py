@@ -1113,3 +1113,30 @@ def test_a_stale_card_kept_while_the_clone_backend_is_unusable(tmp_path: Path, v
     (flag,) = flags
     assert "no [tts] clone_backend is set" in flag and "can run" not in flag
     reg.close()
+
+
+def test_a_lock_kept_key_is_not_a_key_the_character_answers_to(tmp_path: Path):
+    """F1: character 1's lock kept the sub-cluster S1~wendy, so that turn stays its own, but
+    the lock doesn't make Wendy's other lines its speech: a Wendy line elsewhere is foreign.
+    A key it took by name (natsu) is its own."""
+    from fukikae.artifacts import read_json
+    from fukikae.cards.auto import foreign_spans
+    from fukikae.names.inputs import names_path
+    from fukikae.names.models import NamesResult
+    from fukikae.workspace import Workspace
+
+    root = tmp_path / "ws"
+    turns = [(0.0, 4.0, "S0~natsu", 0.01), (10.0, 14.0, "S1~wendy", 0.01), (20.0, 24.0, "S2", 0.01)]
+    clusters = [
+        {"cluster": "S0~natsu", "character_id": 1, "name": "natsu", "source": "name"},
+        {"cluster": "S1~wendy", "character_id": 1, "name": "wendy", "source": "lock"},
+        {"cluster": "S2", "character_id": 2},
+    ]
+    names = [(0.0, 4.0, "natsu", False), (10.0, 14.0, "wendy", False), (20.0, 24.0, "wendy", False)]
+    work = _named_episode(root, "S01E12", turns, clusters, names=names)
+    from fukikae.models import Assignments
+
+    asg = read_json(work / "05-characters" / "assignments.json", Assignments)
+    got = foreign_spans(asg, read_json(names_path(Workspace(root).work_dir("S01E12")), NamesResult),
+                        1, lambda _k: None)  # fmt: skip
+    assert got == [(20.0, 24.0)]
