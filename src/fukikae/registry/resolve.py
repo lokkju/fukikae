@@ -203,8 +203,18 @@ def resolve_episodes(
                 if a.actor_id is not None and len(rows_e[lb]):
                     named_rows.setdefault(a.actor_id, []).append(rows_e[lb])
         anchors: list[tuple[int, np.ndarray]] = []
+        # the actors as stored before this run's named rows: a rowless remainder's parent
+        # match scores against these alone, as the characters stage's snapshot does, so a
+        # character this run's names created (or re-seeded) is no anchor for it
+        stored_mean: dict[int, np.ndarray | None] = {}
         for a in reg.actors():
             named = named_rows.get(a.id, [])
+            if a.locked and a.centroid is not None:
+                stored_mean[a.id] = a.centroid.astype(np.float32)
+            elif a.id in remaining:
+                stored_mean[a.id] = mean_embedding(remaining[a.id])
+            elif a.centroid is not None and (a.id not in orphans or a.id in protected):
+                stored_mean[a.id] = a.centroid.astype(np.float32)
             if a.id in orphans and a.id not in protected and not named:
                 continue
             if a.locked and a.centroid is not None:  # its own centroid alone, as it matches
@@ -294,7 +304,7 @@ def resolve_episodes(
                 gid = group_of.get((e, ev.cluster))
                 status, aid, cid, score = "extra", None, None, None
                 if gid is None and not len(rows[ev.cluster]) and ev.cluster in parents.get(e, {}):
-                    top = _parent_match(ev.cluster, parents[e], rows, anchor_mean)
+                    top = _parent_match(ev.cluster, parents[e], rows, stored_mean)
                     if top is not None and top[1] >= threshold:
                         aid, score = top
                         status, cid = "matched", first_char.get(aid)
@@ -389,9 +399,10 @@ def _parent_match(
     rows: dict[str, np.ndarray],
     anchor_mean: dict[int, np.ndarray | None],
 ) -> tuple[int, float] | None:
-    """The best (anchor actor, cosine) for the mean of every row of ``label``'s parent diarize
+    """The best (stored actor, cosine) for the mean of every row of ``label``'s parent diarize
     cluster (all its sub-clusters', decided or not, as the characters stage pools them), first
-    best on ties; None without rows or anchors."""
+    best on ties; None without rows or stored actors. ``anchor_mean`` is the actors as stored
+    before this run's named rows (Task 8 review), as the characters stage's snapshot is."""
     parent = parents[label]
     pooled = [rows[lb] for lb, p in parents.items() if p == parent and lb in rows and len(rows[lb])]
     mean = mean_embedding(np.concatenate(pooled)) if pooled else None

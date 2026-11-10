@@ -1,7 +1,8 @@
 """Translate stage: dub cues with a speakable target-language line each.
 
 Reads ``03-asr/transcript.json``, ``05-characters/assignments.json`` (with its ``turns``),
-``04c-names/names.json`` when it exists, ``04b-tag/tags.json`` when the tag stage is on,
+``04c-names/names.json`` on the subtitle path when it exists, ``04b-tag/tags.json`` when the tag
+stage is on,
 ``<workspace>/glossary.toml`` when present (its ``[terms]`` table maps source terms to
 renderings) and the cards of the speaking characters (the key holds a hash of each one's
 ``[style]``, not the card id, ruling CD6, so a voice-only change never re-translates); writes
@@ -230,7 +231,7 @@ class TranslateStage:
     @staticmethod
     def _cue_names(
         ep: Episode, sub_file: Path | None, sub_track: media.SubTrack | None
-    ) -> tuple[dict[str, NameSpeaker], list[tuple[float, float]], float] | None:
+    ) -> tuple[dict[str, NameSpeaker], list[tuple[float, float, str | None]], float] | None:
         """(name map, hidden lines' spans, offset) for the subtitle path when the names stage
         used the track this path reads (`_same_track`) and the characters stage decided some
         key by name; else None, and cues go by turn overlap. Only the names stage's visible
@@ -246,7 +247,7 @@ class TranslateStage:
         if not nm:
             return None
         visible = {ln.id for ln in result.visible_lines()}
-        hidden = [(ln.start, ln.end) for ln in result.lines if ln.id not in visible]
+        hidden = [(ln.start, ln.end, ln.key) for ln in result.lines if ln.id not in visible]
         return nm, hidden, result.offset_s
 
     # -- characters and cards ------------------------------------------------------------
@@ -356,13 +357,14 @@ class TranslateStage:
             ep.work / "03-asr" / "transcript.json",
             ep.work / "05-characters" / "assignments.json",
         ]
-        if names_path(ep.work).exists():  # the subtitle path's name map and hidden lines
-            paths.append(names_path(ep.work))
+        subtitles = self._subtitle_input(ep)
+        if subtitles and names_path(ep.work).exists():  # the subtitle path's name map and
+            paths.append(names_path(ep.work))  # hidden lines; the ASR path never reads them
         if self._use_tags():
             paths.append(ep.work / "04b-tag" / "tags.json")
         paths.append(ep.workspace_root / "glossary.toml")
         # Card files are not inputs: the key holds a hash of each speaking character's style.
-        return paths + self._subtitle_input(ep)
+        return paths + subtitles
 
     def outputs(self, ep: Episode) -> list[Path]:
         return [ep.work / "06-translate" / f"cues.{self._target(ep)}.json"]
