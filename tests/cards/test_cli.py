@@ -1082,3 +1082,32 @@ def test_list_flags_automatic_clone_cards_under_the_floor(tmp_path: Path, monkey
         "under the floor of 2 clips and 10 s); no better reference pick exists; flagged for "
         "review: `fukikae voices clone` with a better clip replaces it"
     )
+
+
+def test_list_appends_the_floor_to_a_kept_stale_cards_line(tmp_path: Path):
+    """A locked automatic card both stale and under the clone floor: one line, the stale one,
+    with the shortfall appended."""
+    from tests.cards.test_auto import (
+        NAMED_EP,
+        NATSU_CLUSTERS,
+        NATSU_NAMES,
+        NATSU_TURNS,
+        _auto_clone,
+        _named_episode,
+    )  # fmt: skip
+
+    ws, natsu, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        _, other = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))
+        clusters = [{**c, "character_id": natsu if c["character_id"] == 1 else other}
+                    for c in NATSU_CLUSTERS]  # fmt: skip
+        _named_episode(ws.root, NAMED_EP, NATSU_TURNS, clusters, names=NATSU_NAMES)
+        _auto_clone(reg, store, natsu, [(NAMED_EP, 30.0, 35.0)], locked=True)
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 0, r.output
+    (line,) = [ln for ln in r.output.splitlines() if "clone floor" in ln or "cloned from" in ln]
+    assert line == (
+        f"character {natsu} (Natsu)'s card (auto) was cloned from turns now named WENDY; "
+        "`fukikae voices clone` replaces it; below the clone floor (1 clip and 5.0 s, under "
+        "the floor of 2 clips and 10 s)"
+    )

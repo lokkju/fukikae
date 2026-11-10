@@ -1255,9 +1255,12 @@ def test_a_card_below_the_clone_floor_builds_the_clone_source(ep, monkeypatch):
     ensure_assignments can re-pick it or flag it."""
     from fukikae.cards.auto import Shortfall
 
-    _two_cards(ep)
+    first = CardStore(ep.workspace_root).put(parse_card(_stock("am_adam")))
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.assign_card(1, "en", first, by="auto", locked=False)  # unlocked: re-pickable
+    _assign(ep, 2, _stock("af_heart"))
     seen: dict = {}
-    short = {1: Shortfall("abc", (6.3,))}
+    short = {1: Shortfall(first, (6.3,))}
     monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
     monkeypatch.setattr("fukikae.stages.tts.below_floor", lambda *_, **__: short)
     monkeypatch.setattr(
@@ -1267,3 +1270,22 @@ def test_a_card_below_the_clone_floor_builds_the_clone_source(ep, monkeypatch):
                         lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
     TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
     assert seen["cloning"] == "c" and seen["short"] == short
+
+
+def test_a_locked_card_below_the_clone_floor_builds_no_clone_source(ep, monkeypatch):
+    """A locked card under the floor is only flagged, so it never costs a reference search:
+    no clone source, and ensure_assignments still gets the shortfall to flag."""
+    from fukikae.cards.auto import Shortfall
+
+    first, _ = _two_cards(ep)  # both locked
+    seen: dict = {}
+    short = {1: Shortfall(first, (6.3,))}
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.below_floor", lambda *_, **__: short)
+    monkeypatch.setattr(
+        "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
+    )
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
+                        lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    assert seen["cloning"] is None and seen["short"] == short

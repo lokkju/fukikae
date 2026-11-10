@@ -125,7 +125,8 @@ def _current(reg: Registry, char: Character, lang: str) -> CardAssignment:
 def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
     """List every character with its card for the target language, then each clone card
     cloned from turns the subtitle names now give someone else (D29 #4): the next tts run
-    re-picks an automatic one; a curated or imported one stays until `voices clone`. Then
+    re-picks an automatic one; a curated or imported one stays until `voices clone` (with
+    the clone floor's shortfall appended when the kept card is under it too). Then
     each automatic clone card under the clone floor (2 clips, 10 s; D32): re-picked by the
     next tts run when a better pick exists, else flagged for review."""
     from fukikae.cards import auto
@@ -143,6 +144,7 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
         ws = Workspace(workspace)
         notes: list[str] = []
         stale = stale_cards(ws, reg, store, [c.id for c in chars], language, notes=notes)
+        short = auto.below_floor(reg, store, list(stale), language)
         blocker: list[str | None] = []  # worked out once, only for an automatic stale card
         for c in chars:
             refs = stale.get(c.id)
@@ -158,9 +160,10 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
                     "the next tts run re-picks it"
                     if blocker[0] is None
                     else f"kept while {blocker[0]}; `fukikae voices clone` replaces it"
+                    + auto.floor_suffix(short, c.id)
                 )
             else:
-                fix = "`fukikae voices clone` replaces it"
+                fix = "`fukikae voices clone` replaces it" + auto.floor_suffix(short, c.id)
             _echo(
                 f"character {_label(c)}'s card ({a.chosen_by}) was cloned from turns {now}; {fix}"
             )

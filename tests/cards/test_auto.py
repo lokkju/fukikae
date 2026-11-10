@@ -1395,3 +1395,138 @@ def test_floor_filling_never_moves_a_character_to_another_episode(tmp_path: Path
     got = character_references(Workspace(tmp_path / "ws"), ["S01E11", "S01E12"], 1)
     assert got is not None and got[0] == "S01E12"
     reg.close()
+
+
+# -- D32 review -----------------------------------------------------------------------------
+
+
+def test_eligible_seconds_are_the_picked_episodes_in_the_tier_used(tmp_path: Path):
+    """Charle's shape: the picks are name-confirmed turns of a names-used episode (11 s
+    eligible), while an acoustic-only episode has 15 s the confirmed tier can't use: the
+    figure is the picked episode's 11 s."""
+    from fukikae.cards.auto import find_references
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 2)
+    named = [(0.0, 5.0, "S0~mak", 0.01), (10.0, 16.0, "S0~mak", 0.01)]
+    clusters = [{"cluster": "S0~mak", "character_id": 1, "name": "makarov", "source": "name"}]
+    names = [(0.0, 5.0, "makarov", False), (10.0, 16.0, "makarov", False)]
+    _named_episode(tmp_path / "ws", "S01E12", named, clusters, names=names)
+    plain = [(0.0, 5.0, "S5", 0.01), (10.0, 15.0, "S5", 0.01), (20.0, 25.0, "S5", 0.01)]
+    _named_episode(tmp_path / "ws", "S01E13", plain, [{"cluster": "S5", "character_id": 1}])
+    got = find_references(Workspace(tmp_path / "ws"), ["S01E12", "S01E13"], 1, "ja")
+    assert got.episode == "S01E12" and got.confirmed
+    assert got.seconds == 11.0
+    reg.close()
+
+
+def test_below_the_floor_episodes_rank_by_how_close_they_come(tmp_path: Path):
+    """Neither episode reaches the floor: the one with 2 clips and 9.5 s (6.5 s neutral, then
+    an angry 3 s) beats 2 neutral clips of 8.5 s, though it picked less before filling."""
+    from fukikae.artifacts import write_json
+    from fukikae.cards.auto import character_references
+    from fukikae.models import Tags, TagSpan
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 1)
+    calm = [(0.0, 4.0, "S5", 0.01), (10.0, 14.5, "S5", 0.01)]
+    filled = [(0.0, 6.5, "S5", 0.01), (10.0, 13.0, "S5", 0.01)]
+    _named_episode(tmp_path / "ws", "S01E11", calm, [{"cluster": "S5", "character_id": 1}])
+    _named_episode(tmp_path / "ws", "S01E12", filled, [{"cluster": "S5", "character_id": 1}])
+    tags = Tags(backend="x", events=[], emotion_backend="emotion2vec", emotions=[
+        TagSpan(start=10.0, end=13.0, label="angry", confidence=0.9)])  # fmt: skip
+    work = Workspace(tmp_path / "ws").work_dir("S01E12")
+    (work / "04b-tag").mkdir(parents=True, exist_ok=True)
+    write_json(work / "04b-tag" / "tags.json", tags)
+    got = character_references(Workspace(tmp_path / "ws"), ["S01E11", "S01E12"], 1)
+    assert got is not None and got[0] == "S01E12" and len(got[1]) == 2
+    reg.close()
+
+
+def test_a_locked_stale_card_under_the_floor_says_both(tmp_path: Path, vocals: Path):
+    from fukikae.cards.auto import below_floor, stale_cards
+
+    reg, _, ws = _ws_named(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)], locked=True)
+    stale = stale_cards(ws, reg, store, [1], "en")
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
+                               cloning=_cloning_ws(ws), stale=stale,
+                               short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
+    (flag,) = flags
+    assert "wendy" in flag and "voices clone" in flag
+    assert flag.endswith(
+        "; below the clone floor (1 clip and 5.0 s, under the floor of 2 clips and 10 s)"
+    )
+    reg.close()
+
+
+def test_a_re_pick_still_under_the_floor_is_flagged_and_a_second_run_changes_nothing(
+    tmp_path: Path, vocals: Path
+):
+    """The one-clip 6.3 s card is re-picked to two clips (9.3 s), still under the floor:
+    flagged. The next run finds no better pick: no new card, no report line, the same flag."""
+    from fukikae.cards.auto import below_floor
+
+    turns = [FLOOR_TURNS[0], (10.0, 13.0, "S0~mak", 0.01), FLOOR_TURNS[3]]
+    names = [(0.0, 6.3, "makarov", False), (10.0, 13.0, "makarov", False),
+             (20.0, 25.0, "wendy", False)]  # fmt: skip
+    reg, _, ws = _ws_floor(tmp_path, turns=turns, names=names)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)])
+    flags: list[str] = []
+    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 13.0)]}, vocals,
+                                 cloning=_cloning_ws(ws),
+                                 short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old
+    assert "below the clone floor (2 clips and 9.3 s" in line
+    (flag,) = flags
+    assert flag.startswith(f"character 1: clone card {cur.card_id} is below the clone floor")
+    again: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 13.0)]}, vocals,
+                               cloning=_cloning_ws(ws),
+                               short=below_floor(reg, store, [1], "en"), flags=again)  # fmt: skip
+    assert lines == [] and reg.card_for(1, "en").card_id == cur.card_id  # type: ignore[union-attr]
+    assert len(reg.card_history(1, "en")) == 2
+    (flag,) = again
+    assert "no better reference pick exists" in flag
+    reg.close()
+
+
+def test_reference_candidates_are_read_once_per_process_until_a_file_changes(
+    tmp_path: Path, monkeypatch
+):
+    """Each episode-run's tts asks `find_references` again for a flagged character: the
+    episode's candidates and song exclusions are worked out once while its files are
+    unchanged, whatever order the episodes come in."""
+    import os
+
+    from fukikae.cards import select
+    from fukikae.cards.auto import find_references
+
+    reg, _, ws = _ws_floor(tmp_path)
+    reg.close()
+    calls = {"eligible": 0, "exclusions": 0}
+    eligible, exclusions = select.eligible_references, select.reference_exclusions
+
+    def count_eligible(*a, **kw):
+        calls["eligible"] += 1
+        return eligible(*a, **kw)
+
+    def count_exclusions(*a, **kw):
+        calls["exclusions"] += 1
+        return exclusions(*a, **kw)
+
+    monkeypatch.setattr(select, "eligible_references", count_eligible)
+    monkeypatch.setattr(select, "reference_exclusions", count_exclusions)
+    first = find_references(ws, [FLOOR_EP], 1, "ja")
+    assert find_references(ws, [FLOOR_EP], 1, "ja") == first
+    assert calls == {"eligible": 1, "exclusions": 1}
+    tr = ws.work_dir(FLOOR_EP) / "03-asr" / "transcript.json"
+    st = tr.stat()
+    os.utime(tr, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    find_references(ws, [FLOOR_EP], 1, "ja")
+    assert calls == {"eligible": 2, "exclusions": 1}
