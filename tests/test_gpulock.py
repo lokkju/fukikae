@@ -168,14 +168,78 @@ def test_our_own_children_are_not_leftovers(tmp_path):
         child.wait()
 
 
-def test_lock_dir_falls_back_when_no_runtime_dir(monkeypatch, tmp_path):
+def test_lock_dir_is_fixed_per_user_whatever_the_session(monkeypatch, tmp_path):
+    """B7: an ssh session, a systemd user unit and cron see different XDG_RUNTIME_DIR and
+    TMPDIR values; the lock directory must be the same for all of them."""
     monkeypatch.delenv("FUKIKAE_LOCK_DIR", raising=False)
-    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    monkeypatch.setattr(gpulock.tempfile, "gettempdir", lambda: str(tmp_path))
-    d = gpulock.lock_dir()
-    assert d == tmp_path / f"fukikae-{os.getuid()}"
+    monkeypatch.setattr(gpulock, "LOCK_ROOT", tmp_path / "root")
+    (tmp_path / "root").mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    seen = set()
+    other_tmp = tmp_path / "tmpdir"
+    for xdg, tmpdir in ((str(runtime), str(other_tmp)), (None, None)):
+        for key, value in (("XDG_RUNTIME_DIR", xdg), ("TMPDIR", tmpdir)):
+            if value is None:
+                monkeypatch.delenv(key, raising=False)
+            else:
+                monkeypatch.setenv(key, value)
+        seen.add(gpulock.lock_dir())
+    (d,) = seen
+    assert d == tmp_path / "root" / f"fukikae-{os.getuid()}"
     assert d.is_dir() and (d.stat().st_mode & 0o777) == 0o700
     assert gpulock.lock_path(3) == d / "fukikae-gpu3.lock"
+
+
+def test_a_lock_file_replaced_under_us_is_taken_again(monkeypatch):
+    """B7: a tmp cleaner may delete the lock file while it is held; a new job then creates
+    another file and flocks that. The acquirer checks after flock that its descriptor is still
+    the file at the path, and starts over when it isn't."""
+    real = gpulock.fcntl.flock
+    swapped = []
+
+    def flock(fd, op):
+        real(fd, op)
+        if not swapped and op & gpulock.fcntl.LOCK_EX:
+            path = gpulock.lock_path(0)
+            path.unlink()
+            path.touch()
+            swapped.append(True)
+
+    monkeypatch.setattr(gpulock.fcntl, "flock", flock)
+    with gpu_lock(0, "after a swap", timeout_s=0) as fd:
+        assert swapped
+        assert os.fstat(fd).st_ino == os.stat(gpulock.lock_path(0)).st_ino
+
+
+def test_another_thread_waits_for_the_lock():
+    """C7/B6: the lock is reentrant per thread, not per process: a second thread (a future
+    GPU step in the CPU tail) blocks until the first lets go, or times out."""
+    import threading
+
+    taken = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with gpu_lock(0, "head", timeout_s=0):
+            taken.set()
+            release.wait(5)
+
+    t = threading.Thread(target=hold)
+    t.start()
+    assert taken.wait(5)
+    try:
+        assert gpulock.held_fds() == ()  # this thread holds nothing
+        with pytest.raises(GpuBusy), gpu_lock(0, "tail", timeout_s=0.2, poll_s=0.05):
+            pass
+        threading.Timer(0.3, release.set).start()
+        started = time.monotonic()
+        with gpu_lock(0, "tail", timeout_s=5, poll_s=0.05) as fd:
+            assert time.monotonic() - started >= 0.25
+            assert gpulock.held_fds() == (fd,)
+    finally:
+        release.set()
+        t.join(5)
 
 
 def test_a_process_with_unreadable_environ_is_not_on_every_card(monkeypatch, caplog):

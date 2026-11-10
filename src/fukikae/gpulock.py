@@ -3,14 +3,20 @@
 Every fukikae job that puts a model on a GPU (a GPU stage, the managed llama-server, a TTS
 worker, an eval model) holds ``gpu_lock(<nvml index>)`` for as long as the model lives: an
 ``flock`` on ``<dir>/fukikae-gpu<N>.lock``, where ``<dir>`` is ``FUKIKAE_LOCK_DIR``, else
-``$XDG_RUNTIME_DIR``, else ``<tmp>/fukikae-<uid>`` (mode 0700). A second job on the same card
-waits for the first (``timeout_s``: the run's ``--no-wait``/VRAM timeout, ``runctx``) instead
-of checking free memory, starting, and finding out 70 s later that both loaded.
+``/tmp/fukikae-<uid>`` (mode 0700): a fixed path, never ``$XDG_RUNTIME_DIR`` or ``$TMPDIR``,
+which differ between an ssh session, a systemd user unit and cron, so two runs would lock
+different files (B7). After each ``flock`` the descriptor is checked to still be the file at
+that path (a tmp cleaner may have replaced it), else the lock is taken again. A second job on
+the same card waits for the first (``timeout_s``: the run's ``--no-wait``/VRAM timeout,
+``runctx``) instead of checking free memory, starting, and finding out 70 s later that both
+loaded.
 
-The lock is per process and reentrant: a stage that holds it may start a worker that takes it
-again. Child processes that hold the model (the TTS worker, llama-server) get the lock's file
-descriptor (``held_fds``, passed with ``pass_fds``), so the lock stays held until the last of
-them exits, even when fukikae itself is killed and a child outlives it.
+The lock is reentrant per thread: a stage that holds it may start a worker that takes it
+again, while another thread of the same process (a GPU step in the CPU tail of a
+multi-episode run) waits for it like another process would (C7). Child processes that hold
+the model (the TTS worker, llama-server) get the lock's file descriptor (``held_fds``, passed
+with ``pass_fds``), so the lock stays held until the last of them exits, even when fukikae
+itself is killed and a child outlives it.
 
 Once the lock is taken, ``leftover_jobs`` scans ``/proc`` for fukikae TTS workers and
 fukikae-started llama-servers still running on that card (by command line, and the card from
@@ -27,7 +33,6 @@ import fcntl
 import logging
 import os
 import stat
-import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -36,6 +41,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 LOCK_DIR_ENV = "FUKIKAE_LOCK_DIR"
+LOCK_ROOT = Path("/tmp")  # noqa: S108 - a fixed, per-user subdirectory, checked below
 WORKER_MARK = "fukikae.backends.tts.worker"
 LLAMA_MARK = "fukikae-llama-key-"  # the per-run API key file llama_server passes
 POLL_S = 2.0
@@ -46,7 +52,7 @@ class GpuBusy(RuntimeError):  # noqa: N818 - reads as the state, like VramTimeou
 
 
 _mutex = threading.Lock()
-_held: dict[int, list[int]] = {}  # index -> [fd, depth]
+_held: dict[tuple[int, int], list[int]] = {}  # (index, thread ident) -> [fd, depth]
 
 
 def lock_dir() -> Path:
@@ -55,10 +61,7 @@ def lock_dir() -> Path:
         d = Path(env)
         d.mkdir(parents=True, exist_ok=True)
         return d
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime and os.path.isdir(runtime) and os.access(runtime, os.W_OK):
-        return Path(runtime)
-    d = Path(tempfile.gettempdir()) / f"fukikae-{os.getuid()}"
+    d = LOCK_ROOT / f"fukikae-{os.getuid()}"
     with contextlib.suppress(FileExistsError):
         d.mkdir(mode=0o700)
     st = os.lstat(d)
@@ -74,9 +77,10 @@ def lock_path(index: int) -> Path:
 
 
 def held_fds() -> tuple[int, ...]:
-    """File descriptors of the GPU locks this process holds (for a child's ``pass_fds``)."""
+    """File descriptors of the GPU locks this thread holds (for a child's ``pass_fds``)."""
+    me = threading.get_ident()
     with _mutex:
-        return tuple(fd for fd, _ in _held.values())
+        return tuple(fd for (_, tid), (fd, _) in _held.items() if tid == me)
 
 
 # -- /proc -------------------------------------------------------------------------------------
@@ -207,16 +211,36 @@ def _listed(found: list[tuple[int, str]]) -> str:
 # -- the lock ----------------------------------------------------------------------------------
 
 
+def _same_file(fd: int, path: Path) -> bool:
+    """``fd`` is still the file at ``path`` (not unlinked or replaced since it was opened)."""
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    mine = os.fstat(fd)
+    return (st.st_dev, st.st_ino) == (mine.st_dev, mine.st_ino)
+
+
+def _open_lock(path: Path) -> int:
+    return os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+
+
 def _acquire(index: int, what: str, timeout_s: float | None, poll_s: float) -> int:
     path = lock_path(index)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    fd = _open_lock(path)
     try:
         started = time.monotonic()
         logged = False
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
+                if _same_file(fd, path):
+                    break
+                # the file was replaced while we waited or as we took it: take the new one
+                os.close(fd)
+                fd = -1
+                fd = _open_lock(path)
+                continue
             except OSError as e:
                 if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
                     raise
@@ -250,7 +274,8 @@ def _acquire(index: int, what: str, timeout_s: float | None, poll_s: float) -> i
         os.pwrite(fd, f"{os.getpid()} {what}\n".encode(), 0)
         return fd
     except BaseException:
-        os.close(fd)  # closing the descriptor lets go of the lock too
+        if fd >= 0:
+            os.close(fd)  # closing the descriptor lets go of the lock too
         raise
 
 
@@ -265,26 +290,29 @@ def gpu_lock(
         from fukikae import runctx
 
         timeout_s = runctx.vram_timeout_s
+    key = (index, threading.get_ident())
     with _mutex:
-        entry = _held.get(index)
+        entry = _held.get(key)
         if entry is not None:
             entry[1] += 1
             fd = entry[0]
         else:
             fd = -1
     if fd < 0:
+        # another thread of this process holding the card makes this flock wait, as another
+        # process would: flock locks belong to the open file, and this is a new one
         fd = _acquire(index, what, timeout_s, poll_s)
         with _mutex:
-            _held[index] = [fd, 1]
+            _held[key] = [fd, 1]
     try:
         yield fd
     finally:
         with _mutex:
-            entry = _held[index]
+            entry = _held[key]
             entry[1] -= 1
             done = entry[1] == 0
             if done:
-                del _held[index]
+                del _held[key]
         if done:
             with contextlib.suppress(OSError):
                 os.ftruncate(fd, 0)
