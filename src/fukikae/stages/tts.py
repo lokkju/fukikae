@@ -101,6 +101,7 @@ from fukikae.cards.auto import (
     ensure_assignments,
     extras_voices,
     repick_blocker,
+    replace_refusal,
     stale_cards,
     workspace_cloning,
 )
@@ -1192,9 +1193,14 @@ class TtsStage:
                 notes=flags,
             )  # fmt: skip
             # automatic clone cards under the clone floor (D32): re-picked when a better pick
-            # exists, else flagged
+            # exists, else flagged; only an unlocked one is worth a reference search
             short = below_floor(reg, store, speaking, cfg.target_language)
-            work = bool(todo or stale or fallback or short)
+            repickable = [
+                cid
+                for cid in short
+                if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
+            ]
+            work = bool(todo or stale or fallback or repickable)
             cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if work else None
             if work:  # the gender estimate never reads a theme song or tagged singing
                 exclude = _song_spans(ep, cfg)
