@@ -572,9 +572,12 @@ def adapt(
 ) -> None:
     """Fit the series' LDA projection from labeled episodes, replacing the previous one.
 
-    Each episode's diarization clean spans are labeled from its subtitles (as `eval identity`
-    labels them) and the labeled rows of its clusters.npz, the embeddings the characters
-    stage matches, train the projection. `[characters] matcher = "lda"` then matches in it.
+    Each episode's identity clusters (the names stage's sub-clusters when names were used,
+    else the diarizer's) have their clean spans labeled from its subtitles (as `eval identity`
+    labels them), and the labeled rows of the matching clusters.npz, the embeddings the
+    characters stage matches, train the projection. A row a names cut moved keeps its old span,
+    which is no longer a clean span of the refined turns, so it trains nothing.
+    `[characters] matcher = "lda"` then matches in it.
     Leave the held-out episode(s) out: a projection must never be fit on an episode it
     later resolves for evaluation.
     """
@@ -610,12 +613,13 @@ def adapt(
                 force=force,
                 label=f"{gt} speaker lines in {ep.id} ({path.name})",
             )
-            turns = read_json(ep.work / "04-diarize" / "turns.json", Diarization).turns
+            turns_path, npz_path, _ = identity_inputs(ep.work)  # names' sub-clusters when used
+            turns = read_json(turns_path, Diarization).turns
             label_of = {
                 (s.cluster, round(s.start, 6), round(s.end, 6)): s.label
                 for s in diarization_segments(ep.id, turns, lines)
             }
-            with np.load(ep.work / "04-diarize" / "clusters.npz") as z:
+            with np.load(npz_path) as z:
                 for cluster in [str(c) for c in z["labels"]]:
                     emb = np.asarray(z[f"{cluster}/embeddings"], dtype=np.float32)
                     if len(emb):

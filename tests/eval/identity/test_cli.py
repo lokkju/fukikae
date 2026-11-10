@@ -511,3 +511,36 @@ def test_check_held_out_accepts_unread_names(tmp_path: Path, verdict: str):
     _names_json(root, "S01E02", verdict)
     check_held_out(root / ".fukikae" / "episodes" / "S01E02", "S01E02")
     check_held_out(root / ".fukikae" / "episodes" / "S01E09", "S01E09")  # no names.json
+
+
+def test_from_assignments_scores_sub_cluster_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """S01E02's assignments label the names stage's sub-cluster SPEAKER_00~lucy: the harness
+    segments the turns the assignments recorded, so its speech is scored, not left unassigned."""
+    from fukikae.artifacts import read_json
+    from fukikae.eval.identity import cache as mod
+    from fukikae.models import Assignments
+
+    root = setup_ws(tmp_path, ["S01E01", "S01E02"])
+    monkeypatch.setattr(mod, "ResidentEmbedder", FakeResident)
+    write_assignments(root, "S01E01", {"SPEAKER_00": 1, "SPEAKER_01": 2})
+    write_assignments(root, "S01E02", {"SPEAKER_00~lucy": 1, "SPEAKER_01": 2})
+    work = root / ".fukikae" / "episodes" / "S01E02"
+    turns = read_json(work / "04-diarize" / "turns.json", Diarization).turns
+    path = work / "05-characters" / "assignments.json"
+    a = read_json(path, Assignments)
+    sub = [
+        t.model_copy(update={"speaker": "SPEAKER_00~lucy"}) if t.speaker == "SPEAKER_00" else t
+        for t in turns
+    ]
+    write_json(path, a.model_copy(update={"turns": sub}))
+    out = tmp_path / "r.json"
+    r = CliRunner().invoke(
+        app,
+        ["eval", "identity", str(root), "--tune", "S01E01,S01E02", "--gt-file",
+         str(tmp_path / "gt"), "--from-assignments", "--json", str(out)],
+    )  # fmt: skip
+    assert r.exit_code == 0, r.output
+    score = json.loads(out.read_text())["tune"]["score"]
+    assert score["verdict"] == "pass" and score["merges"] == []

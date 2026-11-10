@@ -150,3 +150,38 @@ def test_adapt_refuses_episodes_of_different_dimensions(tmp_path):
     assert r.exit_code == 1
     assert "S01E13" in r.output and f"{DIM + 2}-dimensional" in r.output
     assert "registry reembed" in r.output
+
+
+def test_adapt_reads_the_names_stage_clusters_when_names_were_used(tmp_path):
+    """Each episode's identity clusters are the names stage's sub-clusters (SPEAKER_00~lucy
+    ...); 04-diarize's clusters.npz is gone, so only the refined pair can train."""
+    from fukikae.artifacts import read_json
+    from fukikae.names.models import NamesResult
+
+    ws = make_ws(tmp_path, ["S01E12", "S01E13"])
+    for eid in ("S01E12", "S01E13"):
+        work = ws.work_dir(eid)
+        out = work / "04c-names"
+        out.mkdir()
+        sub = {spk: f"{spk}~{name.lower()}" for spk, name in NAMES.items()}
+        turns = read_json(work / "04-diarize" / "turns.json", Diarization).turns
+        refined = [t.model_copy(update={"speaker": sub[t.speaker]}) for t in turns]
+        write_json(out / "turns.json", Diarization(backend="x", turns=refined))
+        with np.load(work / "04-diarize" / "clusters.npz") as z:
+            arrays: dict[str, Any] = {"labels": np.array([sub[s] for s in sorted(NAMES)])}
+            for spk in sorted(NAMES):
+                for part in ("embeddings", "spans", "clean_seconds"):
+                    arrays[f"{sub[spk]}/{part}"] = z[f"{spk}/{part}"]
+        np.savez(out / "clusters.npz", **arrays)
+        (work / "04-diarize" / "clusters.npz").unlink()
+        write_json(
+            out / "names.json",
+            NamesResult(
+                episode=eid, used=True, verdict="full", reason=None, source=None, offset_s=0.0,
+                coverage={}, lines=[], hidden=[], pieces=[], labels={}, unvoiced=[], excluded=[],
+                dropped_row_seconds=0.0, suggestions=[],
+            ),
+        )  # fmt: skip
+    r = adapt(ws, "S01E12,S01E13")
+    assert r.exit_code == 0, r.output
+    assert "3 labels" in r.output

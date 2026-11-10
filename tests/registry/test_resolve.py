@@ -383,3 +383,81 @@ def test_min_new_seconds_option_says_where_it_is_set(tmp_path):
     r = resolve(ws, "S01E01,S01E02", "--matcher-option", "min_new_seconds=5")
     assert r.exit_code == 1
     assert "[registry] min_new_seconds" in r.output and "--min-new-seconds" not in r.output
+
+
+# --- names (Task 7): name decisions survive resolve -------------------------------------
+
+
+def _named_season(tmp_path):
+    """Two names-used episodes run through the characters stage: wendy (near A) and natsu
+    (near B) are keys in both; S01E02's SPEAKER_04 is unnamed speech near A."""
+    from tests.stages.test_characters import NAMES_CFG, write_names
+
+    ws = make_ws(tmp_path, season={})
+    e1 = add_episode(
+        ws, "S01E01", {"SPEAKER_00": (noisy(A, seed=1) + noisy(B, seed=2), 60.0),
+                       "SPEAKER_01": (noisy(C, seed=3), 30.0)},
+    )  # fmt: skip
+    write_names(
+        e1,
+        {
+            "SPEAKER_00~wendy": ("SPEAKER_00", "wendy", "named", noisy(A, seed=1), [(0, 30)]),
+            "SPEAKER_00~natsu": ("SPEAKER_00", "natsu", "named", noisy(B, seed=2), [(30, 60)]),
+            "SPEAKER_01": ("SPEAKER_01", None, "remainder", noisy(C, seed=3), [(60, 90)]),
+        },
+    )
+    e2 = add_episode(
+        ws, "S01E02", {"SPEAKER_03": (noisy(A, seed=4), 30.0),
+                       "SPEAKER_04": (noisy(A, seed=5), 30.0),
+                       "SPEAKER_05": (noisy(B, seed=6), 30.0)},
+    )  # fmt: skip
+    write_names(
+        e2,
+        {
+            "SPEAKER_03~wendy": ("SPEAKER_03", "wendy", "named", noisy(A, seed=4), [(0, 30)]),
+            "SPEAKER_04": ("SPEAKER_04", None, "remainder", noisy(A, seed=5), [(30, 60)]),
+            "SPEAKER_05~natsu": ("SPEAKER_05", "natsu", "named", noisy(B, seed=6), [(60, 90)]),
+        },
+    )
+    for ep in (e1, e2):
+        CharactersStage().run(ep, NAMES_CFG)
+    return ws, e1, e2
+
+
+def _named(ws, eid):
+    got, _ = by_cluster(ws, eid)
+    return {lb: (a.character_id, a.name, a.source) for lb, a in got.items() if a.name}
+
+
+@pytest.mark.parametrize("threshold", [0.6, 0.0])
+def test_named_labels_keep_their_character_through_resolve(tmp_path, threshold):
+    from fukikae.registry.resolve import resolve_episodes
+
+    ws, e1, e2 = _named_season(tmp_path)
+    before = {e: _named(ws, e) for e in ("S01E01", "S01E02")}
+    with Registry(ws.registry_path) as reg:
+        wendy, natsu = reg.character_for_key("wendy"), reg.character_for_key("natsu")
+    assert wendy is not None and natsu is not None and wendy.id != natsu.id
+    resolve_episodes(ws, [e1, e2], threshold=threshold)
+    assert {e: _named(ws, e) for e in ("S01E01", "S01E02")} == before
+    assert before["S01E02"]["SPEAKER_03~wendy"][0] == wendy.id
+    assert before["S01E02"]["SPEAKER_05~natsu"][0] == natsu.id
+    with Registry(ws.registry_path) as reg:  # both keys still answer, to different characters
+        w2, n2 = reg.character_for_key("wendy"), reg.character_for_key("natsu")
+        assert w2 is not None and n2 is not None and (w2.id, n2.id) == (wendy.id, natsu.id)
+        assert reg.exemplar_count(w2.actor_id) >= 12 and reg.exemplar_count(n2.actor_id) >= 12
+
+
+def test_unnamed_speech_joins_the_anchor_its_names_seeded(tmp_path):
+    from fukikae.registry.resolve import resolve_episodes
+
+    ws, e1, e2 = _named_season(tmp_path)
+    resolve_episodes(ws, [e1, e2], threshold=0.6)
+    got, _ = by_cluster(ws, "S01E02")
+    with Registry(ws.registry_path) as reg:
+        wendy = reg.character_for_key("wendy")
+    assert wendy is not None
+    rem = got["SPEAKER_04"]
+    assert (rem.status, rem.character_id, rem.source, rem.name) == (
+        "matched", wendy.id, "voice", None
+    )  # fmt: skip

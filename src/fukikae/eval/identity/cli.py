@@ -8,7 +8,7 @@ and merges come from the held-out speech alone (`metrics.score(reference=...)`).
 characters have at least `--min-speech` (default 5 s, Ruling R6) in the tuning episodes
 together and in the held-out one.
 
-Reads pipeline artifacts (``04-diarize/turns.json``, ``01-separate/vocals_16k.wav``) and the
+Reads pipeline artifacts (the identity turns, ``01-separate/vocals_16k.wav``) and the
 subtitles; writes only the embedding cache, extracted subtitle tracks under
 ``.fukikae/cache/subtitles/``, the optional ``--json`` file and the results ledger's rows
 (one per split, unless ``--no-ledger``). Never touches the registry.
@@ -304,6 +304,17 @@ def run_identity(
             raise FileNotFoundError(f"{eid}: no separated vocals at {audio}")
         return audio
 
+    recorded: dict[str, Any] = {}
+    if from_assignments:  # segment the turns the assignments label, sub-clusters included
+        from fukikae.artifacts import read_json
+        from fukikae.models import Assignments
+
+        for eid in order:
+            path = ws.work_dir(eid) / "05-characters" / "assignments.json"
+            if not path.is_file():
+                raise FileNotFoundError(f"{eid}: no assignments at {path}")
+            recorded[eid] = read_json(path, Assignments)  # turns None (older): identity turns
+
     with ResidentEmbedder(cfg) as embed:
         for ref, eid in zip(refs, order, strict=True):
             work = ws.work_dir(eid)
@@ -332,6 +343,7 @@ def run_identity(
                 lines,
                 window_embed=window_embed if segmentation == "asr" else None,
                 options=segmentation_options,
+                turns=recorded[eid].turns if from_assignments else None,
             )
             infos[eid] = EpisodeInfo(
                 eid,
@@ -346,15 +358,9 @@ def run_identity(
             embs[eid] = cache.get_or_compute(eid, segs[eid], emb_cfg, audio_of(eid), embed=embed)
 
     if from_assignments:
-        from fukikae.artifacts import read_json
-        from fukikae.models import Assignments
-
         assign = {}
         for eid in order:
-            path = ws.work_dir(eid) / "05-characters" / "assignments.json"
-            if not path.is_file():
-                raise FileNotFoundError(f"{eid}: no assignments at {path}")
-            a = read_json(path, Assignments)
+            a = recorded[eid]
             char = {c.cluster: c.character_id for c in a.clusters}
             counts: dict[str, int] = {}
             for c in a.clusters:
