@@ -96,6 +96,15 @@ def snapshot(root: Path) -> dict[str, bytes]:
     return out
 
 
+def unchanged_but_orphans(before: dict[str, bytes], after: dict[str, bytes]) -> bool:
+    """Every file in ``before`` is byte-identical in ``after``, and the only new files are
+    content-addressed card-store files a rolled-back import left (A6: harmless orphans)."""
+    new = set(after) - set(before)
+    return all(after.get(k) == v for k, v in before.items()) and all(
+        k.startswith(".fukikae/cards/") for k in new
+    )
+
+
 def history(reg: Registry) -> list[tuple]:
     return [
         (c.id, lang, h.card_id, h.by, h.locked)
@@ -596,7 +605,9 @@ def test_failed_apply_leaves_store_and_registry_unchanged(
         plan = plan_import(pack, reg_b, replace=False)
         with pytest.raises(RuntimeError):
             apply_import(plan, pack, reg_b, store_b)
-    assert snapshot(dst) == before
+    # A6: the registry is unchanged; content-addressed cards and sidecars the failed import
+    # copied stay as harmless orphans (another import may already be using them)
+    assert unchanged_but_orphans(before, snapshot(dst))
     assert history(reg_b) == []
 
 
@@ -743,7 +754,7 @@ def test_cd22_rollback_restores_the_old_card_bytes(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(Registry, "assign_card", boom)
     with read_pack(pack) as p, pytest.raises(RuntimeError):
         apply_import(plan_import(p, reg_b, replace=False), p, reg_b, store_b)
-    assert snapshot(dst) == before
+    assert unchanged_but_orphans(before, snapshot(dst))
 
 
 def test_cd22_differing_fingerprints_keep_the_local_one_and_report_both(tmp_path: Path):
@@ -832,7 +843,7 @@ def test_cli_import_reports_a_registry_refusal_and_rolls_back(
     before = snapshot(dst)
     r = runner.invoke(app, ["voices", "import", str(dst), str(tmp_path / "p")])
     assert r.exit_code == 1 and "nothing was imported" in r.output and "Traceback" not in r.output
-    assert snapshot(dst) == before
+    assert unchanged_but_orphans(before, snapshot(dst))
 
 
 def test_escape_in_a_card_key_never_reaches_stdout(tmp_path: Path):
@@ -1022,3 +1033,22 @@ def test_export_refuses_pack_fields_import_would_refuse(
         export_pack(reg, store, series, out, characters=None, languages=None,
                     no_clips=False, title="FT", author=author, notes=notes)  # fmt: skip
     assert not out.exists()
+
+
+def test_rollback_never_deletes_content_addressed_files(tmp_path: Path):
+    """A6: two imports racing: one copies card X, the other finds X already stored and
+    assigns it; the first fails and rolls back. X must still be there."""
+    _, reg_a, store_a = workspace(tmp_path, "a")
+    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(clone(store_a, tmp_path)),
+                      by="auto", locked=False)  # fmt: skip
+    export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
+                no_clips=False, title="t", author="")  # fmt: skip
+    _, _, store_b = workspace(tmp_path, "b")
+    with read_pack(tmp_path / "p") as pack:
+        ids = list(pack.cards)
+        report = packs.copy_cards(pack, store_b, ids)
+        assert report.created
+        report.rollback()
+    for cid in ids:
+        assert store_b.has(cid)
+        assert not store_b.missing_sidecars(store_b.get(cid))
