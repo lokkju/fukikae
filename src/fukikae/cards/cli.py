@@ -72,14 +72,18 @@ def _fail(msg: str) -> typer.Exit:
 
 @contextmanager
 def _session(workspace: Path, lang: str | None) -> Iterator[tuple[Registry, CardStore, str]]:
-    """The workspace's registry, card store and target language. Input errors, a verify
-    render or worker that crashed (RuntimeError), a registry sqlite can't use and OS errors
-    (a full disk, a permission) exit 1 with one line (A10)."""
+    """The workspace's registry, card store and target language. Input and card errors, a
+    known backend or render failure (``user_errors``: a TTS worker that crashed, a busy GPU),
+    a registry sqlite can't use or a newer fukikae wrote, and OS errors (a full disk, a
+    permission) exit 1 with one line (A10). click's own exits (typer.Exit, typer.Abort) pass
+    through, and any other RuntimeError is a bug and keeps its traceback."""
     import sqlite3
+
+    import click
 
     from fukikae.config import check_language
     from fukikae.errors import user_errors
-    from fukikae.registry.store import Registry
+    from fukikae.registry.store import Registry, RegistrySchemaError
 
     ws = Workspace(workspace)
     try:
@@ -89,15 +93,13 @@ def _session(workspace: Path, lang: str | None) -> Iterator[tuple[Registry, Card
     try:
         with Registry(ws.registry_path) as reg:
             yield reg, CardStore(ws.root), language
-    except typer.Exit:  # click's Exit is a RuntimeError: a command's own exit passes through
+    except (click.exceptions.Exit, click.exceptions.Abort):  # both are RuntimeErrors
         raise
-    except (CardError, ValueError) as e:
-        raise _fail(str(e)) from e
     except KeyError as e:
         raise _fail(f"no character {e.args[0]}") from e
     except sqlite3.DatabaseError as e:
         raise _fail(f"registry {ws.registry_path}: {e}") from e
-    except (RuntimeError, OSError) as e:
+    except (*user_errors(), RegistrySchemaError, OSError) as e:
         raise _fail(str(e) or type(e).__name__) from e
 
 
