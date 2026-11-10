@@ -96,8 +96,8 @@ def _registry(ws: Workspace) -> Registry | None:
 
 def _scan_tracks(ep: Episode, ws: Workspace, choices: list[TrackChoice]) -> list[Path | None]:
     """Each candidate's file: an operator file as is, an embedded ASS track extracted into the
-    scan cache (refreshed when the source file's size or mtime changed); None for a track that
-    can't carry names."""
+    scan cache (refreshed when the source file's size, mtime, inode or ctime changed, as the
+    stage's copies are); None for a track that can't carry names."""
     from fukikae import media
     from fukikae.artifacts import atomic_path
     from fukikae.names import detect
@@ -119,7 +119,12 @@ def _scan_tracks(ep: Episode, ws: Workspace, choices: list[TrackChoice]) -> list
             out.append(None)
             continue
         dest = cache / f"track-{c.track.index}.ass"
-        stamp = [str(ep.source.resolve()), st.st_size, st.st_mtime_ns]
+        # the names stage's stamp for its track copies: inode and ctime too, so a source
+        # replaced or edited with the same size and mtime is extracted again
+        stamp = [
+            str(ep.source.resolve()), st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns,
+            c.track.index,
+        ]  # fmt: skip
         if index.get(dest.name) != stamp or not dest.is_file():
             extract.append((c.track, dest))
             index[dest.name] = stamp
