@@ -680,3 +680,15 @@ def test_a_staged_copy_never_writes_through_a_planted_link(staged, tmp_path):
     with pytest.raises(remote.BackendError, match="not a regular file"):
         s._stage(clip, "refs", keep=True)
     assert secret.read_text() == "host secret"
+
+
+def test_the_build_reads_the_gpu_from_nvidia_smi(monkeypatch):
+    """Read at the start of the build, not by a CUDA init at its end: a host `systemctl
+    daemon-reload` mid-build revokes a container's device access for new opens."""
+
+    def smi(argv, **_kw):
+        assert argv[0] == "nvidia-smi" and "--query-gpu=name,compute_cap" in argv
+        return subprocess.CompletedProcess(argv, 0, "NVIDIA GeForce RTX 3090, 8.6\n", "")
+
+    monkeypatch.setattr(impl.subprocess, "run", smi)
+    assert impl._gpu_identity() == ("NVIDIA GeForce RTX 3090", "8.6")
