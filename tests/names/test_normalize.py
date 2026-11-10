@@ -24,6 +24,12 @@ def test_role_labels():
         assert parse_name(raw).cls is NameClass.ROLE
 
 
+def test_role_label_with_a_trailing_period():
+    assert parse_name("PRINCE A.").cls is NameClass.ROLE
+    assert parse_name("GUARD 2.").cls is NameClass.ROLE
+    assert parse_name("Mr.").cls is NameClass.NAMED
+
+
 def test_sign_and_song_names_are_ignored_but_ed_is_a_speaker():
     assert parse_name("SIGN").cls is NameClass.IGNORED
     assert parse_name("Ed").cls is NameClass.NAMED

@@ -14,8 +14,9 @@ from fukikae.subtitles import SIGN_NAMES, SONG_NAMES
 _THOUGHT = re.compile(r"\s*(?:/\s*(?:I|OS|OC|VO)|\((?:V\.O\.|O\.S\.)\))\s*$", re.IGNORECASE)
 # Two speakers or possession: a slash, ampersand, comma or the word `and`.
 _MULTI = re.compile(r"[&/,]|\band\b", re.IGNORECASE)
-# A slot in one scene: the name ends in one letter or up to two digits after a space.
-_ROLE = re.compile(r"\s(?:[^\W\d_]|\d{1,2})$")
+# A slot in one scene: the name ends in one letter or up to two digits after a space, with an
+# optional trailing period (`PRINCE A.`).
+_ROLE = re.compile(r"\s(?:[^\W\d_]|\d{1,2})\.?$")
 GROUP_WORDS = frozenset({"all", "everyone", "both", "crowd", "together", "all together"})
 
 # suggest_aliases: both keys this long, the rare one under RARE_MAX_LINES lines, the common one
