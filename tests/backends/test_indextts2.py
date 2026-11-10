@@ -80,3 +80,71 @@ def test_worker_project_pins_the_code_revision():
     source = project["tool"]["uv"]["sources"]["indextts"]
     assert source["rev"] == impl.CODE_REVISION
     assert (ROOT / "workers" / "indextts2" / "uv.lock").is_file()
+
+
+# ---- fast inference (D26) -----------------------------------------------------------------
+
+
+def test_fast_inference_options_are_stage_options():
+    assert IndexTts2Synthesizer.option_keys == frozenset({"fp16", "tf32"})
+    IndexTts2Synthesizer({"fp16": True, "tf32": True}, "cpu")
+
+
+class _FakeIndexTTS2:
+    seen: dict = {}
+
+    def __init__(self, **kw):
+        _FakeIndexTTS2.seen = kw
+
+
+@pytest.fixture
+def fake_model(monkeypatch, tmp_path):
+    import types
+
+    mod = types.ModuleType("indextts.infer_v2")
+    mod.IndexTTS2 = _FakeIndexTTS2  # type: ignore[attr-defined]
+    pkg = types.ModuleType("indextts")
+    monkeypatch.setitem(sys.modules, "indextts", pkg)
+    monkeypatch.setitem(sys.modules, "indextts.infer_v2", mod)
+    monkeypatch.setattr(impl, "installed_code_revision", lambda: impl.CODE_REVISION)
+    monkeypatch.setattr(impl, "_snapshot", lambda *_a: str(tmp_path))
+    tf32: list[bool] = []
+    monkeypatch.setattr(impl, "_set_tf32", tf32.append)
+    _FakeIndexTTS2.seen = {}
+    return tf32
+
+
+def test_load_passes_the_fast_inference_options(fake_model):
+    i = impl.Impl()
+    i.load({"fp16": True, "tf32": True}, "cuda:0")
+    seen = _FakeIndexTTS2.seen
+    assert seen["use_fp16"] is True and fake_model == [True]
+    # the engines that failed the gate or the env stay off (impl_indextts2's docstring)
+    assert seen["use_accel"] is False and seen["use_torch_compile"] is False
+    assert seen["use_deepspeed"] is False
+    i.unload()
+
+
+def test_load_defaults_keep_the_reference_inference(fake_model):
+    i = impl.Impl()
+    i.load({}, "cuda:0")
+    assert _FakeIndexTTS2.seen["use_fp16"] is False
+    assert fake_model == []  # torch's defaults untouched
+    i.unload()
+
+
+def test_fast_inference_is_off_on_the_cpu(fake_model):
+    i = impl.Impl()
+    i.load({"fp16": True, "tf32": True}, "cpu")
+    assert _FakeIndexTTS2.seen["use_fp16"] is False and fake_model == []
+    i.unload()
+
+
+@pytest.mark.parametrize("profile", ["default", "anime", "live-action"])
+def test_shipped_profiles_turn_tf32_on(tmp_path, profile):
+    from fukikae.config import load_config
+    from fukikae.stages.tts import backend_config
+
+    (tmp_path / "fukikae.toml").write_text(f'profile = "{profile}"\n')
+    cfg = load_config(tmp_path, user_config=None)
+    assert backend_config(cfg, "indextts2").options.get("tf32") is True

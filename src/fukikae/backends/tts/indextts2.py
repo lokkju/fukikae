@@ -34,7 +34,9 @@ class IndexTts2Synthesizer(WorkerSynthesizer):
     # renders: median per render 13.8 on Fairy Tail E11 (40 renders, 5 cards) and 14.6 on E12
     # (72 renders, 9 cards; per card 11.1 to 18.3); 14.3 is the render-weighted mean of the two.
     speech_cps: ClassVar[dict[str, float]] = {"en": 14.3}
-    option_keys: ClassVar[frozenset[str]] = frozenset({"fp16"})
+    # Fast inference (D26; impl_indextts2 has what each does and what was measured). Options are
+    # in the cache key.
+    option_keys: ClassVar[frozenset[str]] = frozenset({"fp16", "tf32"})
     cpu_refusal: ClassVar[str | None] = (
         "IndexTTS2 on the CPU runs in fp32, takes about 9 GB of RAM and minutes per line "
         '(Task 9a: a stage-wide `[tts] device = "cpu"` meant for Kokoro put it there).'

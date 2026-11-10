@@ -23,6 +23,17 @@ What it honours (ruling recorded in the character-cards ledger, Task 9a):
 - ``seed`` (``torch.manual_seed`` before each line; 0 when the card sets none, so a render is
   reproducible), ``temperature`` and ``top_p`` (IndexTTS2's defaults, 0.8 and 0.8, when unset).
 
+Fast inference (D26): ``fp16`` (the GPT in half precision) and ``tf32`` (TF32 matmuls and
+convolutions on Ampere and later, for the diffusion decoder) are stage options in
+``[tts.indextts2]``, in the render cache key since each changes the audio; the profiles turn
+``tf32`` on. Measured on Fairy Tail E14 on GPU 0 (RTX 3090 at a 200 W limit), 12 lines: fp32
+3.9 s a line, tf32 3.4 s, fp16 4.0 s (the GPT is bound by kernel launches, and fp16 adds casts).
+Not offered: IndexTTS2's ``use_accel`` engine (flash-attention and CUDA graphs, 2.2 s a line)
+samples at the temperature only, without top-p, top-k, beams or the repetition penalty, and
+failed the quality gate (held-out similarity -0.021 and median WER +0.09 on E14; speech 11%
+slower on E13); torch.compile recompiles for each new line length (2.2x slower over 12 lines);
+DeepSpeed is not in the locked environment. On the CPU both options are off.
+
 The released inference code has no duration control (its GPT's ``use_speed`` is fixed at zero
 and no target token count is taken), so ``duration`` is not offered either.
 """
@@ -120,6 +131,13 @@ def installed_code_revision() -> str | None:
     return json.loads(text).get("vcs_info", {}).get("commit_id")
 
 
+def _set_tf32(enabled: bool) -> None:
+    import torch
+
+    torch.backends.cuda.matmul.allow_tf32 = enabled
+    torch.backends.cudnn.allow_tf32 = enabled
+
+
 class Impl:
     sample_rate = SAMPLE_RATE
 
@@ -140,14 +158,20 @@ class Impl:
         for key, (repo, rev, files) in AUX.items():
             snap = _snapshot(repo, rev, files)
             aux[key] = snap if key in ("w2v_bert", "bigvgan") else os.path.join(snap, files[0])
+        gpu = device != "cpu"
+        if options.get("tf32") and gpu:  # off: torch's own defaults, untouched
+            _set_tf32(True)
         from indextts.infer_v2 import IndexTTS2  # pyright: ignore[reportMissingImports]
 
         self.tts = IndexTTS2(
             cfg_path=os.path.join(model_dir, "config.yaml"),
             model_dir=model_dir,
-            use_fp16=bool(options.get("fp16", False)) and device != "cpu",
+            use_fp16=bool(options.get("fp16", False)) and gpu,
             device=device,
             use_cuda_kernel=False,
+            use_deepspeed=False,
+            use_accel=False,
+            use_torch_compile=False,
             use_qwen_emo=False,
             aux_paths=aux,
         )

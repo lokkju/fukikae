@@ -44,3 +44,6 @@ fade_ms = 40
 match_dialogue = true
 protect_bgm = false   # SenseVoice marks BGM under ordinary dialogue (Task 3 review)
 detect_songs = true
+
+[tts.indextts2]   # D26: TF32 for the diffusion decoder, 12% faster a line and inside the eval gate
+tf32 = true
