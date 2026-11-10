@@ -323,22 +323,18 @@ def _subtitle_cluster(cue: Cue, turns: list[Turn], words: list[Word]) -> str | N
     return ranked[0]
 
 
-# Two events with the same spoken text that start within this of the other's end are layers
-# of one line (C8).
-LAYER_TOUCH_S = 0.05
-
-
 def merge_layers(cues: list[Cue]) -> list[Cue]:
-    """Typeset ASS draws one line as several events (an outline and a text layer, or the line
-    split where it touches); events with the same non-empty spoken text that overlap or touch
-    become one cue spanning them all (C8), in start order."""
+    """Typeset ASS draws one line as several events (an outline and a text layer); events
+    with the same non-empty spoken text that overlap (one starts before the other ends) become
+    one cue spanning them all (C8), in start order. Events that only touch ("Wait!" 10-11,
+    "Wait!" 11-12) are the line said twice and stay apart."""
     out: list[Cue] = []
     last: dict[tuple[str, bool], int] = {}  # (spoken text, ruby) -> index in out
     for cue in sorted(cues, key=lambda c: (c.start, c.end)):
         text = spoken_text(cue)
         key = (text, cue.ruby)
         i = last.get(key)
-        if text and i is not None and cue.start <= out[i].end + LAYER_TOUCH_S:
+        if text and i is not None and cue.start < out[i].end:
             out[i] = replace(out[i], end=max(out[i].end, cue.end))
             continue
         last[key] = len(out)

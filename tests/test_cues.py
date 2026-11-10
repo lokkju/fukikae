@@ -349,19 +349,32 @@ def test_zero_length_subtitle_events_are_skipped_as_empty():
 
 
 def test_layered_identical_subtitle_events_are_one_cue():
-    """C8: typeset ASS draws a line as several events (an outline layer, a text layer, or the
-    same line split where it touches); they are spoken once."""
+    """C8: typeset ASS draws a line as several overlapping events (an outline layer and a text
+    layer); they are spoken once. An event that only touches the previous one is a new line."""
     turns = [Turn(start=0.0, end=10.0, speaker="S0")]
     cues = [
         Cue(1.0, 3.0, "Hi there."),
         Cue(1.0, 3.0, "{\\bord3}Hi there."),
-        Cue(3.0, 4.0, "Hi there."),
+        Cue(2.5, 3.5, "Hi there."),  # overlaps: same line
+        Cue(3.5, 4.0, "Hi there."),  # touches only: said again
         Cue(2.0, 2.5, "Other."),
         Cue(6.0, 7.0, "Hi there."),  # later and apart: said again
     ]
     got = _subs(cues, turns, [_cluster("S0", 3)])
     assert [(c.start, c.end, c.source_text) for c in got] == [
-        (1.0, 4.0, "Hi there."),
+        (1.0, 3.5, "Hi there."),
         (2.0, 2.5, "Other."),
+        (3.5, 4.0, "Hi there."),
         (6.0, 7.0, "Hi there."),
+    ]
+
+
+def test_abutting_identical_subtitle_events_stay_two_cues():
+    """C8: "Wait!" 10-11 then "Wait!" 11-12 is the line said twice, not one layered line."""
+    turns = [Turn(start=9.0, end=13.0, speaker="S0")]
+    cues = [Cue(10.0, 11.0, "Wait!"), Cue(11.0, 12.0, "Wait!")]
+    got = _subs(cues, turns, [_cluster("S0", 3)])
+    assert [(c.start, c.end, c.source_text) for c in got] == [
+        (10.0, 11.0, "Wait!"),
+        (11.0, 12.0, "Wait!"),
     ]
