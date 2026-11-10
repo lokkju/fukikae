@@ -626,34 +626,38 @@ def render_guarded(
     store: CardStore,
     *,
     ref_dir: Path | None = None,
+    factor: float = 1.0,
 ) -> GuardedRender:
-    """The cue's render at the card's own rate, from ``cache`` or rendered into it, through
-    the render guards (ruling CD18): a render far longer or shorter than the text's expected
-    length is rendered once more with the card's seed plus one, cached under ``retry_key``
-    (so later runs find it without rendering), and kept; if that one fails the guard too, or
-    the backend takes no seed, the render is marked suspect."""
+    """The cue's render at the card's own rate (times ``factor``, the rate estimate's), from
+    ``cache`` or rendered into it, through the render guards (ruling CD18): a render far longer
+    or shorter than the text's expected length (divided by ``factor``) is rendered once more
+    with the card's seed plus one, cached under ``retry_key`` (so later runs find it without
+    rendering), and kept; if that one fails the guard too, or the backend takes no seed, the
+    render is marked suspect."""
     calls = 0
-    base = cache / f"{job.key}.wav"
+    first = job.key if factor == 1.0 else fitted_key(job.key, factor)
+    rate = None if factor == 1.0 else job.card.voice.rate * factor
+    base = cache / f"{first}.wav"
     if not base.exists():
-        render_cue(job, synth, base, store, ref_dir=ref_dir)
+        render_cue(job, synth, base, store, ref_dir=ref_dir, rate=rate)
         calls += 1
     seconds = wav_seconds(base)
     text = cast(str, job.cue.text)
-    expected = expected_seconds(job.cls, text, job.card.target_language)
+    expected = expected_seconds(job.cls, text, job.card.target_language) / factor
     why = suspect_reason(seconds, expected)
     if why is None:
-        return GuardedRender(job.key, seconds, calls)
+        return GuardedRender(first, seconds, calls)
     if "seed" not in job.cls.voice_keys:
         log.warning(
             "tts: %s render is %s (%.2f s for %.2f s expected) and %s takes no seed to retry "
             "with; marked suspect", job.cue.id, why, seconds, expected, job.cls.name,
         )  # fmt: skip
-        return GuardedRender(job.key, seconds, calls, None, why)
+        return GuardedRender(first, seconds, calls, None, why)
     seed = (job.card.voice.seed or 0) + 1
-    key = retry_key(job.key, seed)
+    key = retry_key(first, seed)
     path = cache / f"{key}.wav"
     if not path.exists():
-        render_cue(job, synth, path, store, ref_dir=ref_dir, seed=seed)
+        render_cue(job, synth, path, store, ref_dir=ref_dir, seed=seed, rate=rate)
         calls += 1
     again = wav_seconds(path)
     still = suspect_reason(again, expected)
@@ -665,6 +669,39 @@ def render_guarded(
     return GuardedRender(key, again, calls, seed, still)
 
 
+class SpeechRates:
+    """The rate estimate's speech rates (D26): per card, the characters a second its renders
+    measure at the card's own rate once ``MIN_RENDERS`` unsuspect renders are in (median), else
+    the backend's ``speech_cps`` times the card's rate. Renders are deterministic and taken in
+    cue order, cached or not, so the estimates (and the cache keys they lead to) are too.
+    ``estimated`` counts cues rendered first at an estimated rate, ``refits`` those whose
+    estimate missed by more than ``RATE_MISS`` and were rendered once more."""
+
+    MIN_RENDERS = 3
+
+    def __init__(self) -> None:
+        self._cps: dict[str, list[float]] = {}
+        self.estimated = 0
+        self.refits = 0
+
+    def seconds(self, job: RenderJob) -> float:
+        """How long the cue should take at the card's rate."""
+        text = cast(str, job.cue.text)
+        seen = self._cps.get(job.card_id, [])
+        if len(seen) >= self.MIN_RENDERS:
+            return len(text) / float(np.median(seen))
+        return expected_seconds(job.cls, text, job.card.target_language) / job.card.voice.rate
+
+    def observe(self, job: RenderJob, seconds: float, factor: float) -> None:
+        if seconds > 0:
+            text = cast(str, job.cue.text)
+            self._cps.setdefault(job.card_id, []).append(len(text) / (seconds * factor))
+
+
+# An estimated rate is kept unless its render misses the slot by more than this share.
+RATE_MISS = 0.10
+
+
 def render_for_slot(
     job: RenderJob,
     lazy: LazySynth,
@@ -672,31 +709,55 @@ def render_for_slot(
     store: CardStore,
     speedup: float,
     ref_dir: Path | None,
+    rates: SpeechRates | None = None,
 ) -> tuple[str, float, float, float, int, GuardedRender]:
-    """The stage's render of ``job`` for its slot: the guarded render, then, when it runs over
-    the slot and the backend takes a rate, one render faster by up to ``speedup`` (the rate
-    fit). Returns (key of the final wav, its seconds, the guarded render's seconds, rate
+    """The stage's render of ``job`` for its slot, for a backend that takes a rate (D26): the
+    rate estimate (``rates``) puts the text's length at the card's speech rate against the
+    slot, and a cue it puts over is rendered once, already faster by up to ``speedup``,
+    through the guards. A render that still misses is rendered once more: one at the card's
+    rate that runs over the slot (the old rate fit), or an estimated one more than
+    ``RATE_MISS`` over the slot (faster, up to ``speedup``) or under it (slower, down to the
+    card's rate). Returns (key of the final wav, its seconds, the first render's seconds, rate
     factor, renders made, the guarded render). The tts stage and ``eval tts-ab`` share it."""
-    g = render_guarded(job, lazy, cache, store, ref_dir=ref_dir)
+    fits = job.slot > 0 and "rate" in job.cls.voice_keys and "duration" not in job.cls.capabilities
+    if not fits:
+        g = render_guarded(job, lazy, cache, store, ref_dir=ref_dir)
+        return g.key, g.seconds, g.seconds, 1.0, g.calls, g
+    rates = rates if rates is not None else SpeechRates()
+    estimate = rates.seconds(job)
+    first = round(min(estimate / job.slot, speedup), 4) if estimate > job.slot else 1.0
+    if first > 1.0:
+        rates.estimated += 1
+    g = render_guarded(job, lazy, cache, store, ref_dir=ref_dir, factor=first)
     calls, seconds = g.calls, g.seconds
-    if (
-        job.slot > 0
-        and seconds > job.slot
-        and "rate" in job.cls.voice_keys
-        and "duration" not in job.cls.capabilities
-    ):
-        factor = round(min(seconds / job.slot, speedup), 4)
-        if factor > 1.0:
-            key = fitted_key(g.key, factor)
-            fitted = cache / f"{key}.wav"
-            if not fitted.exists():
-                render_cue(
-                    job, lazy, fitted, store, rate=job.card.voice.rate * factor,
-                    ref_dir=ref_dir, seed=g.retry_seed,
-                )  # fmt: skip
-                calls += 1
-            return key, wav_seconds(fitted), seconds, factor, calls, g
-    return g.key, seconds, seconds, 1.0, calls, g
+    if g.suspect is None:
+        rates.observe(job, seconds, first)
+    needed = first * seconds / job.slot
+    factor = first
+    if first == 1.0:
+        if seconds > job.slot:
+            factor = min(needed, speedup)
+    elif seconds > job.slot * (1 + RATE_MISS):
+        factor = min(needed, speedup)
+    elif seconds < job.slot * (1 - RATE_MISS):
+        factor = max(1.0, needed)
+    factor = round(factor, 4)
+    if factor == first:
+        return g.key, seconds, seconds, first, calls, g
+    if first > 1.0:
+        rates.refits += 1
+    if factor == 1.0:
+        again = render_guarded(job, lazy, cache, store, ref_dir=ref_dir)
+        return again.key, again.seconds, seconds, 1.0, calls + again.calls, again
+    key = fitted_key(g.key, factor)
+    fitted = cache / f"{key}.wav"
+    if not fitted.exists():
+        render_cue(
+            job, lazy, fitted, store, rate=job.card.voice.rate * factor,
+            ref_dir=ref_dir, seed=g.retry_seed,
+        )  # fmt: skip
+        calls += 1
+    return key, wav_seconds(fitted), seconds, factor, calls, g
 
 
 def tag_events(work: Path) -> list[tuple[float, float, str]]:
@@ -877,6 +938,7 @@ class TtsStage:
         out_dir = ep.work / "07-tts"
         out_dir.mkdir(parents=True, exist_ok=True)
         done: dict[str, TtsPlanCue] = {}
+        rates = SpeechRates()
         rendered = 0
         fresh: list[str] = []
         for backend in sorted(jobs):
@@ -885,7 +947,7 @@ class TtsStage:
             try:
                 for job in jobs[backend]:
                     key, seconds, first, factor, calls, guard = self._render(
-                        job, lazy, cache, store, speedup, out_dir / "ref"
+                        job, lazy, cache, store, speedup, out_dir / "ref", rates
                     )
                     rendered += calls
                     if calls:
@@ -939,11 +1001,14 @@ class TtsStage:
                 rendered=fresh,
                 cached=cached,
                 report=report,
+                rate_estimated=rates.estimated,
+                rate_refits=rates.refits,
             ),
         )
         log.info(
             "tts: %d cues, %d renders, %d from the cache, %d not rendered, %d neutral-only "
-            "(no emotion audio, vector or instruction passed), %d retried, %d suspect",
+            "(no emotion audio, vector or instruction passed), %d retried, %d suspect, "
+            "%d rendered at an estimated rate (%d of them once more)",
             len(cues),
             rendered,
             len(cached),
@@ -951,6 +1016,8 @@ class TtsStage:
             sum(1 for c in done.values() if c.neutral_only),
             sum(1 for c in done.values() if c.retry_seed is not None),
             sum(1 for c in done.values() if c.suspect),
+            rates.estimated,
+            rates.refits,
         )
 
     # -- helpers ---------------------------------------------------------------------------
@@ -1038,8 +1105,9 @@ class TtsStage:
         store: CardStore,
         speedup: float,
         ref_dir: Path,
+        rates: SpeechRates | None = None,
     ) -> tuple[str, float, float, float, int, GuardedRender]:
-        return render_for_slot(job, lazy, cache, store, speedup, ref_dir)
+        return render_for_slot(job, lazy, cache, store, speedup, ref_dir, rates)
 
     @staticmethod
     def _stripped(job: RenderJob) -> dict[str, Any]:
