@@ -71,7 +71,6 @@ __all__ = [
     "checked_names",
     "clone_backend",
     "confirmed_labels",
-    "confirmed_spans",
     "ensure_assignments",
     "extras_voices",
     "foreign_spans",
@@ -731,31 +730,6 @@ def _all_episodes(ws: Workspace) -> list[str]:
     return sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
 
 
-def confirmed_spans(
-    ws: Workspace,
-    character_id: int,
-    *,
-    episodes: Sequence[str] | None = None,
-    owner: KeyOwner | None = None,
-    cache: NamesCache | None = None,
-) -> dict[str, list[tuple[float, float]]]:
-    """Per names-used episode of the workspace (or of ``episodes``), the character's
-    name-confirmed turns (`confirmed_labels`), merged and in time order, less the names
-    stage's inner-voice and multi spans; an episode that used names but confirms none of its
-    turns maps to an empty list. ``cache`` keeps each episode's reads for the next call."""
-    owner = owner if owner is not None else _workspace_owner(ws)
-    cache = cache if cache is not None else {}
-    out: dict[str, list[tuple[float, float]]] = {}
-    for e in episodes if episodes is not None else _all_episodes(ws):
-        asg, names, _ = _episode_names(ws, e, cache)
-        if asg is None or names is None:
-            continue
-        labels = confirmed_labels(asg, character_id, owner)
-        turns = [(t.start, t.end) for t in asg.turns or [] if t.speaker in labels]
-        out[e] = _subtract(turns, names.excluded)
-    return out
-
-
 def _inside(start: float, end: float, spans: Sequence[tuple[float, float]]) -> float:
     """The share of ``start``-``end`` inside the union of ``spans``."""
     covered, edge = 0.0, start
@@ -945,18 +919,24 @@ def workspace_cloning(root: Path, cfg: Config, current: str) -> Cloning | None:
     def references(cid: int) -> CharacterRefs:
         candidates = character_candidates(ws, episodes, cid, exclusions, loaded)
         named = {e for e, a in loaded.items() if a is not None and a.names is not None}
-        acoustic = {
-            **{e: c for e, c in candidates.items() if e not in named},
-            **character_candidates(
-                ws, [e for e in episodes if e in named], cid, exclusions, loaded, acoustic=True
-            ),
-        }
-        seconds = max(
-            (sum(p.seconds for p in c) for c in (*candidates.values(), *acoustic.values())),
-            default=0.0,
-        )
+        tiers = [candidates]
         best = character_references(
-            ws, episodes, cid, candidates=candidates, named=named, acoustic=acoustic
+            ws, episodes, cid, candidates=candidates, named=named, acoustic={}
+        )
+        if best is None:  # the acoustic tier is read only when confirmed turns give no picks
+            acoustic = {
+                **{e: c for e, c in candidates.items() if e not in named},
+                **character_candidates(
+                    ws, [e for e in episodes if e in named], cid, exclusions, loaded,
+                    acoustic=True,
+                ),
+            }  # fmt: skip
+            tiers.append(acoustic)
+            best = character_references(
+                ws, episodes, cid, candidates={}, named=named, acoustic=acoustic
+            )
+        seconds = max(
+            (sum(p.seconds for p in c) for tier in tiers for c in tier.values()), default=0.0
         )
         if best is None:
             return CharacterRefs(seconds=round(seconds, 3), names_used=bool(named))

@@ -1002,11 +1002,26 @@ def test_acoustic_candidates_leave_out_turns_under_other_names(tmp_path: Path):
     reg.close()
 
 
-def test_confirmed_spans_leave_out_inner_voice_and_multi_spans(tmp_path: Path):
-    from fukikae.cards.auto import confirmed_spans
+def test_the_acoustic_tier_is_searched_only_without_confirmed_picks(tmp_path: Path, monkeypatch):
+    """Final review B #11: workspace_cloning reads a character's acoustic candidates only
+    when its name-confirmed ones give no picks."""
+    import fukikae.cards.auto as auto
 
     reg, _, ws = _ws_named(tmp_path)
-    assert confirmed_spans(ws, 1) == {NAMED_EP: [(0.0, 5.0), (10.0, 15.0), (50.0, 55.0)]}
+    cloning = _cloning_ws(ws)
+    real = auto.character_candidates
+    calls: list[bool] = []
+
+    def spy(*a, **kw):
+        calls.append(bool(kw.get("acoustic")))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(auto, "character_candidates", spy)
+    refs = cloning.references(1)
+    assert refs.picks and refs.confirmed and calls == [False]
+    calls.clear()
+    cloning.references(3)  # no name-confirmed turns: the acoustic tier is read
+    assert calls == [False, True]
     reg.close()
 
 
