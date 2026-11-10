@@ -399,13 +399,19 @@ class WorkerSynthesizer(Synthesizer):
 
     @classmethod
     def setup(
-        cls, *, fetch: bool = True, force: bool = False, run: Callable[..., Any] = subprocess.run
+        cls,
+        *,
+        fetch: bool = True,
+        force: bool = False,
+        run: Callable[..., Any] = subprocess.run,
+        options: dict[str, Any] | None = None,
     ) -> None:
         """Set the worker environment up: ``uv sync --locked`` into ``.venvs/<extra>``, record
         the lock's hash, then (``fetch``) run the worker's ``--fetch`` step online. ``force``
-        changes nothing here (the sync is idempotent); a subclass with a costly step it
-        would skip (indextts2_trt's engine build) honours it."""
-        del force
+        and ``options`` (the workspace's ``[tts.<backend>]``) change nothing here (the sync is
+        idempotent and the same for every option); a subclass with a costly step that depends
+        on them (indextts2_trt's engine build) honours them."""
+        del force, options
         inst = cls({}, "cpu")
         env = cls.sync_env()
         env["UV_PROJECT_ENVIRONMENT"] = str(inst.venv())

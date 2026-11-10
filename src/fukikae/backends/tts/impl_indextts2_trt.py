@@ -17,8 +17,11 @@ What it honours is what ``impl_indextts2`` honours, the same way: the card's ref
 joined into one prompt of at most 15 s (``impl_indextts2.Impl._prompt``), the source line's span
 as the emotion prompt with ``emotion_strength`` as ``emo_alpha``, ``seed``, ``temperature`` and
 ``top_p``. The seed seeds torch (the diffusion decoder's noise) and TensorRT-LLM's sampler
-(``random_seed``, which upstream's runtime leaves unset). The engines are fp16 by construction,
-so the ``fp16`` and ``tf32`` options of the PyTorch worker don't apply.
+(``random_seed``, which upstream's runtime leaves unset). The engines are fp16 unless the
+``fp32`` option names some of the plain TensorRT engines (D30), which are then built without
+TensorRT's FP16 flag (upstream's ``--no-fp16``, the path its ``PRECISION=fp32`` takes); the GPT
+stays fp16 on TensorRT-LLM either way. The ``fp16`` and ``tf32`` options of the PyTorch worker
+don't apply.
 
 Files: the engines directory is mounted at ``$FUKIKAE_TRT_ENGINES`` (read-only at run time),
 and ``$HF_HUB_CACHE`` points at a shim cache inside it whose ``refs/main`` name the pinned
@@ -59,6 +62,31 @@ EXPORTS = [
     "speaker_perceiver_conditioner", "emotion_perceiver_conditioner", "latent_projector",
     "campplus", "length_regulator",
 ]  # fmt: skip
+# The networks that condition the GPT and the decoder on the voice (everything but the
+# diffusion decoder's DiT and BigVGAN): the ``fp32`` set D30 measures.
+CONDITIONERS = [n for n in EXPORTS if n not in ("dit", "bigvgan")]
+
+
+def fp32_problem(names: object) -> str | None:
+    """Why ``names`` is not a valid ``fp32`` option (a list of names from ``EXPORTS``)."""
+    allowed = ", ".join(EXPORTS)
+    if not isinstance(names, list | tuple) or not all(isinstance(n, str) for n in names):
+        return f"fp32 must be a list of engine names (from: {allowed}), got {names!r}"
+    unknown = sorted(set(names) - set(EXPORTS))
+    if unknown:
+        return (
+            f"fp32 names no engine {', '.join(unknown)} (it takes: {allowed}; the GPT runs on "
+            "TensorRT-LLM and stays fp16)"
+        )
+    return None
+
+
+def normalize_fp32(names: object) -> tuple[str, ...]:
+    """The ``fp32`` option as the manifest records it: sorted, without repeats."""
+    problem = fp32_problem(names)
+    if problem:
+        raise ValueError(problem)
+    return tuple(sorted(set(names)))  # type: ignore[arg-type]
 
 
 def fetch() -> None:
@@ -123,7 +151,17 @@ def _run(args: list[str], cwd: Path, env: dict[str, str]) -> float:
     return time.monotonic() - started
 
 
-def build(engines: Path) -> dict[str, Any]:
+def engine_build_argv(
+    py: str, name: str, onnx: Path, dest: Path, *, fp32: tuple[str, ...] = ()
+) -> list[str]:
+    """Upstream's build script for engine ``name``: fp16 unless ``fp32`` names it."""
+    batch = MAX_BATCH * 2 if name == "dit" else MAX_BATCH
+    script = Path(INDEX_TTS) / "backends" / "trt" / "build_engines" / f"build_{name}_trt.py"
+    argv = [py, str(script), "--onnx", str(onnx), "--output", str(dest), "--max-batch", str(batch)]
+    return [*argv, "--no-fp16"] if name in fp32 else argv
+
+
+def build(engines: Path, *, fp32: tuple[str, ...] = ()) -> dict[str, Any]:
     """Build every engine into a fresh ``<engines>.tmp-<id>`` beside ``engines`` and move it
     into place whole once its ``manifest.json`` is written: a failed or killed build never
     leaves a manifest beside partial engines, and the engines already there stay as they were
@@ -142,8 +180,9 @@ def build(engines: Path) -> dict[str, Any]:
     tag = secrets.token_hex(4)
     tmp = engines.parent / f"{engines.name}.tmp-{tag}"
     tmp.mkdir()
+    fp32 = normalize_fp32(list(fp32))
     try:
-        manifest = _build_into(tmp)
+        manifest = _build_into(tmp, fp32=fp32)
         (tmp / MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n")
         old = None
         if engines.exists() or engines.is_symlink():
@@ -177,11 +216,12 @@ def _gpu_identity() -> tuple[str, str]:
     return props.name, f"{props.major}.{props.minor}"
 
 
-def _build_into(engines: Path) -> dict[str, Any]:
-    """Export, convert and build every engine into ``engines`` (empty) on this process's GPU
-    and return the manifest (timings, sizes, sha256 of each engine and the build id, the first
-    12 hex of the sha256 over them). Intermediate ONNX graphs, the converted GPT checkpoint
-    and the work directory are deleted once the engines exist; their sizes are recorded."""
+def _build_into(engines: Path, *, fp32: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Export, convert and build every engine into ``engines`` (empty) on this process's GPU,
+    those ``fp32`` names without fp16, and return the manifest (timings, sizes, sha256 of each
+    engine, the fp32 set and the build id, the first 12 hex of the sha256 over the engines).
+    Intermediate ONNX graphs, the converted GPT checkpoint and the work directory are deleted
+    once the engines exist; their sizes are recorded."""
     import shutil
 
     # The GPU first: a host `systemctl daemon-reload` during the build's half hour revokes the
@@ -230,13 +270,9 @@ def _build_into(engines: Path) -> dict[str, Any]:
         dest = trt_out / f"{name}.engine"
         if dest.exists():
             continue
-        batch = MAX_BATCH * 2 if name == "dit" else MAX_BATCH
-        script = trt_dir / "build_engines" / f"build_{name}_trt.py"
         times[f"build {name}"] = _run(
-            [py, str(script), "--onnx", str(onnx / f"{name}.onnx"), "--output", str(dest),
-             "--max-batch", str(batch)],
-            work, env,
-        )  # fmt: skip
+            engine_build_argv(py, name, onnx / f"{name}.onnx", dest, fp32=fp32), work, env
+        )
     if not list(tllm_out.glob("*.engine")):
         times["build gpt"] = _run(
             [py, "-m", "backends.trt.trtllm.build_gpt_engine", "--checkpoint_dir",
@@ -262,6 +298,7 @@ def _build_into(engines: Path) -> dict[str, Any]:
         "version": MANIFEST_VERSION,
         "build_id": build_id,
         "precision": PRECISION,
+        "fp32": list(fp32),
         "max_batch": MAX_BATCH,
         "gpu": gpu_name,
         "compute_capability": capability,
@@ -302,14 +339,22 @@ class Impl(_base.Impl):
         self._seed = 0
 
     def load(self, options: dict[str, Any], device: str) -> None:
-        if options:
-            raise ValueError(f"indextts2_trt takes no options, got {sorted(options)}")
+        unknown = sorted(set(options) - {"fp32"})
+        if unknown:
+            raise ValueError(f"indextts2_trt takes only fp32, got {unknown}")
+        want = normalize_fp32(options.get("fp32", []))
         if device == "cpu":
             raise RuntimeError("indextts2_trt runs only on a GPU")
         engines = Path(os.environ["FUKIKAE_TRT_ENGINES"])
         manifest = read_manifest(engines)
         if manifest.get("code") != CODE_REVISION or manifest.get("model") != f"{REPO}@{REVISION}":
             raise RuntimeError(f"the engines at {engines} are for another pin; run `{SETUP}`")
+        built = tuple(manifest.get("fp32", []))
+        if built != want:
+            raise RuntimeError(
+                f"the engines at {engines} have fp32 {list(built)}, and the options ask for "
+                f"fp32 {list(want)}; run `{SETUP}`"
+            )
         import tempfile
 
         import tensorrt_llm.runtime as trt_runtime  # pyright: ignore[reportMissingImports]
@@ -391,12 +436,21 @@ class Impl(_base.Impl):
 
 
 def main(argv: list[str]) -> int:
+    usage = ("usage: python -m fukikae.backends.tts.impl_indextts2_trt build <engines-dir> "
+             "[--fp32 <engine>,<engine>...]")  # fmt: skip
+    fp32: tuple[str, ...] = ()
+    if len(argv) == 4 and argv[2] == "--fp32":
+        fp32 = tuple(n for n in argv[3].split(",") if n)
+        problem = fp32_problem(list(fp32))
+        if problem:
+            print(f"error: {problem}", file=sys.stderr)
+            return 2
+        argv = argv[:2]
     if len(argv) == 2 and argv[0] == "build":
-        manifest = build(Path(argv[1]))
+        manifest = build(Path(argv[1]), fp32=fp32)
         print(json.dumps({k: manifest[k] for k in ("build_id", "gpu", "times_s", "sizes")}))
         return 0
-    print("usage: python -m fukikae.backends.tts.impl_indextts2_trt build <engines-dir>",
-          file=sys.stderr)  # fmt: skip
+    print(usage, file=sys.stderr)
     return 2
 
 
