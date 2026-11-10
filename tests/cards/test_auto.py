@@ -515,15 +515,16 @@ def test_clone_problem_needs_the_worker_env_and_its_lock(tmp_path: Path, monkeyp
 def test_clone_problem_needs_the_default_device(monkeypatch):
     from fukikae.backends import loader
     from fukikae.cards.auto import clone_problem
-    from fukikae.config import ConfigError
 
     cls = cast(Any, loader.backend_class("tts", "indextts2"))
     cfg = Config(raw={"tts": {"backend": "kokoro", "clone_backend": "indextts2"}})
     monkeypatch.setattr(type(cls({}, "cpu")), "lock_problem", lambda _self: None)
     monkeypatch.setattr(type(cls({}, "cpu")), "interpreter", lambda _self: Path("/bin/sh"))
 
+    from fukikae.stages.tts import NoUsableGpuError
+
     def no_gpu(*_):
-        raise ConfigError("indextts2 found no usable GPU")
+        raise NoUsableGpuError("indextts2 found no usable GPU")
 
     monkeypatch.setattr("fukikae.stages.tts.synth_device", no_gpu)
     assert "no usable GPU" in (clone_problem(cls, cfg) or "")
@@ -538,3 +539,60 @@ def test_workspace_cloning_reports_an_unusable_backend(tmp_path: Path, monkeypat
     assert (
         cloning is not None and cloning.unavailable and "worker environment" in cloning.unavailable
     )
+
+
+# -- fix round 2: device typos fail; unusable-backend fallbacks are upgraded later -----------
+
+
+def test_clone_problem_raises_a_device_typo(monkeypatch):
+    from fukikae.backends import loader
+    from fukikae.cards.auto import clone_problem
+    from fukikae.config import ConfigError
+
+    cls = cast(Any, loader.backend_class("tts", "indextts2"))
+    monkeypatch.setattr(type(cls({}, "cpu")), "lock_problem", lambda _self: None)
+    monkeypatch.setattr(type(cls({}, "cpu")), "interpreter", lambda _self: Path("/bin/sh"))
+    for table in ({"device": "gpu"}, {"device": "cpu"}):
+        cfg = Config(raw={"tts": {"backend": "kokoro", "indextts2": table}})
+        with pytest.raises(ConfigError):
+            clone_problem(cls, cfg)
+
+
+def _unusable():
+    from fukikae.cards.auto import Cloning
+    from tests.cards.test_select import CloneSynth
+
+    return Cloning(CloneSynth, "ja", lambda _cid: None, unavailable="no worker environment")  # type: ignore[arg-type]
+
+
+def test_unusable_backend_fallback_is_marked_and_upgraded_once_usable(tmp_path: Path, vocals: Path):
+    reg, (a, b, c) = _registry(tmp_path, 3)
+    store = CardStore(tmp_path / "ws")
+    spans = {x: [(0.0, 10.0)] for x in (a, b, c)}
+    ensure_assignments(reg, store, CFG, spans, vocals, cloning=_unusable())
+    for x in (a, b, c):
+        cur = reg.card_for(x, "en")
+        assert cur is not None and cur.by == "auto-fallback" and not cur.locked
+    reg.lock_card(b, "en", True)  # locked: never upgraded
+    mine = store.put(parse_card(STOCK_CARD))
+    reg.assign_card(c, "en", mine, by="assign", locked=False)  # operator's: never upgraded
+    cloning = _cloning({x: [(0.0, 4.0, None), (6.0, 10.0, None)] for x in (a, b, c)}, vocals)
+    lines = ensure_assignments(reg, store, CFG, spans, vocals, cloning=cloning)
+    cur = reg.card_for(a, "en")
+    assert cur is not None and cur.by == "auto" and cur.card_id is not None
+    assert store.get(cur.card_id).voice.source == "clone"
+    assert len(lines) == 1 and "replaces the stock fallback" in lines[0]
+    assert store.get(reg.card_for(b, "en").card_id).voice.source == "stock"  # type: ignore[union-attr,arg-type]
+    assert reg.card_for(c, "en").card_id == mine  # type: ignore[union-attr]
+    reg.close()
+
+
+def test_under_6_s_stock_is_plain_auto_and_stays(tmp_path: Path, vocals: Path):
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    short = _cloning({a: [(0.0, 4.2, None)]}, vocals)
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=short)
+    assert reg.card_for(a, "en").by == "auto"  # type: ignore[union-attr]
+    more = _cloning({a: [(0.0, 4.0, None), (6.0, 10.0, None)]}, vocals)
+    assert ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, vocals, cloning=more) == []
+    reg.close()

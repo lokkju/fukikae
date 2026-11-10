@@ -52,6 +52,7 @@ __all__ = [
 ]
 
 UNKNOWN_EXTRA = "unknown"
+FALLBACK_BY = "auto-fallback"  # a stock stand-in while the clone backend can't run here
 MIN_CLONE_S = 6.0  # the spec's minimum of clean speech for a clone (pick_references' default)
 
 
@@ -167,11 +168,16 @@ def ensure_assignments(
     else a stock card from its gender's pool, most speech first (so the main cast gets the
     first voices of each pool). Returns one report line per character handled."""
     language = cfg.target_language
+    usable = cloning is not None and cloning.unavailable is None
     todo = []
+    fallbacks: set[int] = set()
     for cid, spans in character_spans.items():
         a = reg.card_for(cid, language)
         if a is None or a.card_id is None:
             todo.append((cid, spans))
+        elif usable and a.chosen_by == FALLBACK_BY and not a.locked:
+            todo.append((cid, spans))  # the stock stand-in for a clone that couldn't run
+            fallbacks.add(cid)
     if not todo:
         return []
     backend = tts_backend(cfg)
@@ -181,11 +187,15 @@ def ensure_assignments(
     todo.sort(key=lambda item: (-sum(e - s for s, e in item[1]), item[0]))
     lines: list[str] = []
     for cid, spans in todo:
-        usable = cloning is not None and cloning.unavailable is None
         found = cloning.references(cid) if usable else None  # type: ignore[union-attr]
         voice: str | None = None
+        by = "auto"
+        if cid in fallbacks and not (found is not None and found.picks):
+            continue  # still too little speech: the stand-in stays until a clone can be made
         if found is not None and found.picks:
             new, note = _clone(cloning, found, store, language)  # type: ignore[arg-type]
+            if cid in fallbacks:
+                note += "; replaces the stock fallback made while the clone backend couldn't run"
         else:
             f0, seconds = speaker_f0(vocals, spans)
             gender = gender_of(f0, male_below, female_above)
@@ -207,11 +217,12 @@ def ensure_assignments(
                 name = cloning.backend.name
                 note = (
                     f"clone backend {name} is not usable ({cloning.unavailable}); stock voice "
-                    f"{voice}: {note}. Run `fukikae backends setup {name}`; this card stays "
-                    "until `fukikae voices assign` replaces it"
+                    f"{voice}: {note}. Run `fukikae backends setup {name}`: the next run "
+                    "replaces this stand-in with a clone"
                 )
+                by = FALLBACK_BY
         try:
-            reg.assign_card(cid, language, new, by="auto", locked=False, note=note)
+            reg.assign_card(cid, language, new, by=by, locked=False, note=note)
         except ProtectedAssignmentError as e:
             lines.append(f"character {_label(reg, cid)}: kept its card ({e})")
             continue
@@ -374,8 +385,7 @@ def clone_problem(cls: type[Synthesizer], cfg: Config) -> str | None:
     from its current lock (``fukikae backends setup``), and every backend its device (for
     IndexTTS2, a usable GPU). Checked before any clone card is made or assigned."""
     from fukikae.backends.tts.remote import WorkerSynthesizer
-    from fukikae.config import ConfigError
-    from fukikae.stages.tts import synth_device
+    from fukikae.stages.tts import NoUsableGpuError, synth_device
 
     if issubclass(cls, WorkerSynthesizer):
         inst = cls({}, "cpu")
@@ -385,8 +395,8 @@ def clone_problem(cls: type[Synthesizer], cfg: Config) -> str | None:
         if lock is not None:
             return lock
     try:
-        synth_device(cfg, cls)
-    except ConfigError as e:
+        synth_device(cfg, cls)  # a bad device value or a device the backend lacks raises
+    except NoUsableGpuError as e:
         return str(e)
     return None
 

@@ -23,7 +23,7 @@ SCHEMA_VERSION = 2
 
 # `by` values of an assignment; `import:<pack title>` is the one with a suffix. `migrated`
 # (the schema-1 voice note) and `lock`/`unlock` rows are written by the registry itself.
-ASSIGNED_BY = frozenset({"auto", "assign", "revert", "edit", "derive", "restock"})
+ASSIGNED_BY = frozenset({"auto", "auto-fallback", "assign", "revert", "edit", "derive", "restock"})
 # Operator actions (ruling CD2): a card they chose is never replaced by `auto` or an import
 # unless the caller passes override (an import the operator confirmed with --replace). An
 # imported card is never replaced by `auto` without override either (CD3).
@@ -31,7 +31,9 @@ OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive"})
 # Automatic sources (ruling CD9): `restock` re-pins an automatic stock card to a new model
 # revision. It is no operator choice, so a restocked card stays uncurated, and it is refused
 # over a locked, operator-chosen or imported card exactly as `auto` is.
-AUTOMATIC_BY = frozenset({"auto", "restock"})
+# `auto-fallback` is the stock voice a character got while the clone backend could not run
+# here (Task 12 fix round 2); automatic assignment replaces it with a clone once it can.
+AUTOMATIC_BY = frozenset({"auto", "auto-fallback", "restock"})
 _LOCK_BY = frozenset({"lock", "unlock"})
 _CARD_ID = re.compile(r"[0-9a-f]{16}")
 
