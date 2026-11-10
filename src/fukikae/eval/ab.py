@@ -25,7 +25,8 @@ A spec (TOML) names one or more sets, each a workspace, an episode and the candi
    will; extras get the stage's stock extras), muxed with the video as ``video/sceneNN_X.mkv``.
 
 ``write_pack`` blinds it all: per cue (and scene) the candidates are shuffled with
-``random.Random(f"ab-blind:{seed}:{slot}")`` and written as ``audio/cueNN_A.wav``,
+``random.Random(f"ab-blind:{seed}:{slot}")``, ``seed`` a 64-bit draw from ``secrets`` kept only
+in ``key.toml`` (the spec's seed picks the cues), and written as ``audio/cueNN_A.wav``,
 ``cueNN_B.wav``, ...; the references are ``cueNN_ref.wav`` and ``cueNN_ref_en.wav``. Every
 clip is mono 48 kHz (scenes stereo), brought to ``TARGET_LUFS`` (EBU R128 integrated) by one
 linear gain with the true-peak limiter (``mix.normalize``, ruling CD10). ``key.toml`` holds the
@@ -430,7 +431,13 @@ def write_pack(
 ) -> Path:
     """Write the blind pack to ``out`` (absent or empty): ``audio/``, ``video/`` (scenes with
     a video), ``index.html``, ``README.txt``, ``verdict.toml``, ``key.toml`` and, with
-    ``numbers`` (an HTML fragment), ``numbers.html``. Owner-only. Returns ``out``."""
+    ``numbers`` (an HTML fragment), ``numbers.html``. Owner-only. Returns ``out``.
+
+    ``seed`` (the spec's, which picked the cues) is recorded; the labels are shuffled by a
+    seed drawn from ``secrets``, which only ``key.toml`` holds (B14), so the listener can't
+    work the mapping out from the spec."""
+    import secrets
+
     import tomli_w
 
     out = Path(out)
@@ -440,8 +447,10 @@ def write_pack(
         out.mkdir(parents=True, exist_ok=True, mode=0o700)
         audio = out / "audio"
         audio.mkdir(exist_ok=True)
+        blind = secrets.randbits(64)
         key: dict[str, Any] = {
             "seed": seed,
+            "blind_seed": blind,
             "target_lufs": TARGET_LUFS,
             "candidates": sorted({c for m in [*cues, *scenes] for c in m.renders}),
             "notes": list(notes),
@@ -451,7 +460,7 @@ def write_pack(
         page_cues: list[tuple[str, CueMaterial, list[str], list[str]]] = []
         for n, m in enumerate(cues, start=1):
             slot = f"cue{n:02d}"
-            labels = blind_order(list(m.renders), seed=seed, slot=slot)
+            labels = blind_order(list(m.renders), seed=blind, slot=slot)
             window = cue_window(m)
             gains: dict[str, float] = {}
             refs: list[str] = []
@@ -480,7 +489,7 @@ def write_pack(
         page_scenes: list[tuple[str, SceneMaterial, list[str], bool]] = []
         for n, s in enumerate(scenes, start=1):
             slot = f"scene{n:02d}"
-            labels = blind_order(list(s.renders), seed=seed, slot=slot)
+            labels = blind_order(list(s.renders), seed=blind, slot=slot)
             gains = {"original": _write_clip(s.original, s.window, audio / f"{slot}_ref.wav", 2)}
             for label, cand in labels.items():
                 gains[cand] = _write_clip(
