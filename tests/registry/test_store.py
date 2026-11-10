@@ -688,6 +688,52 @@ def test_v2_registry_migrates_to_3_with_chosen_by(tmp_path: Path):
     con.close()
 
 
+def test_v2_migration_normalizes_language_keys_and_keeps_the_newest_on_collision(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """Schema 2 stored target languages in whatever case it was given; reads now normalize
+    (``PT-br`` is ``pt-BR``), so the migration rewrites the stored keys the same way. Two
+    current cards that become one key keep the newer assignment (the older stays in
+    history), and the collision is logged."""
+    import logging
+
+    p = tmp_path / "r.sqlite"
+    with Registry(p) as reg:
+        cid = _char(reg)
+        other = _char(reg)
+        reg.assign_card(cid, "pt-BR", A16, by="assign", locked=False)
+    con = sqlite3.connect(p)
+    for char, lang, card in [(cid, "PT-br", B16), (other, "EN", C16)]:
+        hid = con.execute(
+            "INSERT INTO card_history(character_id, target_language, card_id, assigned, by,"
+            " locked, note) VALUES (?, ?, ?, '2026-11-09T00:00:00+00:00', 'assign', 0, NULL)",
+            (char, lang, card),
+        ).lastrowid
+        con.execute(
+            "INSERT INTO card_assignments(character_id, target_language, card_id, history_id)"
+            " VALUES (?, ?, ?, ?)",
+            (char, lang, card, hid),
+        )
+    con.execute("ALTER TABLE card_history DROP COLUMN chosen_by")
+    con.execute("UPDATE schema_version SET version = 2")
+    con.commit()
+    con.close()
+    with caplog.at_level(logging.WARNING, logger="fukikae.registry.store"), Registry(p) as reg:
+        assert _cur(reg, cid, "pt-BR").card_id == B16
+        assert [h.card_id for h in reg.card_history(cid, "pt-BR")] == [A16, B16]
+        assert reg.card_languages(cid) == ["pt-BR"]
+        assert reg.card_languages(other) == ["en"]
+        assert _cur(reg, other, "en").card_id == C16
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert f"character {cid}" in warning and "pt-BR" in warning
+    assert B16 in warning and A16 in warning
+    con = sqlite3.connect(p)
+    langs = {r[0] for r in con.execute("SELECT target_language FROM card_history")}
+    langs |= {r[0] for r in con.execute("SELECT target_language FROM card_assignments")}
+    con.close()
+    assert langs == {"pt-BR", "en"}
+
+
 @pytest.mark.parametrize("bad", ["9" * 101, "a\x1bb", "   "])
 def test_character_external_id_is_validated(reg: Registry, bad: str):
     cid = _char(reg)

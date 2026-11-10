@@ -8,6 +8,7 @@ Embeddings are stored as float32 bytes.
 from __future__ import annotations
 
 import io
+import logging
 import re
 import sqlite3
 import unicodedata
@@ -20,6 +21,8 @@ from pathlib import Path
 import numpy as np
 
 from fukikae.config import normalize_language
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3
 
@@ -284,10 +287,12 @@ class Registry:
         con.execute("UPDATE schema_version SET version = 2")
 
     def _migrate_2_to_3(self, con: sqlite3.Connection) -> None:
-        """Schema 2 to 3: ``card_history.chosen_by``. A non-lock row's is its ``by``; a
+        """Schema 2 to 3: target language keys in the case reads use (``normalize_language``),
+        then ``card_history.chosen_by``. A non-lock row's is its ``by``; a
         lock/unlock row's is that of the latest earlier non-lock row (by id) with the same
         card for that character and language, else of the latest earlier non-lock row, else
         ``auto``."""
+        self._normalize_card_languages(con)
         cols = {r[1] for r in con.execute("PRAGMA table_info(card_history)")}
         if "chosen_by" not in cols:
             con.execute("ALTER TABLE card_history ADD COLUMN chosen_by TEXT")
@@ -307,6 +312,41 @@ class Registry:
                 earlier.append((card, by))
             con.execute("UPDATE card_history SET chosen_by = ? WHERE id = ?", (chosen, hid))
         con.execute("UPDATE schema_version SET version = 3")
+
+    def _normalize_card_languages(self, con: sqlite3.Connection) -> None:
+        """Rewrite ``card_history`` and ``card_assignments`` language keys the way reads
+        normalize them (schema 2 stored whatever case it was given). History rows that meet
+        under one key simply merge in id order. Two current cards that meet keep the newer
+        assignment (the higher history id); the older stays in history, reachable with
+        ``voices revert``, and each collision is logged."""
+        for hid, lang in con.execute("SELECT id, target_language FROM card_history").fetchall():
+            if normalize_language(lang) != lang:
+                con.execute(
+                    "UPDATE card_history SET target_language = ? WHERE id = ?",
+                    (normalize_language(lang), hid),
+                )
+        rows = con.execute(
+            "SELECT character_id, target_language, card_id, history_id FROM card_assignments"
+            " ORDER BY character_id, history_id"
+        ).fetchall()
+        keep: dict[tuple[int, str], tuple[str, str, int]] = {}
+        for char, lang, card, hid in rows:
+            key = (char, normalize_language(lang))
+            old = keep.get(key)
+            if old is not None:
+                log.warning(
+                    "registry migration: character %d had two current %s cards (%s as %r, "
+                    "%s as %r); keeping the newer, %s (the other stays in its history)",
+                    char, key[1], old[1], old[0], card, lang, card,
+                )  # fmt: skip
+            keep[key] = (lang, card, hid)
+        con.execute("DELETE FROM card_assignments")
+        for (char, lang), (_, card, hid) in keep.items():
+            con.execute(
+                "INSERT INTO card_assignments(character_id, target_language, card_id, history_id)"
+                " VALUES (?, ?, ?, ?)",
+                (char, lang, card, hid),
+            )
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
