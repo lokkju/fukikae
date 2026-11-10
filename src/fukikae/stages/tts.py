@@ -398,6 +398,15 @@ def check_card(
         card = store.get(card_id)
     except CardError as e:
         raise CardError(f"{who}: {e}; {fix}") from e
+    return card, check_loaded_card(store, card, card_id, who, target)
+
+
+def check_loaded_card(
+    store: CardStore, card: Card, card_id: str, who: str, target: str
+) -> type[Synthesizer]:
+    """``check_card`` for a card already in hand (perhaps not yet stored): its backend class,
+    or a CardError naming ``who``, the card and what to do."""
+    fix = "assign another card with `fukikae voices assign`"
     if card.target_language != target:
         raise CardError(
             f"{who}: card {card_id} is for {card.target_language!r}, not {target!r}; {fix}"
@@ -437,7 +446,7 @@ def check_card(
                 f"{store.root / sub}; import the pack with clips or `fukikae voices assign` "
                 "another card"
             )
-    return card, cls
+    return cls
 
 
 def dropping_event(

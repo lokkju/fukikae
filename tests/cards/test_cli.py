@@ -10,7 +10,7 @@ from fukikae.cards.store import CardStore
 from fukikae.cli import app
 from fukikae.registry.store import CardAssignment, Registry
 from fukikae.workspace import Workspace
-from tests.cards.test_card import STOCK_CARD
+from tests.cards.test_card import STOCK_CARD, VECTOR
 
 runner = CliRunner()
 
@@ -418,7 +418,8 @@ def test_show_prints_the_clone_mode(tmp_path: Path):
 def test_edit_offers_the_clone_mode_at_its_default(tmp_path: Path, monkeypatch):
     ws, cid, store = setup(tmp_path)
     a = store.put(_mode_card("qwen3_tts"))
-    assert invoke("assign", str(ws.root), "Natsu", a, "--no-lock").exit_code == 0
+    with Registry(ws.registry_path) as reg:  # a stand-in card the stage would refuse
+        reg.assign_card(cid, "en", a, by="assign", locked=False)
     seen = tmp_path / "seen.toml"
     script = tmp_path / "editor.py"
     script.write_text(f"import shutil, sys\nshutil.copy(sys.argv[1], {str(seen)!r})\n")
@@ -724,3 +725,66 @@ def test_export_fingerprints_exactly_the_rows_it_exports(tmp_path: Path, monkeyp
     r = invoke("export", str(ws.root), "-o", str(tmp_path / "p"))
     assert r.exit_code == 0, r.output
     assert calls == ["am_adam"]  # Happy's card only; the two Natsus are left out
+
+
+FINGERPRINTED = (
+    STOCK_CARD
+    + f"""
+[voice.fingerprint]
+embedder = "wespeaker:resnet34"
+vector = "{VECTOR}"
+threshold = 0.85
+"""
+)
+
+
+def test_derive_drops_the_fingerprint(tmp_path: Path):
+    """A7: a fingerprint describes renders in the old language; the derived card has none."""
+    ws, cid, store = setup(tmp_path)
+    a = store.put(parse_card(FINGERPRINTED))
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(cid, "en", a, by="assign", locked=True)
+    r = invoke("derive", str(ws.root), "Natsu", "--to", "es")
+    assert r.exit_code == 0, r.output
+    with Registry(ws.registry_path) as reg:
+        es = _cur(reg, cid, "es")
+    assert es.card_id is not None and store.get(es.card_id).voice.fingerprint is None
+    assert store.get(a).voice.fingerprint is not None
+
+
+def test_assign_runs_the_stage_card_check(tmp_path: Path):
+    """A8: a card the tts stage would refuse is never assigned (here: a key Fake doesn't
+    honour)."""
+    ws, cid, store = setup(tmp_path)
+    bad = store.put(
+        parse_card(STOCK_CARD.replace('voice = "af_heart"', 'voice = "af_heart"\nseed = 3'))
+    )
+    r = invoke("assign", str(ws.root), "Natsu", bad)
+    assert r.exit_code == 1 and "seed" in r.output and "nothing was assigned" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.card_for(cid, "en") is None
+
+
+def test_assign_refuses_a_card_with_missing_sidecars(tmp_path: Path):
+    ws, cid, store = setup(tmp_path)
+    a = store.put(parse_card(FINGERPRINTED))  # the vector sidecar isn't in the store
+    r = invoke("assign", str(ws.root), "Natsu", a)
+    assert r.exit_code == 1 and VECTOR in r.output
+    with Registry(ws.registry_path) as reg:
+        assert reg.card_for(cid, "en") is None
+
+
+EDIT_SEED = EDIT_RATE.replace('d["voice"]["rate"] = 1.2', 'd["voice"]["seed"] = 3')
+
+
+def test_edit_runs_the_stage_card_check(tmp_path: Path, monkeypatch):
+    ws, cid, store = setup(tmp_path)
+    a = store.put(parse_card(STOCK_CARD))
+    assert invoke("assign", str(ws.root), "Natsu", a).exit_code == 0
+    script = tmp_path / "seed.py"
+    script.write_text(EDIT_SEED)
+    monkeypatch.setenv("EDITOR", f"{sys.executable} {script}")
+    r = invoke("edit", str(ws.root), "Natsu")
+    assert r.exit_code == 1 and "seed" in r.output, r.output
+    with Registry(ws.registry_path) as reg:
+        assert _cur(reg, cid, "en").card_id == a
