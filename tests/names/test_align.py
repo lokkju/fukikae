@@ -130,9 +130,9 @@ def test_role_label_names_its_turn():
     assert pieces[0].label == "A~wizard-a"
 
 
-def test_hidden_lines_act_unnamed_but_stay_in_line_ids():
+def test_hidden_lines_act_unnamed_and_stay_out_of_line_ids():
     pieces, _ = attribute([turn(0, 3, "A")], [line(0, 3, "wendy", id=5)], hidden={5})
-    assert pieces[0].key is None and pieces[0].line_ids == [5]
+    assert pieces[0].key is None and pieces[0].line_ids == []
 
 
 def test_pieces_cover_every_turn_in_order_with_their_line_ids():
@@ -175,6 +175,7 @@ def test_label_infos_describe_named_role_and_remainder():
         "key": "lucy",
         "display": "Lucy",
         "cls": "named",
+        "slug_clash": False,
     }
     assert infos["A~wizard-a"].cls == "role"
     assert infos["A"].cls == "remainder" and infos["A"].key is None
@@ -243,3 +244,188 @@ def test_refined_turns_take_piece_labels():
         (0, 2, "S~lucy"),
         (2, 4, "S~erza"),
     ]
+
+
+# ---- review fixes (Task 3 review) ----
+
+
+def _own_key_overlap(pieces, lines) -> None:
+    """Every keyed piece overlaps a line of its own key."""
+    for p in pieces:
+        if p.key is None:
+            continue
+        own = [ln for ln in lines if ln.key == p.key]
+        assert any(min(p.end, ln.end) > max(p.start, ln.start) for ln in own), p
+
+
+def _contiguous(pieces, t) -> None:
+    assert pieces[0].start == t.start and pieces[-1].end == t.end
+    for a, b in zip(pieces, pieces[1:], strict=False):
+        assert a.end == b.start and a.start <= a.end
+
+
+def test_line_nested_in_another_key_leaves_its_stretch_unnamed():
+    t = turn(0, 14, "S")
+    lines = [line(0, 10, "lucy"), line(3, 4, "natsu"), line(11, 13.5, "lucy")]
+    pieces, _ = attribute([t], lines)
+    _own_key_overlap(pieces, lines)
+    _contiguous(pieces, t)
+    assert [(p.key, p.start, p.end) for p in pieces] == [
+        ("lucy", 0, 3),
+        (None, 3, 4),
+        ("lucy", 4, 14),
+    ]
+
+
+def test_nested_lines_never_hand_another_key_the_outer_line():
+    t = turn(0, 12, "S")
+    lines = [line(0, 10, "lucy"), line(3, 4, "natsu"), line(4.5, 6, "erza"), line(10.5, 12, "erza")]
+    pieces, _ = attribute([t], lines)
+    _own_key_overlap(pieces, lines)
+    _contiguous(pieces, t)
+    erza = [p for p in pieces if p.key == "erza"]
+    assert erza and all(p.start >= 10 for p in erza)
+    assert not [p for p in pieces if p.key == "natsu"]
+
+
+def test_partly_overlapping_lines_of_two_keys_leave_the_overlap_unnamed():
+    t = turn(0, 6, "S")
+    lines = [line(0, 3, "lucy"), line(2.5, 5, "natsu")]
+    pieces, _ = attribute([t], lines)
+    assert [(p.key, p.start, p.end) for p in pieces] == [
+        ("lucy", 0, 2.5),
+        (None, 2.5, 3),
+        ("natsu", 3, 6),
+    ]
+
+
+def test_overlapping_lines_of_one_key_count_once():
+    pieces, _ = attribute(
+        [turn(0, 10, "S")], [line(0, 3, "lucy"), line(0, 3, "lucy"), line(0.5, 3, "lucy")]
+    )
+    assert pieces[0].key is None  # 3 s of 10, not 8.5
+
+
+def test_hidden_key_is_never_a_side_of_a_cut():
+    pieces, _ = attribute(
+        [turn(0, 4, "S")], [line(0, 2.6, "lucy"), line(2.6, 4, "erza", id=900)], hidden={900}
+    )
+    assert [(p.key, p.start, p.end, p.line_ids) for p in pieces] == [
+        ("lucy", 0, 4, pieces[0].line_ids)
+    ]
+    assert 900 not in pieces[0].line_ids
+
+
+def test_cut_wins_over_a_single_key_share():
+    # lucy alone covers 80% of the turn, but natsu's 0.6 s makes it a two-name turn.
+    pieces, _ = attribute([turn(0, 5, "S")], [line(0, 4.0, "lucy"), line(4.4, 5.0, "natsu")])
+    assert [(p.key, p.start, p.end) for p in pieces] == [("lucy", 0, 4.2), ("natsu", 4.2, 5)]
+
+
+def test_equal_cover_is_broken_by_key_order():
+    pieces, _ = attribute(
+        [turn(0, 0.8, "S")], [line(0, 0.4, "lucy"), line(0.4, 0.8, "natsu")], turn_share=0.4
+    )
+    assert pieces[0].key == "natsu"
+
+
+def test_pieces_conserve_each_turns_time():
+    cases = [
+        (turn(0, 14, "A"), [line(0, 10, "lucy"), line(3, 4, "natsu"), line(11, 13.5, "lucy")]),
+        (
+            turn(20, 32, "B"),
+            [
+                line(20, 30, "lucy"),
+                line(23, 24, "natsu"),
+                line(24.5, 26, "erza"),
+                line(30.5, 32, "erza"),
+            ],
+        ),
+        (
+            turn(40, 46, "C"),
+            [
+                line(40, 43, "lucy"),
+                line(42.5, 43.5, None, cls=NameClass.MULTI),
+                line(43.5, 46, "natsu"),
+            ],
+        ),
+        (turn(50, 55, "D"), [line(50, 54.8, "lucy"), line(54.8, 55, "cana")]),
+        (turn(60, 64, "E"), [line(60, 62, "lucy"), line(60, 63, "natsu")]),
+    ]
+    for t, lines in cases:
+        pieces, _ = attribute([t], lines)
+        assert sum(p.end - p.start for p in pieces) == pytest.approx(t.end - t.start)
+        _contiguous(pieces, t)
+        _own_key_overlap(pieces, lines)
+
+
+def test_slug_collisions_are_judged_per_cluster():
+    lines = [line(0, 2, "makarov (wraith)"), line(3, 5, "makarov wraith"), line(8, 9, "lucy")]
+    pieces, _ = attribute([turn(0, 2, "A"), turn(3, 5, "B"), turn(8, 9, "A")], lines)
+    assert [p.label for p in pieces] == ["A~makarov-wraith", "B~makarov-wraith", "A~lucy"]
+    # a colliding key in the same cluster hashes both; label_infos records why
+    lines2 = [line(0, 2, "makarov (wraith)"), line(3, 5, "makarov wraith")]
+    pieces2, _ = attribute([turn(0, 2, "A"), turn(3, 5, "A")], lines2)
+    infos = label_infos(pieces2, lines2)
+    assert all(info.slug_clash for info in infos.values())
+
+
+def test_slug_strips_accents():
+    assert label_for("S", "chloé") == "S~chloe"
+    assert re.fullmatch(r"S~n[0-9a-f]{8}", label_for("S", "ガジル"))
+
+
+def _cut_turn_npz(tmp_path, rows):
+    t = turn(0, 10, "S")
+    lines = [line(0, 4.8, "lucy"), line(5.2, 10, "natsu")]
+    pieces, _ = attribute([t], lines)
+    assert [(p.key, p.end) for p in pieces] == [("lucy", 5.0), ("natsu", 10)]
+    npz = _npz(tmp_path / "in.npz", {"S": rows})
+    return pieces, npz
+
+
+def test_row_inside_a_cut_piece_by_ninety_percent_moves_and_just_under_drops(tmp_path):
+    pieces, npz = _cut_turn_npz(tmp_path, [(0.1, 5.5), (0.1, 5.6)])  # 4.9/5.4 and 4.9/5.5
+    dropped = refine_clusters(npz, pieces, refined_turns(pieces), tmp_path / "out.npz")
+    with np.load(tmp_path / "out.npz") as z:
+        assert z["S~lucy/spans"].tolist() == [[0.1, 5.5]]
+    assert dropped == pytest.approx(5.5)
+
+
+def test_label_rows_stay_longest_first(tmp_path):
+    turns = [turn(0, 2, "A"), turn(10, 15, "A")]
+    lines = [line(0, 2, "lucy"), line(10, 15, "lucy")]
+    pieces, _ = attribute(turns, lines)
+    npz = _npz(tmp_path / "in.npz", {"A": [(0.1, 1.9), (10.1, 14.9)]})
+    refine_clusters(npz, pieces, refined_turns(pieces), tmp_path / "out.npz")
+    with np.load(tmp_path / "out.npz") as z:
+        assert z["A~lucy/spans"].tolist() == [[10.1, 14.9], [0.1, 1.9]]
+
+
+def test_rows_move_only_within_their_own_cluster(tmp_path):
+    turns = [turn(0, 10, "A"), turn(2, 6, "B")]
+    lines = [line(0, 10, "lucy")]
+    pieces, _ = attribute(turns, lines)
+    npz = _npz(tmp_path / "in.npz", {"A": [(6.1, 9.9)], "B": [(2.1, 5.9)]})
+    refine_clusters(npz, pieces, refined_turns(pieces), tmp_path / "out.npz")
+    with np.load(tmp_path / "out.npz") as z:
+        assert z["A~lucy/spans"].tolist() == [[6.1, 9.9]]
+        assert z["B/spans"].tolist() == [[2.1, 5.9]]
+
+
+def test_rows_must_move_to_a_label_of_turns_out(tmp_path):
+    pieces, _ = attribute([turn(0, 4, "A")], [line(0, 4, "lucy")])
+    npz = _npz(tmp_path / "in.npz", {"A": [(0.1, 3.9)]})
+    with pytest.raises(ValueError, match="A~lucy"):
+        refine_clusters(npz, pieces, [turn(0, 4, "A")], tmp_path / "out.npz")
+
+
+def test_refined_npz_is_byte_identical_on_rewrite(tmp_path, monkeypatch):
+    import time
+
+    pieces, npz = _cut_turn_npz(tmp_path, [(0.1, 4.7), (5.3, 9.9)])
+    refine_clusters(npz, pieces, refined_turns(pieces), tmp_path / "a.npz")
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() + 7200)
+    refine_clusters(npz, pieces, refined_turns(pieces), tmp_path / "b.npz")
+    assert (tmp_path / "a.npz").read_bytes() == (tmp_path / "b.npz").read_bytes()

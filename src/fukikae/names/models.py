@@ -34,7 +34,7 @@ class Piece(BaseModel):
     cluster: str  # the diarize cluster the turn came from
     label: str  # `<cluster>~<slug>` when named, else the cluster itself
     key: str | None  # the name key it takes; None for the unnamed remainder
-    line_ids: list[int]  # the lines attributed to the turn that overlap this piece
+    line_ids: list[int]  # the visible lines attributed to the turn that overlap this piece
 
 
 class LabelInfo(BaseModel):
@@ -44,3 +44,5 @@ class LabelInfo(BaseModel):
     key: str | None
     display: str | None
     cls: Literal["named", "role", "remainder"]
+    slug_clash: bool = False  # the key's slug collides with another key's in this cluster, so
+    # the label carries the hashed form (`n` + 8 hex of sha256(key))
