@@ -10,9 +10,10 @@ Cues go to the translator in scene windows with the previous window's lines, the
 ``[style]`` notes and catchphrases, and the glossary. A window whose answer is malformed is
 asked once more; a second failure leaves its cues with ``error`` and no ``text`` (tts skips
 them, and the mix keeps the original vocals there). Cues that come back longer than their
-budget are asked once more, together, with 85% of the budget (a budget is what the ``[tts]``
-backend's voice says in the slot at ``max_speed``: its ``speech_cps``, else the language's
-typical rate); the shorter of the two
+budget are asked once more, together, with 85% of the budget (a budget is what the voice that
+will speak the cue says in the slot at ``max_speed``: the ``speech_cps`` of the character's
+card backend, else of ``[tts] clone_backend``, and of the ``[tts]`` backend for extras; else the
+language's typical rate); the shorter of the two
 renderings is kept, and one still long is flagged (``over_budget``, ``overrun``) and left to
 time fitting, never cut. A backend error (HTTP error, timeout) is retried once, then marks
 only that window (``error = "translate: backend: ..."``), and the stage goes on; three such
@@ -50,7 +51,13 @@ from fukikae.backends.loader import create
 from fukikae.cards.card import CardError
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config, ConfigError
-from fukikae.cues import assign_subtitle_speakers, build_asr_cues, is_marked, windows
+from fukikae.cues import (
+    assign_subtitle_speakers,
+    budget_chars,
+    build_asr_cues,
+    is_marked,
+    windows,
+)
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript
@@ -82,26 +89,41 @@ MAX_BACKEND_FAILURES = 3
 PROMPT_VERSION = 3
 
 
-def speech_cps(cfg: Config) -> float:
-    """Characters per second the target TTS backend speaks ``cfg.target_language`` at
-    (``Synthesizer.speech_cps``, ruling CD7), so a budget is what that voice can say in the
-    slot. Without a ``[tts]`` backend, or one that declares no figure for the language, the
-    language's typical rate (``cues.CPS``)."""
+def backend_cps(name: str | None, language: str) -> float:
+    """Characters per second TTS backend ``name`` speaks ``language`` at
+    (``Synthesizer.speech_cps``, ruling CD7). Without a backend, or one that declares no
+    figure for the language, the language's typical rate (``cues.CPS``)."""
     from fukikae.backends import loader
     from fukikae.cues import CPS, DEFAULT_CPS
 
-    fallback = CPS.get(cfg.target_language, DEFAULT_CPS)
-    try:
-        name = cfg.resolve("tts").backend
-    except ConfigError:
+    fallback = CPS.get(language, DEFAULT_CPS)
+    if not name:
         return fallback
     try:
         cls = loader.backend_class("tts", name)
     except (ConfigError, loader.BackendUnavailable) as e:
-        log.warning("translate: budgets use %s cps, not the tts backend's: %s", fallback, e)
+        log.warning("translate: budgets use %s cps, not %s's: %s", fallback, name, e)
         return fallback
-    figure = getattr(cls, "speech_cps", {}).get(cfg.target_language)
+    figure = getattr(cls, "speech_cps", {}).get(language)
     return float(figure) if figure else fallback
+
+
+def speech_cps(cfg: Config) -> float:
+    """The ``[tts]`` backend's rate: what extras (always stock voices) speak at."""
+    try:
+        name = cfg.resolve("tts").backend
+    except ConfigError:
+        name = None
+    return backend_cps(name, cfg.target_language)
+
+
+def unassigned_cps(cfg: Config) -> float:
+    """The rate of a recurring character with no card yet: ``[tts] clone_backend``'s, since
+    it gets a clone by default (D12), else the ``[tts]`` backend's."""
+    from fukikae.cards.auto import clone_backend
+
+    name = clone_backend(cfg)
+    return backend_cps(name, cfg.target_language) if name else speech_cps(cfg)
 
 
 class TranslateStage:
@@ -222,6 +244,36 @@ class TranslateStage:
         return out
 
     @staticmethod
+    def _rates(ep: Episode, cfg: Config, cards: dict[int, str]) -> dict[str, Any]:
+        """The speech rates budgets use (C4): ``extras`` (the ``[tts]`` backend),
+        ``unassigned`` (``unassigned_cps``) and per character the backend of its assigned card
+        (a card that can't be read counts as unassigned; tts reports it). Only rates that
+        differ from ``unassigned`` are listed, so a card whose voice speaks at the same rate
+        (the clone tts assigns by default) never re-translates."""
+        store = CardStore(ep.workspace_root)
+        unassigned = unassigned_cps(cfg)
+        per: dict[str, float] = {}
+        for cid, card in sorted(cards.items()):
+            try:
+                backend = store.get(card).voice.backend
+            except CardError:
+                continue
+            cps = backend_cps(backend, cfg.target_language)
+            if cps != unassigned:
+                per[str(cid)] = cps
+        return {"extras": speech_cps(cfg), "unassigned": unassigned, "characters": per}
+
+    @staticmethod
+    def _names(ep: Episode, characters: set[int]) -> dict[str, str]:
+        """Id -> registry name of the speaking characters: names are baked into each cue's
+        speaker and the prompt, so a rename re-translates (C3)."""
+        path = Workspace(ep.workspace_root).registry_path
+        if not characters or not path.exists():
+            return {}
+        with Registry(path) as reg:
+            return {str(c.id): c.name for c in reg.characters() if c.id in characters and c.name}
+
+    @staticmethod
     def _style_hashes(ep: Episode, cards: dict[int, str]) -> dict[int, str]:
         """Character -> sha256 of its card's [style] (catchphrases included), the only part of
         a card translate reads (ruling CD6): a voice-only change never re-translates, and a
@@ -282,7 +334,9 @@ class TranslateStage:
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:
         bc, settings = self._settings(ep, cfg)
-        styles = self._style_hashes(ep, self._cards(ep, self._speaking(ep), cfg.target_language))
+        speaking = self._speaking(ep)
+        cards = self._cards(ep, speaking, cfg.target_language)
+        styles = self._style_hashes(ep, cards)
         key: dict[str, Any] = {
             "backend": bc.backend,
             "options": bc.options,
@@ -291,7 +345,8 @@ class TranslateStage:
             "max_speed": settings["max_speed"],
             "source": settings["source"],
             "styles": {str(k): v for k, v in sorted(styles.items())},
-            "cps": settings["cps"],
+            "names": self._names(ep, speaking),
+            "cps": self._rates(ep, cfg, cards),
             "prompt_version": PROMPT_VERSION,
         }
         file, track = self._subtitles(ep, cfg, settings["source"])
@@ -403,6 +458,12 @@ class TranslateStage:
         speaking = {c.character_id for c in cues if c.character_id is not None}
         cards = self._cards(ep, speaking, target)
         styles = self._styles(ep, cards, names)
+        # C4: a character's cue is budgeted for the voice that will speak it
+        rates = self._rates(ep, cfg, cards)
+        for c in cues:
+            if c.character_id is not None:
+                cps = rates["characters"].get(str(c.character_id), rates["unassigned"])
+                c.budget = budget_chars(c.end - c.start, target, settings["max_speed"], cps)
 
         spoken = [c for c in cues if c.skip is None]
         if not subs:

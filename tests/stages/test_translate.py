@@ -304,8 +304,10 @@ def test_budget_follows_the_tts_backends_speech_rate(ep):
         source_language="ja",
         raw={"translate": {"backend": "fake", "max_speed": 1.25}, "tts": {"backend": "kokoro"}},
     )
-    assert TranslateStage().config_key(cfg, ep)["cps"] == cps
-    assert TranslateStage().config_key(CFG, ep)["cps"] == 15.0  # no [tts]: the language table
+    assert TranslateStage().config_key(cfg, ep)["cps"]["extras"] == cps
+    assert TranslateStage().config_key(cfg, ep)["cps"]["unassigned"] == cps  # no clone backend
+    no_tts = TranslateStage().config_key(CFG, ep)["cps"]
+    assert no_tts["extras"] == no_tts["unassigned"] == 15.0  # no [tts]: the language table
     TranslateStage().run(ep, cfg)
     for c in _out(ep).cues:
         assert c.budget == budget_chars(c.end - c.start, "en", 1.25, cps=cps)
@@ -664,3 +666,55 @@ def test_real_backend_errors_mark_the_window(ep, tmp_path, monkeypatch, failure)
         TranslateStage().run(ep, cfg)
     out = _out(ep).cues
     assert all(c.text is None and (c.error or "").startswith("translate: backend:") for c in out)
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_rename_reaches_the_translate_key(ep):
+    """C3: names are baked into each cue's speaker and the prompt, so they are keyed."""
+    stage = TranslateStage()
+    a = stage.config_key(CFG, ep)
+    assert a["names"] == {"1": "Natsu"}
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.rename_character(1, "Natsu Dragneel")
+    assert stage.config_key(CFG, ep)["names"] == {"1": "Natsu Dragneel"}
+
+
+def _backend_card(ep: Episode, character: int, backend: str) -> None:
+    text = CARD.format(voice="v").replace('backend = "fake"', f'backend = "{backend}"')
+    cid = CardStore(ep.workspace_root).put(parse_card(text))
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.assign_card(character, "en", cid, "assign", False)
+
+
+@pytest.mark.usefixtures("fake")
+def test_budget_per_cue_follows_the_speakers_voice(ep):
+    """C4: a cue is budgeted for the backend that will speak it: the character's card, else
+    [tts] clone_backend (a recurring character gets a clone by default), else the stage
+    backend; extras always the stage backend."""
+    from fukikae.backends.tts.indextts2 import IndexTts2Synthesizer
+    from fukikae.backends.tts.kokoro import KokoroSynthesizer
+    from fukikae.backends.tts.qwen3_tts import Qwen3TtsSynthesizer
+    from fukikae.cues import budget_chars
+
+    cfg = Config(
+        source_language="ja",
+        raw={
+            "translate": {"backend": "fake", "max_speed": 1.25},
+            "tts": {"backend": "kokoro", "clone_backend": "indextts2"},
+        },
+    )
+    _backend_card(ep, 1, "qwen3_tts")
+    key = TranslateStage().config_key(cfg, ep)
+    qwen, index = Qwen3TtsSynthesizer.speech_cps["en"], IndexTts2Synthesizer.speech_cps["en"]
+    assert key["cps"] == {
+        "extras": KokoroSynthesizer.speech_cps["en"],
+        "unassigned": index,
+        "characters": {"1": qwen},
+    }
+    TranslateStage().run(ep, cfg)
+    by_char = {c.character_id: c for c in _out(ep).cues}
+    for cid, cps in ((1, qwen), (2, index)):
+        c = by_char[cid]
+        assert c.budget == budget_chars(c.end - c.start, "en", 1.25, cps=cps)
+    _backend_card(ep, 1, "kokoro")
+    assert TranslateStage().config_key(cfg, ep)["cps"] != key["cps"]
