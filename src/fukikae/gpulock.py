@@ -6,7 +6,10 @@ worker, an eval model) holds ``gpu_lock(<nvml index>)`` for as long as the model
 ``/tmp/fukikae-<uid>`` (mode 0700): a fixed path, never ``$XDG_RUNTIME_DIR`` or ``$TMPDIR``,
 which differ between an ssh session, a systemd user unit and cron, so two runs would lock
 different files (B7). After each ``flock`` the descriptor is checked to still be the file at
-that path (a tmp cleaner may have replaced it), else the lock is taken again. A second job on
+that path, else the lock is taken again: this covers a file unlinked or replaced (by a tmp
+cleaner, say) before or while the lock is taken. A file removed after that, while the lock is
+held, is not noticed, and a later job would lock the new file beside it. The holder writes its
+pid and job into the file straight after the ``flock``, so a waiter can name it. A second job on
 the same card waits for the first (``timeout_s``: the run's ``--no-wait``/VRAM timeout,
 ``runctx``) instead of checking free memory, starting, and finding out 70 s later that both
 loaded.
@@ -20,10 +23,9 @@ itself is killed and a child outlives it.
 
 Once the lock is taken, ``leftover_jobs`` scans ``/proc`` for fukikae TTS workers and
 fukikae-started llama-servers still running on that card (by their argv array, whole arguments
-only, and the card from
-the process's ``CUDA_VISIBLE_DEVICES`` when it can be read), so a leftover from a run that died
-is named in the error. It doesn't depend on NVML, which can't see processes in another pid
-namespace; our own descendants are never leftovers.
+only, and the card from the process's ``CUDA_VISIBLE_DEVICES`` when it can be read), so a
+leftover from a run that died is named in the error. It doesn't depend on NVML, which can't
+see processes in another pid namespace; our own descendants are never leftovers.
 """
 
 from __future__ import annotations
@@ -249,6 +251,7 @@ def _open_lock(path: Path) -> int:
 def _acquire(index: int, what: str, timeout_s: float | None, poll_s: float) -> int:
     path = lock_path(index)
     fd = _open_lock(path)
+    locked = False  # whether fd holds the lock (and the file names us)
     try:
         started = time.monotonic()
         logged = False
@@ -256,6 +259,10 @@ def _acquire(index: int, what: str, timeout_s: float | None, poll_s: float) -> i
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 if _same_file(fd, path):
+                    # name the holder at once, for a waiter that reads it during the scan
+                    os.ftruncate(fd, 0)
+                    os.pwrite(fd, f"{os.getpid()} {what}\n".encode(), 0)
+                    locked = True
                     break
                 # the file was replaced while we waited or as we took it: take the new one
                 os.close(fd)
@@ -291,11 +298,12 @@ def _acquire(index: int, what: str, timeout_s: float | None, poll_s: float) -> i
                 f"GPU {index} already runs {_listed(found)}, probably left over from an earlier "
                 "run; stop it (`kill <pid>`) and run again"
             )
-        os.ftruncate(fd, 0)
-        os.pwrite(fd, f"{os.getpid()} {what}\n".encode(), 0)
         return fd
     except BaseException:
         if fd >= 0:
+            if locked:
+                with contextlib.suppress(OSError):
+                    os.ftruncate(fd, 0)  # never another holder's line: only ours
             os.close(fd)  # closing the descriptor lets go of the lock too
         raise
 
