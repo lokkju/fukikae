@@ -1039,3 +1039,13 @@ def test_an_engine_is_refused_as_the_tts_backend():
     cfg = Config(raw={"tts": {"backend": "fake_fast"}})
     with pytest.raises(ConfigError, match=r"\[tts\] engines"):
         tts.stage_settings(cfg)
+
+
+@pytest.mark.usefixtures("engine")
+def test_prepare_cue_without_a_checked_card_uses_the_engines(ep):
+    natsu, _ = _two_cards(ep)
+    store = CardStore(ep.workspace_root)
+    cue = _cue(0, 1, "hello")
+    job = tts.prepare_cue(cue, natsu, ENGINE_CFG, store, who="Natsu")
+    assert job.cls is FakeEngine and job.backend_cfg.backend == "fake_fast"
+    assert tts.prepare_cue(cue, natsu, CFG, store, who="Natsu").cls is FakeSynth
