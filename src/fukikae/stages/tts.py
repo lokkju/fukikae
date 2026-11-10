@@ -7,17 +7,20 @@ did (renders, cache hits, cards it assigned) goes to ``07-tts/run.json``, which 
 output; each automatic assignment is also appended to ``07-tts/assignments.log`` and kept as
 the history row's note.
 
-Before the stage's key is computed (``prepare``, called by the job runner) and again in
-``run``, each character with a cue to speak and no card for the target language gets
-one (``cards.auto.ensure_assignments``, ``by = "auto"``, unlocked; an existing card is never
-replaced): a clone card of ``[tts] clone_backend`` (IndexTTS2 in every profile, D24) from the
-character's reference turns in the workspace's episodes (``cards.auto.workspace_cloning``), or,
-with under 6 s of clean speech or no ``clone_backend``, a gender-matched stock voice of the
-``[tts]`` backend (the F0 estimate skips theme songs and tagged singing). Cues with no
-character (extras, and clusters the characters stage left for review) speak with a stock voice
-from the extras pools, one per label, fixed by first appearance in the episode. Every card is
-then checked (it exists, its backend can honor it at the model revision it names, its sidecars
-are present), so a broken card stops the stage, naming the character, before any model loads.
+Before the stage's key is computed (``prepare``, called by the job runner) and again in ``run``,
+each character with a cue to speak and no card for the target language gets one
+(``cards.auto.ensure_assignments``, ``by = "auto"``, unlocked; an existing card is replaced only
+when stale, below): a clone card of ``[tts] clone_backend`` (IndexTTS2 in every profile, D24)
+from the character's reference turns in the workspace's episodes
+(``cards.auto.workspace_cloning``; name-confirmed turns first when subtitle names were used, and
+an automatic clone card whose references the names now contradict is re-picked,
+``cards.auto.stale_cards``), or, with under 6 s of clean speech or no ``clone_backend``, a
+gender-matched stock voice of the ``[tts]`` backend (the F0 estimate skips theme songs and
+tagged singing). Cues with no character (extras, and clusters the characters stage left for
+review) speak with a stock voice from the extras pools, one per label, fixed by first appearance
+in the episode. Every card is then checked (it exists, its backend can honor it at the model
+revision it names, its sidecars are present), so a broken card stops the stage, naming the
+character, before any model loads.
 
 Renders are cached per cue in ``<workspace>/.fukikae/tts-cache/<key>.wav`` and hard-linked (or
 copied) into ``07-tts``. The key (``cue_key``) hashes the card id, the text, what the backend
@@ -89,10 +92,13 @@ from fukikae.backends.identity import identity_key
 from fukikae.backends.tts import worker
 from fukikae.backends.tts.remote import WorkerSynthesizer
 from fukikae.cards.auto import (
+    FALLBACK_BY,
     character_spans,
     clone_backend,
     ensure_assignments,
     extras_voices,
+    repick_blocker,
+    stale_cards,
     workspace_cloning,
 )
 from fukikae.cards.card import Card, CardError, validate_for_backend
@@ -926,7 +932,7 @@ class TtsStage:
         store = CardStore(ep.workspace_root)
         self._prepared += self._assign(
             ep, cfg, cues, store, ep.work / "01-separate" / "vocals.wav"
-        )[2]
+        )[2]  # its flags are worked out again by run(), which records them
 
     def inputs(self, ep: Episode) -> list[Path]:
         cfg = self._config(ep)
@@ -989,7 +995,9 @@ class TtsStage:
         default_bc, _ = stage_settings(cfg)
         speedup = max_speedup(cfg)
 
-        cards, names, report = self._assign(ep, cfg, cues, store, vocals)
+        cards, names, report, flags = self._assign(ep, cfg, cues, store, vocals)
+        for line in flags:
+            log.warning("tts: %s", line)
         report = self._prepared + report
         self._prepared = []
         extra_cards = self._extra_cards(cues, cfg, store, default_bc.backend)
@@ -1111,6 +1119,7 @@ class TtsStage:
                 rendered=rendered_ids,
                 cached=cached,
                 report=report,
+                flags=flags,
                 rate_estimated=rates.estimated,
                 rate_refits=rates.refits,
             ),
@@ -1145,26 +1154,41 @@ class TtsStage:
     @classmethod
     def _assign(
         cls, ep: Episode, cfg: Config, cues: list[DubCue], store: CardStore, vocals: Path
-    ) -> tuple[dict[int, str], dict[int, str], list[str]]:
-        """(character -> card id, character -> name, report lines), after giving every
-        character with a cue to speak (not all skipped or errored) and no card one. New lines
-        are appended to ``07-tts/assignments.log``."""
+    ) -> tuple[dict[int, str], dict[int, str], list[str], list[str]]:
+        """(character -> card id, character -> name, report lines, flag lines), after giving
+        every character with a cue to speak (not all skipped or errored) and no card one, and
+        re-picking stale automatic cards. The report lines are the cards assigned, appended to
+        ``07-tts/assignments.log``; the flags (curated cards the subtitle names contradict,
+        episodes skipped for stale assignments) changed nothing and go only to ``run.json``."""
         speaking = sorted(
             {c.character_id for c in cues if c.character_id is not None and cls._skipped(c) is None}
         )
         if not speaking:
-            return {}, {}, []
+            return {}, {}, [], []
         asg_path = ep.work / "05-characters" / "assignments.json"
         spans = character_spans(read_json(asg_path, Assignments)) if asg_path.exists() else {}
+        flags: list[str] = []
         with Registry(Workspace(ep.workspace_root).registry_path) as reg:
             names = {c.id: c.name for c in reg.characters() if c.name}
-            todo = [
+            current = {cid: reg.card_for(cid, cfg.target_language) for cid in speaking}
+            todo = [cid for cid, a in current.items() if a is None or a.card_id is None]
+            # stock stand-ins made while the clone backend couldn't run: replaced once it can,
+            # so they build the clone source only when cloning works now
+            fallback = [
                 cid
-                for cid in speaking
-                if (a := reg.card_for(cid, cfg.target_language)) is None or a.card_id is None
+                for cid, a in current.items()
+                if a is not None and a.chosen_by == FALLBACK_BY and not a.locked
             ]
-            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if todo else None
-            if todo:  # the gender estimate never reads a theme song or tagged singing
+            if fallback and repick_blocker(cfg) is not None:
+                fallback = []
+            # clone cards whose references the subtitle names now contradict (D29 #4)
+            stale = stale_cards(
+                Workspace(ep.workspace_root), reg, store, speaking, cfg.target_language,
+                notes=flags,
+            )  # fmt: skip
+            work = bool(todo or stale or fallback)
+            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if work else None
+            if work:  # the gender estimate never reads a theme song or tagged singing
                 exclude = _song_spans(ep, cfg)
                 spans = {
                     cid: [(s, e) for s, e in sp if not any(a < e and s < b for a, b in exclude)]
@@ -1177,6 +1201,8 @@ class TtsStage:
                 {cid: spans.get(cid, []) for cid in speaking},
                 vocals,
                 cloning=cloning,
+                stale=stale,
+                flags=flags,
             )
             cards: dict[int, str] = {}
             for cid in speaking:
@@ -1191,7 +1217,7 @@ class TtsStage:
                 for line in report:
                     log.info("tts: %s", line)
                     f.write(f"{stamp} {ep.id} {cfg.target_language}: {line}\n")
-        return cards, names, report
+        return cards, names, report, flags
 
     @staticmethod
     def _extra_cards(

@@ -301,3 +301,28 @@ def test_force_removes_stale_clips_of_other_kind(tmp_path: Path) -> None:
     assert (out / "S01E01" / "SPEAKER_00-0.mp4").is_file()
     assert r.invoke(eval_app, [*base, "--force"]).exit_code == 0
     assert not list((out / "S01E01").glob("*.mp4"))
+
+
+def test_sample_exports_the_names_stage_sub_clusters(tmp_path: Path) -> None:
+    from fukikae.names.models import NamesResult
+
+    root = _ws(tmp_path)
+    work = _make_episode(root, "S01E01")
+    (work / "04c-names").mkdir()
+    with np.load(work / "04-diarize" / "clusters.npz") as z:
+        arrays = {
+            "labels": np.array(["SPEAKER_00~lucy", "SPEAKER_01"]),
+            "SPEAKER_00~lucy/spans": z["SPEAKER_00/spans"],
+            "SPEAKER_01/spans": z["SPEAKER_01/spans"],
+        }
+    np.savez(work / "04c-names" / "clusters.npz", **arrays)
+    write_json(
+        work / "04c-names" / "names.json",
+        NamesResult(
+            episode="S01E01", used=True, verdict="full", reason=None, source=None, offset_s=0.0,
+            coverage={}, lines=[], hidden=[], pieces=[], labels={}, unvoiced=[], excluded=[],
+            dropped_row_seconds=0.0, suggestions=[],
+        ),
+    )  # fmt: skip
+    clips = sample(root, ["S01E01"], 2, tmp_path / "out")
+    assert [c.cluster for c in clips] == ["SPEAKER_00~lucy"] * 2

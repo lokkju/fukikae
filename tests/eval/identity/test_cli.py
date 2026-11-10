@@ -383,17 +383,46 @@ def test_identity_rows_tune_and_holdout(tmp_path: Path):
         "strict_fraction": 0.5, "weighted_share": 0.7, "coverage": 0.4, "verdict": "fail",
         "nc_overall": 0.8,
     }  # fmt: skip
-    assert t.detail == {"merges": [["B", "C", 3]], "nc": {"A": 1.0, "(overall)": 0.8}}
+    assert {k: v for k, v in t.detail.items() if k != "characters"} == {
+        "merges": [["B", "C", 3]], "nc": {"A": 1.0, "(overall)": 0.8},
+    }  # fmt: skip
+    # each recurring character's share on its modal id (the results docs' per-character tables)
+    assert t.detail["characters"] == [
+        {"name": c.name, "modal_id": 1, "share": c.share, "passing": c.passing}
+        for c in run.tune.characters
+        if c.recurring
+    ]
     assert h.metrics["fraction"] == 0.5 and h.metrics["nc_overall"] == 0.6
     assert h.metrics["clean"] == 1 and h.metrics["merges"] == 0
     assert "workspace" not in t.options and "tune" not in t.options
     assert "holdout" not in t.options
     assert t.options["profile"] == "live-action"
     assert t.options["profile_hash"] == options_hash(cfg.profile_raw)
+    # The diarize stage's resolved config: the live-action profile clusters at 0.5.
+    assert t.options["diarize"]["backend"] == "pyannote"
+    assert t.options["diarize"]["options"]["clustering_threshold"] == 0.5
+    assert set(t.options["diarize"]["identity"]) == {"model", "revision"}
     # Tune and holdout of one run share the options hash, so they sit in one matrix row.
     assert t.options_hash == h.options_hash
     assert identity_rows(fake_run(root, holdout=False), cfg, "bbt", None)[0].split == "tune"
     assert len(identity_rows(fake_run(root, holdout=False), cfg, "bbt", None)) == 1
+
+
+def test_identity_rows_hash_follows_the_workspace_diarize_override(tmp_path: Path):
+    from fukikae.config import load_config
+    from fukikae.eval.identity.cli import identity_rows
+
+    base = 'profile = "live-action"\nsource_language = "en"\n[series]\ntitle = "BBT"\n'
+    hashes = []
+    for name, extra in (("a", ""), ("b", "[diarize]\nclustering_threshold = 0.6\n")):
+        root = tmp_path / name
+        root.mkdir()
+        (root / "fukikae.toml").write_text(base + extra)
+        cfg = load_config(root, user_config=None)
+        (row, _) = identity_rows(fake_run(root), cfg, "bbt", None)
+        hashes.append(row.options_hash)
+        assert row.options["diarize"]["options"]["clustering_threshold"] == (0.6 if extra else 0.5)
+    assert hashes[0] != hashes[1]
 
 
 def test_identity_rows_without_nearest_centroid(tmp_path: Path):
@@ -461,3 +490,177 @@ def test_identity_cli_ledger_failure_warns_and_exits_zero(
     assert r.exit_code == 0, r.output
     assert "fraction: 0.75" in r.stdout
     assert "warning: ledger not written:" in r.stderr
+
+
+def _names_json(root: Path, ep: str, verdict: str) -> None:
+    from fukikae.names.models import NamesResult
+
+    work = root / ".fukikae" / "episodes" / ep / "04c-names"
+    work.mkdir(parents=True)
+    write_json(
+        work / "names.json",
+        NamesResult(
+            episode=ep,
+            used=verdict in ("full", "partial"),
+            verdict=verdict,  # type: ignore[arg-type]
+            reason=None,
+            source=None,
+            offset_s=0.0,
+            coverage={},
+            lines=[],
+            hidden=[],
+            pieces=[],
+            labels={},
+            unvoiced=[],
+            excluded=[],
+            dropped_row_seconds=0.0,
+            suggestions=[],
+        ),
+    )
+
+
+@pytest.mark.parametrize("verdict", ["full", "partial", "none"])
+def test_identity_refuses_a_holdout_whose_names_were_read(tmp_path: Path, verdict: str):
+    root = setup_ws(tmp_path, ["S01E01", "S01E02"])
+    _names_json(root, "S01E02", verdict)
+    r = CliRunner().invoke(
+        app,
+        ["eval", "identity", str(root), "--tune", "S01E01", "--holdout", "S01E02",
+         "--gt-file", str(tmp_path / "gt")],
+    )  # fmt: skip
+    assert r.exit_code != 0
+    read = "its subtitles (verdict none)" if verdict == "none" else "its subtitle names"
+    assert f"held-out episode S01E02 read {read}" in r.output
+
+
+@pytest.mark.parametrize("verdict", ["holdout", "off"])
+def test_check_held_out_accepts_unread_names(tmp_path: Path, verdict: str):
+    from fukikae.names.inputs import check_held_out
+
+    root = setup_ws(tmp_path, ["S01E02"])
+    _names_json(root, "S01E02", verdict)
+    check_held_out(root / ".fukikae" / "episodes" / "S01E02", "S01E02")
+    check_held_out(root / ".fukikae" / "episodes" / "S01E09", "S01E09")  # no names.json
+
+
+def test_from_assignments_scores_sub_cluster_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """S01E02's assignments label the names stage's sub-cluster SPEAKER_00~lucy: the harness
+    segments the turns the assignments recorded, so its speech is scored, not left unassigned."""
+    from fukikae.artifacts import read_json
+    from fukikae.eval.identity import cache as mod
+    from fukikae.models import Assignments
+
+    root = setup_ws(tmp_path, ["S01E01", "S01E02"])
+    monkeypatch.setattr(mod, "ResidentEmbedder", FakeResident)
+    write_assignments(root, "S01E01", {"SPEAKER_00": 1, "SPEAKER_01": 2})
+    write_assignments(root, "S01E02", {"SPEAKER_00~lucy": 1, "SPEAKER_01": 2})
+    work = root / ".fukikae" / "episodes" / "S01E02"
+    turns = read_json(work / "04-diarize" / "turns.json", Diarization).turns
+    path = work / "05-characters" / "assignments.json"
+    a = read_json(path, Assignments)
+    sub = [
+        t.model_copy(update={"speaker": "SPEAKER_00~lucy"}) if t.speaker == "SPEAKER_00" else t
+        for t in turns
+    ]
+    write_json(path, a.model_copy(update={"turns": sub}))
+    out = tmp_path / "r.json"
+    r = CliRunner().invoke(
+        app,
+        ["eval", "identity", str(root), "--tune", "S01E01,S01E02", "--gt-file",
+         str(tmp_path / "gt"), "--from-assignments", "--json", str(out)],
+    )  # fmt: skip
+    assert r.exit_code == 0, r.output
+    score = json.loads(out.read_text())["tune"]["score"]
+    assert score["verdict"] == "pass" and score["merges"] == []
+
+
+def test_identity_refuses_a_holdout_whose_assignments_read_names(tmp_path: Path):
+    """The reviewer's reproduction: names.json says holdout, but the assignments graded come
+    from a characters run that read the names (a sub-cluster with a key)."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments
+
+    root = setup_ws(tmp_path, ["S01E01", "S01E02"])
+    write_assignments(root, "S01E01", {"SPEAKER_00": 1, "SPEAKER_01": 2})
+    write_assignments(root, "S01E02", {"SPEAKER_00~lucy": 1, "SPEAKER_01": 2})
+    path = root / ".fukikae" / "episodes" / "S01E02" / "05-characters" / "assignments.json"
+    asg = read_json(path, Assignments)
+    asg.clusters[0] = asg.clusters[0].model_copy(update={"name": "lucy", "source": "name"})
+    write_json(path, asg)
+    _names_json(root, "S01E02", "holdout")
+    r = CliRunner().invoke(
+        app,
+        ["eval", "identity", str(root), "--tune", "S01E01", "--holdout", "S01E02",
+         "--from-assignments", "--gt-file", str(tmp_path / "gt"), "--no-ledger"],
+    )  # fmt: skip
+    assert r.exit_code != 0
+    assert "held-out episode S01E02's assignments hold name decisions" in r.output
+
+
+def test_identity_ceiling_scores_a_names_read_episode_without_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """B2: S01E02 read its names (verdict full), so --holdout refuses it; --ceiling scores it
+    the same way, against the tuning episodes' registry and ids, in a ledger row with split
+    ceiling, labelled in its detail and in the printed title."""
+    from fukikae.eval.identity import cache as mod
+
+    root = setup_ws(tmp_path, ["S01E01", "S01E02", "S01E03"])
+    monkeypatch.setattr(mod, "ResidentEmbedder", FakeResident)
+    for ep in ("S01E01", "S01E02", "S01E03"):
+        write_assignments(root, ep, {"SPEAKER_00": 1, "SPEAKER_01": 2})
+    for ep in ("S01E02", "S01E03"):
+        _names_json(root, ep, "full")
+        work = root / ".fukikae" / "episodes" / ep
+        (work / "04c-names" / "turns.json").write_bytes(
+            (work / "04-diarize" / "turns.json").read_bytes()
+        )
+    base = ["eval", "identity", str(root), "--tune", "S01E01", "--gt-file", str(tmp_path / "gt"),
+            "--from-assignments"]  # fmt: skip
+    r = CliRunner().invoke(app, [*base, "--holdout", "S01E02", "--no-ledger"])
+    assert r.exit_code != 0 and "read its subtitle names" in r.output
+    ledger = tmp_path / "results.jsonl"
+    out = tmp_path / "r.json"
+    r = CliRunner().invoke(
+        app, [*base, "--ceiling", "S01E02,S01E03", "--ledger", str(ledger), "--json", str(out)]
+    )
+    assert r.exit_code == 0, r.output
+    assert "ceiling: S01E02 (graded on its own names" in r.output
+    rows = [json.loads(x) for x in ledger.read_text().splitlines()]
+    assert [(x["split"], x["episodes"], x["detail"].get("ceiling")) for x in rows] == [
+        ("tune", ["S01E01"], None), ("ceiling", ["S01E02"], True), ("ceiling", ["S01E03"], True)
+    ]  # fmt: skip
+    assert rows[1]["options"] == rows[0]["options"]  # one matrix configuration
+    got = json.loads(out.read_text())["ceiling"]
+    assert [c["episode"] for c in got] == ["S01E02", "S01E03"]
+    assert got[0]["score"]["verdict"] == "pass"
+
+
+def test_identity_ceiling_episodes_resolve_against_tune_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """With a matcher, each ceiling episode is resolved against the registry the tuning
+    episodes built, never against an earlier ceiling episode."""
+    from fukikae.eval.identity import cache as mod
+
+    root = setup_ws(tmp_path, ["S01E01", "S01E02", "S01E03"])
+    monkeypatch.setattr(mod, "ResidentEmbedder", FakeResident)
+    from fukikae.eval.identity import simulate as sim
+
+    seen: list[tuple[list[str], object]] = []
+    orig = sim.simulate
+
+    def spy(order, matcher, segs, embs, state=None):
+        seen.append((list(order), state))
+        return orig(order, matcher, segs, embs, state=state)
+
+    monkeypatch.setattr(sim, "simulate", spy)
+    r = CliRunner().invoke(app, ["eval", "identity", str(root), "--tune", "S01E01", "--ceiling",
+                                 "S01E02,S01E03", "--gt-file", str(tmp_path / "gt"),
+                                 "--no-ledger"])  # fmt: skip
+    assert r.exit_code == 0, r.output
+    assert [o for o, _ in seen] == [["S01E01"], ["S01E02"], ["S01E03"]]
+    tune_state, one, two = (st for _, st in seen)
+    assert len({id(tune_state), id(one), id(two)}) == 3  # a copy of the tune state each

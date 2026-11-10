@@ -12,6 +12,7 @@ import yaml
 from fukikae.artifacts import atomic_path, read_json
 from fukikae.media import run_ffmpeg
 from fukikae.models import Assignments
+from fukikae.names.inputs import identity_inputs
 from fukikae.workspace import Workspace, episode_id
 
 MAX_CLIP_SECONDS = 8.0
@@ -132,7 +133,7 @@ def sample(
     for ref in episodes:
         eid = episode_id(Path(ref))
         work = ws.work_dir(eid)
-        npz = work / "04-diarize" / "clusters.npz"
+        npz = identity_inputs(work)[1]  # the names stage's sub-clusters when names were used
         if not npz.is_file():
             raise FileNotFoundError(f"{eid}: no diarization at {npz}")
         pcm = _read_wav(work / "01-separate" / "vocals_16k.wav")

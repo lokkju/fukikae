@@ -34,6 +34,7 @@ from fukikae.eval.groundtruth.colour import Anonymous, has_colour, workspace_col
 from fukikae.eval.speakers import LabeledClip, label_key, write_labels
 from fukikae.media import MediaError, ProbeResult, SubTrack, _norm_lang, probe, run_ffmpeg
 from fukikae.models import Diarization, Turn
+from fukikae.names.inputs import identity_inputs
 from fukikae.workspace import Episode, Workspace
 
 __all__ = [
@@ -176,12 +177,13 @@ def gt_path_for(gt_file: Path, ep_id: str, n_episodes: int) -> Path:
 
 
 def speech_turns(work: Path) -> list[Turn]:
-    """The diarizer's turns, else the cluster spans."""
-    d = work / "04-diarize"
-    if (d / "turns.json").is_file():
-        return read_json(d / "turns.json", Diarization).turns
+    """The identity turns (`identity_inputs`: the names stage's when names were used, else the
+    diarizer's), else the identity clusters' spans."""
+    turns_path, npz, _ = identity_inputs(work)
+    if turns_path.is_file():
+        return read_json(turns_path, Diarization).turns
     out: list[Turn] = []
-    with np.load(d / "clusters.npz") as z:
+    with np.load(npz) as z:
         for cluster in [str(x) for x in z["labels"]]:
             for a, b in np.asarray(z[f"{cluster}/spans"]).reshape(-1, 2):
                 out.append(Turn(start=float(a), end=float(b), speaker=cluster))
@@ -278,7 +280,7 @@ def auto_label(
     aligned: list[tuple[str, AlignmentReport, bool]] = []
     for ref in episodes:
         ep = ws.find_episode(ref)
-        npz = ep.work / "04-diarize" / "clusters.npz"
+        npz = identity_inputs(ep.work)[1]  # the names stage's sub-clusters when names were used
         if not npz.is_file():
             raise FileNotFoundError(f"{ep.id}: no diarization at {npz}")
         if gt_file is not None:

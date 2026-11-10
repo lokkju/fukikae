@@ -19,11 +19,23 @@ HEADLINE = {
     "identity": "fraction",
     "embedder": "nc_overall",
     "tts": "speaker_similarity",
+    "names": "cue_accuracy",
 }
 MISSING = "-"
 # Shares in [0, 1] shown to two places, as `eval identity` prints them; others to four
 # significant digits (a CER of 0.1234 keeps its digits).
-_SHARES = frozenset({"fraction", "strict_fraction", "weighted_share", "coverage", "nc_overall"})
+_SHARES = frozenset(
+    {
+        "fraction",
+        "strict_fraction",
+        "weighted_share",
+        "coverage",
+        "nc_overall",
+        "cue_accuracy",
+        "reference_purity",
+        "hidden_accuracy",
+    }
+)
 
 
 @dataclass(frozen=True)
