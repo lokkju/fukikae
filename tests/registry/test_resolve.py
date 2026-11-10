@@ -609,3 +609,50 @@ def test_a_rowless_remainder_takes_its_parent_clusters_match_in_resolve(tmp_path
     rem = by_cluster(ws, "S01E02")[0]["SPEAKER_07"]
     want = anchor.character_id if status == "matched" else None
     assert (rem.status, rem.character_id, rem.source) == (status, want, "voice")
+
+
+def _remainder_after_named(tmp_path, *, earlier: bool):
+    """S01E01's SPEAKER_01 is 25 s named NATSU in voice B and a rowless 5 s remainder. With
+    ``earlier``, S01E00 created Natsu from voice D (cosine 0.5 to B) and both episodes are
+    resolved; otherwise Natsu is created in S01E01 itself. The stage and resolve decide the
+    remainder by the parent's pooled rows against the actors stored before this run's named
+    rows, so both leave it extra."""
+    import math
+
+    from fukikae.registry.resolve import resolve_episodes
+    from tests.stages.test_characters import NAMES_CFG, write_names
+
+    d = unit([math.sqrt(0.75), 0.5, 0])
+    ws = make_ws(tmp_path, season={})
+    eps = []
+    if earlier:
+        e0 = add_episode(ws, "S01E00", {"SPEAKER_00": (noisy(d, seed=1), 30.0)})
+        write_names(
+            e0, {"SPEAKER_00~natsu": ("SPEAKER_00", "natsu", "named", noisy(d, seed=1), [(0, 30)])}
+        )
+        CharactersStage().run(e0, NAMES_CFG)
+        eps.append(e0)
+    e1 = add_episode(ws, "S01E01", {"SPEAKER_01": (noisy(B, seed=2), 30.0)})
+    write_names(
+        e1,
+        {
+            "SPEAKER_01~natsu": ("SPEAKER_01", "natsu", "named", noisy(B, seed=2), [(0, 25)]),
+            "SPEAKER_01": ("SPEAKER_01", None, "remainder", [], [(25, 30)]),
+        },
+    )
+    CharactersStage().run(e1, NAMES_CFG)
+    eps.append(e1)
+    stage = {k: (v.status, v.source) for k, v in by_cluster(ws, "S01E01")[0].items()}
+    resolve_episodes(ws, eps, threshold=0.6)
+    res = {k: (v.status, v.source) for k, v in by_cluster(ws, "S01E01")[0].items()}
+    return stage, res
+
+
+@pytest.mark.parametrize("earlier", [True, False])
+def test_a_rowless_remainder_never_matches_this_runs_named_rows(tmp_path, earlier):
+    """Task 8 review: resolve's parent match scores against stored exemplars and centroids
+    only, as the stage does, so a remainder doesn't join the character its own sibling's
+    named rows just seeded."""
+    stage, res = _remainder_after_named(tmp_path, earlier=earlier)
+    assert stage["SPEAKER_01"] == ("extra", "voice")
+    assert res == stage

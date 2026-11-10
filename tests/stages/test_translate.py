@@ -841,4 +841,36 @@ def test_translate_key_changes_when_names_json_changes(ep):
     assert named["cue_names"] == {"map": {"natsu": [1, None]}, "hidden": [], "offset_s": 0.0}
     assert {k: v for k, v in named.items() if k != "cue_names"} == plain
     _names_used(ep, hidden=[1])
-    assert stage.config_key(SUBS, ep)["cue_names"]["hidden"] == [[3.0, 4.0]]
+    assert stage.config_key(SUBS, ep)["cue_names"]["hidden"] == [[3.0, 4.0, "natsu"]]
+
+
+def test_names_json_is_no_input_on_the_asr_path(ep):
+    """Task 8 review: only the subtitle path reads names.json, so an ASR-path workspace with
+    names doesn't re-translate when its names change."""
+    asr = Config(source_language="ja", raw={"translate": {"backend": "fake", "source": "asr"}})
+    stage = TranslateStage(cfg=asr)
+    _names_used(ep)
+    assert names_path(ep.work) not in stage.inputs(ep)
+    assert "cue_names" not in stage.config_key(asr, ep)
+
+
+def test_same_track_file_and_track_branches(tmp_path):
+    from fukikae import media
+    from fukikae.stages.translate import _same_track
+
+    f = tmp_path / "a.en.ass"
+    f.write_text("")
+    other = tmp_path / "b.en.ass"
+    other.write_text("")
+    track = media.SubTrack(index=3, codec="ass", language="eng", title=None, forced=False)
+    assert _same_track({"how": "file", "file": str(f)}, f, None)
+    assert not _same_track({"how": "file", "file": str(f)}, other, None)
+    assert not _same_track({"how": "file", "file": str(f)}, None, track)
+    assert not _same_track({"how": "file", "file": None}, f, None)
+    assert _same_track({"how": "track", "track": 3}, None, track)
+    assert not _same_track({"how": "track", "track": 4}, None, track)
+    assert not _same_track({"how": "track", "track": 3}, f, track)
+    assert not _same_track({"how": "track", "track": 3}, None, None)
+    assert _same_track({"how": "target"}, None, None)
+    assert not _same_track({"how": "other-language"}, f, None)
+    assert not _same_track(None, f, None)
