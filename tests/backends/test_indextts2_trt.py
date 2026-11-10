@@ -182,6 +182,8 @@ def test_command_runs_the_worker_in_an_isolated_container(tmp_path):
     s.gpu_index = 0
     s._cwd = tmp_path / "stage"
     cmd = s.command()
+    s.gpu_index = 3
+    assert f"-e {gpulock.GPU_INDEX_ENV}=3" in " ".join(s.command())
     assert cmd[:4] == [str(FAKE_DOCKER), "run", "-i", "--rm"]
     joined = " ".join(cmd)
     assert "--gpus device=0" in joined and "--network none" in joined
@@ -191,6 +193,8 @@ def test_command_runs_the_worker_in_an_isolated_container(tmp_path):
     assert f"-v {s.checkout() / 'src'}:/fukikae/src:ro" in joined
     for k in ("HF_HUB_OFFLINE=1", "HF_HUB_DISABLE_TELEMETRY=1", "DO_NOT_TRACK=1"):
         assert f"-e {k}" in joined
+    # the host's card, for other cards' leftover scans (the worker itself sees device 0)
+    assert f"-e {gpulock.GPU_INDEX_ENV}=0" in joined
     # python as the entrypoint: the CUDA image's own prints a banner on stdout
     assert cmd[-6:] == ["--entrypoint", "python", s.image(), "-m", remote.WORKER_MODULE,
                         "indextts2_trt"]  # fmt: skip

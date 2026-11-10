@@ -23,7 +23,8 @@ itself is killed and a child outlives it.
 
 Once the lock is taken, ``leftover_jobs`` scans ``/proc`` for fukikae TTS workers and
 fukikae-started llama-servers still running on that card (by their argv array, whole arguments
-only, and the card from the process's ``CUDA_VISIBLE_DEVICES`` when it can be read), so a
+only, and the card from the process's ``FUKIKAE_GPU_INDEX``, which a containerised worker
+gets, else its ``CUDA_VISIBLE_DEVICES``, when it can be read), so a
 leftover from a run that died is named in the error. It doesn't depend on NVML, which can't
 see processes in another pid namespace; our own descendants are never leftovers.
 """
@@ -48,6 +49,8 @@ LOCK_ROOT = Path("/tmp")  # noqa: S108 - a fixed, per-user subdirectory, checked
 WORKER_MARK = "fukikae.backends.tts.worker"
 LLAMA_MARK = "fukikae-llama-key-"  # the per-run API key file llama_server passes
 POLL_S = 2.0
+# The host card a containerised worker runs on (its own view is always device 0).
+GPU_INDEX_ENV = "FUKIKAE_GPU_INDEX"
 
 
 class GpuBusy(RuntimeError):  # noqa: N818 - reads as the state, like VramTimeout
@@ -138,15 +141,22 @@ def _read_environ(pid: int) -> list[bytes]:
 
 
 def _cuda_devices(pid: int) -> tuple[bool, str | None]:
-    """(readable, CUDA_VISIBLE_DEVICES): ``(True, None)`` when the variable is unset (every
-    card is visible), ``(False, None)`` when the environment can't be read."""
+    """(readable, the host cards it can use): ``FUKIKAE_GPU_INDEX`` when set (a worker in a
+    container, which sees its one card as device 0 and has no CUDA_VISIBLE_DEVICES), else
+    CUDA_VISIBLE_DEVICES; ``(True, None)`` when neither is set (every card is visible),
+    ``(False, None)`` when the environment can't be read."""
     try:
         env = _read_environ(pid)
     except OSError:
         return False, None
+    found: dict[bytes, str] = {}
     for item in env:
-        if item.startswith(b"CUDA_VISIBLE_DEVICES="):
-            return True, item.partition(b"=")[2].decode("utf-8", errors="replace")
+        key, sep, value = item.partition(b"=")
+        if sep and key in (GPU_INDEX_ENV.encode(), b"CUDA_VISIBLE_DEVICES"):
+            found[key] = value.decode("utf-8", errors="replace")
+    for key in (GPU_INDEX_ENV.encode(), b"CUDA_VISIBLE_DEVICES"):
+        if key in found:
+            return True, found[key]
     return True, None
 
 

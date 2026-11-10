@@ -353,3 +353,15 @@ def test_unreadable_environs_are_warned_about_once_per_scan(monkeypatch, caplog)
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert "101" in warnings[0].getMessage() and "102" in warnings[0].getMessage()
+
+
+def test_fukikae_gpu_index_names_the_card_before_cuda_visible_devices(monkeypatch):
+    """A worker in a container (indextts2_trt) sees its one card as device 0 and has no
+    CUDA_VISIBLE_DEVICES at all; FUKIKAE_GPU_INDEX names the host's card for it."""
+    monkeypatch.setattr(gpulock, "_read_environ", lambda _pid: [b"FUKIKAE_GPU_INDEX=1"])
+    assert gpulock._on_card(4242, 1) is True and gpulock._on_card(4242, 0) is False
+    both = [b"CUDA_VISIBLE_DEVICES=0", b"FUKIKAE_GPU_INDEX=2"]
+    monkeypatch.setattr(gpulock, "_read_environ", lambda _pid: both)
+    assert gpulock._on_card(4242, 2) is True and gpulock._on_card(4242, 0) is False
+    monkeypatch.setattr(gpulock, "_read_environ", lambda _pid: [b"FUKIKAE_GPU_INDEX=x"])
+    assert gpulock._on_card(4242, 0) is True  # unreadable value: on every card, as before
