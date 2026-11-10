@@ -41,6 +41,7 @@ from fukikae.backends.loader import BackendUnavailable
 from fukikae.backends.tts import impl_indextts2_trt as _impl
 from fukikae.backends.tts.indextts2 import IndexTts2Synthesizer
 from fukikae.backends.tts.remote import WORKER_MODULE, nvml_index
+from fukikae.gpulock import GPU_INDEX_ENV
 from fukikae.privacy import TELEMETRY_OFF
 
 if TYPE_CHECKING:
@@ -204,6 +205,9 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
             "PYTHONUNBUFFERED": "1",
             "PYTHONNOUSERSITE": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
+            # the host's card: the worker sees it as device 0 and carries no
+            # CUDA_VISIBLE_DEVICES, so other cards' leftover scans read this instead
+            GPU_INDEX_ENV: str(self.gpu_index),
         }
         values.update({k: os.environ[k] for k in sorted(CONTAINER_PASS) if k in os.environ})
         out: list[str] = []
