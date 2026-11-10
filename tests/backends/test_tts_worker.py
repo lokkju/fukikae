@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -640,6 +641,56 @@ def test_the_worker_runs_in_its_own_session_and_its_group_is_killed(monkeypatch,
     while _alive(grandchild) and time.monotonic() < deadline:
         time.sleep(0.05)
     assert not _alive(grandchild)
+
+
+def test_a_worker_that_exited_on_its_own_still_has_its_group_killed(monkeypatch, tmp_path):
+    """B9: a worker that exits by itself (here before its hello) may leave children in its
+    group; the group is killed anyway, before the worker is reaped."""
+    child_pid = tmp_path / "child.pid"
+    script = (
+        "import subprocess as s; p = s.Popen(['sleep', '60'], stdin=s.DEVNULL, stdout=s.DEVNULL, "
+        "stderr=s.DEVNULL); "
+        f"open({str(child_pid)!r}, 'w').write(str(p.pid))"
+    )
+    monkeypatch.setattr(ScriptWorker, "SCRIPT", script)
+    w = ScriptWorker({}, "cpu")
+    with pytest.raises(BackendError, match="exited with status 0"):
+        w.load()
+    grandchild = int(child_pid.read_text())
+    deadline = time.monotonic() + 5
+    while _alive(grandchild) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(grandchild)
+
+
+@pytest.mark.parametrize("exited", [False, True])
+def test_reap_signals_the_group_while_the_leader_is_unreaped(monkeypatch, exited):
+    """The group id is the leader's pid, which the kernel may hand out again once the leader
+    is reaped; so SIGTERM and SIGKILL go to the group first, and only then the wait."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time, sys; time.sleep(0 if sys.argv[1] == '1' else 60)",
+         "1" if exited else "0"],
+        start_new_session=True,
+    )  # fmt: skip
+    if exited:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not os.waitid(
+            os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+        ):
+            time.sleep(0.02)
+    calls: list[tuple[int, bool]] = []
+    real = os.killpg
+
+    def killpg(pgid, sig):
+        calls.append((sig, os.path.exists(f"/proc/{proc.pid}")))
+        real(pgid, sig)
+
+    monkeypatch.setattr(remote.os, "killpg", killpg)
+    monkeypatch.setattr(remote, "KILL_WAIT_S", 2.0)
+    remote._reap(proc)
+    assert calls == [(signal.SIGTERM, True), (signal.SIGKILL, True)]
+    assert proc.returncode is not None
+    assert not os.path.exists(f"/proc/{proc.pid}") or not _alive(proc.pid)
 
 
 def test_a_worker_in_its_own_session():
