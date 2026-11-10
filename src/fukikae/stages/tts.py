@@ -875,7 +875,15 @@ class TtsStage:
             "backend": bc.backend,
             "clone_backend": clone_backend(cfg),
             "options": bc.options,
-            "identity": {b: identity_key("tts", backend_config(cfg, b)) for b in sorted(backends)},
+            # per backend in use: its resolved options ([tts.<backend>] included, so flipping
+            # tf32, fp16 or a mode re-renders) and its model identity
+            "identity": {
+                b: {
+                    "options": backend_config(cfg, b).options,
+                    "identity": identity_key("tts", backend_config(cfg, b)),
+                }
+                for b in sorted(backends)
+            },
             "max_speedup": max_speedup(cfg),
             "cards": {str(k): v for k, v in sorted(cards.items())},
             "extras": extras_voices(cues, cfg) if cues else {},
