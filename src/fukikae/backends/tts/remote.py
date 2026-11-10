@@ -398,9 +398,14 @@ class WorkerSynthesizer(Synthesizer):
         }
 
     @classmethod
-    def setup(cls, *, fetch: bool = True, run: Callable[..., Any] = subprocess.run) -> None:
+    def setup(
+        cls, *, fetch: bool = True, force: bool = False, run: Callable[..., Any] = subprocess.run
+    ) -> None:
         """Set the worker environment up: ``uv sync --locked`` into ``.venvs/<extra>``, record
-        the lock's hash, then (``fetch``) run the worker's ``--fetch`` step online."""
+        the lock's hash, then (``fetch``) run the worker's ``--fetch`` step online. ``force``
+        changes nothing here (the sync is idempotent); a subclass with a costly step it
+        would skip (indextts2_trt's engine build) honours it."""
+        del force
         inst = cls({}, "cpu")
         env = cls.sync_env()
         env["UV_PROJECT_ENVIRONMENT"] = str(inst.venv())
