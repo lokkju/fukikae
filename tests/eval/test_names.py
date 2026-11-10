@@ -207,3 +207,20 @@ def test_the_ledger_takes_names_rows_and_the_hidden_split():
 
     assert "names" in STAGES and "hidden" in SPLITS
     assert STAGES[:4] == ("asr", "identity", "embedder", "tts")  # GT2: added, none changed
+
+
+def test_a_held_out_episode_with_names_built_assignments_is_refused(tmp_path: Path):
+    """The reviewer's reproduction: S01E14 ran with names, then its names.json was rewritten
+    to verdict holdout; the assignments still hold its name decisions."""
+    from fukikae.names.inputs import HeldOutNamesError
+
+    root, gt = _ws(tmp_path)
+    work = Workspace(root).work_dir("S01E14")
+    from fukikae.models import Assignments
+
+    path = work / "05-characters" / "assignments.json"
+    asg = read_json(path, Assignments)
+    asg.clusters[0] = asg.clusters[0].model_copy(update={"name": "natsu", "source": "name"})
+    write_json(path, asg)
+    with pytest.raises(HeldOutNamesError, match="S01E14's assignments hold name decisions"):
+        names_eval(root, ["S01E12"], "S01E14", gt_file=gt)

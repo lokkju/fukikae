@@ -544,3 +544,26 @@ def test_from_assignments_scores_sub_cluster_labels(
     assert r.exit_code == 0, r.output
     score = json.loads(out.read_text())["tune"]["score"]
     assert score["verdict"] == "pass" and score["merges"] == []
+
+
+def test_identity_refuses_a_holdout_whose_assignments_read_names(tmp_path: Path):
+    """The reviewer's reproduction: names.json says holdout, but the assignments graded come
+    from a characters run that read the names (a sub-cluster with a key)."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments
+
+    root = setup_ws(tmp_path, ["S01E01", "S01E02"])
+    write_assignments(root, "S01E01", {"SPEAKER_00": 1, "SPEAKER_01": 2})
+    write_assignments(root, "S01E02", {"SPEAKER_00~lucy": 1, "SPEAKER_01": 2})
+    path = root / ".fukikae" / "episodes" / "S01E02" / "05-characters" / "assignments.json"
+    asg = read_json(path, Assignments)
+    asg.clusters[0] = asg.clusters[0].model_copy(update={"name": "lucy", "source": "name"})
+    write_json(path, asg)
+    _names_json(root, "S01E02", "holdout")
+    r = CliRunner().invoke(
+        app,
+        ["eval", "identity", str(root), "--tune", "S01E01", "--holdout", "S01E02",
+         "--from-assignments", "--gt-file", str(tmp_path / "gt"), "--no-ledger"],
+    )  # fmt: skip
+    assert r.exit_code != 0
+    assert "held-out episode S01E02's assignments hold name decisions" in r.output
