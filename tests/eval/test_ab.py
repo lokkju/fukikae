@@ -185,9 +185,33 @@ def test_key_maps_labels_back_and_is_never_linked(pack):
     assert sorted(key["scene"]["scene01"]["labels"].values()) == sorted(CANDS[:4])
     html = (pack / "index.html").read_text()
     assert "key.toml" not in html
-    # the same seed gives the same key
-    again = ab.blind_order(CANDS, seed=11, slot="cue01")
+    # B14: the blinding seed is drawn fresh and only key.toml has it
+    again = ab.blind_order(CANDS, seed=key["blind_seed"], slot="cue01")
     assert labels == again
+
+
+@pytest.mark.ffmpeg
+def test_the_blinding_seed_is_secret_and_only_in_the_key(tmp_path, monkeypatch):
+    """B14: the spec's seed (visible to the listener) picks the cues; the blinding is
+    shuffled by a seed from `secrets`, recorded in key.toml alone."""
+    import secrets
+
+    drawn: list[int] = []
+
+    def randbits(k: int) -> int:
+        drawn.append(k)
+        return 123456789
+
+    monkeypatch.setattr(secrets, "randbits", randbits)
+    cues, scenes = _materials(tmp_path)
+    out = tmp_path / "pack"
+    ab.write_pack(out, seed=11, cues=cues, scenes=scenes)
+    assert drawn and drawn[0] >= 64
+    key = tomllib.loads((out / "key.toml").read_text())
+    assert key["blind_seed"] == 123456789 and key["seed"] == 11
+    assert key["cue"]["cue01"]["labels"] == ab.blind_order(CANDS, seed=123456789, slot="cue01")
+    for name in ("index.html", "README.txt", "verdict.toml"):
+        assert "123456789" not in (out / name).read_text()
 
 
 @pytest.mark.ffmpeg
