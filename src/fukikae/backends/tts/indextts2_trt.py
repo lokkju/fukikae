@@ -50,6 +50,7 @@ from fukikae.backends.loader import BackendUnavailable
 from fukikae.backends.tts import impl_indextts2_trt as _impl
 from fukikae.backends.tts.indextts2 import IndexTts2Synthesizer
 from fukikae.backends.tts.remote import FETCH_NET, WORKER_MODULE, BackendError, nvml_index
+from fukikae.config import ConfigError
 from fukikae.gpulock import GPU_INDEX_ENV
 from fukikae.privacy import TELEMETRY_OFF
 
@@ -95,13 +96,16 @@ def _cache_home() -> Path:
 
 
 class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
-    """IndexTTS2 cards rendered through TensorRT (fp16 engines, batch 1)."""
+    """IndexTTS2 cards rendered through TensorRT (fp16 engines unless ``fp32`` names some,
+    batch 1)."""
 
     name: ClassVar[str] = "indextts2_trt"
     extra: ClassVar[str] = "indextts2_trt"
     card_backend: ClassVar[str] = "indextts2"
     devices: ClassVar[frozenset[str]] = frozenset({"cuda"})
-    option_keys: ClassVar[frozenset[str]] = frozenset()
+    # fp32: the plain TensorRT engines to build without fp16 (D30); each set has its own
+    # engines directory and identity, so fp16 and fp32 renders never share a cache key
+    option_keys: ClassVar[frozenset[str]] = frozenset({"fp32"})
     # nvidia-smi peak on GPU 0 during the 40-cue E14 run, 15438 MiB with the CUDA context
     # (TensorRT-LLM reserves its KV cache up front), plus a margin (results, "D28 lever 2").
     vram_mb: ClassVar[int] = 16500
@@ -113,6 +117,10 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
 
     def __init__(self, options: dict[str, Any], device: str) -> None:
         super().__init__(options, device)
+        problem = _impl.fp32_problem(self.options.get("fp32", []))
+        if problem:
+            raise ConfigError(f"[tts.{self.name}] {problem}")
+        self.fp32: tuple[str, ...] = _impl.normalize_fp32(self.options.get("fp32", []))
         self._container: str | None = None
         self._staged: dict[str, Path] = {}
         self._serial = 0
@@ -134,8 +142,18 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
     def image(self) -> str:
         return f"{IMAGE}:{self.project_digest()}"
 
+    def variant(self) -> str:
+        """``fp32-<8 hex of the sorted fp32 names>``, or "" for the default all-fp16 set."""
+        if not self.fp32:
+            return ""
+        return "fp32-" + hashlib.sha256(",".join(self.fp32).encode()).hexdigest()[:8]
+
     def engine_dir(self) -> Path:
-        return _cache_home() / "fukikae" / self.name / str(self.project_digest())
+        """``<project digest>`` for the default set, ``<project digest>-<variant>`` for one
+        with fp32 engines: the sets live side by side."""
+        name = str(self.project_digest())
+        variant = self.variant()
+        return _cache_home() / "fukikae" / self.name / (f"{name}-{variant}" if variant else name)
 
     def manifest(self) -> dict[str, Any] | None:
         path = self.engine_dir() / _impl.MANIFEST
@@ -144,11 +162,14 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
         return json.loads(path.read_text())
 
     def lock_revision(self) -> str | None:
-        """The project digest and the engines' build id, for the cache keys' identity: a
-        rebuilt image or rebuilt engines can change the audio."""
+        """The project digest, the variant (fp32 engines) and the engines' build id, for the
+        cache keys' identity: a rebuilt image, another precision or rebuilt engines can change
+        the audio."""
         digest = self.project_digest()
         if digest is None:
             return None
+        if self.variant():
+            digest = f"{digest}-{self.variant()}"
         manifest = self.manifest()
         return f"{digest}-{manifest['build_id']}" if manifest else digest
 
@@ -226,6 +247,12 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
         manifest = self.manifest()
         if manifest is None:
             return f"no TensorRT engines at {self.engine_dir()}"
+        built = tuple(manifest.get("fp32", []))
+        if built != self.fp32:
+            return (
+                f"the engines at {self.engine_dir()} have fp32 {list(built)}, and "
+                f"[tts.{self.name}] asks for fp32 {list(self.fp32)}"
+            )
         if self.device.startswith("cuda"):
             have = self.gpu_compute_capability(nvml_index(self.device))
             built = manifest.get("compute_capability")
@@ -505,23 +532,35 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
                 )
 
     def engines_current(self, gpu: int) -> bool:
-        """Engines for this project digest exist, built for this GPU's compute capability."""
+        """Engines for this project digest and fp32 set exist, built for this GPU's compute
+        capability."""
         manifest = self.manifest()
         have = self.gpu_compute_capability(gpu)
-        return bool(manifest and have and manifest.get("compute_capability") == have)
+        return bool(
+            manifest
+            and have
+            and manifest.get("compute_capability") == have
+            and tuple(manifest.get("fp32", [])) == self.fp32
+        )
 
     @classmethod
     def setup(
-        cls, *, fetch: bool = True, force: bool = False, run: Callable[..., Any] = subprocess.run
+        cls,
+        *,
+        fetch: bool = True,
+        force: bool = False,
+        run: Callable[..., Any] = subprocess.run,
+        options: dict[str, Any] | None = None,
     ) -> None:
         """Build the image, fetch the pinned models (online, the only download) and build the
-        engines for this machine's GPU (the first CUDA device, under its lock). Engines already
-        built for this project digest and this GPU's compute capability are kept unless
-        ``force``. Docker missing or down, no NVIDIA runtime or too little disk is
-        ``BackendUnavailable`` before anything starts."""
+        engines ``options`` ask for (``[tts.indextts2_trt]``: ``fp32``) for this machine's GPU
+        (the first CUDA device, under its lock). Engines already built for this project
+        digest, this fp32 set and this GPU's compute capability are kept unless ``force``.
+        Docker missing or down, no NVIDIA runtime or too little disk is ``BackendUnavailable``
+        before anything starts."""
         from fukikae.gpulock import gpu_lock
 
-        inst = cls({}, "cuda:0")
+        inst = cls(dict(options or {}), "cuda:0")
         if inst.project_digest() is None:
             raise BackendUnavailable(f"{inst.project_dir()} has no uv.lock and Dockerfile")
         gpu = nvml_index("cuda:0")
@@ -580,7 +619,8 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
                      "-e", f"{GPU_INDEX_ENV}={gpu}",
                      "--entrypoint", "python", inst.image(), "-m",
                      "fukikae.backends.tts.impl_indextts2_trt",
-                     "build", str(engines)],
+                     "build", str(engines),
+                     *(["--fp32", ",".join(inst.fp32)] if inst.fp32 else [])],
                     env=client, check=True)  # fmt: skip
             finally:
                 # a docker client killed under the build leaves the container on the card

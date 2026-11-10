@@ -63,10 +63,27 @@ def test_existing_indextts2_cards_validate_against_it():
     validate_for_backend(_card(emotion_strength=0.5, temperature=0.7), IndexTts2TrtSynthesizer)
 
 
-def test_it_takes_no_stage_options():
+def test_its_only_stage_option_is_fp32():
     IndexTts2TrtSynthesizer({}, "cuda:0")
+    IndexTts2TrtSynthesizer({"fp32": ["dit", "campplus"]}, "cuda:0")
+    IndexTts2TrtSynthesizer({"fp32": []}, "cuda:0")
     with pytest.raises(ConfigError, match="fp16"):
         IndexTts2TrtSynthesizer({"fp16": True}, "cuda:0")
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [(["gpt"], "gpt"), (["dit", "ditt"], "ditt"), ("dit", "list"), ([1], "list")],
+)
+def test_fp32_names_only_the_plain_tensorrt_engines(value, match):
+    with pytest.raises(ConfigError, match=match) as e:
+        IndexTts2TrtSynthesizer({"fp32": value}, "cuda:0")
+    assert "speech_semantic_encoder" in str(e.value)  # it lists what it takes
+
+
+def test_the_conditioners_are_the_engines_before_the_gpt_and_the_decoder():
+    assert set(impl.CONDITIONERS) == set(impl.EXPORTS) - {"dit", "bigvgan"}
+    assert len(impl.CONDITIONERS) == 7
 
 
 def test_registered_as_a_tts_backend():
@@ -202,6 +219,46 @@ def test_the_engine_build_is_in_the_identity():
     assert s.lock_revision().endswith("-b1d0000000ab")  # type: ignore[union-attr]
 
 
+def _variant_manifest(s: IndexTts2TrtSynthesizer, fp32: list[str], build_id: str) -> None:
+    s.engine_dir().mkdir(parents=True, exist_ok=True)
+    (s.engine_dir() / impl.MANIFEST).write_text(
+        json.dumps({"build_id": build_id, "compute_capability": "8.6", "fp32": fp32})
+    )
+
+
+@pytest.mark.usefixtures("setup_done")
+def test_fp32_engines_live_apart_and_never_share_an_identity_with_fp16():
+    fp16 = IndexTts2TrtSynthesizer({}, "cuda:0")
+    fp32 = IndexTts2TrtSynthesizer({"fp32": ["dit", "campplus"]}, "cuda:0")
+    digest = fp16.project_digest()
+    assert fp16.engine_dir().name == digest  # the default set stays where it was
+    assert IndexTts2TrtSynthesizer({"fp32": []}, "cuda:0").engine_dir() == fp16.engine_dir()
+    assert fp32.engine_dir() != fp16.engine_dir()
+    assert fp32.engine_dir().parent == fp16.engine_dir().parent
+    assert fp32.engine_dir().name.startswith(f"{digest}-fp32-")
+    # order and repeats don't make another set
+    same = IndexTts2TrtSynthesizer({"fp32": ["campplus", "dit", "dit"]}, "cuda:0")
+    assert same.engine_dir() == fp32.engine_dir()
+    assert IndexTts2TrtSynthesizer({"fp32": ["dit"]}, "cuda:0").engine_dir() != fp32.engine_dir()
+    # even the same build id (it can't happen, but the key mustn't rest on it) keeps them apart
+    _variant_manifest(fp32, ["campplus", "dit"], "b1d0000000ab")
+    assert fp32.lock_revision() != fp16.lock_revision()
+    assert "fp32" in fp32.lock_revision()  # type: ignore[operator]
+    assert "fp32" not in fp16.lock_revision()  # type: ignore[operator]
+    assert fp32.environment_problem() is None
+
+
+@pytest.mark.usefixtures("setup_done")
+def test_engines_built_with_other_fp32_engines_are_refused():
+    s = IndexTts2TrtSynthesizer({"fp32": ["dit"]}, "cuda:0")
+    _variant_manifest(s, ["bigvgan"], "c0ffee000000")
+    assert "fp32" in (s.environment_problem() or "")
+    # a default set whose manifest says it has fp32 engines is refused as well
+    d = IndexTts2TrtSynthesizer({}, "cuda:0")
+    _variant_manifest(d, ["dit"], "c0ffee000000")
+    assert "fp32" in (d.environment_problem() or "")
+
+
 @pytest.mark.usefixtures("setup_done")
 def test_command_runs_the_worker_in_an_isolated_container(tmp_path):
     s = IndexTts2TrtSynthesizer({}, "cuda:0")
@@ -333,7 +390,7 @@ def test_a_build_replaces_the_engines_whole(tmp_path, monkeypatch):
     engines = tmp_path / "trt" / "abc123"
     _old_engines(engines)
 
-    def into(dest: Path) -> dict:
+    def into(dest: Path, **_kw: object) -> dict:
         assert dest.parent == engines.parent and dest.name.startswith("abc123.tmp-")
         (dest / "trt_engines_fp16").mkdir()
         (dest / "trt_engines_fp16" / "bigvgan.engine").write_text("new")
@@ -352,7 +409,7 @@ def test_a_failed_build_leaves_the_old_engines_untouched(tmp_path, monkeypatch):
     _old_engines(engines)
     (engines.parent / "abc123.tmp-deadbeef").mkdir()  # a killed build's leftovers go too
 
-    def into(dest: Path) -> dict:
+    def into(dest: Path, **_kw: object) -> dict:
         (dest / "trt_engines_fp16").mkdir()
         (dest / "trt_engines_fp16" / "bigvgan.engine").write_text("partial")
         raise subprocess.CalledProcessError(1, ["build_bigvgan_trt.py"])
@@ -367,9 +424,63 @@ def test_a_failed_build_leaves_the_old_engines_untouched(tmp_path, monkeypatch):
 
 def test_a_first_build_needs_no_old_engines(tmp_path, monkeypatch):
     engines = tmp_path / "trt" / "abc123"
-    monkeypatch.setattr(impl, "_build_into", lambda _dest: {"build_id": "first0000000"})
+    monkeypatch.setattr(impl, "_build_into", lambda _dest, **_kw: {"build_id": "first0000000"})
     impl.build(engines)
     assert json.loads((engines / impl.MANIFEST).read_text())["build_id"] == "first0000000"
+
+
+def test_a_build_hands_its_fp32_engines_to_the_builder(tmp_path, monkeypatch):
+    seen: list[tuple[str, ...]] = []
+
+    def into(_dest: Path, *, fp32: tuple[str, ...] = ()) -> dict:
+        seen.append(fp32)
+        return {"build_id": "first0000000", "fp32": list(fp32)}
+
+    monkeypatch.setattr(impl, "_build_into", into)
+    impl.build(tmp_path / "a", fp32=("dit", "campplus"))
+    impl.build(tmp_path / "b")
+    assert seen == [("campplus", "dit"), ()]  # sorted: the manifest's order
+
+
+def test_only_the_named_engines_are_built_without_fp16():
+    onnx, dest = Path("/e/onnx/dit.onnx"), Path("/e/trt/dit.engine")
+    argv = impl.engine_build_argv("py", "dit", onnx, dest, fp32=("dit",))
+    assert argv[-1] == "--no-fp16"
+    at = argv.index("--max-batch")
+    assert argv[at : at + 2] == ["--max-batch", "2"]  # the DiT's conditional and unconditional
+    argv = impl.engine_build_argv("py", "bigvgan", onnx, dest, fp32=("dit",))
+    at = argv.index("--max-batch")
+    assert "--no-fp16" not in argv and argv[at : at + 2] == ["--max-batch", "1"]
+    assert argv[:2] == ["py", f"{impl.INDEX_TTS}/backends/trt/build_engines/build_bigvgan_trt.py"]
+
+
+def test_the_build_command_takes_the_fp32_engines(tmp_path, monkeypatch, capsys):
+    got: list[tuple[Path, tuple[str, ...]]] = []
+
+    def build(engines: Path, *, fp32: tuple[str, ...] = ()) -> dict:
+        got.append((engines, fp32))
+        return {"build_id": "x", "gpu": "g", "times_s": {}, "sizes": {}}
+
+    monkeypatch.setattr(impl, "build", build)
+    assert impl.main(["build", str(tmp_path), "--fp32", "dit,campplus"]) == 0
+    assert impl.main(["build", str(tmp_path)]) == 0
+    assert got == [(tmp_path, ("dit", "campplus")), (tmp_path, ())]
+    assert impl.main(["build", str(tmp_path), "--fp32", "gpt"]) == 2
+    assert "gpt" in capsys.readouterr().err
+
+
+def test_the_worker_refuses_engines_built_with_other_fp32_engines(tmp_path, monkeypatch):
+    (tmp_path / impl.MANIFEST).write_text(json.dumps({
+        "build_id": "x", "code": impl.CODE_REVISION, "model": f"{impl.REPO}@{impl.REVISION}",
+        "fp32": ["dit"],
+    }))  # fmt: skip
+    monkeypatch.setenv("FUKIKAE_TRT_ENGINES", str(tmp_path))
+    with pytest.raises(RuntimeError, match="fp32"):
+        impl.Impl().load({}, "cuda")
+    with pytest.raises(RuntimeError, match="fp32"):
+        impl.Impl().load({"fp32": ["bigvgan"]}, "cuda")
+    with pytest.raises(ValueError, match="fp16"):
+        impl.Impl().load({"fp16": True}, "cuda")
 
 
 # ---- the container's lifecycle -------------------------------------------------------------
@@ -550,6 +661,50 @@ def test_setup_skips_engines_already_built_for_this_gpu_unless_forced():
     run = _Recorder()
     IndexTts2TrtSynthesizer.setup(run=run, force=True)
     assert [a for a in run.runs("build") if a[1] == "run"]
+
+
+@pytest.mark.usefixtures("setup_env")
+def test_setup_builds_the_fp32_engines_its_options_name_beside_the_default_set():
+    run = _Recorder()
+    IndexTts2TrtSynthesizer.setup(run=run, options={"fp32": ["dit", "campplus"]})
+    (build,) = [a for a in run.runs("build") if a[1] == "run"]
+    variant = IndexTts2TrtSynthesizer({"fp32": ["campplus", "dit"]}, "cuda:0").engine_dir()
+    assert build[-4:] == ["build", str(variant), "--fp32", "campplus,dit"]
+    run = _Recorder()
+    IndexTts2TrtSynthesizer.setup(run=run)
+    (build,) = [a for a in run.runs("build") if a[1] == "run"]
+    assert build[-2:] == ["build", str(IndexTts2TrtSynthesizer({}, "cuda:0").engine_dir())]
+
+
+@pytest.mark.usefixtures("setup_env")
+def test_setup_keeps_an_fp32_set_already_built():
+    s = IndexTts2TrtSynthesizer({"fp32": ["dit"]}, "cuda:0")
+    _variant_manifest(s, ["dit"], "b1d0000000ab")
+    run = _Recorder()
+    IndexTts2TrtSynthesizer.setup(run=run, options={"fp32": ["dit"]})
+    assert not [a for a in run.runs("build") if a[1] == "run"]
+
+
+@pytest.mark.usefixtures("setup_env")
+def test_setup_cli_reads_the_workspace_s_engine_options(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from fukikae.cli import app
+
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        IndexTts2TrtSynthesizer, "setup",
+        classmethod(lambda _cls, **kw: seen.append(kw.get("options") or {})),
+    )  # fmt: skip
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "fukikae.toml").write_text('[tts.indextts2_trt]\nfp32 = ["dit"]\n')
+    result = CliRunner().invoke(app, ["backends", "setup", "indextts2_trt", "--workspace", str(ws)])
+    assert result.exit_code == 0, result.output
+    assert seen == [{"fp32": ["dit"]}]
+    result = CliRunner().invoke(app, ["backends", "setup", "indextts2_trt"])
+    assert result.exit_code == 0, result.output
+    assert seen[-1] == {}
 
 
 @pytest.mark.usefixtures("setup_env")
