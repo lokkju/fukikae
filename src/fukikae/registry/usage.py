@@ -32,3 +32,20 @@ def actors_in_use(workspace_root: Path, skip: Collection[str]) -> set[int]:
             continue
         used |= {c.actor_id for c in a.clusters if c.actor_id is not None}
     return used
+
+
+def episodes_naming(
+    workspace_root: Path, actor_ids: Collection[int], character_ids: Collection[int] = ()
+) -> list[str]:
+    """Episodes whose ``assignments.json`` names one of these actors or characters, sorted.
+    An unreadable file names nothing."""
+    out: list[str] = []
+    episodes = workspace_root / ".fukikae" / "episodes"
+    for path in sorted(episodes.glob("*/05-characters/assignments.json")):
+        try:
+            a = read_json(path, Assignments)
+        except (OSError, ValueError):
+            continue
+        if any(c.actor_id in actor_ids or c.character_id in character_ids for c in a.clusters):
+            out.append(path.parent.parent.name)
+    return out
