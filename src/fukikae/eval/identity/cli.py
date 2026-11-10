@@ -434,15 +434,19 @@ _NOT_OPTIONS = ("workspace", "tune", "holdout")
 def identity_rows(run: IdentityRun, cfg: Config, test_set: str, tag: str | None) -> list[LedgerRow]:
     """Ledger rows for a run: one `tune` row, and a `holdout` row when it has one. Both
     carry the same options (the run's settings without the workspace and episodes, plus the
-    profile's hash), so they share a matrix row."""
+    profile's hash and the diarize stage's resolved backend, options and model identity, as
+    its stage key holds them), so they share a matrix row, and runs that differ only in
+    ``[diarize]`` don't."""
     from fukikae.config import BackendConfig
     from fukikae.eval.identity.metrics import OVERALL, clean_count
     from fukikae.eval.ledger import make_row, model_identity, options_hash
+    from fukikae.stages.diarize import diarize_key
 
     st = run.settings
     options = {k: v for k, v in st.items() if k not in _NOT_OPTIONS}
     options.setdefault("profile", cfg.profile)
     options["profile_hash"] = options_hash(cfg.profile_raw)
+    options["diarize"] = diarize_key(cfg)
     emb = st["embedder"]
     backend = str(emb["backend"])
     model, revision = model_identity("embed", BackendConfig(backend, dict(emb["options"])))
