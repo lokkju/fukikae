@@ -373,7 +373,13 @@ def _from_pack(
     the pack into the store, its fingerprint merged into a stored copy that has none (CD22);
     returns its id and what was copied (for rollback). The series check only warns here: the
     operator named the card."""
-    from fukikae.cards.packs import copy_cards, printable, read_pack, series_check
+    from fukikae.cards.packs import (
+        copy_cards,
+        low_thresholds,
+        printable,
+        read_pack,
+        series_check,
+    )
 
     path, who = _split_pack_ref(ref)
     with read_pack(path) as pack:
@@ -385,6 +391,8 @@ def _from_pack(
             f"pack {printable(pack.meta.title)!r}: {printable(entry.key.name)} {language} "
             f"is card {entry.card}"
         )
+        for line in low_thresholds(pack, [entry.card]):
+            _echo(f"warning: {line}")
         return entry.card, copy_cards(pack, store, [entry.card])
 
 
@@ -888,6 +896,7 @@ def import_(
         CharacterKey,
         PackError,
         apply_import,
+        low_thresholds,
         plan_import,
         printable,
         read_pack,
@@ -914,6 +923,8 @@ def import_(
             else:
                 _echo(why)
             plan = plan_import(pack, reg, replace=replace_cards)
+            for line in low_thresholds(pack, [m.card_id for m in [*plan.assign, *plan.unchanged]]):
+                _echo(f"warning: {line}")
             names = {c.id: c for c in reg.characters()}
             target = Workspace(workspace).config.target_language
             for other in sorted({m.target_language for m in plan.assign} - {target}):

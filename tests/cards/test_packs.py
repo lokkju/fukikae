@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import tarfile
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -1052,3 +1053,21 @@ def test_rollback_never_deletes_content_addressed_files(tmp_path: Path):
     for cid in ids:
         assert store_b.has(cid)
         assert not store_b.missing_sidecars(store_b.get(cid))
+
+
+def test_import_warns_on_a_fingerprint_threshold_below_one_half(tmp_path: Path):
+    """A11: a low threshold reports almost any render as a match; import says so."""
+    src, reg_a, store_a = workspace(tmp_path, "a")
+    card = with_fingerprint(store_a, tmp_path, stock())
+    assert card.voice.fingerprint is not None
+    low = replace(card.voice.fingerprint, threshold=0.3)
+    cid = store_a.put(Card(card.target_language, replace(card.voice, fingerprint=low)))
+    reg_a.assign_card(character(reg_a, "Natsu"), "en", cid, by="auto", locked=False)
+    export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
+                no_clips=False, title="t", author="")  # fmt: skip
+    dst, reg_b, _ = workspace(tmp_path, "b")
+    character(reg_b, "Natsu")
+    reg_b.close()
+    r = runner.invoke(app, ["voices", "import", str(dst), str(tmp_path / "p"), "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert f"card {cid}" in r.output and "threshold 0.3" in r.output and "0.5" in r.output
