@@ -508,7 +508,8 @@ def test_identity_refuses_a_holdout_whose_names_were_read(tmp_path: Path, verdic
          "--gt-file", str(tmp_path / "gt")],
     )  # fmt: skip
     assert r.exit_code != 0
-    assert "held-out episode S01E02 read its subtitle names" in r.output
+    read = "its subtitles (verdict none)" if verdict == "none" else "its subtitle names"
+    assert f"held-out episode S01E02 read {read}" in r.output
 
 
 @pytest.mark.parametrize("verdict", ["holdout", "off"])
