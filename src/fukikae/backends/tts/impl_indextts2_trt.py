@@ -124,10 +124,45 @@ def _run(args: list[str], cwd: Path, env: dict[str, str]) -> float:
 
 
 def build(engines: Path) -> dict[str, Any]:
-    """Export, convert and build every engine into ``engines`` on this process's GPU, then
-    write ``manifest.json`` (timings, sizes, sha256 of each engine and the build id, the
-    first 12 hex of the sha256 over them). Intermediate ONNX graphs and the converted GPT
-    checkpoint are deleted once the engines exist; their sizes are recorded."""
+    """Build every engine into a fresh ``<engines>.tmp-<id>`` beside ``engines`` and move it
+    into place whole once its ``manifest.json`` is written: a failed or killed build never
+    leaves a manifest beside partial engines, and the engines already there stay as they were
+    until the new set is complete. The old set is renamed aside, the new one renamed in and
+    the old one deleted (two renames, so for an instant there are no engines at all, which
+    ``environment_problem`` reports as not set up). A killed build's ``.tmp-``/``.old-``
+    directories are removed first: builds run under the GPU lock, one at a time."""
+    import secrets
+    import shutil
+
+    engines = Path(engines)
+    engines.parent.mkdir(parents=True, exist_ok=True)
+    for stale in [*engines.parent.glob(f"{engines.name}.tmp-*"),
+                  *engines.parent.glob(f"{engines.name}.old-*")]:  # fmt: skip
+        shutil.rmtree(stale, ignore_errors=True)
+    tag = secrets.token_hex(4)
+    tmp = engines.parent / f"{engines.name}.tmp-{tag}"
+    tmp.mkdir()
+    try:
+        manifest = _build_into(tmp)
+        (tmp / MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n")
+        old = None
+        if engines.exists() or engines.is_symlink():
+            old = engines.parent / f"{engines.name}.old-{tag}"
+            os.rename(engines, old)
+        os.rename(tmp, engines)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    if old is not None:
+        shutil.rmtree(old, ignore_errors=True)
+    return manifest
+
+
+def _build_into(engines: Path) -> dict[str, Any]:
+    """Export, convert and build every engine into ``engines`` (empty) on this process's GPU
+    and return the manifest (timings, sizes, sha256 of each engine and the build id, the first
+    12 hex of the sha256 over them). Intermediate ONNX graphs, the converted GPT checkpoint
+    and the work directory are deleted once the engines exist; their sizes are recorded."""
     import shutil
 
     engines.mkdir(parents=True, exist_ok=True)
@@ -224,7 +259,8 @@ def build(engines: Path) -> dict[str, Any]:
     for p in onnx.glob("*.data"):
         p.unlink()
     shutil.rmtree(tllm_ckpt, ignore_errors=True)
-    (engines / MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n")
+    # its checkpoints link names this directory's path, which changes when it moves into place
+    shutil.rmtree(work, ignore_errors=True)
     return manifest
 
 
