@@ -804,11 +804,35 @@ def _assign_with_verify_raising(tmp_path: Path, monkeypatch, exc: BaseException)
 
 
 def test_session_reports_a_worker_crash_in_one_line(tmp_path: Path, monkeypatch):
-    """A10: RuntimeError from a verify render or a worker crash, OSError and sqlite errors
-    are one-line errors, not tracebacks."""
-    r = _assign_with_verify_raising(tmp_path, monkeypatch, RuntimeError("worker exited with 9"))
+    """A10: a worker crash (BackendError) or a busy GPU from a verify render, OSError and
+    sqlite errors are one-line errors, not tracebacks."""
+    from fukikae.backends.tts.remote import BackendError
+    from fukikae.gpulock import GpuBusy
+
+    r = _assign_with_verify_raising(tmp_path, monkeypatch, BackendError("worker exited with 9"))
     assert r.exit_code == 1 and "worker exited with 9" in r.output
     assert r.exception is None or isinstance(r.exception, SystemExit)
+    (tmp_path / "b").mkdir()
+    r = _assign_with_verify_raising(tmp_path / "b", monkeypatch, GpuBusy("GPU 0 is held"))
+    assert r.exit_code == 1 and "GPU 0 is held" in r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+
+
+def test_session_lets_an_unexpected_runtime_error_show_its_traceback(tmp_path: Path, monkeypatch):
+    """A RuntimeError that is not a known backend or render error is a bug: it is not turned
+    into a one-line error that hides where it came from."""
+    r = _assign_with_verify_raising(tmp_path, monkeypatch, RuntimeError("something broke"))
+    assert r.exit_code != 0
+    assert isinstance(r.exception, RuntimeError) and "something broke" in str(r.exception)
+
+
+def test_session_passes_typer_abort_through(tmp_path: Path, monkeypatch):
+    """typer.Abort (Ctrl-C at a prompt) is click's own exit, not "error: Abort"."""
+    import typer
+
+    r = _assign_with_verify_raising(tmp_path, monkeypatch, typer.Abort())
+    assert r.exit_code == 1
+    assert "error:" not in r.output and "Aborted" in r.output
 
 
 def test_session_reports_os_errors_in_one_line(tmp_path: Path, monkeypatch):

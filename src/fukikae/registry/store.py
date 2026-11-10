@@ -140,6 +140,10 @@ class CardAssignment:
     chosen_by: str
 
 
+class RegistrySchemaError(RuntimeError):
+    """The registry file was written by a newer fukikae."""
+
+
 class ProtectedAssignmentError(ValueError):
     """An automatic assignment or an import would replace a locked or operator-chosen card."""
 
@@ -253,7 +257,7 @@ class Registry:
             if row[0] is None:
                 con.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
             elif row[0] > SCHEMA_VERSION:
-                raise RuntimeError(
+                raise RegistrySchemaError(
                     f"registry {path} has schema version {row[0]}, "
                     f"newer than this fukikae supports ({SCHEMA_VERSION}); upgrade fukikae"
                 )
