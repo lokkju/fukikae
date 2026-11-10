@@ -164,6 +164,13 @@ class TranslateStage:
             return read_json(transcript, Transcript).language
         raise ConfigError("translate: the source language is unknown; run the language stage")
 
+    def settings(self, ep: Episode, cfg: Config) -> dict[str, Any]:
+        """The stage's resolved settings for an episode (``cps``, ``source_language``,
+        ``max_speed``, ``source``, ``subs_condense``, ``subs_filter``), as the subtitle path
+        uses them; ConfigError when ``[translate]`` holds a bad value or the source language
+        is unknown."""
+        return self._settings(ep, cfg)[1]
+
     def _settings(self, ep: Episode, cfg: Config) -> tuple[BackendConfig, dict[str, Any]]:
         src = self._source_language(ep, cfg)
         bc = cfg.resolve("translate", src, f"{src}-{cfg.target_language}")

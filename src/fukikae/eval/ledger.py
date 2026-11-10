@@ -38,7 +38,7 @@ from fukikae.backends.identity import model_identity  # noqa: F401  (re-exported
 
 SCHEMA = 1
 STAGES = ("asr", "identity", "embedder", "tts", "names")
-SPLITS = ("tune", "holdout", "hidden")  # hidden: eval names, protocol B (GT2-additive)
+SPLITS = ("tune", "holdout", "hidden", "ceiling")  # hidden, ceiling: eval names (GT2-additive)
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
 
