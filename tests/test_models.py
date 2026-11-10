@@ -63,3 +63,15 @@ def test_tags_round_trip():
     )
     assert Tags.model_validate_json(t.model_dump_json()) == t
     assert t.schema_version == 1
+
+
+def test_cluster_assignment_defaults_are_omitted_from_json():
+    plain = ClusterAssignment(
+        cluster="S0", actor_id=1, character_id=1, score=0.9, clean_seconds=3.0, status="matched"
+    )
+    assert "name" not in plain.model_dump_json() and "source" not in plain.model_dump_json()
+    named = plain.model_copy(update={"name": "natsu", "source": "name"})
+    raw = named.model_dump_json()
+    assert '"name":"natsu"' in raw and '"source":"name"' in raw
+    assert ClusterAssignment.model_validate_json(raw) == named
+    assert ClusterAssignment.model_validate_json(plain.model_dump_json()) == plain

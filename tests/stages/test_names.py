@@ -335,7 +335,9 @@ def test_without_names_characters_output_is_unchanged(tmp_path):
         CharactersStage().run(ep, cfg)
         if names_between:
             NamesStage(cfg).run(ep, cfg)
-            assert identity_inputs(ep.work)[:2] == tuple(CharactersStage().inputs(ep))
+            names_json, *pair = CharactersStage().inputs(ep)
+            assert names_json == ep.work / "04c-names" / "names.json" and names_json.exists()
+            assert identity_inputs(ep.work)[:2] == tuple(pair)  # 04-diarize's, names unused
         CharactersStage().run(ep, cfg)
         return (ep.work / "05-characters" / "assignments.json").read_bytes()
 

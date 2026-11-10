@@ -61,6 +61,17 @@ def match(
     actor or character yet: the caller creates them. `matched` takes the actor's
     lowest-id character from `characters`.
     """
+    return decide(
+        evidence, centroid_tops(evidence, actors), threshold, min_new_seconds, characters, claimed
+    )
+
+
+def centroid_tops(
+    evidence: list[ClusterEvidence], actors: list[Actor]
+) -> dict[str, tuple[int, float] | None]:
+    """Each cluster's best (actor id, cosine) against the actors' centroids, first best on
+    ties; None for a cluster without an embedding or with no actor to score. ConfigError when
+    the actors' centroids and the clusters differ in dimension (the embedder changed)."""
     scored = [a for a in actors if a.centroid is not None]
     dim = next((len(ev.embedding) for ev in evidence if ev.embedding is not None), 0)
     for a in scored:
@@ -85,7 +96,7 @@ def match(
                 if top is None or s > top[1]:
                     top = (a.id, s)
         tops[ev.cluster] = top
-    return decide(evidence, tops, threshold, min_new_seconds, characters, claimed)
+    return tops
 
 
 def decide(
@@ -157,9 +168,10 @@ def pin_sources(
     """Map each current cluster that pins to the previous cluster it inherits from.
 
     A current cluster inherits from the previous cluster it overlaps most in time when that
-    overlap exceeds half of the current cluster's total turn time. Only previous assignments
-    with a character (matched, new, pinned) are inherited; `extra` and `review` clusters are
-    matched afresh on each run.
+    overlap exceeds half of the current cluster's total turn time; on a tie, its own label
+    (a names-stage remainder nested in another cluster's overlapping turn). Only previous
+    assignments with a character (matched, new, pinned) are inherited; `extra` and `review`
+    clusters are matched afresh on each run.
     """
     assigned = {c.cluster for c in previous.clusters if c.character_id is not None}
     prev_iv = _intervals(previous_turns.turns)
@@ -173,7 +185,7 @@ def pin_sources(
             if plabel not in assigned:
                 continue
             ov = sum(max(0.0, min(e, pe) - max(s, ps)) for s, e in cur for ps, pe in piv)
-            if ov > best_overlap:
+            if ov > best_overlap or (ov == best_overlap and ov > 0 and plabel == label):
                 best_label, best_overlap = plabel, ov
         if best_label is not None and best_overlap > PIN_OVERLAP * total:
             sources[label] = best_label
@@ -183,9 +195,11 @@ def pin_sources(
 def pin(
     previous: Assignments, previous_turns: Diarization, current_turns: Diarization
 ) -> dict[str, ClusterAssignment]:
-    """Carry earlier assignments onto the current clusters (see `pin_sources`), as `pinned`."""
+    """Carry earlier assignments onto the current clusters (see `pin_sources`), as `pinned`. A
+    pin is acoustic: it never carries the name or source of the sub-cluster it came from."""
     prev_by_label = {c.cluster: c for c in previous.clusters}
+    update = {"status": "pinned", "name": None, "source": "voice"}
     return {
-        cur: prev_by_label[src].model_copy(update={"cluster": cur, "status": "pinned"})
+        cur: prev_by_label[src].model_copy(update={"cluster": cur, **update})
         for cur, src in pin_sources(previous, previous_turns, current_turns).items()
     }
