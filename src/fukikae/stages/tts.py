@@ -690,11 +690,26 @@ def render_guarded(
     return GuardedRender(key, again, calls, seed, still)
 
 
+def render_order(jobs: Sequence[RenderJob]) -> list[RenderJob]:
+    """One backend's jobs in the order the stage renders them (D28): grouped by card, the
+    cards in order of first appearance, each card's jobs in their given (cue) order. A cloning
+    backend conditions on one speaker at a time (IndexTTS2 caches a single speaker prompt and
+    redoes w2v-BERT, the codec, CAMPPlus and the mel on every change), so cue order paid that
+    on each change of speaker. Every render is seeded and each card's ``SpeechRates`` sees its
+    cues in the same order, so the audio and the keys don't change."""
+    first: dict[str, int] = {}
+    for i, job in enumerate(jobs):
+        first.setdefault(job.card_id, i)
+    return sorted(jobs, key=lambda job: first[job.card_id])
+
+
 class SpeechRates:
     """The rate estimate's speech rates (D26): per card, the characters a second its renders
     measure at the card's own rate once ``MIN_RENDERS`` unsuspect renders are in (median), else
-    the backend's ``speech_cps`` times the card's rate. Renders are deterministic and taken in
-    cue order, cached or not, so the estimates (and the cache keys they lead to) are too.
+    the backend's ``speech_cps`` times the card's rate. Renders are deterministic and each
+    card's are taken in cue order, cached or not (other cards' renders, and where they fall
+    between, never enter a card's estimate), so the estimates (and the cache keys they lead
+    to) are too.
     ``estimated`` counts cues rendered first at an estimated rate, ``refits`` those whose
     estimate missed by more than ``RATE_MISS`` and were rendered once more."""
 
@@ -983,18 +998,18 @@ class TtsStage:
         done: dict[str, TtsPlanCue] = {}
         rates = SpeechRates()
         rendered = 0
-        fresh: list[str] = []
+        fresh: set[str] = set()
         for backend in sorted(jobs):
             cls = jobs[backend][0].cls
             lazy = LazySynth(backend_config(cfg, backend), synth_device(cfg, cls), cfg)
             try:
-                for job in jobs[backend]:
+                for job in render_order(jobs[backend]):
                     key, seconds, first, factor, calls, guard = self._render(
                         job, lazy, cache, store, speedup, out_dir / "ref", rates
                     )
                     rendered += calls
                     if calls:
-                        fresh.append(job.cue.id)
+                        fresh.add(job.cue.id)
                     self._link(cache / f"{key}.wav", out_dir / f"{job.cue.id}.wav")
                     done[job.cue.id] = TtsPlanCue(
                         cue_id=job.cue.id,
@@ -1034,14 +1049,16 @@ class TtsStage:
             if stale.stem not in done:
                 stale.unlink()
         write_json(out_dir / "plan.json", TtsPlan(episode=ep.id, cues=plan))
-        cached = [cid for cid in done if cid not in fresh]
+        # run.json lists cues in cue order, whatever order they rendered in.
+        rendered_ids = [c.id for c in cues if c.id in fresh]
+        cached = [c.id for c in cues if c.id in done and c.id not in fresh]
         write_json(
             out_dir / "run.json",
             TtsRun(
                 episode=ep.id,
                 finished=datetime.now(UTC).isoformat(timespec="seconds"),
                 renders=rendered,
-                rendered=fresh,
+                rendered=rendered_ids,
                 cached=cached,
                 report=report,
                 rate_estimated=rates.estimated,
