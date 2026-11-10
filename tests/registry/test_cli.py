@@ -190,3 +190,18 @@ def test_registry_rename_stales_episodes_that_used_the_new_names_key(tmp_path):
     r = runner.invoke(app, ["registry", "rename", str(ws.root), "2", "ERZA"])
     assert r.exit_code == 0, r.output
     assert "stale" in r.output and "S01E03" in r.output and "S01E04" not in r.output
+
+
+def test_registry_lock_character_locks_and_unlocks(tmp_path):
+    ws = _alias_ws(tmp_path)
+    r = runner.invoke(app, ["registry", "lock", str(ws.root), "2", "--character"])
+    assert r.exit_code == 0 and "character 2: locked" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert [c.locked for c in reg.characters()] == [False, True]
+        assert not any(a.locked for a in reg.actors())
+    r = runner.invoke(app, ["registry", "lock", str(ws.root), "2", "--character", "--unlock"])
+    assert r.exit_code == 0
+    with Registry(ws.registry_path) as reg:
+        assert not any(c.locked for c in reg.characters())
+    r = runner.invoke(app, ["registry", "lock", str(ws.root), "9", "--character"])
+    assert r.exit_code != 0 and "no character 9" in r.output

@@ -1044,14 +1044,58 @@ def test_operator_rename_keeps_the_subs_key(reg: Registry):
     }
 
 
-def test_operator_rename_skips_a_key_another_character_holds(reg: Registry):
+def test_operator_rename_skips_a_key_another_character_holds_by_operator(reg: Registry):
     a, b = _char(reg), _char(reg)
-    reg.add_alias(a, "erza", by="subs")
+    reg.add_alias(a, "erza", by="operator")
     warning = reg.rename_character(b, "Erza")
     assert warning is not None and f"character {a}" in warning
     assert reg.characters()[1].name == "Erza"
     hit = reg.character_for_key("erza")
     assert hit is not None and hit.id == a
+
+
+def test_operator_rename_moves_a_subs_alias_and_outranks_a_subs_name(reg: Registry):
+    a, b = _char(reg), _char(reg)
+    reg.name_character(a, "Erza", "erza", "en")  # subtitles named a
+    assert reg.rename_character(b, "Erza") is None
+    assert {(x.alias, x.character_id, x.by) for x in reg.aliases()} == {("erza", b, "operator")}
+    names = [(c.name, c.name_by) for c in reg.characters()]
+    assert names == [("Erza", "subs"), ("Erza", "operator")]
+    hit = reg.character_for_key("erza")
+    assert hit is not None and hit.id == b
+
+
+def test_operator_rename_beside_an_operator_name_warns(reg: Registry):
+    a, b = _char(reg), _char(reg)
+    reg.rename_character(a, "Erza")
+    warning = reg.rename_character(b, "ERZA")
+    assert warning is not None and f"character {a}" in warning
+
+
+def test_character_for_key_ranks_operator_alias_name_then_subs_alias_name(reg: Registry):
+    c1, c2, c3, c4 = (_char(reg) for _ in range(4))
+    with reg._tx() as con:
+        con.execute("UPDATE characters SET name = 'Lucy', name_by = 'subs' WHERE id = ?", (c1,))
+    assert reg.character_for_key("lucy").id == c1  # type: ignore[union-attr]
+    with reg._tx() as con:  # (add_alias refuses a key that is another character's name)
+        con.execute(
+            "INSERT INTO character_aliases VALUES ('lucy', ?, 'subs', NULL, '2026-11-10')", (c2,)
+        )
+    assert reg.character_for_key("lucy").id == c2  # type: ignore[union-attr]
+    with reg._tx() as con:  # a name from before schema 4 (NULL name_by) is the operator's
+        con.execute("UPDATE characters SET name = 'LUCY', name_by = NULL WHERE id = ?", (c3,))
+    assert reg.character_for_key("lucy").id == c3  # type: ignore[union-attr]
+    with reg._tx() as con:
+        con.execute("UPDATE character_aliases SET character_id = ?, by = 'operator'", (c4,))
+    assert reg.character_for_key("lucy").id == c4  # type: ignore[union-attr]
+
+
+def test_a_name_without_name_by_counts_as_curated(reg: Registry):
+    a, b = _char(reg), _char(reg)
+    with reg._tx() as con:
+        con.execute("UPDATE characters SET name = 'Old', name_by = NULL WHERE id = ?", (a,))
+        con.execute("UPDATE characters SET name = 'Subs', name_by = 'subs' WHERE id = ?", (b,))
+    assert reg.curated_characters() == {a}
 
 
 def test_rename_of_a_two_speaker_name_adds_no_alias(reg: Registry):
@@ -1159,3 +1203,14 @@ def test_ambiguous_key_hint_names_rename_and_merge(reg: Registry):
         con.execute("UPDATE characters SET name = 'Lucy' WHERE id IN (?, ?)", (a, b))
     with pytest.raises(ValueError, match="registry rename.*registry merge"):
         reg.character_for_key("lucy")
+
+
+def test_lock_character_sets_the_flag_and_refuses_unknown(reg: Registry):
+    a, b = _char(reg), _char(reg)
+    reg.lock_character(b, True)
+    assert [c.locked for c in reg.characters()] == [False, True]
+    reg.lock_character(b, False)
+    assert not reg.characters()[1].locked
+    with pytest.raises(KeyError):
+        reg.lock_character(99, True)
+    assert a

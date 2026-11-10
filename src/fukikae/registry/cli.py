@@ -480,16 +480,26 @@ def split(
 @registry_app.command("lock")
 def lock(
     workspace: Path = typer.Argument(..., help="Workspace directory."),
-    actor_id: int = typer.Argument(..., metavar="ID", help="Actor id."),
+    actor_id: int = typer.Argument(
+        ..., metavar="ID", help="Actor id (character id with --character)."
+    ),
     unlock: bool = typer.Option(False, "--unlock", help="Unlock instead."),
+    character: bool = typer.Option(
+        False, "--character", help="ID is a character: lock it against subtitle names."
+    ),
 ) -> None:
-    """Lock an actor's centroid (or unlock it)."""
+    """Lock an actor's centroid (or unlock it); with --character, lock a character, which keeps
+    the speech its clusters hold whatever subtitle names say, and is never named by them."""
+    what = "character" if character else "actor"
     with _open(workspace) as reg:
         try:
-            reg.lock_actor(actor_id, not unlock)
+            if character:
+                reg.lock_character(actor_id, not unlock)
+            else:
+                reg.lock_actor(actor_id, not unlock)
         except KeyError as e:
-            raise _fail(f"no actor {actor_id}") from e
-    typer.echo(f"actor {actor_id}: {'unlocked' if unlock else 'locked'}")
+            raise _fail(f"no {what} {actor_id}") from e
+    typer.echo(f"{what} {actor_id}: {'unlocked' if unlock else 'locked'}")
 
 
 @registry_app.command("actor")
