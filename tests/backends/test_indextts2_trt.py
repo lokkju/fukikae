@@ -94,6 +94,11 @@ def test_dockerfile_clones_upstream_at_the_code_revision():
     froms = [ln for ln in text.splitlines() if ln.startswith("FROM ")]
     assert froms and all("@sha256:" in ln for ln in froms)
     assert (ROOT / "workers" / "indextts2_trt" / "uv.lock").is_file()
+    # every apt package pinned to a version
+    joined = text.replace("\\\n", " ")
+    install = next(ln for ln in joined.splitlines() if "apt-get install" in ln)
+    packages = install.split("--no-install-recommends", 1)[1].split("&&", 1)[0].split()
+    assert packages and all("=" in p for p in packages), packages
 
 
 # ---- the hub shim --------------------------------------------------------------------------
