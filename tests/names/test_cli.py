@@ -271,3 +271,38 @@ def test_show_flags_stale_clone_cards_and_unnamed_exemplars(tmp_path: Path):
     assert f"character {natsu} (Natsu)'s card" in out and "now named WENDY" in out
     assert "`fukikae voices clone` replaces it" in out
     assert f"character {natsu} (Natsu) holds exemplars from S01E10, run without names" in out
+
+
+def test_scan_cache_refreshes_when_the_source_is_replaced_in_place(cli_ws: Path, monkeypatch):
+    """F8: the scan cache stamps the source like the stage's track copies, inode and ctime
+    included, so a source replaced with the same size and mtime is extracted again."""
+    import os
+    import shutil
+
+    from fukikae.names import detect
+    from fukikae.names.cli import _scan_tracks
+
+    calls: list[Path] = []
+
+    def extract(_src, wanted):
+        for _, dest in wanted:
+            dest.write_text("x")
+            calls.append(dest)
+        return [d for _, d in wanted]
+
+    monkeypatch.setattr(media, "extract_subtitles", extract)
+    ws = Workspace(cli_ws)
+    ep = ws.find_episode("S01E01")
+    ep.source.write_bytes(b"0123456789")
+    track = media.SubTrack(index=3, codec="ass", language="en", title=None, forced=False)
+    choice = detect.TrackChoice(file=None, track=track, language="en", how="target")
+    _scan_tracks(ep, ws, [choice])
+    _scan_tracks(ep, ws, [choice])
+    assert len(calls) == 1
+    st = ep.source.stat()
+    copy = ep.source.with_suffix(".new")
+    shutil.copyfile(ep.source, copy)
+    os.replace(copy, ep.source)  # a new inode, same size
+    os.utime(ep.source, ns=(st.st_atime_ns, st.st_mtime_ns))  # same mtime
+    _scan_tracks(ep, ws, [choice])
+    assert len(calls) == 2
