@@ -980,6 +980,7 @@ def test_an_auto_fallback_card_builds_the_clone_source(ep, monkeypatch):
     _assign(ep, 2, _stock("af_heart"))
     seen: dict = {}
     monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.repick_blocker", lambda _cfg: None)
     monkeypatch.setattr(
         "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
     )
@@ -991,6 +992,25 @@ def test_an_auto_fallback_card_builds_the_clone_source(ep, monkeypatch):
     with Registry(Workspace(ep.workspace_root).registry_path) as reg:
         reg.lock_card(1, "en", True)
     seen.clear()
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    assert seen["cloning"] is None
+
+
+def test_an_auto_fallback_card_builds_nothing_while_cloning_still_cant_run(ep, monkeypatch):
+    """Final review B #6: the stand-in is upgraded only when cloning works; while the clone
+    backend still can't run (repick_blocker says why), no clone source is built for it."""
+    _auto_card(ep, 1, "am_adam", by="auto-fallback")
+    _assign(ep, 2, _stock("af_heart"))
+    seen: dict = {}
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.repick_blocker", lambda _cfg: "no clone backend")
+
+    def cloning(*_, **__):
+        raise AssertionError("built a clone source no one can use")
+
+    monkeypatch.setattr("fukikae.stages.tts.workspace_cloning", cloning)
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
+                        lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
     TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
     assert seen["cloning"] is None
 
