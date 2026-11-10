@@ -63,6 +63,7 @@ from fukikae.names.inputs import identity_inputs
 from fukikae.registry.matchers import JointMatcher
 from fukikae.registry.matching import load_clusters, mean_embedding
 from fukikae.registry.store import Registry
+from fukikae.registry.usage import actors_in_use
 from fukikae.workspace import Episode, Workspace
 
 ANCHORS = "@registry"  # the pseudo-episode holding existing actors' rows
@@ -338,7 +339,8 @@ def resolve_episodes(
                 )
         for aid in sorted(touched):
             reg.recompute_centroid(aid)
-        pruned = reg.prune_actors(sorted(orphans - touched - claimed))
+        in_use = actors_in_use(ws.root, skip=set(order))  # another episode still names them
+        pruned = reg.prune_actors(sorted(orphans - touched - claimed - in_use))
 
     for ep in episodes:
         evs, _ = loaded[ep.id]
