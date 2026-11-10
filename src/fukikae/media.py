@@ -59,6 +59,22 @@ def _norm_lang(code: str | None) -> str | None:
     return _ISO3_ALIASES.get(c, c)
 
 
+_ISO3_TO_1 = {v: k for k, v in _ISO1_TO_3.items()}
+
+
+def normalize_language(code: str | None) -> str | None:
+    """A language code as the ISO 639-2 form ``dialogue_track`` matches (``en``, ``ger`` ->
+    ``eng``, ``deu``)."""
+    return _norm_lang(code)
+
+
+def short_language(code: str | None) -> str | None:
+    """A language code as ISO 639-1 when it has one (``eng``, ``ger``, ``en-US`` -> ``en``,
+    ``de``, ``en``), else its ISO 639-2 form; None for none."""
+    c = _norm_lang(code)
+    return _ISO3_TO_1.get(c, c) if c else None
+
+
 def _tail(text: str, lines: int = 20) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
