@@ -123,3 +123,25 @@ def test_put_refuses_an_invalid_card_built_in_code(tmp_path: Path):
     bad = replace(card, voice=replace(card.voice, rate=-1.0))
     with pytest.raises(CardError, match="rate"):
         CardStore(tmp_path).put(bad)
+
+
+def test_re_put_without_fingerprint_keeps_the_stored_fingerprint_and_meta(tmp_path: Path):
+    """A1: re-putting the same voice (ensure_assignments' stock path, voices assign stock,
+    restock, a clone with the same picks) must not drop a recorded fingerprint or [meta]."""
+    store = CardStore(tmp_path)
+    card = parse_card(SPEC_CARD)
+    cid = store.put(card)
+    bare = replace(card, meta={}, voice=replace(card.voice, fingerprint=None))
+    assert store.put(bare) == cid
+    got = store.get(cid)
+    assert got.voice.fingerprint == card.voice.fingerprint
+    assert got.meta == card.meta
+
+
+def test_re_put_over_a_corrupted_file_rewrites_it(tmp_path: Path):
+    store = CardStore(tmp_path)
+    card = parse_card(STOCK_CARD)
+    cid = store.put(card)
+    store.card_path(cid).write_text("not toml [", encoding="utf-8")
+    assert store.put(card) == cid
+    assert store.get(cid) == card
