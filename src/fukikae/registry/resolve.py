@@ -41,6 +41,7 @@ import numpy as np
 from fukikae.artifacts import read_json, write_json
 from fukikae.job import StageRecord, cache_key, load_manifest, mark_stale, save_manifest
 from fukikae.models import Assignments, ClusterAssignment, Diarization
+from fukikae.names.inputs import identity_inputs
 from fukikae.registry.matchers import JointMatcher
 from fukikae.registry.matching import load_clusters, mean_embedding
 from fukikae.registry.store import Registry
@@ -109,8 +110,8 @@ def resolve_episodes(
 
     stage = CharactersStage()
     order = [ep.id for ep in episodes]
-    turns = {ep.id: read_json(stage.inputs(ep)[0], Diarization) for ep in episodes}
-    loaded = {ep.id: load_clusters(stage.inputs(ep)[1]) for ep in episodes}
+    turns = {ep.id: read_json(identity_inputs(ep.work)[0], Diarization) for ep in episodes}
+    loaded = {ep.id: load_clusters(identity_inputs(ep.work)[1]) for ep in episodes}
     seconds = {(e, ev.cluster): ev.clean_seconds for e, (evs, _) in loaded.items() for ev in evs}
 
     dims = {
@@ -169,7 +170,7 @@ def resolve_episodes(
         for e in order:
             evs, rows = loaded[e]
             parts = [(ev.cluster, rows[ev.cluster]) for ev in evs if len(rows[ev.cluster])]
-            spans = _spans(stage.inputs(next(ep for ep in episodes if ep.id == e))[1])
+            spans = _spans(identity_inputs(next(ep for ep in episodes if ep.id == e).work)[1])
             embs[e] = np.vstack([r for _, r in parts]) if parts else np.zeros((0, dim), np.float32)
             segs[e] = [
                 _Row(*spans[c][k], c) if c in spans and k < len(spans[c]) else _Row(0.0, 0.0, c)

@@ -5,6 +5,7 @@ from typing import Any
 
 import typer
 
+from fukikae.names.inputs import identity_inputs
 from fukikae.workspace import Episode, Workspace
 
 registry_app = typer.Typer(help="Manage the series character registry.", no_args_is_help=True)
@@ -39,7 +40,7 @@ def rematch(
         for n in ("extract", "separate", "language", "asr", "diarize")
         if n not in records or records[n].status != "done"
     ]
-    if missing or any(not p.exists() for p in stage.inputs(ep)):
+    if missing or any(not p.exists() for p in identity_inputs(ep.work)[:2]):
         typer.echo(
             f"error: {ep.id}: earlier stages not done ({', '.join(missing) or 'diarize outputs'}); "
             f"run `fukikae run` first",
@@ -183,7 +184,11 @@ def cluster(
     not_done = []
     for ep in eps:
         rec = load_manifest(ep).stages.get("diarize")
-        if rec is None or rec.status != "done" or any(not p.exists() for p in stage.inputs(ep)):
+        if (
+            rec is None
+            or rec.status != "done"
+            or any(not p.exists() for p in identity_inputs(ep.work)[:2])
+        ):
             not_done.append(ep.id)
     if not_done:
         raise _fail(f"diarize stage not done for {', '.join(not_done)}; run `fukikae run` first")
@@ -194,7 +199,7 @@ def cluster(
                 "the registry already has actors; batch seeding needs an empty one. "
                 "Use per-episode matching (`fukikae run`, `registry rematch`)."
             )
-        loaded = {ep.id: load_clusters(stage.inputs(ep)[1]) for ep in eps}
+        loaded = {ep.id: load_clusters(identity_inputs(ep.work)[1]) for ep in eps}
         _same_dims(
             {
                 e: next((r.shape[1] for r in rows.values() if len(r)), 0)
@@ -232,7 +237,7 @@ def cluster(
             reg.recompute_centroid(aid)
 
     for ep in eps:
-        turns_path = stage.inputs(ep)[0]
+        turns_path = identity_inputs(ep.work)[0]
         turns = read_json(turns_path, Diarization)
         evs, _ = loaded[ep.id]
         out = []
@@ -506,7 +511,6 @@ def _worked_episodes(ws: Workspace, episodes: str) -> list[Episode]:
     """The listed episodes (SxxEyy codes or media paths), each with a done diarize stage in
     this workspace; anything else is refused as not an episode of this workspace."""
     from fukikae.job import load_manifest
-    from fukikae.stages.characters import CharactersStage
 
     refs = [e.strip() for e in episodes.split(",") if e.strip()]
     if not refs:
@@ -521,7 +525,7 @@ def _worked_episodes(ws: Workspace, episodes: str) -> list[Episode]:
         if (
             rec is None
             or rec.status != "done"
-            or any(not p.exists() for p in CharactersStage().inputs(ep))
+            or any(not p.exists() for p in identity_inputs(ep.work)[:2])
         ):
             raise _fail(
                 f"{ref}: not an episode of this workspace with a done diarize stage "

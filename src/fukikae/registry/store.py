@@ -932,18 +932,21 @@ class Registry:
         return nid
 
     def _insert_actor_with_character(
-        self, con: sqlite3.Connection, centroid: np.ndarray
+        self, con: sqlite3.Connection, centroid: np.ndarray | None
     ) -> tuple[int, int]:
         aid = self._next_id(con, "actors")
         con.execute(
             "INSERT INTO actors(id, centroid) VALUES (?, ?)",
-            (aid, _to_blob(_normalized(centroid))),
+            (aid, None if centroid is None else _to_blob(_normalized(centroid))),
         )
         cid = self._next_id(con, "characters")
         con.execute("INSERT INTO characters(id, actor_id) VALUES (?, ?)", (cid, aid))
         return aid, cid
 
-    def create_actor_with_character(self, centroid: np.ndarray) -> tuple[int, int]:
+    def create_actor_with_character(self, centroid: np.ndarray | None) -> tuple[int, int]:
+        """A new actor and its character. ``centroid`` None leaves the actor without one (a
+        subtitle name whose speech kept no embedding row); matching skips it until exemplars
+        give it one."""
         with self._tx() as con:
             return self._insert_actor_with_character(con, centroid)
 
