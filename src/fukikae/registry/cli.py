@@ -405,9 +405,9 @@ def alias(
         if name is None:
             if remove or replace:
                 raise _fail("--remove and --replace need a NAME")
-            typer.echo("alias	character	by	language")
+            typer.echo("alias\tcharacter\tby\tlanguage")
             for a in reg.aliases(None if target is None else target.id):
-                typer.echo(f"{a.alias}	{a.character_id}	{a.by}	{a.language or '-'}")
+                typer.echo(f"{a.alias}\t{a.character_id}\t{a.by}\t{a.language or '-'}")
             return
         assert target is not None
         key = alias_key(name)

@@ -129,14 +129,14 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
     from fukikae.cards.auto import AUTOMATIC_BY, repick_blocker, replace_refusal, stale_cards
 
     with _session(workspace, lang) as (reg, store, language):
-        _echo(f"character	name	{language} card	by	state")
+        _echo(f"character\tname\t{language} card\tby\tstate")
         chars = reg.characters()
         for c in chars:
             a = reg.card_for(c.id, language)
             if a is None:
-                _echo(f"{c.id}	{c.name or '-'}	-	-	-")
+                _echo(f"{c.id}\t{c.name or '-'}\t-\t-\t-")
             else:
-                _echo(f"{c.id}	{c.name or '-'}	{a.card_id}	{a.by}	{_state(a)}")
+                _echo(f"{c.id}\t{c.name or '-'}\t{a.card_id}\t{a.by}\t{_state(a)}")
         ws = Workspace(workspace)
         notes: list[str] = []
         stale = stale_cards(ws, reg, store, [c.id for c in chars], language, notes=notes)
