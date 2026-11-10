@@ -25,8 +25,12 @@ seeded one group per diarization cluster. Against an existing registry:
   longer exists (merged or deleted by hand) follows its key (`Registry.character_for_key`)
   and keeps its ``name``; one whose key answers nobody, or a lock decision whose character is
   gone, is grouped like an unnamed cluster. A remainder left with no embedding rows of its
-  own takes its parent diarize cluster's match: the anchor nearest the mean of all the
-  parent's sub-cluster rows, when at least the threshold, else it is ``extra``.
+  own goes by its parent's named sub-clusters, as the characters stage does
+  (`fukikae.registry.siblings`): the character holding at least 60% of the parent's named
+  seconds after this resolve (``matched``, source ``voice``), else ``extra``; each such
+  decision is a line in the summary's ``notes``. Only when the parent has no named
+  sub-cluster does the remainder take its parent diarize cluster's match: the anchor nearest
+  the mean of all the parent's sub-cluster rows, when at least the threshold, else ``extra``.
 - A names-used episode's ``assignments.json`` must be the characters stage's answer to its
   current refined clusters (the same turns, every label covered); otherwise (names reran
   after characters, or characters never ran) resolve refuses: run the characters stage
@@ -50,7 +54,7 @@ the next `fukikae run` or another resolve redoes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -62,6 +66,7 @@ from fukikae.models import Assignments, ClusterAssignment, Diarization
 from fukikae.names.inputs import identity_inputs
 from fukikae.registry.matchers import JointMatcher
 from fukikae.registry.matching import load_clusters, mean_embedding
+from fukikae.registry.siblings import has_named_siblings, sibling_verdict
 from fukikae.registry.store import Registry
 from fukikae.registry.usage import actors_in_use
 from fukikae.workspace import Episode, Workspace
@@ -89,6 +94,8 @@ class ResolveSummary:
     new_actors: list[int]
     extras: int
     pruned: list[int]
+    notes: list[str] = field(default_factory=list)  # one line per rowless remainder decided by
+    # its named siblings (Task 11 ruling)
 
 
 def _cosine(a: np.ndarray | None, b: np.ndarray | None) -> float | None:
@@ -164,6 +171,7 @@ def resolve_episodes(
 
     result: dict[str, dict[str, ClusterAssignment]] = {e: {} for e in order}
     new_actors: list[int] = []
+    notes: list[str] = []
     with Registry(ws.registry_path) as reg, reg.transaction():
         orphans: set[int] = set()
         for e in order:
@@ -286,6 +294,9 @@ def resolve_episodes(
         claimed: set[int] = set()
         for e in order:
             evs, rows = loaded[e]
+            names_e = inputs[e][2]
+            infos = names_e.labels if names_e is not None and e in parents else {}
+            followers: list[str] = []
             for ev in evs:
                 kept = decided[e].get(ev.cluster)
                 if kept is not None:  # a name or lock decision, as the characters stage made it
@@ -304,7 +315,16 @@ def resolve_episodes(
                     continue
                 gid = group_of.get((e, ev.cluster))
                 status, aid, cid, score = "extra", None, None, None
-                if gid is None and not len(rows[ev.cluster]) and ev.cluster in parents.get(e, {}):
+                rowless = gid is None and not len(rows[ev.cluster])
+                if (
+                    rowless
+                    and ev.cluster in infos
+                    and infos[ev.cluster].cls == "remainder"
+                    and has_named_siblings(ev.cluster, infos)
+                ):
+                    followers.append(ev.cluster)  # once every sibling is decided
+                    continue
+                if rowless and ev.cluster in parents.get(e, {}):
                     top = _parent_match(ev.cluster, parents[e], rows, stored_mean)
                     if top is not None and top[1] >= threshold:
                         aid, score = top
@@ -337,6 +357,31 @@ def resolve_episodes(
                     clean_seconds=ev.clean_seconds,
                     status=status,  # type: ignore[arg-type]
                 )
+            if followers:  # Task 11 ruling: a rowless remainder follows its named siblings
+                secs: dict[str, float] = {}
+                for t in turns[e].turns:
+                    secs[t.speaker] = secs.get(t.speaker, 0.0) + t.end - t.start
+                live = {c.id: c for c in reg.characters()}
+                by_label = {ev.cluster: ev for ev in evs}
+                for lb in followers:
+                    verdict = sibling_verdict(lb, infos, result[e], secs)
+                    assert verdict is not None  # has_named_siblings
+                    c = live.get(verdict.character_id) if verdict.character_id else None
+                    who = (
+                        "no character" if c is None else f"character {c.id} ({c.name or 'unnamed'})"
+                    )
+                    notes.append(f"{e} {verdict.line(lb, infos[lb].parent, who)}")
+                    takes = verdict.how == "follow" and c is not None
+                    if takes and c is not None:
+                        claimed.add(c.actor_id)
+                    result[e][lb] = ClusterAssignment(
+                        cluster=lb,
+                        actor_id=c.actor_id if takes and c is not None else None,
+                        character_id=c.id if takes and c is not None else None,
+                        score=None,
+                        clean_seconds=by_label[lb].clean_seconds,
+                        status="matched" if takes else "extra",
+                    )
         for aid in sorted(touched):
             reg.recompute_centroid(aid)
         in_use = actors_in_use(ws.root, skip=set(order))  # another episode still names them
@@ -364,7 +409,7 @@ def resolve_episodes(
 
     statuses = [a.status for r in result.values() for a in r.values()]
     return ResolveSummary(
-        order, statuses.count("matched"), new_actors, statuses.count("extra"), pruned
+        order, statuses.count("matched"), new_actors, statuses.count("extra"), pruned, notes
     )
 
 

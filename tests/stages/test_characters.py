@@ -1115,40 +1115,90 @@ def test_without_names_assignments_match_the_pre_names_code_byte_for_byte(tmp_pa
 # --- Task 7 review: rowless remainders, the lock hint, ambiguous keys on fresh runs --------
 
 
-def _rowless_remainder(tmp_path, parent_rows):
-    """Natsu (operator-named, NATSU) and an unnamed actor at WENDY exist; SPEAKER_08's named
-    natsu speech carries `parent_rows`, and its remainder has no embedding rows."""
+def _rowless_remainder(tmp_path, parent_rows, named=None):
+    """Natsu (operator-named, NATSU), Wendy (operator-named, WENDY) and an unnamed actor at
+    HAPPY exist. SPEAKER_08's named sub-clusters are ``named`` ({key: (cls, seconds)}, natsu
+    30 s by default), all carrying ``parent_rows``, and its 10 s remainder has no rows."""
     ep = make_ep(tmp_path)
     with registry(ep) as reg:
         _, natsu = reg.create_actor_with_character(NATSU)
         reg.rename_character(natsu, "Natsu")
-        _, other = reg.create_actor_with_character(WENDY)
-    write_diarize(ep, {"SPEAKER_08": (parent_rows, 40.0)}, [(0, 40, "SPEAKER_08")])
-    write_names(
-        ep,
-        {
-            "SPEAKER_08~natsu": ("SPEAKER_08", "natsu", "named", parent_rows, [(0, 30)]),
-            "SPEAKER_08": ("SPEAKER_08", None, "remainder", [], [(30, 40)]),
-        },
-    )
-    return ep, natsu, other
+        _, wendy = reg.create_actor_with_character(WENDY)
+        reg.rename_character(wendy, "Wendy")
+        _, other = reg.create_actor_with_character(HAPPY)
+    named = {"natsu": ("named", 30.0)} if named is None else named
+    labels: dict[str, Any] = {}
+    t = 0.0
+    for key, (cls, secs) in named.items():
+        labels[f"SPEAKER_08~{key.replace(' ', '-')}"] = (
+            "SPEAKER_08", key, cls, parent_rows, [(t, t + secs)]
+        )  # fmt: skip
+        t += secs
+    labels["SPEAKER_08"] = ("SPEAKER_08", None, "remainder", [], [(t, t + 10)])
+    write_diarize(ep, {"SPEAKER_08": (parent_rows, t + 10)}, [(0, t + 10, "SPEAKER_08")])
+    write_names(ep, labels)
+    return ep, {"natsu": natsu, "wendy": wendy, "other": other}
 
 
-def test_a_rowless_remainder_takes_its_parent_clusters_match(tmp_path):
-    ep, natsu, other = _rowless_remainder(tmp_path, [WENDY] * 3)
-    CharactersStage().run(ep, NAMES_CFG)
-    by = by_cluster(ep)
-    assert by["SPEAKER_08~natsu"].character_id == natsu
-    rem = by["SPEAKER_08"]
-    assert (rem.status, rem.character_id, rem.source) == ("matched", other, "voice")
-    assert rem.score is not None and rem.score > 0.99
+def _report_lines(ep):
+    from fukikae.names.models import NamesReport
+
+    return read_json(CharactersStage.report_path(ep), NamesReport).lines
 
 
-def test_a_rowless_remainder_is_extra_when_its_parent_matches_nobody(tmp_path):
-    ep, _, _ = _rowless_remainder(tmp_path, [unit([0, 0, 1])] * 3)
+@pytest.mark.parametrize(
+    "named",
+    [{"natsu": ("named", 30.0)}, {"natsu": ("named", 21.0), "wendy": ("named", 9.0)}],
+    ids=["alone", "70-30"],
+)
+def test_a_rowless_remainder_follows_the_character_holding_most_named_seconds(tmp_path, named):
+    """Task 11 ruling (a): natsu holds at least 60% of SPEAKER_08's named seconds, so the
+    rowless remainder is Natsu's (source voice), though the parent sounds like HAPPY."""
+    ep, c = _rowless_remainder(tmp_path, [HAPPY] * 3, named)
     CharactersStage().run(ep, NAMES_CFG)
     rem = by_cluster(ep)["SPEAKER_08"]
-    assert (rem.status, rem.character_id) == ("extra", None)
+    assert (rem.status, rem.character_id, rem.source, rem.name) == (
+        "matched", c["natsu"], "voice", None
+    )  # fmt: skip
+    with registry(ep) as reg:
+        natsu_actor = next(x.actor_id for x in reg.characters() if x.id == c["natsu"])
+    assert rem.actor_id == natsu_actor
+    assert any("SPEAKER_08 follows its named siblings" in ln for ln in _report_lines(ep))
+
+
+@pytest.mark.parametrize(
+    "named",
+    [
+        {"natsu": ("named", 15.0), "wendy": ("named", 15.0)},
+        {"natsu": ("named", 15.0), "townsperson": ("named", 3.0), "wendy": ("named", 12.0)},
+        {"kiria": ("named", 3.0)},  # no character, under [names] min_new_seconds: an extra
+    ],
+    ids=["50-50", "under-60", "named-extra"],
+)
+def test_a_rowless_remainder_is_extra_when_its_named_siblings_split(tmp_path, named):
+    """Task 11 ruling (b): the parent's named sub-clusters went to several characters (or to
+    a named extra) with none at 60%, so the remainder is extra, never the parent's match."""
+    ep, _ = _rowless_remainder(tmp_path, [HAPPY] * 3, named)
+    CharactersStage().run(ep, NAMES_CFG)
+    rem = by_cluster(ep)["SPEAKER_08"]
+    assert (rem.status, rem.character_id, rem.actor_id) == ("extra", None, None)
+    assert any("SPEAKER_08 stays extra" in ln for ln in _report_lines(ep))
+
+
+@pytest.mark.parametrize(("voice", "status"), [(HAPPY, "matched"), (unit([0, 0, 1]), "extra")])
+def test_a_rowless_remainder_without_named_siblings_takes_its_parents_match(
+    tmp_path, voice, status
+):
+    """Task 11 ruling (c), R1 as before: a parent whose only keyed sub-cluster is a role label
+    has no named sub-clusters; its pooled rows decide the remainder at the threshold."""
+    ep, c = _rowless_remainder(tmp_path, [voice] * 3, {"guard a": ("role", 30.0)})
+    CharactersStage().run(ep, NAMES_CFG)
+    rem = by_cluster(ep)["SPEAKER_08"]
+    want = c["other"] if status == "matched" else None
+    assert (rem.status, rem.character_id, rem.source) == (status, want, "voice")
+    if status == "matched":
+        assert rem.score is not None and rem.score > 0.99
+    assert not any("SPEAKER_08 follows" in ln or "stays extra" in ln for ln in _report_lines(ep))
 
 
 def test_locked_character_report_says_how_to_unlock_the_character(tmp_path, caplog):
