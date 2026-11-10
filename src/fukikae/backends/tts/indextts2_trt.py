@@ -77,8 +77,9 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
     card_backend: ClassVar[str] = "indextts2"
     devices: ClassVar[frozenset[str]] = frozenset({"cuda"})
     option_keys: ClassVar[frozenset[str]] = frozenset()
-    # Measured on GPU 0 during the 40-cue E14 run (results, "D28 lever 2: TensorRT").
-    vram_mb: ClassVar[int] = 9500
+    # nvidia-smi peak on GPU 0 during the 40-cue E14 run, 15438 MiB with the CUDA context
+    # (TensorRT-LLM reserves its KV cache up front), plus a margin (results, "D28 lever 2").
+    vram_mb: ClassVar[int] = 16500
     # The engines and the code that runs them: a voice can differ from the PyTorch worker's.
     revision: ClassVar[str] = f"{_impl.REVISION}+{_impl.CODE_REVISION[:12]}+trt-{_impl.PRECISION}"
     # The cards' pin is the model's, the same as the PyTorch worker's.
@@ -231,8 +232,10 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
             "-v", f"{hub}:{hub}:ro",
             "-v", f"{src}:{SRC_MOUNT}:ro",
             *self._container_env(),
+            # the CUDA image's entrypoint prints a banner on stdout, which is the protocol's
+            "--entrypoint", "python",
             self.image(),
-            "python", "-m", WORKER_MODULE, self.name,
+            "-m", WORKER_MODULE, self.name,
         ]  # fmt: skip
 
     def _remove_container(self, name: str) -> None:
@@ -346,7 +349,8 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
             if os.environ.get("HF_TOKEN"):
                 online += ["-e", "HF_TOKEN"]  # docker reads the value from its own environment
                 client = {**client, "HF_TOKEN": os.environ["HF_TOKEN"]}
-            run([*online, inst.image(), "python", "-m", WORKER_MODULE, cls.name, "--fetch"],
+            run([*online, "--entrypoint", "python", inst.image(), "-m", WORKER_MODULE, cls.name,
+                 "--fetch"],
                 env=client, check=True)  # fmt: skip
             client.pop("HF_TOKEN", None)
         engines = inst.engine_dir()
@@ -357,6 +361,7 @@ class IndexTts2TrtSynthesizer(IndexTts2Synthesizer):
             run([*base, "--gpus", f"device={gpu}", "--network", "none", "--shm-size", "2g",
                  "-v", f"{hub}:{hub}:ro", "-v", f"{engines}:{engines}",
                  "-e", f"FUKIKAE_HUB_REAL={hub}", "-e", "HF_HUB_OFFLINE=1",
-                 inst.image(), "python", "-m", "fukikae.backends.tts.impl_indextts2_trt",
+                 "--entrypoint", "python", inst.image(), "-m",
+                 "fukikae.backends.tts.impl_indextts2_trt",
                  "build", str(engines)],
                 env=client, check=True)  # fmt: skip
