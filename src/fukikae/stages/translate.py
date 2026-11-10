@@ -1,10 +1,11 @@
 """Translate stage: dub cues with a speakable target-language line each.
 
 Reads ``03-asr/transcript.json``, ``05-characters/assignments.json`` (with its ``turns``),
-``04b-tag/tags.json`` when the tag stage is on, ``<workspace>/glossary.toml`` when present
-(its ``[terms]`` table maps source terms to renderings) and the cards of the speaking
-characters (the key holds a hash of each one's ``[style]``, not the card id, ruling CD6, so a
-voice-only change never re-translates); writes ``06-translate/cues.<target>.json`` (a ``DubCues``).
+``04c-names/names.json`` when it exists, ``04b-tag/tags.json`` when the tag stage is on,
+``<workspace>/glossary.toml`` when present (its ``[terms]`` table maps source terms to
+renderings) and the cards of the speaking characters (the key holds a hash of each one's
+``[style]``, not the card id, ruling CD6, so a voice-only change never re-translates); writes
+``06-translate/cues.<target>.json`` (a ``DubCues``).
 
 Cues go to the translator in scene windows with the previous window's lines, the speakers'
 ``[style]`` notes and catchphrases, and the glossary. A window whose answer is malformed is
@@ -24,11 +25,15 @@ previous lines, then in halves.
 path: cues come from target-language subtitles (``media.find_target_subtitles``: ``[subs] file``,
 whose ``{episode}`` is replaced by the episode id, then ``[subs] track``, a sidecar, an embedded
 track), each spoken by the diarize cluster that overlaps it most, and a cue within its budget
-is spoken verbatim. Only a cue over budget goes to the translator, in condense mode (English to
-shorter English), unless ``subs_condense = false``; a condensed line that fails or comes back no
-shorter leaves the subtitle line in place, flagged over budget for time fitting, and so does
-a backend that gives up (``MAX_BACKEND_FAILURES``): the episode goes on with the lines as
-written. Signs, songs
+is spoken verbatim. When the names stage used this very track's names (D27), a cue whose own
+Name the characters stage decided by name is spoken by that character (or named extra)
+instead, unless the names stage hid the line or a lock kept the sub-cluster under it; the
+name map, the hidden lines and the track offset join the key, so new names or new
+assignments re-attribute. Only a cue over budget goes to the translator, in condense mode
+(English to shorter English), unless ``subs_condense = false``; a condensed line that fails
+or comes back no shorter leaves the subtitle line in place, flagged over budget for time
+fitting, and so does a backend that gives up (``MAX_BACKEND_FAILURES``): the episode goes on
+with the lines as written. Signs, songs
 and SDH notes are filtered by ``subs_filter`` (default all three rules). ``auto`` takes the
 subtitle path when subtitles are found, else the ASR path. Stage settings (``max_speed``,
 ``source``, ``subs_condense``, ``subs_filter``) are not backend options.
@@ -54,15 +59,19 @@ from fukikae.cards.card import CardError
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.cues import (
+    NameSpeaker,
     assign_subtitle_speakers,
     budget_chars,
     build_asr_cues,
     is_marked,
+    name_map,
     windows,
 )
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript
+from fukikae.names.inputs import names_path
+from fukikae.names.models import NamesResult
 from fukikae.registry.store import Registry
 from fukikae.stages.language import LanguageResult
 from fukikae.subtitles import RULES, read_cues
@@ -218,6 +227,28 @@ class TranslateStage:
             )
         return found
 
+    @staticmethod
+    def _cue_names(
+        ep: Episode, sub_file: Path | None, sub_track: media.SubTrack | None
+    ) -> tuple[dict[str, NameSpeaker], list[tuple[float, float]], float] | None:
+        """(name map, hidden lines' spans, offset) for the subtitle path when the names stage
+        used the track this path reads (`_same_track`) and the characters stage decided some
+        key by name; else None, and cues go by turn overlap. Only the names stage's visible
+        lines drive anything: the hidden ones are listed so their cues fall back."""
+        path = names_path(ep.work)
+        assignments = ep.work / "05-characters" / "assignments.json"
+        if not path.exists() or not assignments.exists():
+            return None
+        result = read_json(path, NamesResult)
+        if not result.used or not _same_track(result.source, sub_file, sub_track):
+            return None
+        nm = name_map(read_json(assignments, Assignments))
+        if not nm:
+            return None
+        visible = {ln.id for ln in result.visible_lines()}
+        hidden = [(ln.start, ln.end) for ln in result.lines if ln.id not in visible]
+        return nm, hidden, result.offset_s
+
     # -- characters and cards ------------------------------------------------------------
 
     @staticmethod
@@ -325,6 +356,8 @@ class TranslateStage:
             ep.work / "03-asr" / "transcript.json",
             ep.work / "05-characters" / "assignments.json",
         ]
+        if names_path(ep.work).exists():  # the subtitle path's name map and hidden lines
+            paths.append(names_path(ep.work))
         if self._use_tags():
             paths.append(ep.work / "04b-tag" / "tags.json")
         paths.append(ep.workspace_root / "glossary.toml")
@@ -360,6 +393,14 @@ class TranslateStage:
                 "subs_condense": settings["subs_condense"],
                 "subs_filter": settings["subs_filter"],
             }
+            cue_names = self._cue_names(ep, file, track)
+            if cue_names is not None:  # without names the subtitle path's key is unchanged
+                nm, hidden, offset = cue_names
+                key["cue_names"] = {
+                    "map": {k: list(v) for k, v in nm.items()},
+                    "hidden": [list(h) for h in hidden],
+                    "offset_s": offset,
+                }
         return key
 
     # -- run -------------------------------------------------------------------------------
@@ -435,6 +476,8 @@ class TranslateStage:
                     cast(media.SubTrack, sub_track),
                     ep.work / "06-translate" / f"subs.{target}",
                 )
+            cue_names = self._cue_names(ep, sub_file if sub_track is None else None, sub_track)
+            nm, hidden, offset = cue_names if cue_names is not None else (None, [], 0.0)
             cues = assign_subtitle_speakers(
                 read_cues(sub_file),
                 assignments.turns,
@@ -446,6 +489,9 @@ class TranslateStage:
                 settings["max_speed"],
                 settings["subs_filter"],
                 cps=settings["cps"],
+                name_map=nm,
+                hidden=hidden,
+                offset_s=offset,
             )
         else:
             cues = build_asr_cues(
@@ -690,3 +736,21 @@ class TranslateStage:
             kept += 1
         if kept:
             log.info("translate: %d over-budget subtitle line(s) kept as written", kept)
+
+
+def _same_track(
+    source: dict[str, Any] | None, sub_file: Path | None, sub_track: media.SubTrack | None
+) -> bool:
+    """Whether the names stage read the subtitles the subtitle path reads: the target track
+    (the same `media.find_target_subtitles` call), or a ``[names]`` file or track that is the
+    path's own. Names from another language's track never name a cue."""
+    src = source or {}
+    how = src.get("how")
+    if how == "target":
+        return True
+    if how == "file":
+        f = src.get("file")
+        return sub_file is not None and bool(f) and Path(str(f)).resolve() == sub_file.resolve()
+    if how == "track":
+        return sub_file is None and sub_track is not None and src.get("track") == sub_track.index
+    return False

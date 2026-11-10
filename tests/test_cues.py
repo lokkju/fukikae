@@ -5,6 +5,7 @@ from fukikae.cues import (
     budget_chars,
     build_asr_cues,
     is_marked,
+    name_map,
     windows,
 )
 from fukikae.models import (
@@ -378,3 +379,101 @@ def test_abutting_identical_subtitle_events_stay_two_cues():
         (10.0, 11.0, "Wait!"),
         (11.0, 12.0, "Wait!"),
     ]
+
+
+# ---- names (Task 8): a cue's own Name picks its speaker ----
+
+
+def _named(
+    name: str, character: int | None, source: str = "name", status: str = "matched", secs=30.0
+) -> ClusterAssignment:
+    return ClusterAssignment.model_validate(
+        {
+            "cluster": name,
+            "actor_id": character,
+            "character_id": character,
+            "score": 0.9,
+            "clean_seconds": secs,
+            "status": status,
+            "name": name.split("~")[1].replace("-", " ") if "~" in name else None,
+            "source": source,
+        }
+    )
+
+
+S12 = [Turn(start=1299.0, end=1304.0, speaker="SPEAKER_12")]
+JELLAL = Cue(1300.3, 1302.8, "I'd even settle for Jellal!", name="NATSU")
+
+
+def _by_name(cues, turns, clusters, **kw):
+    return assign_subtitle_speakers(
+        cues, turns, _assignments(turns, clusters), None, None, {9: "Natsu"}, "en", 1.25,
+        ("sdh", "song", "sign"), **kw,
+    )  # fmt: skip
+
+
+def test_cue_name_beats_turn_overlap():
+    (got,) = _by_name([JELLAL], S12, [_cluster("SPEAKER_12", 2)], name_map={"natsu": (9, None)})
+    assert (got.character_id, got.extra, got.speaker) == (9, None, "Natsu")
+
+
+def test_without_a_name_map_the_overlap_decides():
+    (got,) = _by_name([JELLAL], S12, [_cluster("SPEAKER_12", 2)])
+    assert got.character_id == 2
+
+
+def test_hidden_cue_falls_back_to_turn_overlap():
+    (got,) = _by_name(
+        [JELLAL], S12, [_cluster("SPEAKER_12", 2)],
+        name_map={"natsu": (9, None)}, hidden=[(1300.3, 1302.8)],
+    )  # fmt: skip
+    assert got.character_id == 2
+
+
+def test_hidden_lines_are_matched_after_moving_the_cue_back_by_the_offset():
+    late = Cue(1303.3, 1305.8, JELLAL.text, name="NATSU")  # the track runs 3 s late
+    clusters = [_cluster("SPEAKER_12", 2)]
+    nm = {"natsu": (9, None)}
+    (hid,) = _by_name([late], S12, clusters, name_map=nm, hidden=[(1300.3, 1302.8)], offset_s=3.0)
+    (shown,) = _by_name([late], S12, clusters, name_map=nm, hidden=[(1300.3, 1302.8)])
+    assert (hid.character_id, shown.character_id) == (2, 9)
+
+
+@pytest.mark.parametrize("name", ["GRAY", "NATSU/HAPPY", "", "SIGN"])
+def test_unknown_or_multi_name_falls_back(name):
+    cue = Cue(JELLAL.start, JELLAL.end, JELLAL.text, name=name)
+    (got,) = _by_name([cue], S12, [_cluster("SPEAKER_12", 2)], name_map={"natsu": (9, None)})
+    assert got.character_id == 2
+
+
+def test_named_extra_gets_its_extra_label():
+    cue = Cue(JELLAL.start, JELLAL.end, "Halt!", name="Wizard A")
+    nm = {"wizard a": (None, "SPEAKER_04~wizard-a")}
+    (got,) = _by_name([cue], S12, [_cluster("SPEAKER_12", 2)], name_map=nm)
+    assert (got.character_id, got.extra, got.speaker) == (
+        None, "SPEAKER_04~wizard-a", "extra:SPEAKER_04~wizard-a"
+    )  # fmt: skip
+
+
+def test_a_lock_kept_sub_cluster_keeps_its_speech():
+    """A cue under a sub-cluster a lock kept (natsu's speech in a locked actor's cluster) stays
+    with the locked character, whatever its Name says (operator state beats names)."""
+    turns = [Turn(start=1299.0, end=1304.0, speaker="SPEAKER_12~natsu")]
+    clusters = [_named("SPEAKER_12~natsu", 2, source="lock")]
+    (got,) = _by_name([JELLAL], turns, clusters, name_map={"natsu": (9, None)})
+    assert got.character_id == 2
+
+
+def test_name_map_takes_name_decisions_only():
+    asg = _assignments(
+        [],
+        [
+            _named("SPEAKER_04~natsu", 9),
+            _named("SPEAKER_12~natsu", 2, source="lock"),
+            _named("SPEAKER_04~wizard-a", None, status="extra", secs=2.0),
+            _named("SPEAKER_12~wizard-a", None, status="extra", secs=5.0),
+            _named("SPEAKER_05~wizard-a", None, status="extra", secs=5.0),
+            _cluster("SPEAKER_12", 2),
+        ],
+    )
+    assert name_map(asg) == {"natsu": (9, None), "wizard a": (None, "SPEAKER_05~wizard-a")}
