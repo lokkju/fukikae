@@ -330,8 +330,11 @@ def main(name: str, fetch: bool = False) -> int:
             if op == "hello":
                 answer({"ok": True, "protocol": PROTOCOL, "impl": name})
             elif op == "load":
-                impl = module.Impl()
-                impl.load(dict(req.get("options", {})), req["device"])
+                if impl is not None:  # a second model beside the first (B15)
+                    raise RequestError("a model is already loaded; unload it first")
+                fresh = module.Impl()
+                fresh.load(dict(req.get("options", {})), req["device"])
+                impl = fresh
                 answer({"ok": True})
             elif op == "unload":
                 if impl is not None:

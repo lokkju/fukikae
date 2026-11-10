@@ -678,3 +678,19 @@ def test_the_death_signal_is_resolved_in_the_parent(monkeypatch):
     monkeypatch.setattr(ctypes, "CDLL", boom)
     hook()  # sets PDEATHSIG on this test process: harmless, the runner outlives nothing
     assert remote.death_signal_hook() is hook
+
+
+def test_a_second_load_is_refused_until_unload():
+    """B15: a second load would put a second model on the card beside the first; it is
+    refused (the first stays loaded and usable) until an unload."""
+    env = {**os.environ, "FUKIKAE_TTS_FAKE_IMPL": "tests.fixtures.fake_tts_impl"}
+    env["PYTHONPATH"] = os.pathsep.join([str(ROOT), str(ROOT / "src")])
+    load = json.dumps({"op": "load", "options": {}, "device": "cpu"})
+    lines = [load, load, json.dumps({"op": "unload"}), load, ""]
+    r = subprocess.run(
+        [sys.executable, "-m", "fukikae.backends.tts.worker", "faketts"],
+        input="\n".join(lines), capture_output=True, text=True, env=env, timeout=60, check=False,
+    )  # fmt: skip
+    answers = [json.loads(x) for x in r.stdout.splitlines()]
+    assert [a["ok"] for a in answers] == [True, False, True, True]
+    assert "already loaded" in answers[1]["error"]
