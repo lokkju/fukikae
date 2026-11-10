@@ -343,10 +343,18 @@ def _disagreements(
 def _merge_suggestions(
     ws: Workspace, result: NamesResult, asg: Assignments, reg: Registry
 ) -> list[str]:
-    """A nameless character that kept a parent cluster's unnamed remainder while that
-    parent's named speech went, mostly (`MERGE_SHARE`), to one named character: the two may
-    be one voice, and merging is the operator's call (Task 6 ruling)."""
+    """A nameless character that kept a parent cluster's unnamed remainder (at least
+    ``[names] min_new_seconds`` of it) while that parent's named speech went, mostly
+    (`MERGE_SHARE`), to one named character: the two may be one voice, and merging is the
+    operator's call (Task 6 ruling). The command is `registry merge KEEP DROP` with the named
+    character's actor as KEEP, which folds the leftover into KEEP's lowest-id character, so
+    the hint is given only when that is the named character; never for two characters of one
+    actor, which no merge joins."""
+    floor = ws.config.names.min_new_seconds
     chars = {c.id: c for c in reg.characters()}
+    first: dict[int, int] = {}  # actor -> its lowest-id character, the one a merge keeps
+    for c in chars.values():
+        first[c.actor_id] = min(first.get(c.actor_id, c.id), c.id)
     clusters = {c.cluster: c for c in asg.clusters}
     seconds = _label_seconds(asg)
     named_by_parent: dict[str, dict[int, float]] = defaultdict(lambda: defaultdict(float))
@@ -364,12 +372,14 @@ def _merge_suggestions(
     for parent, lb in sorted(remainder.items()):
         x = chars.get(clusters[lb].character_id or -1)
         got = named_by_parent.get(parent)
-        if x is None or x.name is not None or not got:
+        if x is None or x.name is not None or not got or seconds[lb] < floor:
             continue
         cid, held = max(got.items(), key=lambda kv: (kv[1], -kv[0]))
         total = sum(got.values())
         y = chars.get(cid)
         if y is None or y.name is None or y.id == x.id or held < MERGE_SHARE * total:
+            continue
+        if y.actor_id == x.actor_id or first[y.actor_id] != y.id:
             continue
         if (y.id, x.id) in seen:
             continue
