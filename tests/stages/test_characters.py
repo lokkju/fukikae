@@ -1234,3 +1234,88 @@ def test_fresh_run_keeps_the_candidates_of_an_ambiguous_key(tmp_path):
     CharactersStage().run(ep, NAMES_CFG)
     got = by_cluster(ep)["SPEAKER_01~lucy"]
     assert (got.status, got.character_id, got.source) == ("matched", first.character_id, "voice")
+
+
+# --- final review A: no name or lock decision comes back as a pin; the manual fallback -------
+
+
+def _names_then_off(tmp_path):
+    """A names run in which SPEAKER_08~wendy (named) holds 130 s of SPEAKER_08's 220 s and the
+    remainder is NATSU-voiced, then a rerun with names off (whole SPEAKER_08 again)."""
+    ep = make_ep(tmp_path)
+    rows = [WENDY] * 3 + [NATSU] * 5
+    write_diarize(ep, {"SPEAKER_08": (rows, 170.0)}, [(0, 220, "SPEAKER_08")])
+    write_names(
+        ep,
+        {
+            "SPEAKER_08~wendy": ("SPEAKER_08", "wendy", "named", [WENDY] * 3, [(0, 130)]),
+            "SPEAKER_08": ("SPEAKER_08", None, "remainder", [NATSU] * 5, [(130, 220)]),
+        },
+    )
+    CharactersStage().run(ep, NAMES_CFG)
+    by = by_cluster(ep)
+    assert by["SPEAKER_08~wendy"].source == "name"
+    return ep, by["SPEAKER_08~wendy"].character_id, by["SPEAKER_08"].character_id
+
+
+@pytest.mark.parametrize("verdict", ["none", "holdout"])
+def test_a_name_decision_never_comes_back_as_a_pin_once_names_stop(tmp_path, verdict):
+    import json
+
+    ep, wendy, remainder = _names_then_off(tmp_path)
+    write_names(ep, {}, used=False)
+    p = ep.work / "04c-names" / "names.json"
+    d = json.loads(p.read_text())
+    d["verdict"] = verdict
+    p.write_text(json.dumps(d))
+    CharactersStage().run(ep, NAMES_CFG)
+    (got,) = assignments(ep).clusters
+    # the 130 s named wendy would have pinned the whole cluster to wendy; acoustics say natsu
+    assert got.status != "pinned"
+    assert got.character_id != wendy
+    assert got.character_id == remainder and got.source == "voice"
+
+
+def test_a_lock_decision_never_comes_back_as_a_pin_once_names_stop(tmp_path):
+    ep, wendy, _ = _names_then_off(tmp_path)
+    assert wendy is not None
+    with registry(ep) as reg:
+        reg.lock_character(wendy, True)
+    CharactersStage().run(ep, NAMES_CFG)  # names still used: wendy kept by its lock
+    assert by_cluster(ep)["SPEAKER_08~wendy"].source in ("name", "lock")
+    write_names(ep, {}, used=False)
+    CharactersStage().run(ep, NAMES_CFG)
+    (got,) = assignments(ep).clusters
+    assert got.status != "pinned" and got.character_id != wendy
+
+
+def test_a_split_renamed_locked_sub_cluster_stays_on_rerun(tmp_path):
+    """The manual fallback: the operator splits a named sub-cluster off, names and locks the new
+    character and actor, and edits the assignment by hand (source still ``name``)."""
+    ep = make_ep(tmp_path)
+    rows = [WENDY] * 3 + [HAPPY] * 2 + [CHARLE] * 2
+    write_diarize(ep, {"SPEAKER_08": (rows, 170.0)}, [(0, 220, "SPEAKER_08")])
+    write_names(ep, merged_cluster())
+    CharactersStage().run(ep, NAMES_CFG)
+    happy = by_cluster(ep)["SPEAKER_08~happy"]
+    assert happy.actor_id is not None
+    with registry(ep) as reg:
+        new_aid, new_cid = reg.split_cluster(happy.actor_id, ep.id, "SPEAKER_08~happy")
+        reg.rename_character(new_cid, "Natsu")
+        reg.lock_actor(new_aid, True)
+        reg.lock_character(new_cid, True)
+    a = assignments(ep)
+    clusters = [
+        c.model_copy(update={"actor_id": new_aid, "character_id": new_cid})
+        if c.cluster == "SPEAKER_08~happy"
+        else c
+        for c in a.clusters
+    ]
+    write_json(
+        ep.work / "05-characters" / "assignments.json", a.model_copy(update={"clusters": clusters})
+    )
+    CharactersStage().run(ep, NAMES_CFG)
+    got = by_cluster(ep)["SPEAKER_08~happy"]
+    assert (got.actor_id, got.character_id, got.source) == (new_aid, new_cid, "lock")
+    CharactersStage().run(ep, NAMES_CFG)  # and the next run again
+    assert by_cluster(ep)["SPEAKER_08~happy"].character_id == new_cid
