@@ -69,6 +69,8 @@ def test_a_busy_lock_times_out_naming_the_holder(tmp_path):
             gpu_lock(0, "test waiter", timeout_s=0.3, poll_s=0.05),
         ):
             pass
+        # giving up leaves the holder's line alone
+        assert gpulock.lock_path(0).read_text() == f"{holder.pid} test holder\n"
     finally:
         holder.kill()
         holder.wait()
@@ -190,6 +192,28 @@ def test_a_shell_that_only_mentions_the_worker_is_not_a_leftover(tmp_path, start
 )
 def test_a_job_is_recognised_by_its_argv(argv, job):
     assert gpulock._is_job(argv) is job
+
+
+def test_the_holder_pid_is_written_before_the_leftover_scan(monkeypatch):
+    """B7: a waiter that finds the lock taken reads who holds it, so the pid goes in at once,
+    not after the /proc scan."""
+    seen: list[str] = []
+
+    def scan(index):
+        seen.append(gpulock.lock_path(index).read_text())
+        return []
+
+    monkeypatch.setattr(gpulock, "leftover_jobs", scan)
+    with gpu_lock(0, "early bird", timeout_s=0):
+        pass
+    assert seen == [f"{os.getpid()} early bird\n"]
+
+
+def test_a_failed_leftover_check_leaves_no_holder_behind(monkeypatch):
+    monkeypatch.setattr(gpulock, "leftover_jobs", lambda _i: [(4242, "llama-server x")])
+    with pytest.raises(GpuBusy), gpu_lock(0, "refused", timeout_s=0):
+        pass
+    assert gpulock.lock_path(0).read_text() == ""
 
 
 def test_leftovers_on_another_card_or_the_cpu_are_not_ours(tmp_path, started_pids):
