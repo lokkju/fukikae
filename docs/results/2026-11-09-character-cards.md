@@ -237,6 +237,58 @@ Per cue, the PyTorch and TensorRT renders of the same line on the 40 timing cues
 
 **Recommendation.** Keep the PyTorch worker as the default and don't build an A/B pack: the speed is real, but the similarity loss is consistent across every measure and both samples and at least as large as the one that failed `accel`, so the gate fails before the listening checkpoint. The backend stays as an opt-in for a run where speed matters more than likeness. The likeliest causes are the fp16 conditioners (w2v-BERT, the perceivers and CAMPPlus all shape the voice, and PyTorch runs them in fp32 with tf32 matmuls) and TensorRT-LLM's beam search; an fp32 build of the non-GPT engines (upstream's `PRECISION=fp32` path for those) is the next thing to measure if lever 2 is reopened.
 
+## D30: TensorRT with fp32 conditioners
+
+Lever 2's likeliest suspect was the fp16 conditioners, so I built them in fp32 and measured again. They are not the cause: the fp32 build is as far from the PyTorch voice as the fp16 one, its gate figures move by about as much as two fp16 builds differ from each other, and the gap stays. The engine stays opt-in and fp16, and I built no A/B pack.
+
+**What I built.** `[tts.indextts2_trt]` now takes `fp32`, a list of the plain TensorRT engines to build without TensorRT's FP16 flag (upstream's `--no-fp16`, the same switch its `PRECISION=fp32` passes to every build script); the GPT stays fp16 on TensorRT-LLM. Each `fp32` set gets its own directory beside the default, `<digest>-fp32-<8 hex of the sorted names>`, a manifest that records the set, and the variant in the identity (`lock:1182ed740dfb-fp32-4a5094a7-28df86feddbc`), so fp16 and fp32 renders never share a cache key (all 40 timing keys differ); the default set, its directory and its identity are unchanged. `fukikae backends setup indextts2_trt --workspace <ws>` builds the set that workspace's table names. Variant A has the seven conditioners in fp32 (w2v-BERT, the semantic codec, CAMPPlus, both perceiver conditioners, the latent projector, the length regulator); variant B has all nine engines in fp32, the DiT and BigVGAN too.
+
+**Build cost.** Both on GPU 0, the same image and ONNX graphs as the fp16 set (digest `1182ed740dfb`):
+
+| set | wall | export | engine builds | engines | build peak on disk | worker VRAM |
+|---|---|---|---|---|---|---|
+| fp16 (`0cd083cc1ef1`, for scale) | about 26 min | 6.8 min | 15.7 min | 3.13 GB | about 8 GB | 15,438 MiB |
+| A: fp32 conditioners (`28df86feddbc`) | 20.6 min | 7.3 min | 11.2 min | 4.67 GB | 9.1 GB | 18,596 MiB |
+| B: all nine fp32 (`fb10cec2b5db`) | 15.5 min | 6.8 min | 7.4 min | 5.09 GB | 9.5 GB | does not fit |
+
+fp32 engines build faster than fp16 (CAMPPlus 68 s against 213 s, BigVGAN 130 s against 251 s), because TensorRT has fewer tactics to try. The fp32 engines are twice their fp16 size (w2v-BERT 1.67 GB, the speaker conditioner 0.73 GB, the emotion conditioner 0.66 GB). Variant A's worker takes 18,596 MiB, measured per process (another session shared GPU 0), 3.2 GB more than fp16 and above the backend's `vram_mb` of 16,500, which is the fp16 figure. Variant B doesn't load on the 3090: the fp32 DiT and BigVGAN contexts take the card to 23.4 GiB before TensorRT-LLM allocates its KV cache, and the load fails on a 552 MiB allocation. Upstream's runtime has no KV-cache budget to lower; fitting it would mean smaller optimization profiles, so I stopped there, as planned.
+
+**Speed.** The lever-2 method on the same 40 E14 cues (c0026 to c0065, driver `~/fukikae-scratch/trt-fp32/driver.py`, workspace `~/fukikae-scratch/trt-fp32/orig/ws`), alternating backends; each run's worker load is taken out. Another session rendered on GPU 0 in between, which inflates some loads (lock waits) but not the render times, since the lock is held while rendering.
+
+| backend | runs | mean | real-time factor | audio |
+|---|---|---|---|---|
+| indextts2 (PyTorch, tf32) | 3.33, 3.31 s/line | 3.32 s/line | 1.73 | 76.6 s |
+| indextts2_trt, fp16 | 1.45, 1.46, 1.51 s/line | 1.47 s/line | 0.83 | 70.8 s |
+| indextts2_trt, fp32 conditioners | 1.48, 1.47, 1.50 s/line | 1.48 s/line | 0.84 | 70.5 s |
+
+The fp32 conditioners cost under 1% a line: they run once per reference prompt and per line, and the GPT and the DiT dominate. Every backend is deterministic across its runs. The PyTorch renders are byte-identical to lever 2's; the fp16 TensorRT renders are not, because lever 2 ran on the earlier engine build (`0186a853043d-6412eda054c3`, before the lock change) and these on `1182ed740dfb-0cd083cc1ef1`, so I have two independent fp16 builds to measure noise against. The TensorRT renders are again shorter than PyTorch's (median per cue 0.94 of the PyTorch length for both fp16 and fp32 conditioners).
+
+**Per-cue distance.** WeSpeaker cosine of the same line on two engines, on the 40 timing cues (`pairsim.py`):
+
+| pair | mean | median | lowest | p10 |
+|---|---|---|---|---|
+| PyTorch vs fp16 | 0.649 | 0.668 | 0.390 (c0034) | 0.461 |
+| PyTorch vs fp32 conditioners | 0.642 | 0.667 | 0.384 (c0034) | 0.444 |
+| fp16 vs fp32 conditioners | 0.892 | 0.983 | 0.477 (c0035) | 0.697 |
+| fp16 build `6412eda054c3` vs fp16 build `0cd083cc1ef1` | 0.869 | 0.979 | 0.488 (c0035) | 0.666 |
+
+This is the clearest result. Putting the conditioners in fp32 moves the TensorRT voice no closer to PyTorch's (0.642 against 0.649), and the fp32-conditioner renders differ from the fp16 ones by no more than two fp16 builds differ from each other. Half the lines come out nearly identical (median 0.98) and a few change entirely, which is what a different token sequence from the GPT looks like.
+
+**Quality gate.** `eval tts` on E14 in assigned mode, as in lever 2, all three backends on the same cues and cards (scratch ledger `~/fukikae-scratch/trt-fp32/ledger.jsonl`):
+
+| run | cues | held-out sim (ceiling) | sim to references | sim to card | WER | median WER | fit | stretch p90 | cps | suspect |
+|---|---|---|---|---|---|---|---|---|---|---|
+| indextts2, 4/char, `fa48cec1` | 36 | 0.406 (0.651) | 0.493 | 0.491 | 0.105 | 0 | 0.83 | 1.03 | 14.6 | 1 |
+| indextts2_trt fp16, 4/char, `8ac0ec13` | 36 | 0.347 (0.651) | 0.468 | 0.463 | 0.087 | 0 | 0.75 | 1.06 | 14.7 | 0 |
+| indextts2_trt fp32 cond., 4/char, `dd373357` | 36 | 0.360 (0.651) | 0.486 | 0.467 | 0.105 | 0 | 0.75 | 1.04 | 14.7 | 0 |
+| indextts2, 8/char, `60187e9a` | 67 | 0.438 (0.673) | 0.494 | 0.453 | 0.103 | 0 | 0.82 | 1.05 | 14.3 | 1 |
+| indextts2_trt fp16, 8/char, `8713cb88` | 67 | 0.410 (0.673) | 0.469 | 0.441 | 0.078 | 0 | 0.78 | 1.06 | 14.3 | 0 |
+| indextts2_trt fp32 cond., 8/char, `5db582f7` | 67 | 0.412 (0.673) | 0.473 | 0.434 | 0.083 | 0 | 0.81 | 1.07 | 14.9 | 0 |
+
+The PyTorch rows reproduce lever 2's exactly. Against PyTorch, the fp32-conditioner build is at -0.046 and -0.026 held-out (fp16: -0.059 and -0.028), -0.007 and -0.021 against the references (fp16: -0.025 and -0.025) and -0.024 and -0.019 against the card (fp16: -0.028 and -0.012). For scale, the two fp16 builds differ by 0.003 and 0.000 held-out, 0.000 and 0.005 against the references and 0.019 and 0.002 against the card (lever 2's rows against these). Only the 4-a-character similarity to the references moves by more than that spread (+0.018), and the 8-a-character sample, with nearly twice the cues, doesn't repeat it (+0.004). Per character, the two characters that lost most in lever 2 still do in every TensorRT build: character 13 against its references 0.454 on PyTorch, 0.39 and 0.39 (4 a character) and 0.41 and 0.39 (8) on fp16 and fp32; character 15 0.487 and 0.504 on PyTorch, 0.39 to 0.42 on both. WER, fit and speech rate stay where lever 2 had them, and the render guard flags nothing on TensorRT.
+
+**Recommendation.** The likeness gap doesn't come from the fp16 conditioners, and fp32 doesn't close it within noise, so there is no A/B pack and no reason to switch: keep the PyTorch worker as the default and `indextts2_trt` opt-in in fp16. The `fp32` option stays, off by default, for reproducing this. The all-fp32 build doesn't fit beside TensorRT-LLM on a 24 GB card, so the DiT and BigVGAN went unmeasured, but the per-cue figures point away from them: the TensorRT renders are 6% shorter in every build and either near-identical to each other or entirely different, which points at the GPT's token sequence (TensorRT-LLM's fp16 GPT and its beam search, where IndexTTS2 samples within its beams) rather than the decoder or the vocoder. The next thing to measure, if lever 2 is reopened, is the GPT: TensorRT-LLM with sampling matched to PyTorch's, or the PyTorch GPT in front of the TensorRT conditioners and decoder.
+
 ## How to run it
 
 ```bash
