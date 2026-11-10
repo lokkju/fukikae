@@ -717,26 +717,45 @@ HELDOUT_COUNT = 3
 HELDOUT_MIN_S = 6.0
 
 
+def reference_origins(card: Card) -> tuple[dict[str, list[tuple[float, float]]], bool]:
+    """(spans per episode, complete): where each of the card's references was cut from, by its
+    ``origin = {episode, start, end}``; ``complete`` False when a reference has no usable
+    origin, so held-out exemplars can't be checked against it (B1)."""
+    spans: dict[str, list[tuple[float, float]]] = {}
+    complete = True
+    for r in card.voice.references:
+        o = r.origin or {}
+        e, a, b = o.get("episode"), o.get("start"), o.get("end")
+        numbers = all(isinstance(x, int | float) and not isinstance(x, bool) for x in (a, b))
+        if not isinstance(e, str) or not numbers:
+            complete = False
+            continue
+        spans.setdefault(e, []).append((float(cast(float, a)), float(cast(float, b))))
+    return spans, complete
+
+
 def heldout_exemplars(
     candidates: Mapping[str, Sequence[RefPick]],
     references: tuple[str, Sequence[RefPick]],
     delivery: Mapping[str, Sequence[tuple[float, float]]],
     *,
+    exclude: Mapping[str, Sequence[tuple[float, float]]] | None = None,
     count: int = HELDOUT_COUNT,
     min_total: float = HELDOUT_MIN_S,
 ) -> list[tuple[str, RefPick]] | None:
     """Held-out exemplars of a character for speaker similarity (ruling CD17): eligible turns
     of the sampled episodes (``candidates``) that are not reference picks and overlap no
     rendered cue's delivery reference (``delivery``, per episode: a clone hears that span as
-    its emotion prompt), episodes other than the references' first, then the CD5 ranking; the
-    top ``count``. None under ``min_total`` seconds."""
+    its emotion prompt) and no span in ``exclude`` (per episode: the rendered card's own
+    reference origins, B1), episodes other than the references' first, then the CD5 ranking;
+    the top ``count``. None under ``min_total`` seconds."""
     from fukikae.cards.select import rank_key
 
     ref_ep, picks = references
     taken = {(ref_ep, p.start, p.end) for p in picks}
     pool: list[tuple[str, RefPick]] = []
     for e, ranked in candidates.items():
-        spans = delivery.get(e, ())
+        spans = [*delivery.get(e, ()), *(exclude or {}).get(e, ())]
         for p in ranked:
             if (e, p.start, p.end) in taken:
                 continue
@@ -1091,7 +1110,14 @@ def evaluate(
     for cid, found in refs.items():
         if found is None or cid not in cards:
             continue
-        held = heldout_exemplars(cands[cid], found, delivery)
+        # B1: the rendered card's own references, which in assigned mode may not be the picks
+        origins, complete = reference_origins(store.get(cards[cid]))
+        if not complete:
+            notes.append(
+                f"character {cid}: card {cards[cid]} has a reference with no origin, so its "
+                "held-out exemplars can't be checked against the references"
+            )
+        held = heldout_exemplars(cands[cid], found, delivery, exclude=origins)
         if held is None:
             notes.append(
                 f"character {cid}: under {HELDOUT_MIN_S:g} s of held-out speech, so no held-out "

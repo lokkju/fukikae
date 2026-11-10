@@ -963,6 +963,34 @@ def test_heldout_exemplars_exclude_picks_and_delivery_spans_and_prefer_other_epi
     assert [(e, p.start) for e, p in got] == [("E2", 5), ("E2", 50), ("E1", 20)]
 
 
+def test_heldout_exemplars_exclude_the_rendered_cards_reference_origins():
+    """B1: in assigned mode the card's own references (by their origin) may differ from the
+    picks computed now; a held-out turn overlapping one would leak."""
+    eligible = {"E1": [_pick(0, 4, 30), _pick(10, 4, 29), _pick(20, 4, 28), _pick(30, 4, 27)]}
+    picks = ("E1", [eligible["E1"][0]])
+    got = ev.heldout_exemplars(eligible, picks, {}, exclude={"E1": [(11.0, 12.0)]})
+    assert got is not None and [p.start for _, p in got] == [20, 30]
+
+
+def test_reference_origins_of_a_card():
+    from fukikae.cards.card import Card, Reference
+
+    clip = "sha256:" + "0" * 64
+
+    def card(*origins):
+        refs = tuple(Reference(clip, "x", "ja", o) for o in origins)
+        return Card("en", Voice(backend="b", model_revision="r", source="clone", references=refs))
+
+    spans, complete = ev.reference_origins(
+        card({"episode": "E1", "start": 1.0, "end": 4.0}, {"episode": "E2", "start": 2, "end": 5})
+    )
+    assert spans == {"E1": [(1.0, 4.0)], "E2": [(2.0, 5.0)]} and complete
+    spans, complete = ev.reference_origins(card({"episode": "E1", "start": 1.0, "end": 4.0}, None))
+    assert spans == {"E1": [(1.0, 4.0)]} and not complete
+    stock_card = Card("en", Voice(backend="b", model_revision="r", source="stock", voice="v"))
+    assert ev.reference_origins(stock_card) == ({}, True)
+
+
 def test_heldout_exemplars_omitted_under_six_seconds():
     eligible = {"E1": [_pick(0, 4, 30), _pick(10, 2.5, 29), _pick(20, 3, 28)]}
     assert ev.heldout_exemplars(eligible, ("E1", [eligible["E1"][0]]), {}) is None
