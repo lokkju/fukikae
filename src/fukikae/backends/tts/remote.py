@@ -189,12 +189,37 @@ def death_signal_hook() -> Callable[[], None] | None:
 
 def _signal_group(proc: subprocess.Popen[bytes], sig: int) -> None:
     """``sig`` to the worker's whole process group (it leads its own session, B9), so
-    anything it started goes with it; to the worker alone if the group is already gone."""
-    try:
+    anything it started goes with it. Only while the worker is unreaped: the group id is its
+    pid, which the kernel may give to another process once the worker is reaped."""
+    if proc.returncode is not None:
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(proc.pid, sig)
-    except (ProcessLookupError, PermissionError):
-        with contextlib.suppress(ProcessLookupError):
-            proc.send_signal(sig)
+
+
+def _exit_status(proc: subprocess.Popen[bytes]) -> int | None:
+    """The worker's exit status once it has exited, else None, without reaping it (unlike
+    ``Popen.poll``): the exited worker stays a zombie, keeping its pid and so its group id,
+    until ``_reap`` has signalled the group."""
+    if proc.returncode is not None:
+        return proc.returncode
+    try:
+        info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return proc.poll()
+    if info is None:
+        return None
+    return info.si_status if info.si_code == os.CLD_EXITED else -info.si_status
+
+
+def _wait_exit(proc: subprocess.Popen[bytes], timeout: float) -> int | None:
+    """``_exit_status`` once the worker exits, or None after ``timeout`` seconds."""
+    deadline = time.monotonic() + timeout
+    while True:
+        code = _exit_status(proc)
+        if code is not None or time.monotonic() >= deadline:
+            return code
+        time.sleep(0.02)
 
 
 def nvml_index(device: str) -> int:
@@ -208,15 +233,13 @@ def nvml_index(device: str) -> int:
 
 
 def _reap(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is None:
-        _signal_group(proc, signal.SIGTERM)
-        try:
-            proc.wait(timeout=KILL_WAIT_S)
-        except subprocess.TimeoutExpired:
-            _signal_group(proc, signal.SIGKILL)
-            proc.wait()
-    else:
-        proc.wait()
+    """SIGTERM, then SIGKILL, to the worker's group, then reap the worker. The group is
+    signalled even when the worker has already exited, since it may have left children in
+    its group, and before the wait, while the group id can't belong to anyone else (B9)."""
+    _signal_group(proc, signal.SIGTERM)
+    _wait_exit(proc, KILL_WAIT_S)
+    _signal_group(proc, signal.SIGKILL)
+    proc.wait()
 
 
 def _json_safe(value: Any) -> Any:
@@ -435,7 +458,7 @@ class WorkerSynthesizer(Synthesizer):
         if self._proc is None:
             self._stop()
             return
-        if self._proc.poll() is None:
+        if _exit_status(self._proc) is None:
             try:
                 self._request({"op": "unload"}, 60.0)
             except BackendError as e:
@@ -450,12 +473,9 @@ class WorkerSynthesizer(Synthesizer):
                 if proc.stdin is not None and not proc.stdin.closed:
                     with contextlib.suppress(OSError):
                         proc.stdin.close()
-                if proc.poll() is None:
-                    try:
-                        proc.wait(timeout=self.stop_wait_s)
-                    except subprocess.TimeoutExpired:
-                        log.warning("%s worker still running after %g s; stopping it",
-                                    self.name, self.stop_wait_s)  # fmt: skip
+                if _wait_exit(proc, self.stop_wait_s) is None:
+                    log.warning("%s worker still running after %g s; stopping it",
+                                self.name, self.stop_wait_s)  # fmt: skip
                 _reap(proc)
             finally:
                 if proc.stdout is not None:
@@ -477,15 +497,13 @@ class WorkerSynthesizer(Synthesizer):
         if self._err is None:
             return ""
         # a worker that has exited has written all it will; let the drain catch up
-        done = self._proc is not None and self._proc.poll() is not None
+        done = self._proc is not None and _exit_status(self._proc) is not None
         return self._err.tail(STDERR_LINES, wait=2.0 if done else 0.2)
 
     def _fail(self, what: str, *, kill: bool = True) -> NoReturn:
         tail = self._stderr_tail()
         if kill and self._proc is not None:
-            proc = self._proc
-            if proc.poll() is None:
-                _signal_group(proc, signal.SIGKILL)
+            _signal_group(self._proc, signal.SIGKILL)
             self._stop()
         message = f"{self.name} worker {what}"
         if tail:
@@ -508,9 +526,8 @@ class WorkerSynthesizer(Synthesizer):
                     continue
                 chunk = os.read(fd, 65536)
                 if not chunk:
-                    try:
-                        code = self._proc.wait(timeout=EOF_WAIT_S)
-                    except subprocess.TimeoutExpired:
+                    code = _wait_exit(self._proc, EOF_WAIT_S)
+                    if code is None:
                         self._fail(f"closed its output and did not exit within {EOF_WAIT_S:g} s")
                     self._fail(f"exited with status {code}")
                 self._buf += chunk
@@ -526,7 +543,7 @@ class WorkerSynthesizer(Synthesizer):
             self._proc.stdin.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
-            code = self._proc.poll()
+            code = _exit_status(self._proc)
             self._fail(f"is gone (exit status {code})")
         line = self._read_line(timeout)
         try:
