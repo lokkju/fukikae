@@ -1,14 +1,17 @@
 """SQLite registry of actors, characters and per-episode voice exemplars.
 
-Actors own the voice embeddings; characters (which get an English voice) belong
-to an actor. Embeddings are stored as float32 bytes.
+Actors own the voice embeddings; characters belong to an actor and get one assigned character
+card per target language (schema 2), with every assignment kept in ``card_history``.
+Embeddings are stored as float32 bytes.
 """
 
 from __future__ import annotations
 
 import io
-import json
+import logging
+import re
 import sqlite3
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,7 +20,29 @@ from pathlib import Path
 
 import numpy as np
 
-SCHEMA_VERSION = 1
+from fukikae.config import normalize_language
+
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 3
+
+# `by` values of an assignment; `import:<pack title>` is the one with a suffix. `migrated`
+# (the schema-1 voice note) and `lock`/`unlock` rows are written by the registry itself.
+ASSIGNED_BY = frozenset({"auto", "auto-fallback", "assign", "revert", "edit", "derive", "restock"})
+# Operator actions (ruling CD2): a card they chose is never replaced by `auto` or an import
+# unless the caller passes override (an import the operator confirmed with --replace). An
+# imported card is never replaced by `auto` without override either (CD3).
+OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive"})
+# Automatic sources (ruling CD9): `restock` re-pins an automatic stock card to a new model
+# revision. It is no operator choice, so a restocked card stays uncurated, and it is refused
+# over a locked, operator-chosen or imported card exactly as `auto` is.
+# `auto-fallback` is the stock voice a character got while the clone backend could not run
+# here (Task 12 fix round 2); automatic assignment replaces it with a clone once it can.
+AUTOMATIC_BY = frozenset({"auto", "auto-fallback", "restock"})
+_LOCK_BY = frozenset({"lock", "unlock"})
+# The longest external character id a registry stores (and a pack carries).
+EXTERNAL_ID_CAP = 100
+_CARD_ID = re.compile(r"[0-9a-f]{16}")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -32,8 +57,9 @@ CREATE TABLE IF NOT EXISTS characters (
     id INTEGER PRIMARY KEY,
     actor_id INTEGER NOT NULL REFERENCES actors(id),
     name TEXT,
-    voice TEXT,
-    locked INTEGER NOT NULL DEFAULT 0
+    voice TEXT, -- schema 1's free-text voice, always NULL from schema 2 (card_assignments)
+    locked INTEGER NOT NULL DEFAULT 0,
+    external_id TEXT
 );
 CREATE TABLE IF NOT EXISTS exemplars (
     id INTEGER PRIMARY KEY,
@@ -52,6 +78,26 @@ CREATE TABLE IF NOT EXISTS projections (
     created TEXT NOT NULL,
     PRIMARY KEY (series, kind)
 );
+CREATE TABLE IF NOT EXISTS card_history (
+    id INTEGER PRIMARY KEY,
+    character_id INTEGER NOT NULL REFERENCES characters(id),
+    target_language TEXT NOT NULL,
+    card_id TEXT,
+    assigned TEXT NOT NULL,
+    by TEXT NOT NULL,
+    locked INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    chosen_by TEXT -- how the row's card was chosen: `by`, or on a lock/unlock row the
+                   -- chosen_by of the assignment it locked (schema 3, written at insert)
+);
+CREATE TABLE IF NOT EXISTS card_assignments (
+    character_id INTEGER NOT NULL REFERENCES characters(id),
+    target_language TEXT NOT NULL,
+    card_id TEXT NOT NULL,
+    history_id INTEGER NOT NULL REFERENCES card_history(id),
+    PRIMARY KEY (character_id, target_language)
+);
+CREATE INDEX IF NOT EXISTS card_history_character ON card_history(character_id, target_language);
 CREATE INDEX IF NOT EXISTS exemplars_actor ON exemplars(actor_id);
 CREATE INDEX IF NOT EXISTS exemplars_episode ON exemplars(episode);
 """
@@ -71,8 +117,35 @@ class Character:
     id: int
     actor_id: int
     name: str | None
-    voice: dict | None
+    external_id: str | None
     locked: bool
+
+
+@dataclass(frozen=True)
+class CardAssignment:
+    """One card_history row; ``n`` numbers a (character, target language)'s rows from 1, in
+    row id (insertion) order, never wall-clock order. ``chosen_by`` is how its card was
+    chosen: ``by`` itself, except on a ``lock``/``unlock`` row, which records the chosen_by
+    of the assignment it locked, stored when the row is written (schema 3) so a merge that
+    interleaves two characters' rows can't change it."""
+
+    n: int
+    character_id: int
+    target_language: str
+    card_id: str | None
+    assigned: str  # ISO 8601, UTC
+    by: str
+    locked: bool
+    note: str | None
+    chosen_by: str
+
+
+class RegistrySchemaError(RuntimeError):
+    """The registry file was written by a newer fukikae."""
+
+
+class ProtectedAssignmentError(ValueError):
+    """An automatic assignment or an import would replace a locked or operator-chosen card."""
 
 
 @dataclass(frozen=True)
@@ -120,10 +193,44 @@ def _from_blob(b: bytes | None) -> np.ndarray | None:
     return None if b is None else np.frombuffer(b, dtype=np.float32).copy()
 
 
+def _fold(text: str) -> str:
+    """Case- and width-insensitive form of a name (NFKC, then casefold)."""
+    return unicodedata.normalize("NFKC", text).casefold().strip()
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat(timespec="microseconds")
+
+
 def _normalized(v: np.ndarray) -> np.ndarray:
     v = np.asarray(v, dtype=np.float32)
     n = float(np.linalg.norm(v))
     return v if n == 0.0 else v / n
+
+
+def _curated_card(a: CardAssignment | None) -> bool:
+    """A current assignment someone has curated: locked, or its card not chosen automatically
+    (``auto`` or ``restock``, ruling CD9)."""
+    return a is not None and (a.locked or a.chosen_by not in AUTOMATIC_BY)
+
+
+def replace_refusal(cur: CardAssignment | None, by: str) -> str | None:
+    """Why an assignment ``by`` may not replace ``cur`` without override, or None when it may:
+    the one rule (rulings CD2, CD3, CD9) that ``assign_card`` enforces and pack import plans
+    with. Operator actions replace anything; ``auto``, ``restock`` and imports never replace
+    a locked or operator-chosen card; ``auto`` and ``restock`` never replace an imported one."""
+    if cur is None or by in OPERATOR_BY:
+        return None
+    imported = cur.chosen_by.startswith("import:")
+    if cur.locked:
+        why = "locked"
+    elif cur.chosen_by in OPERATOR_BY:
+        why = "operator-chosen"
+    elif by in AUTOMATIC_BY and imported:
+        why = "imported"
+    else:
+        return None
+    return f"card {cur.card_id} is {why} ({cur.chosen_by})"
 
 
 class Registry:
@@ -140,20 +247,110 @@ class Registry:
             raise
 
     def _init_schema(self, path: Path) -> None:
-        with self._tx():
+        """Create a new registry, or migrate an older one, in one transaction: a migration
+        that fails leaves the file exactly as it was."""
+        with self._tx() as con:
             for stmt in _SCHEMA.split(";"):
                 if stmt.strip():
-                    self._con.execute(stmt)
-            row = self._con.execute("SELECT MAX(version) FROM schema_version").fetchone()
+                    con.execute(stmt)
+            row = con.execute("SELECT MAX(version) FROM schema_version").fetchone()
             if row[0] is None:
-                self._con.execute(
-                    "INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,)
-                )
+                con.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
             elif row[0] > SCHEMA_VERSION:
-                raise RuntimeError(
+                raise RegistrySchemaError(
                     f"registry {path} has schema version {row[0]}, "
                     f"newer than this fukikae supports ({SCHEMA_VERSION}); upgrade fukikae"
                 )
+            else:
+                if row[0] == 1:
+                    self._migrate_1_to_2(con)
+                if row[0] <= 2:
+                    self._migrate_2_to_3(con)
+
+    def _migrate_1_to_2(self, con: sqlite3.Connection) -> None:
+        """Schema 1 to 2: ``characters.external_id``, the card tables (already created by
+        ``_SCHEMA``), and each non-empty ``characters.voice`` moved into history as a note.
+
+        Schema 1's voice was an English voice (the project dubs into English and nothing
+        assigned it per language), so the note goes under target language ``en``.
+        """
+        cols = {r[1] for r in con.execute("PRAGMA table_info(characters)")}
+        if "external_id" not in cols:
+            con.execute("ALTER TABLE characters ADD COLUMN external_id TEXT")
+        now = _now()
+        for cid, voice in con.execute(
+            "SELECT id, voice FROM characters WHERE voice IS NOT NULL AND TRIM(voice) != ''"
+            " ORDER BY id"
+        ).fetchall():
+            con.execute(
+                "INSERT INTO card_history(character_id, target_language, card_id, assigned, by,"
+                " locked, note) VALUES (?, 'en', NULL, ?, 'migrated', 0, ?)",
+                (cid, now, voice),
+            )
+        con.execute("UPDATE characters SET voice = NULL")
+        con.execute("UPDATE schema_version SET version = 2")
+
+    def _migrate_2_to_3(self, con: sqlite3.Connection) -> None:
+        """Schema 2 to 3: target language keys in the case reads use (``normalize_language``),
+        then ``card_history.chosen_by``. A non-lock row's is its ``by``; a
+        lock/unlock row's is that of the latest earlier non-lock row (by id) with the same
+        card for that character and language, else of the latest earlier non-lock row, else
+        ``auto``."""
+        self._normalize_card_languages(con)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(card_history)")}
+        if "chosen_by" not in cols:
+            con.execute("ALTER TABLE card_history ADD COLUMN chosen_by TEXT")
+        rows = con.execute(
+            "SELECT id, character_id, target_language, card_id, by FROM card_history"
+            " ORDER BY character_id, target_language, id"
+        ).fetchall()
+        seen: dict[tuple[int, str], list[tuple[str | None, str]]] = {}
+        for hid, char, lang, card, by in rows:
+            earlier = seen.setdefault((char, lang), [])
+            if by in _LOCK_BY:
+                chosen = next((b for c, b in reversed(earlier) if c == card), None)
+                if chosen is None:
+                    chosen = earlier[-1][1] if earlier else "auto"
+            else:
+                chosen = by
+                earlier.append((card, by))
+            con.execute("UPDATE card_history SET chosen_by = ? WHERE id = ?", (chosen, hid))
+        con.execute("UPDATE schema_version SET version = 3")
+
+    def _normalize_card_languages(self, con: sqlite3.Connection) -> None:
+        """Rewrite ``card_history`` and ``card_assignments`` language keys the way reads
+        normalize them (schema 2 stored whatever case it was given). History rows that meet
+        under one key simply merge in id order. Two current cards that meet keep the newer
+        assignment (the higher history id); the older stays in history, reachable with
+        ``voices revert``, and each collision is logged."""
+        for hid, lang in con.execute("SELECT id, target_language FROM card_history").fetchall():
+            if normalize_language(lang) != lang:
+                con.execute(
+                    "UPDATE card_history SET target_language = ? WHERE id = ?",
+                    (normalize_language(lang), hid),
+                )
+        rows = con.execute(
+            "SELECT character_id, target_language, card_id, history_id FROM card_assignments"
+            " ORDER BY character_id, history_id"
+        ).fetchall()
+        keep: dict[tuple[int, str], tuple[str, str, int]] = {}
+        for char, lang, card, hid in rows:
+            key = (char, normalize_language(lang))
+            old = keep.get(key)
+            if old is not None:
+                log.warning(
+                    "registry migration: character %d had two current %s cards (%s as %r, "
+                    "%s as %r); keeping the newer, %s (the other stays in its history)",
+                    char, key[1], old[1], old[0], card, lang, card,
+                )  # fmt: skip
+            keep[key] = (lang, card, hid)
+        con.execute("DELETE FROM card_assignments")
+        for (char, lang), (_, card, hid) in keep.items():
+            con.execute(
+                "INSERT INTO card_assignments(character_id, target_language, card_id, history_id)"
+                " VALUES (?, ?, ?, ?)",
+                (char, lang, card, hid),
+            )
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
@@ -194,11 +391,86 @@ class Registry:
 
     def characters(self) -> list[Character]:
         rows = self._con.execute(
-            "SELECT id, actor_id, name, voice, locked FROM characters ORDER BY id"
+            "SELECT id, actor_id, name, external_id, locked FROM characters ORDER BY id"
         ).fetchall()
+        return [Character(r[0], r[1], r[2], r[3], bool(r[4])) for r in rows]
+
+    def character_by_ref(self, ref: str) -> Character:
+        """A character by id, or by name case- and width-insensitively ("ＮＡＴＳＵ" finds
+        "Natsu"). ValueError when nothing matches, or when several names do (listing them)."""
+        chars = self.characters()
+        folded = _fold(ref)
+        if folded.isdecimal():
+            hit = next((c for c in chars if c.id == int(folded)), None)
+            if hit is not None:
+                return hit
+        matches = [c for c in chars if c.name is not None and _fold(c.name) == folded]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            listed = ", ".join(f"{c.id} ({c.name})" for c in matches)
+            raise ValueError(f"{ref!r} names several characters: {listed}; use the id")
+        raise ValueError(f"no character {ref!r} (by id or name); see `fukikae registry list`")
+
+    def _history_rows(
+        self, con: sqlite3.Connection, character_id: int, target_language: str
+    ) -> list[tuple[int, CardAssignment]]:
+        target_language = normalize_language(target_language)
+        rows = con.execute(
+            "SELECT id, card_id, assigned, by, locked, note, chosen_by FROM card_history"
+            " WHERE character_id = ? AND target_language = ? ORDER BY id",
+            (character_id, target_language),
+        ).fetchall()
+        out: list[tuple[int, CardAssignment]] = []
+        for n, r in enumerate(rows, start=1):
+            chosen = r[6] or r[3]
+            out.append(
+                (
+                    r[0],
+                    CardAssignment(
+                        n, character_id, target_language, r[1], r[2], r[3], bool(r[4]), r[5], chosen
+                    ),
+                )
+            )
+        return out
+
+    def card_history(
+        self, character_id: int, target_language: str, *, by_time: bool = False
+    ) -> list[CardAssignment]:
+        """Every assignment of this character in this target language, in row order (``n``).
+        ``by_time`` sorts the same rows (each keeping its ``n``) by when they were assigned,
+        for display after a merge has interleaved two characters' rows."""
+        rows = [h for _, h in self._history_rows(self._con, character_id, target_language)]
+        return sorted(rows, key=lambda h: (h.assigned, h.n)) if by_time else rows
+
+    def _current(
+        self, con: sqlite3.Connection, character_id: int, target_language: str
+    ) -> CardAssignment | None:
+        target_language = normalize_language(target_language)
+        row = con.execute(
+            "SELECT history_id FROM card_assignments WHERE character_id = ?"
+            " AND target_language = ?",
+            (character_id, target_language),
+        ).fetchone()
+        if row is None:
+            return None
+        return next(
+            h for hid, h in self._history_rows(con, character_id, target_language) if hid == row[0]
+        )
+
+    def card_for(self, character_id: int, target_language: str) -> CardAssignment | None:
+        """The character's current card assignment for this target language, if any."""
+        return self._current(self._con, character_id, target_language)
+
+    def card_languages(self, character_id: int) -> list[str]:
+        """Target languages this character has a current card for."""
         return [
-            Character(r[0], r[1], r[2], None if r[3] is None else json.loads(r[3]), bool(r[4]))
-            for r in rows
+            r[0]
+            for r in self._con.execute(
+                "SELECT target_language FROM card_assignments WHERE character_id = ?"
+                " ORDER BY target_language",
+                (character_id,),
+            )
         ]
 
     def exemplar_count(self, actor_id: int) -> int:
@@ -266,17 +538,40 @@ class Registry:
             StoredProjection(r[0], r[1], _blob_array(r[2]), _blob_array(r[3]), r[4]) for r in rows
         ]
 
+    def _is_curated(self, con: sqlite3.Connection, character_id: int) -> bool:
+        """Named, with an external id, with a schema-1 voice migrated into history, or with a
+        current card (any target language) that is locked or was not chosen by ``auto``
+        (ruling CD2). Lock and unlock rows by themselves curate nothing."""
+        row = con.execute(
+            "SELECT name IS NOT NULL OR external_id IS NOT NULL OR EXISTS (SELECT 1 FROM"
+            " card_history WHERE character_id = characters.id AND by = 'migrated')"
+            " FROM characters WHERE id = ?",
+            (character_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if row[0]:
+            return True
+        return any(
+            _curated_card(self._current(con, character_id, lang))
+            for (lang,) in con.execute(
+                "SELECT target_language FROM card_assignments WHERE character_id = ?",
+                (character_id,),
+            ).fetchall()
+        )
+
+    def curated_characters(self) -> set[int]:
+        """Characters someone has curated (`_is_curated`)."""
+        ids = [r[0] for r in self._con.execute("SELECT id FROM characters").fetchall()]
+        return {cid for cid in ids if self._is_curated(self._con, cid)}
+
     def protected_actors(self) -> set[int]:
         """Actors someone has curated, which pruning never deletes: locked or named, or with
-        a character that has a name or a voice."""
-        return {
-            r[0]
-            for r in self._con.execute(
-                "SELECT id FROM actors WHERE locked OR name IS NOT NULL"
-                " UNION SELECT actor_id FROM characters"
-                " WHERE name IS NOT NULL OR voice IS NOT NULL"
-            )
-        }
+        a curated character (`curated_characters`)."""
+        sql = "SELECT id FROM actors WHERE locked OR name IS NOT NULL"
+        actors = {r[0] for r in self._con.execute(sql)}
+        curated = self.curated_characters()
+        return actors | {c.actor_id for c in self.characters() if c.id in curated}
 
     def load_projection(self, series: str, kind: str) -> StoredProjection | None:
         row = self._con.execute(
@@ -317,7 +612,7 @@ class Registry:
         it must be in `keep` (centroid left exactly as stored) or `fixed` (given that
         centroid, e.g. one mapped into the new space); one in neither refuses. Stored
         projections of another input dimension are deleted. Names, locks, voices, external
-        ids and the id high-water mark are untouched.
+        ids, card assignments and the id high-water mark are untouched.
         """
         keep, fixed = set(keep or ()), dict(fixed or {})
         dims = {len(np.ravel(v)) for v in embeddings.values()}
@@ -439,6 +734,225 @@ class Registry:
             "UPDATE actors SET centroid = ? WHERE id = ?", (_to_blob(_normalized(mean)), actor_id)
         )
 
+    def _append(
+        self,
+        con: sqlite3.Connection,
+        character_id: int,
+        target_language: str,
+        card_id: str,
+        by: str,
+        locked: bool,
+        note: str | None = None,
+        chosen_by: str | None = None,
+    ) -> CardAssignment:
+        """Write a history row and make it the current assignment. ``chosen_by`` defaults to
+        ``by``; a lock/unlock row passes the locked assignment's own. Language keys are
+        case-normalized (``EN`` is ``en``), as cards are."""
+        target_language = normalize_language(target_language)
+        cur = con.execute(
+            "INSERT INTO card_history(character_id, target_language, card_id, assigned, by,"
+            " locked, note, chosen_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (character_id, target_language, card_id, _now(), by, int(locked), note,
+             chosen_by or by),
+        )  # fmt: skip
+        con.execute(
+            "INSERT INTO card_assignments(character_id, target_language, card_id, history_id)"
+            " VALUES (?, ?, ?, ?) ON CONFLICT(character_id, target_language) DO UPDATE SET"
+            " card_id = excluded.card_id, history_id = excluded.history_id",
+            (character_id, target_language, card_id, cur.lastrowid),
+        )
+        current = self._current(con, character_id, target_language)
+        assert current is not None
+        return current
+
+    def assign_card(
+        self,
+        character_id: int,
+        target_language: str,
+        card_id: str,
+        by: str,
+        locked: bool,
+        override: bool = False,
+        note: str | None = None,
+    ) -> CardAssignment:
+        """Make ``card_id`` the character's card for ``target_language``, recorded in history.
+
+        ``by`` is one of auto, assign, revert, edit, derive, restock, or
+        ``import:<pack title>``. Other target languages are never touched. Raises KeyError for
+        an unknown character. ``auto``, ``restock`` and imports refuse
+        (ProtectedAssignmentError) to replace a card that is locked or was chosen by an
+        operator action, unless ``override`` (ruling CD2); ``auto`` and ``restock`` (CD9) also
+        refuse to replace an imported card, which a later import may replace (CD3).
+        """
+        if not _CARD_ID.fullmatch(card_id):
+            raise ValueError(f"not a card id (16 lowercase hex digits): {card_id!r}")
+        if by not in ASSIGNED_BY and not (by.startswith("import:") and len(by) > 7):
+            raise ValueError(
+                f"unknown assignment by {by!r}; use one of {', '.join(sorted(ASSIGNED_BY))} "
+                "or import:<pack title>"
+            )
+        if not target_language:
+            raise ValueError("target language must not be empty")
+        with self._tx() as con:
+            self._require_character(con, character_id)
+            if not override:
+                why = replace_refusal(self._current(con, character_id, target_language), by)
+                if why is not None:
+                    raise ProtectedAssignmentError(
+                        f"character {character_id}'s {target_language!r} {why}; {by} does not "
+                        "replace it without override"
+                    )
+            return self._append(con, character_id, target_language, card_id, by, locked, note)
+
+    def revert_card(
+        self, character_id: int, target_language: str, to: int | None
+    ) -> CardAssignment:
+        """Assign again the card of history row ``to``, or by default the most recent earlier
+        card that differs from the current one (so two reverts in a row swap back). The new
+        row is ``by = "revert"`` and locked: the operator picked it."""
+        with self._tx() as con:
+            self._require_character(con, character_id)
+            rows = [h for _, h in self._history_rows(con, character_id, target_language)]
+            current = self._current(con, character_id, target_language)
+            if to is not None:
+                if not 1 <= to <= len(rows):
+                    raise ValueError(
+                        f"character {character_id} has no history row {to} for "
+                        f"{target_language!r} (rows 1 to {len(rows)})"
+                    )
+                card = rows[to - 1].card_id
+                if card is None:
+                    raise ValueError(
+                        f"history row {to} has no card (it is a {rows[to - 1].by!r} note); "
+                        "pick a row with a card"
+                    )
+            else:
+                if current is None:
+                    raise ValueError(
+                        f"character {character_id} has no card for {target_language!r} to revert"
+                    )
+                card = next(
+                    (
+                        h.card_id
+                        for h in reversed(rows[: current.n - 1])
+                        if h.card_id is not None and h.card_id != current.card_id
+                    ),
+                    None,
+                )
+                if card is None:
+                    raise ValueError(
+                        f"character {character_id} has no earlier card for {target_language!r}"
+                    )
+            return self._append(con, character_id, target_language, card, "revert", True)
+
+    def lock_card(self, character_id: int, target_language: str, locked: bool) -> CardAssignment:
+        """Lock (or unlock) the current assignment, recorded as a ``lock``/``unlock`` history
+        row with the same card; a no-op (no row) when it is already in that state."""
+        with self._tx() as con:
+            self._require_character(con, character_id)
+            current = self._current(con, character_id, target_language)
+            if current is None or current.card_id is None:
+                raise ValueError(
+                    f"character {character_id} has no card for {target_language!r} to "
+                    f"{'lock' if locked else 'unlock'}"
+                )
+            if current.locked == locked:
+                return current
+            return self._append(
+                con,
+                character_id,
+                target_language,
+                current.card_id,
+                "lock" if locked else "unlock",
+                locked,
+                chosen_by=current.chosen_by,
+            )
+
+    def set_character_external_id(self, character_id: int, external_id: str | None) -> None:
+        """Set (or, with None, clear) the character's external id: stripped, non-empty, at
+        most ``EXTERNAL_ID_CAP`` characters and printable, the form packs carry."""
+        if external_id is not None:
+            external_id = external_id.strip()
+            if (
+                not external_id
+                or len(external_id) > EXTERNAL_ID_CAP
+                or any(unicodedata.category(ch)[0] == "C" for ch in external_id)
+            ):
+                raise ValueError(
+                    f"external id {external_id[:40]!r} must be 1 to {EXTERNAL_ID_CAP} printable "
+                    "characters"
+                )
+        with self._tx() as con:
+            cur = con.execute(
+                "UPDATE characters SET external_id = ? WHERE id = ?", (external_id, character_id)
+            )
+            if cur.rowcount == 0:
+                raise KeyError(character_id)
+
+    def _require_character(self, con: sqlite3.Connection, character_id: int) -> None:
+        if con.execute("SELECT 1 FROM characters WHERE id = ?", (character_id,)).fetchone() is None:
+            raise KeyError(character_id)
+
+    def _delete_character_cards(self, con: sqlite3.Connection, character_id: int) -> None:
+        con.execute("DELETE FROM card_assignments WHERE character_id = ?", (character_id,))
+        con.execute("DELETE FROM card_history WHERE character_id = ?", (character_id,))
+
+    def _fold_character(
+        self, con: sqlite3.Connection, drop: int, keep: int, report: list[str]
+    ) -> None:
+        """Fold character ``drop`` into ``keep``: its card history (`_fold_cards`) and its
+        external id when keep has none. Keep's own external id wins a conflict."""
+        ids = dict(
+            con.execute("SELECT id, external_id FROM characters WHERE id IN (?, ?)", (drop, keep))
+        )
+        theirs, mine = ids.get(drop), ids.get(keep)
+        if theirs is not None and mine is None:
+            con.execute("UPDATE characters SET external_id = ? WHERE id = ?", (theirs, keep))
+        elif theirs is not None and theirs != mine:
+            report.append(
+                f"character {keep} keeps external id {mine}; character {drop}'s {theirs} "
+                "was dropped"
+            )
+        self._fold_cards(con, drop, keep, report)
+
+    def _fold_cards(self, con: sqlite3.Connection, drop: int, keep: int, report: list[str]) -> None:
+        """Move character ``drop``'s card history to ``keep``. Per target language, keep's
+        current card stays unless it is uncurated and drop's is curated (or keep has none):
+        a merge never loses a hand-picked voice for an automatic one. When both are curated,
+        keep's wins and ``report`` says so."""
+        langs = [
+            r[0]
+            for r in con.execute(
+                "SELECT target_language FROM card_assignments WHERE character_id = ?", (drop,)
+            )
+        ]
+        winners: dict[str, int] = {}
+        for lang in langs:
+            mine, theirs = self._current(con, keep, lang), self._current(con, drop, lang)
+            if mine is not None and _curated_card(mine) and _curated_card(theirs):
+                assert theirs is not None
+                report.append(
+                    f"character {keep} {lang}: kept its card {mine.card_id} ({mine.chosen_by}); "
+                    f"character {drop}'s card {theirs.card_id} ({theirs.chosen_by}) stays in "
+                    "history"
+                )
+            if mine is None or (_curated_card(theirs) and not _curated_card(mine)):
+                winners[lang] = con.execute(
+                    "SELECT history_id FROM card_assignments WHERE character_id = ?"
+                    " AND target_language = ?",
+                    (drop, lang),
+                ).fetchone()[0]
+        con.execute("DELETE FROM card_assignments WHERE character_id = ?", (drop,))
+        con.execute("UPDATE card_history SET character_id = ? WHERE character_id = ?", (keep, drop))
+        for lang, hid in winners.items():
+            card = con.execute("SELECT card_id FROM card_history WHERE id = ?", (hid,)).fetchone()
+            con.execute(
+                "INSERT INTO card_assignments(character_id, target_language, card_id, history_id)"
+                " VALUES (?, ?, ?, ?) ON CONFLICT(character_id, target_language) DO UPDATE SET"
+                " card_id = excluded.card_id, history_id = excluded.history_id",
+                (keep, lang, card[0], hid),
+            )
+
     def rename_character(self, character_id: int, name: str) -> None:
         with self._tx() as con:
             cur = con.execute("UPDATE characters SET name = ? WHERE id = ?", (name, character_id))
@@ -464,13 +978,16 @@ class Registry:
             if cur.rowcount == 0:
                 raise KeyError(actor_id)
 
-    def merge_actors(self, keep: int, drop: int) -> dict[int, int]:
+    def merge_actors(self, keep: int, drop: int, report: list[str] | None = None) -> dict[int, int]:
         """Fold actor drop into keep, delete drop, recompute keep.
 
         drop's exemplars move to keep. v1 has one character per actor, so drop's
-        characters are deleted and folded into keep's lowest-id character; returns
-        {drop character id: keep character id} for the caller to remap references.
+        characters are deleted and folded into keep's lowest-id character (card history and
+        external id, `_fold_character`); returns {drop character id: keep character id} for
+        the caller to remap references. Lines worth telling the operator (a curated card or
+        an external id that lost) are appended to ``report``.
         """
+        notes: list[str] = report if report is not None else []
         if keep == drop:
             raise ValueError("cannot merge an actor into itself")
         with self._tx() as con:
@@ -491,6 +1008,11 @@ class Registry:
                 target = dropped.pop(0)
                 con.execute("UPDATE characters SET actor_id = ? WHERE id = ?", (keep, target))
             con.execute("UPDATE exemplars SET actor_id = ? WHERE actor_id = ?", (keep, drop))
+            for cid in dropped:
+                if target is not None:
+                    self._fold_character(con, cid, target, notes)
+                else:
+                    self._delete_character_cards(con, cid)
             con.execute("DELETE FROM characters WHERE actor_id = ?", (drop,))
             con.execute("DELETE FROM actors WHERE id = ?", (drop,))
             self._recompute(con, keep)
@@ -526,7 +1048,8 @@ class Registry:
         """Delete those actors (and their characters) that have no exemplars, and return them.
 
         An actor someone has curated is kept: one that is locked or named, or that has a
-        character with a name or a voice.
+        curated character (`curated_characters`). A pruned character's card rows (all ``auto``
+        and unlocked, or it would be curated) go with it.
         """
         deleted: list[int] = []
         with self._tx() as con:
@@ -536,12 +1059,16 @@ class Registry:
                     continue
                 if con.execute("SELECT 1 FROM exemplars WHERE actor_id = ?", (aid,)).fetchone():
                     continue
-                if con.execute(
-                    "SELECT 1 FROM characters WHERE actor_id = ?"
-                    " AND (name IS NOT NULL OR voice IS NOT NULL)",
-                    (aid,),
-                ).fetchone():
+                cids = [
+                    r[0]
+                    for r in con.execute(
+                        "SELECT id FROM characters WHERE actor_id = ?", (aid,)
+                    ).fetchall()
+                ]
+                if any(self._is_curated(con, cid) for cid in cids):
                     continue
+                for cid in cids:
+                    self._delete_character_cards(con, cid)
                 con.execute("DELETE FROM characters WHERE actor_id = ?", (aid,))
                 con.execute("DELETE FROM actors WHERE id = ?", (aid,))
                 deleted.append(aid)

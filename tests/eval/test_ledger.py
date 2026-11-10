@@ -214,3 +214,23 @@ def test_model_identity_honours_hf_home(monkeypatch, tmp_path):
         "a/b",
         "deadbeef",
     )
+
+
+def test_a_retraction_row_hides_a_row_from_readers(tmp_path):
+    """A duplicate or bad run is retracted by an appended record, never by editing the file
+    (GT2: an additive record shape; old readers skip it with a warning)."""
+    path = tmp_path / "r.jsonl"
+    keep, dup = row(), row()
+    append_rows([keep, dup], path)
+    ledger.retract(dup.run_id, "stray concurrent run on a shared GPU", path)
+    rows, warnings = read_rows(path)
+    assert rows == [keep] and warnings == []
+    last = json.loads(path.read_text().splitlines()[-1])
+    assert last["retracts"] == dup.run_id and last["reason"].startswith("stray")
+    assert last["schema"] == SCHEMA and len(last["run_id"]) == 32
+    rows, _ = read_rows(path, include_retracted=True)
+    assert rows == [keep, dup]
+    with pytest.raises(ValueError, match="no ledger row"):
+        ledger.retract("0" * 32, "typo", path)
+    with pytest.raises(ValueError, match="reason"):
+        ledger.retract(keep.run_id, "  ", path)

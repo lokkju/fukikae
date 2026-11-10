@@ -25,6 +25,14 @@ EXTRAS: dict[str, str] = {
     "eres2netv2": "sherpa",
     "titanet": "sherpa",
     "fusion": "pyannote",
+    "sensevoice": "sensevoice",
+    "emotion2vec": "sensevoice",
+    "kokoro": "kokoro",
+    # Out-of-process backends import without their model; a missing worker environment
+    # (`.venvs/<extra>`, from `workers/<extra>`) is reported at load with the setup command.
+    "indextts2": "indextts2",
+    "cosyvoice3": "cosyvoice3",
+    "qwen3_tts": "qwen3tts",
 }
 
 

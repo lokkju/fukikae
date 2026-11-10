@@ -18,6 +18,7 @@ from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpulock import gpu_job
 from fukikae.workspace import Episode
 
 _sleep = time.sleep
@@ -55,6 +56,11 @@ class SeparateStage:
         }
 
     def run(self, ep: Episode, cfg: Config) -> None:
+        # Ruling CD15: on a GPU the stage holds the card's lock for its whole life.
+        with gpu_job(cfg.gpu_device, device_string(cfg), self.name):
+            self._run(ep, cfg)
+
+    def _run(self, ep: Episode, cfg: Config) -> None:
         bc = self._backend_cfg(cfg)
         device = device_string(cfg)
         backend = create("separation", bc, device)

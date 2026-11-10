@@ -34,6 +34,9 @@ class WespeakerEmbedder:
         import torch
         from pyannote.audio import Model
 
+        from fukikae.privacy import quiet_onnxruntime
+
+        quiet_onnxruntime()  # pyannote's import loads onnxruntime (ruling CD24)
         net = Model.from_pretrained(self.model)
         if net is None:
             raise RuntimeError(f"cannot load {self.model}; accept its terms on huggingface.co")

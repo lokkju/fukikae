@@ -9,6 +9,7 @@ are not in the key, so relabeling the same spans hits. Files live in
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from collections.abc import Callable, Sequence
@@ -26,6 +27,7 @@ from fukikae.backends.loader import create
 from fukikae.config import BackendConfig, Config
 from fukikae.eval.identity.segments import Segment
 from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpulock import gpu_job
 
 KEY_VERSION = 2
 
@@ -116,6 +118,7 @@ class ResidentEmbedder:
         self.device: str | None = None
         self._backend: Backend | None = None
         self._key: str | None = None
+        self._lock = contextlib.ExitStack()  # the GPU lock while a model is loaded (CD15)
 
     def __enter__(self) -> ResidentEmbedder:
         return self
@@ -130,8 +133,11 @@ class ResidentEmbedder:
 
     def close(self) -> None:
         backend, self._backend, self._key = self._backend, None, None
-        if backend is not None:
-            backend.unload()
+        try:
+            if backend is not None:
+                backend.unload()
+        finally:
+            self._lock.close()
 
     def _ensure(self, emb_cfg: BackendConfig) -> Backend:
         key = json.dumps([emb_cfg.backend, emb_cfg.options], sort_keys=True, default=str)
@@ -141,14 +147,18 @@ class ResidentEmbedder:
         if self.device is None:
             self.device = device_string(self.cfg)
         backend = create("embed", emb_cfg, self.device)
-        if self.device.startswith("cuda"):
-            wait_for_vram(
-                self.cfg.gpu_device, backend.vram_mb, runctx.vram_timeout_s, query=free_mb
-            )
+        self._lock.enter_context(gpu_job(self.cfg.gpu_device, self.device, "eval embed"))
         try:
+            if self.device.startswith("cuda"):
+                wait_for_vram(
+                    self.cfg.gpu_device, backend.vram_mb, runctx.vram_timeout_s, query=free_mb
+                )
             backend.load()
         except BaseException:
-            backend.unload()
+            try:
+                backend.unload()
+            finally:
+                self._lock.close()
             raise
         self._backend, self._key = backend, key
         return backend

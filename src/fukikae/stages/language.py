@@ -15,6 +15,7 @@ from fukikae.backends.identity import identity_key
 from fukikae.backends.loader import create
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
+from fukikae.gpulock import gpu_job
 from fukikae.workspace import Episode
 
 _sleep = time.sleep
@@ -71,13 +72,15 @@ class LanguageStage:
         backend = create("lid", bc, device)
         if not getattr(backend, "supports_lid", False):
             raise ValueError(f"lid backend {bc.backend!r} does not support language detection")
-        if device.startswith("cuda"):
-            wait_for_vram(
-                cfg.gpu_device, backend.vram_mb, runctx.vram_timeout_s, query=free_mb, sleep=_sleep
-            )
-        try:
-            backend.load()
-            lang, conf = cast(Transcriber, backend).detect_language(self.inputs(ep)[0])
-        finally:
-            backend.unload()
+        with gpu_job(cfg.gpu_device, device, "language"):  # ruling CD15
+            if device.startswith("cuda"):
+                wait_for_vram(
+                    cfg.gpu_device, backend.vram_mb, runctx.vram_timeout_s, query=free_mb,
+                    sleep=_sleep,
+                )  # fmt: skip
+            try:
+                backend.load()
+                lang, conf = cast(Transcriber, backend).detect_language(self.inputs(ep)[0])
+            finally:
+                backend.unload()
         write_json(out, LanguageResult(language=lang, confidence=conf, source="detected"))

@@ -14,12 +14,12 @@ def test_language_override_wins(tmp_path):
 
 def test_override_inherits_backend_and_options(tmp_path):
     (tmp_path / "fukikae.toml").write_text(
-        '[translate]\nbackend="openai_compat"\nmodel="a"\nmax_speed=1.25\n'
-        '[translate.pair.ko-en]\nmodel="b"\n'
+        '[translate]\nbackend="x"\nmodel="a"\nmax_speed=1.25\n[translate.pair.ko-en]\nmodel="b"\n'
     )
     c = load_config(tmp_path, user_config=None)
+    # backend "x", not the default profile's openai_compat, so no profile option joins in
     assert c.resolve("translate", pair="ko-en") == BackendConfig(
-        "openai_compat", {"model": "b", "max_speed": 1.25}
+        "x", {"model": "b", "max_speed": 1.25}
     )
 
 
@@ -50,8 +50,9 @@ def test_workspace_overrides_user_config(tmp_path):
 def test_missing_backend_raises(tmp_path):
     (tmp_path / "fukikae.toml").write_text('[asr]\nbackend="x"\n')
     c = load_config(tmp_path, user_config=None)
-    with pytest.raises(ConfigError, match="translate"):
-        c.resolve("translate", "ko")
+    # a kind no shipped profile configures (the profiles name [translate] since Task 4)
+    with pytest.raises(ConfigError, match="lid"):
+        c.resolve("lid", "ko")
 
 
 def test_defaults_and_source(tmp_path):
@@ -152,3 +153,9 @@ def test_older_top_level_series_string_is_the_title(tmp_path):
     (tmp_path / "fukikae.toml").write_text('profile = "anime"\nseries = "Fairy Tail"\n')
     s = load_config(tmp_path, user_config=None).series
     assert (s.title, s.genre, s.ids) == ("Fairy Tail", "anime", {})
+
+
+def test_target_language_must_be_a_language_tag(tmp_path):
+    (tmp_path / "fukikae.toml").write_text('target_language = "pt_BR"\n')
+    with pytest.raises(ConfigError, match="pt-BR"):
+        load_config(tmp_path, user_config=None)
