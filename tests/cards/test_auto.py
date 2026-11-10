@@ -880,10 +880,11 @@ def test_restock_card_with_stale_references_is_repicked(tmp_path: Path, vocals: 
     reg.close()
 
 
-def test_a_stale_card_without_confirmed_picks_is_kept(tmp_path: Path, vocals: Path):
-    """Character 3 has no name-confirmed turns, so a re-pick would clone the same contradicted
-    speech: the card stays and the report says why."""
-    from fukikae.cards.auto import stale_cards
+def test_a_stale_card_without_confirmed_picks_gets_a_stock_voice(tmp_path: Path, vocals: Path):
+    """Character 3 has no name-confirmed turns and no acoustic-only episode, so the re-pick
+    falls back the way a new card does: a stock voice, no longer the voice of the speech the
+    names gave Wendy. The stock card has no references, so the next run leaves it."""
+    from fukikae.cards.auto import REPICK_NOTE, stale_cards
 
     reg, _, ws = _ws_named(tmp_path)
     store = CardStore(ws.root)
@@ -891,8 +892,11 @@ def test_a_stale_card_without_confirmed_picks_is_kept(tmp_path: Path, vocals: Pa
     stale = stale_cards(ws, reg, store, [3], "en")
     (line,) = ensure_assignments(reg, store, CFG, {3: [(30.0, 35.0)]}, vocals,
                                  cloning=_cloning_ws(ws), stale=stale)  # fmt: skip
-    assert reg.card_for(3, "en").card_id == old  # type: ignore[union-attr]
-    assert "no name-confirmed references" in line
+    cur = reg.card_for(3, "en")
+    assert cur is not None and cur.card_id != old and cur.by == "auto"
+    assert store.get(cur.card_id or "").voice.source == "stock"
+    assert REPICK_NOTE in line and "wendy" in line
+    assert stale_cards(ws, reg, store, [3], "en") == {}
     reg.close()
 
 
