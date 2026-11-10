@@ -35,6 +35,8 @@ OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive"})
 # here (Task 12 fix round 2); automatic assignment replaces it with a clone once it can.
 AUTOMATIC_BY = frozenset({"auto", "auto-fallback", "restock"})
 _LOCK_BY = frozenset({"lock", "unlock"})
+# The longest external character id a registry stores (and a pack carries).
+EXTERNAL_ID_CAP = 100
 _CARD_ID = re.compile(r"[0-9a-f]{16}")
 
 _SCHEMA = """
@@ -817,6 +819,19 @@ class Registry:
             )
 
     def set_character_external_id(self, character_id: int, external_id: str | None) -> None:
+        """Set (or, with None, clear) the character's external id: stripped, non-empty, at
+        most ``EXTERNAL_ID_CAP`` characters and printable, the form packs carry."""
+        if external_id is not None:
+            external_id = external_id.strip()
+            if (
+                not external_id
+                or len(external_id) > EXTERNAL_ID_CAP
+                or any(unicodedata.category(ch)[0] == "C" for ch in external_id)
+            ):
+                raise ValueError(
+                    f"external id {external_id[:40]!r} must be 1 to {EXTERNAL_ID_CAP} printable "
+                    "characters"
+                )
         with self._tx() as con:
             cur = con.execute(
                 "UPDATE characters SET external_id = ? WHERE id = ?", (external_id, character_id)

@@ -972,3 +972,53 @@ def test_tar_zst_refuses_a_huge_pax_header_without_buffering_it(tmp_path: Path):
     evil = tmp_path / "evil.tar.zst"
     evil.write_bytes(zstandard.ZstdCompressor().compress(raw))
     _import_refused(tmp_path, evil, "extended header")
+
+
+def _stock_in(lang: str) -> Card:
+    return parse_card(
+        dump_card(stock()).replace('target_language = "en"', f'target_language = "{lang}"')
+    )
+
+
+def test_export_leaves_out_rows_import_would_refuse(tmp_path: Path):
+    """A4: export runs import's validators: per row it leaves out, so the pack it writes
+    always imports."""
+    _, reg, store = workspace(tmp_path, "a")
+    ok = character(reg, "Natsu")
+    long_name = character(reg, "N" * 250)
+    long_ext = character(reg, "Lucy")
+    reg._con.execute("UPDATE characters SET external_id = ? WHERE id = ?", ("9" * 150, long_ext))
+    bad_lang = character(reg, "Gray")
+    s = store.put(stock())
+    for cid in (ok, long_name, long_ext):
+        reg.assign_card(cid, "en", s, by="auto", locked=False)
+    reg.assign_card(bad_lang, "pt_BR", store.put(_stock_in("pt_BR")), by="auto", locked=False)
+    out = tmp_path / "pack"
+    report = export_pack(reg, store, SERIES, out, characters=None, languages=None,
+                         no_clips=False, title="FT", author="lokkju")  # fmt: skip
+    assert report.written == 1
+    reasons = " | ".join(why for _, why in report.left_out)
+    assert "250 characters" in reasons and "external" in reasons and "pt_BR" in reasons
+    with read_pack(out) as pack:
+        assert [e.key.name for e in pack.cast] == ["Natsu"]
+
+
+@pytest.mark.parametrize(
+    ("series", "author", "notes", "match"),
+    [
+        (SeriesInfo("T" * 400, "anime", {}), "a", "", "series_title"),
+        (SERIES, "a" * 300, "", "author"),
+        (SERIES, "a", "n" * 3000, "notes"),
+        (SeriesInfo("Fairy Tail", "anime", {"anidb": "x" * 200}), "a", "", "anidb"),
+    ],
+)
+def test_export_refuses_pack_fields_import_would_refuse(
+    tmp_path: Path, series: SeriesInfo, author: str, notes: str, match: str
+):
+    _, reg, store = workspace(tmp_path, "a")
+    reg.assign_card(character(reg, "Natsu"), "en", store.put(stock()), by="auto", locked=False)
+    out = tmp_path / "pack"
+    with pytest.raises(PackError, match=match):
+        export_pack(reg, store, series, out, characters=None, languages=None,
+                    no_clips=False, title="FT", author=author, notes=notes)  # fmt: skip
+    assert not out.exists()

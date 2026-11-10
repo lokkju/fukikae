@@ -19,6 +19,18 @@ _WORKSPACE_NEEDS_BACKEND = frozenset({"embed"})
 SERIES_ID_KEYS = ("tmdb", "tvdb", "anidb")
 _SERIES_KEYS = ("title", "genre", *SERIES_ID_KEYS)
 _GENRE = re.compile(r"[a-z0-9-]+")
+# A BCP 47-shaped language tag (a 2-3 letter language, then dash-separated subtags), the form
+# packs carry and import accepts.
+LANGUAGE_TAG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")
+
+
+def check_language(tag: object, what: str) -> str:
+    """``tag`` when it is a language tag (``en``, ``pt-BR``), else ConfigError naming
+    ``what``."""
+    if not isinstance(tag, str) or not LANGUAGE_TAG.fullmatch(tag):
+        hint = f" (use {tag.replace('_', '-')!r})" if isinstance(tag, str) and "_" in tag else ""
+        raise ConfigError(f"{what} {tag!r} is not a language tag such as 'en' or 'pt-BR'{hint}")
+    return tag
 
 
 class ConfigError(Exception):
@@ -207,7 +219,7 @@ def load_config(
     defaults = RegistrySettings()
     source = raw.get("source")
     return Config(
-        target_language=raw.get("target_language", "en"),
+        target_language=check_language(raw.get("target_language", "en"), "target_language"),
         source_language=raw.get("source_language"),
         source=workspace / Path(str(source)).expanduser() if source else None,
         gpu_device=int(raw.get("gpu_device", 0)),

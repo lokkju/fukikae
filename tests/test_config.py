@@ -153,3 +153,9 @@ def test_older_top_level_series_string_is_the_title(tmp_path):
     (tmp_path / "fukikae.toml").write_text('profile = "anime"\nseries = "Fairy Tail"\n')
     s = load_config(tmp_path, user_config=None).series
     assert (s.title, s.genre, s.ids) == ("Fairy Tail", "anime", {})
+
+
+def test_target_language_must_be_a_language_tag(tmp_path):
+    (tmp_path / "fukikae.toml").write_text('target_language = "pt_BR"\n')
+    with pytest.raises(ConfigError, match="pt-BR"):
+        load_config(tmp_path, user_config=None)
