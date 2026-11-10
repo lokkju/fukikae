@@ -1120,3 +1120,25 @@ def test_one_eval_tts_per_workspace_at_a_time(tmp_path):
         holder.wait()
     with ev.workspace_lock(root):
         pass
+
+
+def test_floor_clips_are_never_reused_stale(tmp_path):
+    """B2: a clip is named by a digest of its vocals and span, so new vocals or a different
+    span end never reuse an old clip."""
+    from fukikae.subtitles import Cue
+
+    out = tmp_path / "floor"
+    vocals = tmp_path / "vocals.wav"
+    tone_wav(vocals, 10.0, 16000)
+    subs = [Cue(1.0, 3.0, "one two three four")]
+    ((first, _),) = ev.floor_clips(out, subs, vocals, episode="E1", slots=[(1.0, 3.0)])
+    longer = [Cue(1.0, 4.0, "one two three four")]
+    ((second, _),) = ev.floor_clips(out, longer, vocals, episode="E1", slots=[(1.0, 4.0)])
+    assert first != second
+    import wave as _wave
+
+    with _wave.open(str(second)) as w:
+        assert w.getnframes() == 3 * 16000
+    tone_wav(vocals, 10.0, 16000, freq=880.0)
+    ((third, _),) = ev.floor_clips(out, longer, vocals, episode="E1", slots=[(1.0, 4.0)])
+    assert third != second
