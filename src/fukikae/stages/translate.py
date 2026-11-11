@@ -14,7 +14,7 @@ asked once more; a second failure leaves its cues with ``error`` and no ``text``
 them, and the mix keeps the original vocals there). Cues that come back longer than their
 budget are asked once more, together, with 85% of the budget (a budget is what the voice that
 will speak the cue says in the slot at ``max_speed``: the ``speech_cps`` of the character's
-card backend, else of ``[tts] clone_backend``, and of the ``[tts]`` backend for extras; else the
+card backend, else of ``[tts] clone_backend``, which makes extras' voices too (D41); else the
 language's typical rate); the shorter of the two
 renderings is kept, and one still long is flagged (``over_budget``, ``overrun``) and left to
 time fitting, never cut. A backend error (HTTP error, timeout) is retried once, then marks
@@ -121,21 +121,24 @@ def backend_cps(name: str | None, language: str) -> float:
 
 
 def speech_cps(cfg: Config) -> float:
-    """The ``[tts]`` backend's rate: what extras (always stock voices) speak at."""
-    try:
-        name = cfg.resolve("tts").backend
-    except ConfigError:
-        name = None
+    """What extras speak at: ``[tts] clone_backend``'s rate, since every extra is a clone of
+    its own speech (A2, D41); without one, a ``[tts] backend`` a workspace still names, else
+    the language's typical rate."""
+    from fukikae.cards.auto import clone_backend
+
+    name = clone_backend(cfg)
+    if name is None:
+        try:
+            name = cfg.resolve("tts").backend
+        except ConfigError:
+            name = None
     return backend_cps(name, cfg.target_language)
 
 
 def unassigned_cps(cfg: Config) -> float:
     """The rate of a recurring character with no card yet: ``[tts] clone_backend``'s, since
-    it gets a clone by default (D12), else the ``[tts]`` backend's."""
-    from fukikae.cards.auto import clone_backend
-
-    name = clone_backend(cfg)
-    return backend_cps(name, cfg.target_language) if name else speech_cps(cfg)
+    it gets a clone (D12, D41); the same rate extras speak at (`speech_cps`)."""
+    return speech_cps(cfg)
 
 
 class TranslateStage:

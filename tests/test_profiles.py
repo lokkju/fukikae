@@ -127,10 +127,13 @@ SHIPPED = ("default", "anime", "live-action")
 def test_every_profile_table_names_its_backend(name):
     for kind, table in cfgmod.load_profile(name).items():
         # [registry], [timefit], [mix] and [names] hold plain settings (no model behind
-        # them); [resolve] selects its matcher by `matcher`, as [characters] does (R17).
+        # them); [resolve] selects its matcher by `matcher`, as [characters] does (R17);
+        # [tts] chooses no card by `backend` since D41: `clone_backend` makes every voice.
         if kind in ("registry", "timefit", "mix", "names"):
             continue
-        key = "matcher" if kind in ("characters", "resolve") else "backend"
+        key = {"characters": "matcher", "resolve": "matcher", "tts": "clone_backend"}.get(
+            kind, "backend"
+        )
         assert isinstance(table, dict) and table.get(key), f"{name}: [{kind}] lacks {key}"
 
 

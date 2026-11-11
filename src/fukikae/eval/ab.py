@@ -1313,7 +1313,13 @@ def _scene(
     w0, w1 = window
     inside = [c for c in ordered if c.start >= w0 and c.end <= w1]
     spoken = [c for c in inside if TtsStage._skipped(c) is None]
-    default_backend = stage_settings(cfg)[0].backend
+    # the stock fallback for characters with no clone in the scene (an eval baseline, R1):
+    # the [tts] backend a workspace still names when it has stock pools, else Kokoro (D41: the
+    # profiles name no [tts] backend)
+    from fukikae.eval.stock import STOCK_BASELINE, STOCK_POOLS
+
+    named = stage_settings(cfg)[0].backend
+    default_backend = named if named in STOCK_POOLS else STOCK_BASELINE
     from fukikae.cards.auto import extras_label
     from fukikae.workspace import Episode
 

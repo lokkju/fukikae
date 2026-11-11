@@ -690,10 +690,9 @@ def _backend_card(ep: Episode, character: int, backend: str) -> None:
 @pytest.mark.usefixtures("fake")
 def test_budget_per_cue_follows_the_speakers_voice(ep):
     """C4: a cue is budgeted for the backend that will speak it: the character's card, else
-    [tts] clone_backend (a recurring character gets a clone by default), else the stage
-    backend; extras always the stage backend."""
+    [tts] clone_backend (a recurring character gets a clone by default), and extras the
+    clone backend too (they speak in clones of their own speech, D41)."""
     from fukikae.backends.tts.indextts2 import IndexTts2Synthesizer
-    from fukikae.backends.tts.kokoro import KokoroSynthesizer
     from fukikae.backends.tts.qwen3_tts import Qwen3TtsSynthesizer
     from fukikae.cues import budget_chars
 
@@ -708,7 +707,7 @@ def test_budget_per_cue_follows_the_speakers_voice(ep):
     key = TranslateStage().config_key(cfg, ep)
     qwen, index = Qwen3TtsSynthesizer.speech_cps["en"], IndexTts2Synthesizer.speech_cps["en"]
     assert key["cps"] == {
-        "extras": KokoroSynthesizer.speech_cps["en"],
+        "extras": index,
         "unassigned": index,
         "characters": {"1": qwen},
     }

@@ -7,18 +7,17 @@ import numpy as np
 import pytest
 
 from fukikae.cards import auto, stock
-from fukikae.cards.auto import character_spans, ensure_assignments, extras_voices
+from fukikae.cards.auto import character_spans, ensure_assignments
 from fukikae.cards.card import CardError, card_id, parse_card
 from fukikae.cards.select import estimate_gender
-from fukikae.cards.stock import STOCK_POOLS, pick_stock, stock_card
+from fukikae.cards.stock import stock_card
 from fukikae.cards.store import CardStore
 from fukikae.config import Config
 from fukikae.models import Assignments, ClusterAssignment, Delivery, DubCue, Turn
 from fukikae.registry.store import ProtectedAssignmentError, Registry
 from tests.cards.test_card import STOCK_CARD
 
-POOL = STOCK_POOLS["kokoro"]["en"]
-CFG = Config(raw={"tts": {"backend": "kokoro"}})
+CFG = Config(raw={"tts": {"clone_backend": "indextts2"}})
 RATE = 16000
 
 
@@ -44,30 +43,6 @@ def vocals(tmp_path: Path) -> Path:
     """0-6 s a 120 Hz voice, 6-10 s a 220 Hz voice, 10-12 s silence."""
     x = np.concatenate([harmonic(120, 6), harmonic(220, 4), np.zeros(2 * RATE, np.float32)])
     return write_wav(tmp_path / "vocals.wav", x)
-
-
-def test_pick_stock_by_gender_then_reuse():
-    assert pick_stock("kokoro", "en", "f", set()) == POOL["f"][0]
-    assert pick_stock("kokoro", "en", "m", {POOL["m"][0]}) == POOL["m"][1]
-    # exhausted: reuse from the start, then the least reused
-    assert pick_stock("kokoro", "en", "m", set(POOL["m"])) == POOL["m"][0]
-    assert pick_stock("kokoro", "en", "m", [*POOL["m"], POOL["m"][0]]) == POOL["m"][1]
-    assert pick_stock("kokoro", "en", "f", set(), extras=True) == POOL["extras_f"][0]
-
-
-def test_pick_stock_unknown_gender_alternates():
-    used: list[str] = []
-    picks = []
-    for _ in range(4):
-        v = pick_stock("kokoro", "en", "u", used)
-        used.append(v)
-        picks.append(v)
-    assert picks == [POOL["f"][0], POOL["m"][0], POOL["f"][1], POOL["m"][1]]
-
-
-def test_pick_stock_without_a_pool_names_backend_and_language():
-    with pytest.raises(CardError, match="kokoro.*'de'"):
-        pick_stock("kokoro", "de", "f", set())
 
 
 def test_stock_card_id_is_stable_and_meta_free():
@@ -108,50 +83,7 @@ def _registry(tmp_path: Path, n: int) -> tuple[Registry, list[int]]:
     return reg, ids
 
 
-def test_ensure_assignments_creates_unlocked_auto_stock_cards(tmp_path: Path, vocals: Path):
-    reg, (a, b) = _registry(tmp_path, 2)
-    store = CardStore(tmp_path / "ws")
-    lines = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)], b: [(6.0, 10.0)]}, vocals)
-    for cid, gender in ((a, "m"), (b, "f")):
-        cur = reg.card_for(cid, "en")
-        assert cur is not None and cur.by == "auto" and not cur.locked
-        assert cur.card_id is not None
-        card = store.get(cur.card_id)
-        assert card.voice.backend == "kokoro" and card.voice.source == "stock"
-        assert card.voice.voice == POOL[gender][0]
-    assert len(lines) == 2
-    assert any(f"character {a}" in ln and "m" in ln and POOL["m"][0] in ln for ln in lines)
-    reg.close()
-
-
-def test_ensure_assignments_gives_the_most_talkative_the_first_voice(tmp_path: Path, vocals: Path):
-    reg, (a, b) = _registry(tmp_path, 2)
-    store = CardStore(tmp_path / "ws")
-    # both male; b speaks longer, so b gets the pool's first voice
-    ensure_assignments(reg, store, CFG, {a: [(0.0, 2.0)], b: [(2.0, 6.0)]}, vocals)
-
-    def voice(cid: int) -> str | None:
-        cur = reg.card_for(cid, "en")
-        assert cur is not None and cur.card_id is not None
-        return store.get(cur.card_id).voice.voice
-
-    assert (voice(b), voice(a)) == (POOL["m"][0], POOL["m"][1])
-    reg.close()
-
-
-def test_ensure_assignments_skips_voices_already_assigned(tmp_path: Path, vocals: Path):
-    reg, (a, b) = _registry(tmp_path, 2)
-    store = CardStore(tmp_path / "ws")
-    first = store.put(stock_card("kokoro", POOL["m"][0], "en", stock.revision("kokoro")))
-    reg.assign_card(a, "en", first, by="assign", locked=True)
-    ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)], b: [(0.0, 6.0)]}, vocals)
-    cur = reg.card_for(b, "en")
-    assert cur is not None and cur.card_id is not None
-    assert store.get(cur.card_id).voice.voice == POOL["m"][1]
-    reg.close()
-
-
-def test_existing_assignment_is_never_replaced(tmp_path: Path, vocals: Path):
+def test_existing_assignment_is_never_replaced(tmp_path: Path):
     reg, (a, b, c) = _registry(tmp_path, 3)
     store = CardStore(tmp_path / "ws")
     mine = store.put(parse_card(STOCK_CARD))
@@ -162,7 +94,7 @@ def test_existing_assignment_is_never_replaced(tmp_path: Path, vocals: Path):
     reg.assign_card(c, "en", third, by="auto", locked=False)
     before = {x: reg.card_history(x, "en") for x in (a, b, c)}
     spans = {a: [(0.0, 6.0)], b: [(6.0, 10.0)], c: [(0.0, 6.0)]}
-    assert ensure_assignments(reg, store, CFG, spans, vocals) == []
+    assert ensure_assignments(reg, store, CFG, spans) == []
     assert {x: reg.card_history(x, "en") for x in (a, b, c)} == before
     reg.close()
 
@@ -186,7 +118,8 @@ def test_protected_assignment_race_keeps_the_existing_card(
         return real_assign(*args, **kw)
 
     monkeypatch.setattr(reg, "assign_card", spy)
-    lines = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals)
+    lines = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]},
+                               cloning=_cloning({a: [(0.0, 4.0, None)]}, vocals))  # fmt: skip
     assert seen and seen[0][1].get("override", False) is False and seen[0][1]["by"] == "auto"
     assert real(a, "en").card_id == mine  # type: ignore[union-attr]
     assert len(lines) == 1 and "kept" in lines[0]
@@ -211,23 +144,6 @@ def _cue(i: int, character: int | None, extra: str | None, text: str | None = "h
         budget=20,
         delivery=Delivery(reference=(float(i), i + 0.9)),
     )
-
-
-def test_extras_voices_stable_by_first_appearance():
-    cues = [
-        _cue(1, None, "S3"),
-        _cue(2, 1, None),
-        _cue(3, None, "unknown", text=None),  # an errored cue still fixes the order
-        _cue(4, None, "S3"),
-        _cue(5, None, "S7"),
-    ]
-    got = extras_voices(cues, CFG)
-    assert got == {
-        "S3": POOL["extras_f"][0],
-        "unknown": POOL["extras_m"][0],
-        "S7": POOL["extras_f"][1],
-    }
-    assert extras_voices(cues, CFG) == got
 
 
 def test_character_spans_leave_out_extras_and_review():
@@ -317,17 +233,6 @@ def test_profile_gender_table_does_not_warn(caplog):
     assert not [r for r in caplog.records if "median F0" in r.getMessage()]
 
 
-def test_ensure_assignments_uses_the_configured_band(tmp_path: Path, vocals: Path):
-    reg, (a,) = _registry(tmp_path, 1)
-    store = CardStore(tmp_path / "ws")
-    band = Config(raw={"tts": {"backend": "kokoro", "gender": {"female_above": 300.0}}})
-    (line,) = ensure_assignments(reg, store, band, {a: [(6.0, 10.0)]}, vocals)
-    assert "gender estimate u" in line and "F0 2" in line
-    cur = reg.card_for(a, "en")
-    assert cur is not None and cur.note == line.split(": ", 1)[1]
-    reg.close()
-
-
 # -- the clone branch (Task 12, D12 with the D24 verdict) -----------------------------------
 
 
@@ -356,7 +261,7 @@ def test_clone_backend_set_builds_clone_card(tmp_path: Path, vocals: Path):
     reg, (a,) = _registry(tmp_path, 1)
     store = CardStore(tmp_path / "ws")
     cloning = _cloning({a: [(0.0, 4.0, None), (6.0, 10.0, "angry")]}, vocals)
-    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, vocals, cloning=cloning)
+    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, cloning=cloning)
     cur = reg.card_for(a, "en")
     assert cur is not None and cur.by == "auto" and not cur.locked and cur.card_id
     card = store.get(cur.card_id)
@@ -379,23 +284,13 @@ def test_short_speech_gets_a_clone_below_the_floor(tmp_path: Path, vocals: Path)
     store = CardStore(tmp_path / "ws")
     cloning = _cloning({a: [(0.0, 4.2, None)]}, vocals)
     flags: list[str] = []
-    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=cloning,
+    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, cloning=cloning,
                                  flags=flags)  # fmt: skip
     cur = reg.card_for(a, "en")
     assert cur is not None and cur.card_id is not None
     assert store.get(cur.card_id).voice.source == "clone"
     assert "below the clone floor (1 clip and 4.2 s" in line and "stock" not in line
     assert len(flags) == 1 and "below the clone floor" in flags[0]
-    reg.close()
-
-
-def test_no_clone_backend_keeps_stock(tmp_path: Path, vocals: Path):
-    reg, (a,) = _registry(tmp_path, 1)
-    store = CardStore(tmp_path / "ws")
-    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=None)
-    cur = reg.card_for(a, "en")
-    assert cur is not None and cur.card_id is not None
-    assert store.get(cur.card_id).voice.source == "stock" and "under 6 s" not in line
     reg.close()
 
 
@@ -411,7 +306,7 @@ def test_auto_never_replaces_existing_assignment(tmp_path: Path, vocals: Path):
     before = {x: reg.card_history(x, "en") for x in ids}
     cloning = _cloning({x: [(0.0, 4.0, None), (6.0, 10.0, None)] for x in ids}, vocals)
     spans = {x: [(0.0, 10.0)] for x in ids}
-    assert ensure_assignments(reg, store, CFG, spans, vocals, cloning=cloning) == []
+    assert ensure_assignments(reg, store, CFG, spans, cloning=cloning) == []
     assert {x: reg.card_history(x, "en") for x in ids} == before
     assert not list((tmp_path / "ws").rglob("*.wav"))
     reg.close()
@@ -425,7 +320,7 @@ def test_clone_race_keeps_the_existing_card(tmp_path: Path, vocals: Path, monkey
     real = reg.card_for
     monkeypatch.setattr(reg, "card_for", lambda cid, lang: None if cid == a else real(cid, lang))
     cloning = _cloning({a: [(0.0, 4.0, None), (6.0, 10.0, None)]}, vocals)
-    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, vocals, cloning=cloning)
+    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, cloning=cloning)
     assert "kept" in line and real(a, "en").card_id == mine  # type: ignore[union-attr]
     reg.close()
 
@@ -433,18 +328,19 @@ def test_clone_race_keeps_the_existing_card(tmp_path: Path, vocals: Path, monkey
 def test_clone_backend_comes_from_tts_config():
     from fukikae.cards.auto import clone_backend
 
-    assert clone_backend(CFG) is None
+    assert clone_backend(Config()) is None
     assert clone_backend(Config(raw={"tts": {"backend": "kokoro", "clone_backend": "x"}})) == "x"
     assert clone_backend(Config(raw={"tts": {"clone_backend": ""}})) is None
 
 
 @pytest.mark.parametrize("profile", ["default", "anime", "live-action"])
 def test_profiles_clone_with_indextts2_by_default(profile: str):
-    """D24: IndexTTS2 is the default clone backend; Kokoro stays the stock and extras one."""
+    """D24: IndexTTS2 is the default clone backend; D41: no [tts] backend chooses a stock
+    voice any more, so the profiles name none."""
     from fukikae.config import load_profile
 
     tts = load_profile(profile)["tts"]
-    assert tts["clone_backend"] == "indextts2" and tts["backend"] == "kokoro"
+    assert tts["clone_backend"] == "indextts2" and "backend" not in tts
 
 
 def test_clone_backend_is_no_backend_option():
@@ -505,35 +401,10 @@ def test_workspace_cloning_reads_the_episode_artifacts(tmp_path: Path, monkeypat
     assert one.vocals == work / "01-separate" / "vocals.wav" and one.language == "ja"
     two = cloning.references(2)  # 4 s: the short tier, a clone below the floor (A2)
     assert two.picks is not None and two.tier == "short" and two.seconds == 4.0
-    assert workspace_cloning(root, CFG, "S01E12") is None
+    assert workspace_cloning(root, Config(), "S01E12") is None
 
 
 # -- fix round 1: no clone card before the clone backend can run -----------------------------
-
-
-def test_unusable_clone_backend_falls_back_to_stock_naming_setup(tmp_path: Path, vocals: Path):
-    from fukikae.cards.auto import Cloning
-    from tests.cards.test_select import CloneSynth
-
-    reg, (a,) = _registry(tmp_path, 1)
-    store = CardStore(tmp_path / "ws")
-    asked: list[int] = []
-
-    def find(cid: int):
-        asked.append(cid)
-        raise AssertionError("no references are read for an unusable backend")
-
-    cloning = Cloning(
-        backend=CloneSynth, source_language="ja", references=find,
-        unavailable="no worker environment at /x/.venvs/clonefake",
-    )  # fmt: skip
-    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=cloning)
-    cur = reg.card_for(a, "en")
-    assert cur is not None and cur.card_id is not None and not asked
-    assert store.get(cur.card_id).voice.source == "stock"
-    assert "clonefake is not usable" in line and "fukikae backends setup clonefake" in line
-    assert "no worker environment" in line
-    reg.close()
 
 
 def test_clone_problem_needs_the_worker_env_and_its_lock(tmp_path: Path, monkeypatch):
@@ -613,35 +484,13 @@ def _unusable():
     return Cloning(CloneSynth, "ja", lambda _cid: None, unavailable="no worker environment")  # type: ignore[arg-type]
 
 
-def test_unusable_backend_fallback_is_marked_and_upgraded_once_usable(tmp_path: Path, vocals: Path):
-    reg, (a, b, c) = _registry(tmp_path, 3)
-    store = CardStore(tmp_path / "ws")
-    spans = {x: [(0.0, 10.0)] for x in (a, b, c)}
-    ensure_assignments(reg, store, CFG, spans, vocals, cloning=_unusable())
-    for x in (a, b, c):
-        cur = reg.card_for(x, "en")
-        assert cur is not None and cur.by == "auto-fallback" and not cur.locked
-    reg.lock_card(b, "en", True)  # locked: never upgraded
-    mine = store.put(parse_card(STOCK_CARD))
-    reg.assign_card(c, "en", mine, by="assign", locked=False)  # operator's: never upgraded
-    cloning = _cloning({x: [(0.0, 4.0, None), (6.0, 10.0, None)] for x in (a, b, c)}, vocals)
-    lines = ensure_assignments(reg, store, CFG, spans, vocals, cloning=cloning)
-    cur = reg.card_for(a, "en")
-    assert cur is not None and cur.by == "auto" and cur.card_id is not None
-    assert store.get(cur.card_id).voice.source == "clone"
-    assert len(lines) == 1 and "replaces the stock fallback" in lines[0]
-    assert store.get(reg.card_for(b, "en").card_id).voice.source == "stock"  # type: ignore[union-attr,arg-type]
-    assert reg.card_for(c, "en").card_id == mine  # type: ignore[union-attr]
-    reg.close()
-
-
 def test_a_character_with_no_speech_anywhere_gets_no_stock_card(tmp_path: Path, vocals: Path):
     """D41: with a usable clone backend, a character the reference search finds no turn for
     is named in the flags and gets no card at all, never a stock voice."""
     reg, (a,) = _registry(tmp_path, 1)
     store = CardStore(tmp_path / "ws")
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {a: []}, vocals, cloning=_cloning({}, vocals),
+    lines = ensure_assignments(reg, store, CFG, {a: []}, cloning=_cloning({}, vocals),
                                flags=flags)  # fmt: skip
     assert lines == [] and reg.card_for(a, "en") is None
     assert flags == [
@@ -882,7 +731,7 @@ def _cloning_ws(ws):
     return dataclasses.replace(cloning, backend=CloneSynth)
 
 
-def test_auto_card_with_stale_references_is_repicked(tmp_path: Path, vocals: Path):
+def test_auto_card_with_stale_references_is_repicked(tmp_path: Path):
     from fukikae.cards.auto import REPICK_NOTE, stale_cards
 
     reg, _, ws = _ws_named(tmp_path)
@@ -891,7 +740,7 @@ def test_auto_card_with_stale_references_is_repicked(tmp_path: Path, vocals: Pat
     stale = stale_cards(ws, reg, store, [1], "en")
     # 20-25 is Natsu's unnamed remainder: unnamed speech never makes a card stale
     assert [(r["start"], r["names"]) for r in stale[1]] == [(30.0, ["wendy"])]
-    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]},
                                cloning=_cloning_ws(ws), stale=stale)  # fmt: skip
     cur = reg.card_for(1, "en")
     assert cur is not None and cur.by == "auto" and not cur.locked
@@ -909,7 +758,7 @@ def _inside_o(o, spans) -> bool:
 
 
 @pytest.mark.parametrize("by", ["assign", "import:Pack", "auto-locked"])
-def test_assigned_imported_or_locked_card_is_flagged_not_repicked(tmp_path, vocals, by):
+def test_assigned_imported_or_locked_card_is_flagged_not_repicked(tmp_path, by):
     from fukikae.cards.auto import stale_cards
 
     reg, _, ws = _ws_named(tmp_path)
@@ -919,7 +768,7 @@ def test_assigned_imported_or_locked_card_is_flagged_not_repicked(tmp_path, voca
                       by="auto" if locked else by, locked=locked)  # fmt: skip
     stale = stale_cards(ws, reg, store, [1], "en")
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]},
                                cloning=_cloning_ws(ws), stale=stale, flags=flags)  # fmt: skip
     cur = reg.card_for(1, "en")
     assert cur is not None and cur.card_id == old and len(reg.card_history(1, "en")) == 1
@@ -929,7 +778,7 @@ def test_assigned_imported_or_locked_card_is_flagged_not_repicked(tmp_path, voca
     reg.close()
 
 
-def test_restock_card_with_stale_references_is_repicked(tmp_path: Path, vocals: Path):
+def test_restock_card_with_stale_references_is_repicked(tmp_path: Path):
     """CD9: restock is automatic, so a stale restock clone card is re-picked."""
     from fukikae.cards.auto import REPICK_NOTE, stale_cards
 
@@ -937,16 +786,14 @@ def test_restock_card_with_stale_references_is_repicked(tmp_path: Path, vocals: 
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)], by="restock")
     stale = stale_cards(ws, reg, store, [1], "en")
-    ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
+    ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]},
                        cloning=_cloning_ws(ws), stale=stale)  # fmt: skip
     cur = reg.card_for(1, "en")
     assert cur is not None and cur.card_id != old and (cur.note or "").startswith(REPICK_NOTE)
     reg.close()
 
 
-def test_a_stale_card_without_any_speech_of_its_own_is_kept_and_flagged(
-    tmp_path: Path, vocals: Path
-):
+def test_a_stale_card_without_any_speech_of_its_own_is_kept_and_flagged(tmp_path: Path):
     """Character 3 holds no cluster in any episode, so there is nothing of its own to re-pick
     from: D41 keeps its card and flags it (the stock voice it used to get is gone)."""
     from fukikae.cards.auto import stale_cards
@@ -956,7 +803,7 @@ def test_a_stale_card_without_any_speech_of_its_own_is_kept_and_flagged(
     old = _auto_clone(reg, store, 3, [(NAMED_EP, 30.0, 35.0)])
     stale = stale_cards(ws, reg, store, [3], "en")
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {3: [(30.0, 35.0)]}, vocals,
+    lines = ensure_assignments(reg, store, CFG, {3: [(30.0, 35.0)]},
                                cloning=_cloning_ws(ws), stale=stale, flags=flags)  # fmt: skip
     assert lines == [] and reg.card_for(3, "en").card_id == old  # type: ignore[union-attr]
     assert any(f"card {old} is kept, flagged: no speech of its own" in f for f in flags)
@@ -1002,11 +849,10 @@ def test_unnamed_speech_never_makes_a_card_stale(tmp_path: Path):
     from fukikae.cards.auto import stale_cards
 
     reg, _, ws = _ws_remainder(tmp_path)
-    vocals = write_wav(tmp_path / "vocals.wav", harmonic(200, 120))
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 3, [(NAMED_EP, 60.0, 68.0), (NAMED_EP, 70.0, 78.0)])
     assert stale_cards(ws, reg, store, [3], "en") == {}
-    assert ensure_assignments(reg, store, CFG, {3: [(60.0, 88.0)]}, vocals,
+    assert ensure_assignments(reg, store, CFG, {3: [(60.0, 88.0)]},
                               cloning=_cloning_ws(ws), stale={}) == []  # fmt: skip
     assert reg.card_for(3, "en").card_id == old  # type: ignore[union-attr]
     reg.close()
@@ -1019,13 +865,12 @@ def test_a_stale_card_without_name_confirmed_turns_re_picks_from_its_own_speech(
     from fukikae.cards.auto import REPICK_NOTE, stale_cards
 
     reg, _, ws = _ws_remainder(tmp_path)
-    vocals = write_wav(tmp_path / "vocals.wav", harmonic(200, 120))
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 3, [(NAMED_EP, 30.0, 35.0)])
     stale = stale_cards(ws, reg, store, [3], "en")
     assert [r["names"] for r in stale[3]] == [["wendy"]]
     cloning = _cloning_ws(ws)
-    (line,) = ensure_assignments(reg, store, CFG, {3: [(60.0, 88.0)]}, vocals,
+    (line,) = ensure_assignments(reg, store, CFG, {3: [(60.0, 88.0)]},
                                  cloning=cloning, stale=stale)  # fmt: skip
     cur = reg.card_for(3, "en")
     assert cur is not None and cur.card_id != old and (cur.note or "").startswith(REPICK_NOTE)
@@ -1035,7 +880,7 @@ def test_a_stale_card_without_name_confirmed_turns_re_picks_from_its_own_speech(
     assert "references are not name-confirmed" in line
     # second run: the new card is not stale, nothing to do
     assert stale_cards(ws, reg, store, [3], "en") == {}
-    assert ensure_assignments(reg, store, CFG, {3: [(60.0, 88.0)]}, vocals, cloning=cloning,
+    assert ensure_assignments(reg, store, CFG, {3: [(60.0, 88.0)]}, cloning=cloning,
                               stale={}) == []  # fmt: skip
     assert len(reg.card_history(3, "en")) == 2
     reg.close()
@@ -1159,7 +1004,7 @@ def test_stale_cards_read_each_episode_once(tmp_path: Path, monkeypatch):
     assert reads.count("assignments.json") == 1 and reads.count("names.json") == 1
 
 
-def test_a_stale_card_kept_while_the_clone_backend_is_unusable(tmp_path: Path, vocals: Path):
+def test_a_stale_card_kept_while_the_clone_backend_is_unusable(tmp_path: Path):
     """Stale and unusable: the automatic card stays, and the flag says why and how to fix it;
     nothing is reported as changed."""
     from fukikae.cards.auto import stale_cards
@@ -1169,14 +1014,14 @@ def test_a_stale_card_kept_while_the_clone_backend_is_unusable(tmp_path: Path, v
     old = _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)])
     stale = stale_cards(ws, reg, store, [1], "en")
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]},
                                cloning=_unusable(), stale=stale, flags=flags)  # fmt: skip
     assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
     (flag,) = flags
     assert "kept until the clone backend" in flag and "no worker environment" in flag
     assert "fukikae backends setup" in flag
     flags.clear()
-    assert ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals, cloning=None,
+    assert ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, cloning=None,
                               stale=stale, flags=flags) == []  # fmt: skip
     (flag,) = flags
     assert "no [tts] clone_backend is set" in flag and "can run" not in flag
@@ -1213,13 +1058,14 @@ def test_a_lock_kept_key_is_not_a_key_the_character_answers_to(tmp_path: Path):
 def test_an_engine_is_refused_as_clone_backend_or_tts_backend():
     """indextts2_trt renders indextts2 cards; it makes none, so it is no clone_backend and no
     [tts] backend. The message points at [tts] engines."""
-    from fukikae.cards.auto import clone_backend, tts_backend
+    from fukikae.cards.auto import clone_backend
     from fukikae.config import ConfigError
+    from fukikae.stages.tts import stage_settings
 
     with pytest.raises(ConfigError, match=r"\[tts\] engines"):
         clone_backend(Config(raw={"tts": {"clone_backend": "indextts2_trt"}}))
     with pytest.raises(ConfigError, match=r"\[tts\] engines"):
-        tts_backend(Config(raw={"tts": {"backend": "indextts2_trt"}}))
+        stage_settings(Config(raw={"tts": {"backend": "indextts2_trt"}}))
 
 
 # -- D32: joined fragments and the clone floor ------------------------------------------------
@@ -1277,9 +1123,7 @@ def test_a_join_over_someone_elses_named_line_falls_back(tmp_path: Path):
     reg.close()
 
 
-def test_an_auto_card_below_the_floor_is_re_picked_when_a_better_pick_exists(
-    tmp_path: Path, vocals: Path
-):
+def test_an_auto_card_below_the_floor_is_re_picked_when_a_better_pick_exists(tmp_path: Path):
     """D32: the one-clip 6.3 s card is below the floor; the join gives 2 clips and 10.8 s,
     so it is re-picked like a stale card: a new card, the old one kept in history (CD1)."""
     from fukikae.cards.auto import FLOOR_NOTE, below_floor
@@ -1291,7 +1135,7 @@ def test_an_auto_card_below_the_floor_is_re_picked_when_a_better_pick_exists(
     assert list(short) == [1] and short[1].card_id == old
     assert short[1].phrase == "1 clip and 6.3 s, under the floor of 2 clips and 10 s"
     flags: list[str] = []
-    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 14.5)]}, vocals,
+    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 14.5)]},
                                  cloning=_cloning_ws(ws), short=short, flags=flags)  # fmt: skip
     cur = reg.card_for(1, "en")
     assert cur is not None and cur.card_id != old and cur.by == "auto" and not cur.locked
@@ -1305,9 +1149,7 @@ def test_an_auto_card_below_the_floor_is_re_picked_when_a_better_pick_exists(
     reg.close()
 
 
-def test_an_auto_card_below_the_floor_with_no_better_pick_is_kept_and_flagged(
-    tmp_path: Path, vocals: Path
-):
+def test_an_auto_card_below_the_floor_with_no_better_pick_is_kept_and_flagged(tmp_path: Path):
     from fukikae.cards.auto import below_floor
 
     turns = [FLOOR_TURNS[0], FLOOR_TURNS[3]]  # no fragments: the 6.3 s turn is all there is
@@ -1315,7 +1157,7 @@ def test_an_auto_card_below_the_floor_with_no_better_pick_is_kept_and_flagged(
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)])
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 6.3)]}, vocals,
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 6.3)]},
                                cloning=_cloning_ws(ws),
                                short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
     cur = reg.card_for(1, "en")
@@ -1329,7 +1171,7 @@ def test_an_auto_card_below_the_floor_with_no_better_pick_is_kept_and_flagged(
     reg.close()
 
 
-def test_a_floor_re_pick_never_falls_back_to_a_stock_voice(tmp_path: Path, vocals: Path):
+def test_a_floor_re_pick_never_falls_back_to_a_stock_voice(tmp_path: Path):
     """Character 2's card is below the floor and no reference picks remain at all: kept and
     flagged, never a stock voice or another character's card."""
     from fukikae.cards.auto import below_floor
@@ -1338,7 +1180,7 @@ def test_a_floor_re_pick_never_falls_back_to_a_stock_voice(tmp_path: Path, vocal
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 2, [(FLOOR_EP, 20.0, 25.0)])
     flags: list[str] = []
-    ensure_assignments(reg, store, CFG, {2: [(20.0, 25.0)]}, vocals, cloning=_cloning_ws(ws),
+    ensure_assignments(reg, store, CFG, {2: [(20.0, 25.0)]}, cloning=_cloning_ws(ws),
                        short=below_floor(reg, store, [2], "en"), flags=flags)  # fmt: skip
     cur = reg.card_for(2, "en")
     assert cur is not None and cur.card_id == old
@@ -1358,14 +1200,14 @@ def test_curated_and_imported_cards_are_never_below_the_floor(tmp_path: Path, by
     reg.close()
 
 
-def test_a_locked_auto_card_below_the_floor_is_flagged_not_re_picked(tmp_path: Path, vocals: Path):
+def test_a_locked_auto_card_below_the_floor_is_flagged_not_re_picked(tmp_path: Path):
     from fukikae.cards.auto import below_floor
 
     reg, _, ws = _ws_floor(tmp_path)
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)], locked=True)
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 14.5)]}, vocals,
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 14.5)]},
                                cloning=_cloning_ws(ws),
                                short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
     cur = reg.card_for(1, "en")
@@ -1379,7 +1221,7 @@ def test_a_new_clone_below_the_floor_is_made_and_flagged(tmp_path: Path, vocals:
     reg, (a,) = _registry(tmp_path, 1)
     store = CardStore(tmp_path / "ws")
     flags: list[str] = []
-    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.3)]}, vocals,
+    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.3)]},
                                  cloning=_cloning({a: [(0.0, 6.3, None)]}, vocals),
                                  flags=flags)  # fmt: skip
     cur = reg.card_for(a, "en")
@@ -1496,7 +1338,7 @@ def test_below_the_floor_episodes_rank_by_how_close_they_come(tmp_path: Path):
     reg.close()
 
 
-def test_a_locked_stale_card_under_the_floor_says_both(tmp_path: Path, vocals: Path):
+def test_a_locked_stale_card_under_the_floor_says_both(tmp_path: Path):
     from fukikae.cards.auto import below_floor, stale_cards
 
     reg, _, ws = _ws_named(tmp_path)
@@ -1504,7 +1346,7 @@ def test_a_locked_stale_card_under_the_floor_says_both(tmp_path: Path, vocals: P
     old = _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)], locked=True)
     stale = stale_cards(ws, reg, store, [1], "en")
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]}, vocals,
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]},
                                cloning=_cloning_ws(ws), stale=stale,
                                short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
     assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
@@ -1517,7 +1359,7 @@ def test_a_locked_stale_card_under_the_floor_says_both(tmp_path: Path, vocals: P
 
 
 def test_a_re_pick_still_under_the_floor_is_flagged_and_a_second_run_changes_nothing(
-    tmp_path: Path, vocals: Path
+    tmp_path: Path,
 ):
     """The one-clip 6.3 s card is re-picked to two clips (9.3 s), still under the floor:
     flagged. The next run finds no better pick: no new card, no report line, the same flag."""
@@ -1530,7 +1372,7 @@ def test_a_re_pick_still_under_the_floor_is_flagged_and_a_second_run_changes_not
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 1, [(FLOOR_EP, 0.0, 6.3)])
     flags: list[str] = []
-    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 13.0)]}, vocals,
+    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 13.0)]},
                                  cloning=_cloning_ws(ws),
                                  short=below_floor(reg, store, [1], "en"), flags=flags)  # fmt: skip
     cur = reg.card_for(1, "en")
@@ -1539,7 +1381,7 @@ def test_a_re_pick_still_under_the_floor_is_flagged_and_a_second_run_changes_not
     (flag,) = flags
     assert flag.startswith(f"character 1: clone card {cur.card_id} is below the clone floor")
     again: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 13.0)]}, vocals,
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 13.0)]},
                                cloning=_cloning_ws(ws),
                                short=below_floor(reg, store, [1], "en"), flags=again)  # fmt: skip
     assert lines == [] and reg.card_for(1, "en").card_id == cur.card_id  # type: ignore[union-attr]
@@ -1735,7 +1577,7 @@ def test_impure_cards_refuse_a_reference_inside_an_accepted_song_span(tmp_path: 
     reg.close()
 
 
-def test_auto_card_with_an_off_register_reference_is_repicked(tmp_path: Path, vocals: Path):
+def test_auto_card_with_an_off_register_reference_is_repicked(tmp_path: Path):
     from fukikae.cards.auto import PURITY_NOTE, impure_cards
 
     reg, _, ws = _ws_impure(tmp_path)
@@ -1743,7 +1585,7 @@ def test_auto_card_with_an_off_register_reference_is_repicked(tmp_path: Path, vo
     old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
     flags: list[str] = []
     (line,) = ensure_assignments(
-        reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning_ws(ws),
+        reg, store, CFG, {1: [(0.0, 95.0)]}, cloning=_cloning_ws(ws),
         impure=impure_cards(ws, reg, store, "en"), flags=flags,
     )  # fmt: skip
     cur = reg.card_for(1, "en")
@@ -1757,7 +1599,7 @@ def test_auto_card_with_an_off_register_reference_is_repicked(tmp_path: Path, vo
     # a second run is a no-op: the new card passes the gates it was picked by
     assert impure_cards(ws, reg, store, "en") == {}
     again = ensure_assignments(
-        reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning_ws(ws),
+        reg, store, CFG, {1: [(0.0, 95.0)]}, cloning=_cloning_ws(ws),
         impure=impure_cards(ws, reg, store, "en"),
     )  # fmt: skip
     assert again == [] and len(reg.card_history(1, "en")) == 2
@@ -1765,7 +1607,7 @@ def test_auto_card_with_an_off_register_reference_is_repicked(tmp_path: Path, vo
 
 
 @pytest.mark.parametrize("by", ["assign", "import:Pack", "auto-locked"])
-def test_assigned_imported_or_locked_impure_card_is_only_flagged(tmp_path, vocals, by):
+def test_assigned_imported_or_locked_impure_card_is_only_flagged(tmp_path, by):
     from fukikae.cards.auto import impure_cards
 
     reg, _, ws = _ws_impure(tmp_path)
@@ -1776,7 +1618,7 @@ def test_assigned_imported_or_locked_impure_card_is_only_flagged(tmp_path, vocal
     impure = impure_cards(ws, reg, store, "en")
     assert list(impure) == [1]  # judged, for the flag
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals,
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]},
                                cloning=_cloning_ws(ws), impure=impure, flags=flags)  # fmt: skip
     assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
     assert len(reg.card_history(1, "en")) == 1
@@ -1795,7 +1637,7 @@ def test_impure_card_without_a_passing_pick_is_kept_and_flagged(tmp_path: Path, 
     old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
     flags: list[str] = []
     lines = ensure_assignments(
-        reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning({}, vocals),
+        reg, store, CFG, {1: [(0.0, 95.0)]}, cloning=_cloning({}, vocals),
         impure=impure_cards(ws, reg, store, "en"), flags=flags,
     )  # fmt: skip
     assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
@@ -1822,7 +1664,7 @@ def test_voices_clone_card_is_never_judged(tmp_path: Path):
     reg.close()
 
 
-def test_restock_impure_card_is_repicked(tmp_path: Path, vocals: Path):
+def test_restock_impure_card_is_repicked(tmp_path: Path):
     """CD9: restock is automatic."""
     from fukikae.cards.auto import PURITY_NOTE, impure_cards
 
@@ -1830,7 +1672,7 @@ def test_restock_impure_card_is_repicked(tmp_path: Path, vocals: Path):
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)],
                       by="restock")  # fmt: skip
-    ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning_ws(ws),
+    ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, cloning=_cloning_ws(ws),
                        impure=impure_cards(ws, reg, store, "en"))  # fmt: skip
     cur = reg.card_for(1, "en")
     assert cur is not None and cur.card_id != old and (cur.note or "").startswith(PURITY_NOTE)
@@ -1849,7 +1691,7 @@ def test_a_name_confirmed_reference_skips_the_register_gate_as_selection_does(tm
     reg.close()
 
 
-def test_stale_floor_and_impure_together_make_one_repick(tmp_path: Path, vocals: Path):
+def test_stale_floor_and_impure_together_make_one_repick(tmp_path: Path):
     """The 60-64.5 s reference is noise (unvoiced) under a Wendy line (stale), and the card's
     two clips are 9.5 s (under the floor): one re-pick naming all three reasons (D27, D32,
     A1), and the next run changes nothing."""
@@ -1887,7 +1729,7 @@ def test_stale_floor_and_impure_together_make_one_repick(tmp_path: Path, vocals:
     now = reasons()
     assert all(list(v) == [1] for v in now.values()), now
     assert now["impure"][1].gates == "unvoiced"
-    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals,
+    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]},
                                  cloning=_cloning_ws(ws), **now)  # fmt: skip
     cur = reg.card_for(1, "en")
     assert cur is not None and cur.card_id != old
@@ -1895,7 +1737,7 @@ def test_stale_floor_and_impure_together_make_one_repick(tmp_path: Path, vocals:
     assert note.startswith(REPICK_NOTE) and FLOOR_NOTE in note and PURITY_NOTE in note
     assert len(reg.card_history(1, "en")) == 2
     assert reasons() == {"stale": {}, "short": {}, "impure": {}}
-    assert ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals,
+    assert ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]},
                               cloning=_cloning_ws(ws), **reasons()) == []  # fmt: skip
     reg.close()
 
@@ -1954,12 +1796,12 @@ def test_find_references_gives_every_speaker_a_tier(tmp_path: Path):
     reg.close()
 
 
-def test_character_under_six_seconds_gets_a_clone_not_stock(tmp_path: Path, vocals: Path):
+def test_character_under_six_seconds_gets_a_clone_not_stock(tmp_path: Path):
     reg, _, ws = _ws_tiers(tmp_path)
     store = CardStore(ws.root)
     flags: list[str] = []
     lines = ensure_assignments(
-        reg, store, CFG, {1: [(0.0, 4.0)], 2: [(10.0, 11.5), (14.0, 15.0)]}, vocals,
+        reg, store, CFG, {1: [(0.0, 4.0)], 2: [(10.0, 11.5), (14.0, 15.0)]},
         cloning=_cloning_ws(ws), flags=flags,
     )  # fmt: skip
     assert len(lines) == 2
@@ -1970,13 +1812,13 @@ def test_character_under_six_seconds_gets_a_clone_not_stock(tmp_path: Path, voca
     reg.close()
 
 
-def test_thin_card_is_flagged_in_thin_lines(tmp_path: Path, vocals: Path):
+def test_thin_card_is_flagged_in_thin_lines(tmp_path: Path):
     from fukikae.cards.auto import THIN_NOTE, below_floor, impure_cards, thin_lines
 
     reg, _, ws = _ws_tiers(tmp_path)
     store = CardStore(ws.root)
     flags: list[str] = []
-    (line,) = ensure_assignments(reg, store, CFG, {2: [(10.0, 11.5), (14.0, 15.0)]}, vocals,
+    (line,) = ensure_assignments(reg, store, CFG, {2: [(10.0, 11.5), (14.0, 15.0)]},
                                  cloning=_cloning_ws(ws), flags=flags)  # fmt: skip
     cur = reg.card_for(2, "en")
     assert cur is not None and cur.card_id is not None
@@ -1994,25 +1836,25 @@ def test_thin_card_is_flagged_in_thin_lines(tmp_path: Path, vocals: Path):
     assert impure_cards(ws, reg, store, "en") == {}
     # the next run finds the same thin picks: nothing changes, the flag stays
     flags = []
-    again = ensure_assignments(reg, store, CFG, {2: [(10.0, 11.5), (14.0, 15.0)]}, vocals,
+    again = ensure_assignments(reg, store, CFG, {2: [(10.0, 11.5), (14.0, 15.0)]},
                                cloning=_cloning_ws(ws), short=below_floor(reg, store, [2], "en"),
                                flags=flags)  # fmt: skip
     assert again == [] and flags == [want]
     reg.close()
 
 
-def test_floor_lines_leave_thin_cards_to_thin_lines(tmp_path: Path, vocals: Path):
+def test_floor_lines_leave_thin_cards_to_thin_lines(tmp_path: Path):
     from fukikae.cards.auto import floor_lines
 
     reg, _, ws = _ws_tiers(tmp_path)
     store = CardStore(ws.root)
-    ensure_assignments(reg, store, CFG, {2: [(10.0, 11.5), (14.0, 15.0)]}, vocals,
+    ensure_assignments(reg, store, CFG, {2: [(10.0, 11.5), (14.0, 15.0)]},
                        cloning=_cloning_ws(ws))  # fmt: skip
     assert floor_lines(ws, reg, store, [2], "en") == []
     reg.close()
 
 
-def test_a_thin_card_is_repicked_when_a_gated_pick_exists(tmp_path: Path, vocals: Path):
+def test_a_thin_card_is_repicked_when_a_gated_pick_exists(tmp_path: Path):
     """Character 1's card is a thin clone (made before its 4 s turn was there to pick): the
     short tier beats any thin card, so the next run re-picks it."""
     import dataclasses
@@ -2026,7 +1868,7 @@ def test_a_thin_card_is_repicked_when_a_gated_pick_exists(tmp_path: Path, vocals
     store.put(thin)  # the same id, now marked thin
     short = below_floor(reg, store, [1], "en")
     assert short[1].thin
-    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 4.0)]}, vocals,
+    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 4.0)]},
                                  cloning=_cloning_ws(ws), short=short)  # fmt: skip
     cur = reg.card_for(1, "en")
     assert cur is not None and cur.card_id != old_id
@@ -2034,13 +1876,13 @@ def test_a_thin_card_is_repicked_when_a_gated_pick_exists(tmp_path: Path, vocals
     reg.close()
 
 
-def test_no_stock_card_is_ever_created_by_auto(tmp_path: Path, vocals: Path):
+def test_no_stock_card_is_ever_created_by_auto(tmp_path: Path):
     """D41: with a usable clone backend, every character with any speech gets a clone, from
     nothing at all up to the floor; no path through ensure_assignments makes a stock card."""
     reg, _, ws = _ws_tiers(tmp_path)
     store = CardStore(ws.root)
     spans = {1: [(0.0, 4.0)], 2: [(10.0, 11.5), (14.0, 15.0)], 3: [(20.0, 25.0)]}
-    ensure_assignments(reg, store, CFG, spans, vocals, cloning=_cloning_ws(ws))
+    ensure_assignments(reg, store, CFG, spans, cloning=_cloning_ws(ws))
     sources = {
         store.get(p.stem).voice.source for p in (ws.root / ".fukikae" / "cards").glob("*.toml")
     }
@@ -2199,7 +2041,7 @@ def test_a_repick_that_picks_the_same_card_keeps_every_flag(tmp_path: Path, voca
     reg, (a,) = _registry(tmp_path, 1)
     store = CardStore(tmp_path / "ws")
     cloning = _cloning({a: [(0.0, 4.2, None)]}, vocals)
-    ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=cloning)
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, cloning=cloning)
     card = reg.card_for(a, "en")
     assert card is not None and card.card_id is not None
     short = below_floor(reg, store, [a], "en")
@@ -2207,7 +2049,7 @@ def test_a_repick_that_picks_the_same_card_keeps_every_flag(tmp_path: Path, voca
            "gates": ["unvoiced"], "median": None, "voiced_fraction": 0.1}  # fmt: skip
     impure = {a: Impurity(card.card_id, (ref,))}
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=cloning,
+    lines = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, cloning=cloning,
                                short=short, impure=impure, flags=flags)  # fmt: skip
     assert lines == [] and reg.card_for(a, "en").card_id == card.card_id  # type: ignore[union-attr]
     assert len(reg.card_history(a, "en")) == 1
@@ -2221,12 +2063,12 @@ def test_a_stale_repick_that_picks_the_same_card_keeps_the_stale_flag(tmp_path: 
     reg, (a,) = _registry(tmp_path, 1)
     store = CardStore(tmp_path / "ws")
     cloning = _cloning({a: [(0.0, 4.0, None), (6.0, 10.0, None)]}, vocals)
-    ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, vocals, cloning=cloning)
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, cloning=cloning)
     old = reg.card_for(a, "en").card_id  # type: ignore[union-attr]
     stale = {a: [{"episode": "S01E12", "start": 6.0, "end": 10.0, "overlap": 0.5,
                   "names": ["wendy"]}]}  # fmt: skip
     flags: list[str] = []
-    lines = ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, vocals, cloning=cloning,
+    lines = ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, cloning=cloning,
                                stale=stale, flags=flags)  # fmt: skip
     assert lines == [] and reg.card_for(a, "en").card_id == old  # type: ignore[union-attr]
     assert any("now name otherwise" in f and "S01E12 6.00-10.00 (wendy)" in f for f in flags), flags
@@ -2259,7 +2101,7 @@ def test_a_character_with_no_turn_is_cloned_thin_from_its_own_lines(tmp_path: Pa
     from tests.cards.test_select import CloneSynth
 
     flags: list[str] = []
-    (line,) = ensure_assignments(reg, store, CFG, {3: []}, ws.root / "v.wav",
+    (line,) = ensure_assignments(reg, store, CFG, {3: []},
                                  cloning=dataclasses.replace(cloning, backend=CloneSynth),
                                  flags=flags)  # fmt: skip
     cur = reg.card_for(3, "en")
@@ -2296,7 +2138,7 @@ def test_a_skipped_episode_tells_the_operator_to_rerun_characters(tmp_path: Path
     cloning = Cloning(CloneSynth, "ja", lambda _cid: thin)
     store = CardStore(ws.root)
     flags: list[str] = []
-    ensure_assignments(reg, store, CFG, {1: []}, vocals, cloning=cloning, flags=flags)
+    ensure_assignments(reg, store, CFG, {1: []}, cloning=cloning, flags=flags)
     (flag,) = flags
     assert f"{NAMED_EP} was skipped" in flag
     assert f"`fukikae run <ws> {NAMED_EP} --from characters`" in flag
@@ -2329,7 +2171,7 @@ def test_span_issues_name_silence_music_and_unvoiced_spans(tmp_path: Path):
     assert span_issues(path, spans[3:], None, [(8.0, 12.0)]) == ["music"]
 
 
-def test_the_song_span_gate_re_picks_an_existing_card(tmp_path: Path, vocals: Path, monkeypatch):
+def test_the_song_span_gate_re_picks_an_existing_card(tmp_path: Path, monkeypatch):
     """Review fix 5: the accepted-song-span gate reads on cards made before it (selection
     already leaves the detector's spans out of every new pick, as theme exclusions): an
     automatic card with a reference inside one is impure and re-picked outside it."""
@@ -2347,7 +2189,7 @@ def test_the_song_span_gate_re_picks_an_existing_card(tmp_path: Path, vocals: Pa
     monkeypatch.setattr(select, "reference_exclusions", lambda *_a, **_k: list(song))
     impure = impure_cards(ws, reg, store, "en")
     assert impure[1].gates == "song-like"
-    ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning_ws(ws),
+    ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, cloning=_cloning_ws(ws),
                        impure=impure)  # fmt: skip
     cur = reg.card_for(1, "en")
     assert cur is not None and cur.card_id != old
@@ -2360,4 +2202,128 @@ def test_the_song_span_gate_re_picks_an_existing_card(tmp_path: Path, vocals: Pa
     for memo in (auto._GATING_MEMO, auto._SONG_SPANS_MEMO, auto._EXCLUSIONS_MEMO,
                  auto._CANDIDATES_MEMO):  # fmt: skip
         memo.clear()
+    reg.close()
+
+
+# -- Task 6: stock voices retired (D41) ------------------------------------------------------
+
+
+def _stock_card(store: CardStore, voice: str = "af_heart") -> str:
+    from fukikae.cards.card import Card, Voice
+
+    return store.put(Card("en", Voice(backend="kokoro", model_revision="1.0", source="stock",
+                                      voice=voice)))  # fmt: skip
+
+
+@pytest.mark.parametrize("by", ["auto", "auto-fallback", "restock"])
+def test_an_automatic_stock_card_is_repicked_as_a_clone(tmp_path: Path, by: str):
+    from fukikae.cards.auto import STOCK_NOTE, stock_cards
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    old = _stock_card(store)
+    reg.assign_card(3, "en", old, by=by, locked=False)
+    stock = stock_cards(reg, store, [1, 2, 3], "en")
+    assert stock == {3: old}
+    (line,) = ensure_assignments(reg, store, CFG, {3: [(20.0, 45.0)]},
+                                 cloning=_cloning_ws(ws), stock=stock)  # fmt: skip
+    cur = reg.card_for(3, "en")
+    assert cur is not None and cur.by == "auto" and cur.card_id != old
+    assert store.get(cur.card_id or "").voice.source == "clone"
+    assert (cur.note or "").startswith(STOCK_NOTE) and line.startswith(f"character 3: {STOCK_NOTE}")
+    assert [h.card_id for h in reg.card_history(3, "en")] == [old, cur.card_id]  # CD1
+    assert stock_cards(reg, store, [3], "en") == {}
+    reg.close()
+
+
+def test_a_thin_speaker_stock_card_is_repicked_as_a_thin_clone(tmp_path: Path):
+    from fukikae.cards.auto import STOCK_NOTE, THIN_NOTE, stock_cards
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    reg.assign_card(2, "en", _stock_card(store), by="auto", locked=False)
+    flags: list[str] = []
+    (line,) = ensure_assignments(reg, store, CFG, {2: [(10.0, 15.0)]},
+                                 cloning=_cloning_ws(ws), stock=stock_cards(reg, store, [2], "en"),
+                                 flags=flags)  # fmt: skip
+    assert STOCK_NOTE in line and f"{THIN_NOTE}: 2.5 s from 2 turns" in line
+    assert len(flags) == 1 and "thin-reference clone" in flags[0]
+    reg.close()
+
+
+@pytest.mark.parametrize(
+    ("by", "locked"),
+    [("assign", True), ("import:pack", False), ("auto", True), ("auto-fallback", True)],
+)
+def test_a_curated_imported_or_locked_stock_card_is_kept_and_flagged(tmp_path, by, locked):
+    from fukikae.cards.auto import stock_cards
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    old = _stock_card(store)
+    reg.assign_card(3, "en", old, by=by, locked=locked)
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {3: [(20.0, 45.0)]},
+                               cloning=_cloning_ws(ws), stock=stock_cards(reg, store, [3], "en"),
+                               flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(3, "en").card_id == old  # type: ignore[union-attr]
+    state = f"{by}{', locked' if locked else ''}"
+    assert flags == [
+        f"character 3 speaks with a stock card ({state}); stock voices are retired (D41): "
+        "accept a clone in `fukikae studio` or use `fukikae voices clone`"
+    ]
+    reg.close()
+
+
+def test_an_auto_fallback_stock_card_with_no_speech_is_kept_and_flagged(
+    tmp_path: Path, vocals: Path
+):
+    """Controller ruling (5): a stand-in whose character has no speech to clone stays,
+    flagged, never silently."""
+    from fukikae.cards.auto import stock_cards
+
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    old = _stock_card(store)
+    reg.assign_card(a, "en", old, by="auto-fallback", locked=False)
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {a: []}, cloning=_cloning({}, vocals),
+                               stock=stock_cards(reg, store, [a], "en"), flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(a, "en").card_id == old  # type: ignore[union-attr]
+    (flag,) = flags
+    assert flag.startswith(f"character {a} speaks with a stock card (auto-fallback); no speech")
+    assert "stock voices are retired (D41)" in flag
+    reg.close()
+
+
+def test_no_clone_means_no_card_never_a_stock_one(tmp_path: Path):
+    """D41: without a usable clone backend nothing is assigned (the tts stage refuses before
+    it gets here); no stock card is made on any path."""
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    for cloning in (None, _unusable()):
+        flags: list[str] = []
+        assert ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, cloning=cloning,
+                                  flags=flags) == []  # fmt: skip
+        assert reg.card_for(a, "en") is None and len(flags) == 1
+    assert not list((tmp_path / "ws").rglob("*.toml"))
+    reg.close()
+
+
+def test_voices_list_lines_name_stock_cards(tmp_path: Path, monkeypatch):
+    from fukikae.cards.auto import card_status_lines
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    auto_stock = _stock_card(store, "af_heart")
+    mine = _stock_card(store, "am_adam")
+    reg.assign_card(1, "en", auto_stock, by="auto", locked=False)
+    reg.assign_card(3, "en", mine, by="assign", locked=True)
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    assert card_status_lines(ws, reg, store, [1, 2, 3], "en") == [
+        f"character 1's card {auto_stock} (auto) is a stock card; stock voices are retired "
+        "(D41): the next tts run re-picks it as a clone",
+        f"character 3's card {mine} (assign, locked) is a stock card; stock voices are retired "
+        "(D41): kept; accept a clone in `fukikae studio` or use `fukikae voices clone`",
+    ]
     reg.close()

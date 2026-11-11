@@ -10,7 +10,6 @@ import pytest
 from fukikae.artifacts import read_json, write_json
 from fukikae.backends import loader
 from fukikae.backends.base import Synthesizer
-from fukikae.cards import stock
 from fukikae.cards.card import CardError, Voice, parse_card
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config, ConfigError
@@ -147,9 +146,6 @@ def fakes(monkeypatch):
         tts, "identity_key", lambda _k, bc: {"model": f"{bc.backend}-model", "revision": "r"}
     )
     monkeypatch.setattr(tts, "device_string", lambda _cfg: "cpu")
-    pools = {"f": ["af_heart"], "m": ["am_adam"], "extras_f": ["xf_one"], "extras_m": ["xm_one"]}
-    for name in CLASSES:
-        monkeypatch.setitem(stock.STOCK_POOLS, name, {"en": pools})
 
 
 def _cue(i: int, character: int | None, text: str | None, **kw: Any) -> DubCue:
@@ -223,7 +219,8 @@ def ep(tmp_path: Path) -> Episode:
     return episode
 
 
-CFG = Config(raw={"tts": {"backend": "fake"}})
+# Extras speak in clones of their own speech (A2, D41), made by the fake clone backend.
+CFG = Config(raw={"tts": {"backend": "fake", "clone_backend": "fakeclone"}}, source_language="ja")
 
 
 def _assign(ep: Episode, character: int, text: str, by: str = "assign") -> str:
@@ -277,21 +274,8 @@ def test_renders_each_spoken_cue_and_links_it_from_the_cache(ep):
         assert c.neutral_only and c.passed == {}
     assert _run(ep).cached == [] and sorted(_run(ep).rendered) == [c.cue_id for c in rendered]
     assert by_id["c0001"].character_id == 1 and by_id["c0001"].backend == "fake"
-    assert FakeSynth.LOG == ["load fake", "unload fake"]
-
-
-def test_extras_get_pool_voices_and_render(ep):
-    """Review Focus 1: an extra, or a review cluster, gets an extras-pool voice that stays the
-    same for the same label within the episode."""
-    _two_cards(ep)
-    TtsStage(CFG).run(ep, CFG)
-    by_id = {c.cue_id: c for c in _plan(ep).cues}
-    assert by_id["c0004"].extra == "S5" and by_id["c0004"].character_id is None
-    assert by_id["c0004"].card_id == by_id["c0007"].card_id
-    assert by_id["c0008"].card_id not in (None, by_id["c0004"].card_id)
-    voices = {t: v for t, v, _ in FakeSynth.CALLS}
-    assert voices["extra line"] == voices["extra again"] == "xf_one"
-    assert voices["review line"] == "xm_one"
+    assert by_id["c0004"].backend == "fakeclone"  # extras speak in clones (A2, D41)
+    assert FakeSynth.LOG == ["load fake", "unload fake", "load fakeclone", "unload fakeclone"]
 
 
 def test_second_run_renders_nothing_and_loads_nothing(ep):
@@ -330,12 +314,12 @@ def test_auto_assigns_a_character_without_a_card(ep):
         assert reg.card_for(1, "en").card_id == natsu  # type: ignore[union-attr]
     assert cur is not None and cur.by == "auto" and not cur.locked
     card = CardStore(ep.workspace_root).get(cur.card_id)  # type: ignore[arg-type]
-    assert card.voice.backend == "fake" and card.voice.source == "stock"
+    assert card.voice.backend == "fakeclone" and card.voice.source == "clone"  # D41
     assert {c.cue_id: c.card_id for c in _plan(ep).cues}["c0002"] == cur.card_id
     assert any("Lucy" in line for line in _run(ep).report)
     log = (ep.work / "07-tts" / "assignments.log").read_text()
     assert "Lucy" in log and cur.card_id in log
-    assert cur.note is not None and "gender estimate" in cur.note
+    assert cur.note is not None and "clone fakeclone" in cur.note
     TtsStage(CFG).run(ep, CFG)  # nothing new to assign: the log only grows when something is
     assert (ep.work / "07-tts" / "assignments.log").read_text() == log
 
@@ -414,7 +398,7 @@ def test_rate_fit_rerenders_once_within_max_speedup(ep):
 def test_rate_fit_follows_the_timefit_max_speedup(ep):
     _two_cards(ep)
     FakeSynth.DUR = {"natsu one": 2.2}
-    cfg = Config(raw={"tts": {"backend": "fake"}, "timefit": {"max_speedup": 1.5}})
+    cfg = Config(raw={**CFG.raw, "timefit": {"max_speedup": 1.5}}, source_language="ja")
     TtsStage(cfg).run(ep, cfg)
     c = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
     assert c.rate_factor == pytest.approx(1.1)
@@ -490,7 +474,10 @@ def test_one_backend_loaded_at_a_time(ep):
     _assign(ep, 1, _stock("am_adam"))
     _assign(ep, 2, _stock("af_heart", backend="fake2"))
     TtsStage(CFG).run(ep, CFG)
-    assert FakeSynth.LOG == ["load fake", "unload fake", "load fake2", "unload fake2"]
+    assert FakeSynth.LOG == [
+        "load fake", "unload fake", "load fake2", "unload fake2", "load fakeclone",
+        "unload fakeclone",
+    ]  # fmt: skip
     by_id = {c.cue_id: c for c in _plan(ep).cues}
     assert by_id["c0002"].backend == "fake2" and by_id["c0001"].backend == "fake"
 
@@ -541,8 +528,8 @@ def test_stage_key_holds_each_backend_tables_options(ep):
     """C1: flipping an option in [tts.<backend>] (tf32, fp16, a qwen mode) changes the stage
     key, so renders made with the old setting are never kept."""
     _two_cards(ep)
-    on = Config(raw={"tts": {"backend": "fake", "fake": {"tf32": True}}})
-    off = Config(raw={"tts": {"backend": "fake", "fake": {"tf32": False}}})
+    on = Config(raw={"tts": {**CFG.raw["tts"], "fake": {"tf32": True}}})
+    off = Config(raw={"tts": {**CFG.raw["tts"], "fake": {"tf32": False}}})
     key_on, key_off = TtsStage(on).config_key(on, ep), TtsStage(off).config_key(off, ep)
     assert key_on != key_off
     assert key_on["identity"]["fake"]["options"] == {"tf32": True}
@@ -948,7 +935,7 @@ def test_a_stale_card_builds_the_clone_source_and_reaches_ensure_assignments(ep,
 
     monkeypatch.setattr("fukikae.stages.tts.ensure_assignments", ensure)
     store = CardStore(ep.workspace_root)
-    TtsStage._assign(ep, CFG, CUES, store, ep.work / "01-separate" / "vocals.wav")
+    TtsStage._assign(ep, CFG, CUES, store)
     assert seen["cloning"] == "c" and seen["stale"] == stale
 
 
@@ -963,28 +950,10 @@ def _auto_card(ep: Episode, character: int, voice: str, by: str = "auto") -> str
 STALE_1 = {1: [{"episode": "e1", "start": 0.0, "end": 2.5, "overlap": 1.0, "names": ["lucy"]}]}
 
 
-def test_a_stale_card_alone_keeps_songs_out_of_the_gender_estimate(ep, monkeypatch):
-    """Nothing is new, but a stale re-pick may fall back to a stock voice, whose gender
-    estimate must not read a theme song either."""
-    _two_cards(ep)
-    seen: dict = {}
-    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: STALE_1)
-    monkeypatch.setattr("fukikae.stages.tts.workspace_cloning", lambda *_, **__: None)
-    monkeypatch.setattr("fukikae.stages.tts._song_spans", lambda *_: [(0.0, 1.0)])
-
-    def ensure(_reg, _store, _cfg, spans, *_, **__):
-        seen["spans"] = spans
-        return []
-
-    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments", ensure)
-    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
-    assert seen["spans"] == {1: [], 2: [(3.0, 5.0)]}
-
-
 def test_an_auto_fallback_card_builds_the_clone_source(ep, monkeypatch):
     """Every speaking character has a card, none stale, but character 1's is the stock
-    stand-in made while the clone backend couldn't run: the clone source is built so
-    ensure_assignments can replace it."""
+    stand-in made while the clone backend couldn't run (an automatic stock card, D41): the
+    clone source is built so ensure_assignments can re-pick it, and it gets the stock list."""
     _auto_card(ep, 1, "am_adam", by="auto-fallback")
     _assign(ep, 2, _stock("af_heart"))
     seen: dict = {}
@@ -995,33 +964,29 @@ def test_an_auto_fallback_card_builds_the_clone_source(ep, monkeypatch):
     )
     monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
                         lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
-    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
-    assert seen["cloning"] == "c"
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root))
+    assert seen["cloning"] == "c" and set(seen["stock"]) == {1, 2}
     # locked, it is never replaced, so nothing is built
     with Registry(Workspace(ep.workspace_root).registry_path) as reg:
         reg.lock_card(1, "en", True)
     seen.clear()
-    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root))
     assert seen["cloning"] is None
 
 
-def test_an_auto_fallback_card_builds_nothing_while_cloning_still_cant_run(ep, monkeypatch):
-    """Final review B #6: the stand-in is upgraded only when cloning works; while the clone
-    backend still can't run (repick_blocker says why), no clone source is built for it."""
+def test_an_auto_fallback_card_refuses_while_cloning_still_cant_run(ep, monkeypatch):
+    """D41: the stand-in must become a clone and no clone can be made here, so the stage
+    stops, naming the backend; no clone source is built and nothing is assigned."""
     _auto_card(ep, 1, "am_adam", by="auto-fallback")
     _assign(ep, 2, _stock("af_heart"))
-    seen: dict = {}
-    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
-    monkeypatch.setattr("fukikae.stages.tts.repick_blocker", lambda _cfg: "no clone backend")
+    monkeypatch.setattr("fukikae.cards.auto.clone_problem", lambda *_: "no worker environment")
 
     def cloning(*_, **__):
         raise AssertionError("built a clone source no one can use")
 
     monkeypatch.setattr("fukikae.stages.tts.workspace_cloning", cloning)
-    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
-                        lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
-    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
-    assert seen["cloning"] is None
+    with pytest.raises(tts.CloneBackendError, match=r"character 1 \(Natsu\) \(an automatic"):
+        TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root))
 
 
 def test_flags_go_to_run_json_not_to_the_assignments_log(ep, monkeypatch):
@@ -1041,7 +1006,7 @@ def test_flags_go_to_run_json_not_to_the_assignments_log(ep, monkeypatch):
     for _ in range(2):
         stage.prepare(ep, CFG)
         stage.run(ep, CFG)
-        assert _run(ep).flags == [
+        assert [f for f in _run(ep).flags if not f.startswith("extra ")] == [
             "e0: its assignments.json is older than its names",
             "character 1's card was cloned from turns now named LUCY",
         ]
@@ -1187,7 +1152,9 @@ class FakeEngine(FakeSynth):
     card_backend: ClassVar[str] = "fake"
 
 
-ENGINE_CFG = Config(raw={"tts": {"backend": "fake", "engines": {"fake": "fake_fast"}}})
+ENGINE_CFG = Config(
+    raw={"tts": {**CFG.raw["tts"], "engines": {"fake": "fake_fast"}}}, source_language="ja"
+)
 
 
 @pytest.fixture
@@ -1199,11 +1166,13 @@ def engine(monkeypatch):
 def test_an_engine_renders_the_cards_under_its_own_cache_identity(ep):
     _two_cards(ep)
     TtsStage(CFG).run(ep, CFG)
-    before = {c.cue_id: c.key for c in _plan(ep).cues if c.skipped is None}
+    # the characters' fake cards (the extras' clones are fakeclone's, no engine of theirs)
+    before = {c.cue_id: c.key for c in _plan(ep).cues if c.backend == "fake"}
     FakeSynth.LOG = []
     TtsStage(ENGINE_CFG).run(ep, ENGINE_CFG)
     assert "load fake_fast" in FakeSynth.LOG and "load fake" not in FakeSynth.LOG
-    after = {c.cue_id: c.key for c in _plan(ep).cues if c.skipped is None}
+    after = {c.cue_id: c.key for c in _plan(ep).cues if c.character_id is not None
+             and c.skipped is None}  # fmt: skip
     assert after.keys() == before.keys()
     assert all(after[k] != before[k] for k in before)  # never a PyTorch render from the cache
     assert TtsStage(ENGINE_CFG).config_key(ENGINE_CFG, ep) != TtsStage(CFG).config_key(CFG, ep)
@@ -1275,7 +1244,7 @@ def test_a_card_below_the_clone_floor_builds_the_clone_source(ep, monkeypatch):
     )
     monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
                         lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
-    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root))
     assert seen["cloning"] == "c" and seen["short"] == short
 
 
@@ -1294,7 +1263,7 @@ def test_a_locked_card_below_the_clone_floor_builds_no_clone_source(ep, monkeypa
     )
     monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
                         lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
-    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root))
     assert seen["cloning"] is None and seen["short"] == short
 
 
@@ -1330,7 +1299,7 @@ def test_an_impure_auto_card_builds_the_clone_source(ep, monkeypatch):
     )
     monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
                         lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
-    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root))
     assert seen["cloning"] == "c" and seen["impure"] == impure
 
 
@@ -1361,7 +1330,7 @@ def test_a_locked_impure_card_builds_no_clone_source(ep, monkeypatch):
     )
     monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
                         lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
-    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root))
     assert seen["cloning"] is None and seen["impure"] == impure
 
 
@@ -1484,14 +1453,6 @@ def test_each_unknown_line_speaks_in_its_own_clone(ep):
     assert any("2 unknown lines cloned from themselves" in f for f in run.flags)
 
 
-def test_without_a_clone_backend_extras_keep_the_key_they_had(ep):
-    """Until Task 6 retires stock voices, a workspace with no clone backend keys and renders
-    its extras as before (their key is byte-identical)."""
-    _two_cards(ep)
-    key = TtsStage(CFG).config_key(CFG, ep)
-    assert key["extras"] == {"S5": "xf_one", "S9": "xm_one"}
-
-
 def _second_episode(ep: Episode, cues: list[DubCue]) -> Episode:
     """Episode e2 of ep's workspace: the same two characters' clusters, ``cues`` to speak."""
     work = ep.workspace_root / ".fukikae" / "episodes" / "e2"
@@ -1575,3 +1536,73 @@ def test_an_unknown_line_over_silence_is_cloned_and_flagged(ep):
     run = _run(ep)
     assert run.extras["unknown~c0009"]["issue"] == "silence"
     assert any("unknown line c0009 (27.00-29.00) is silence" in f for f in run.flags), run.flags
+
+
+# -- Task 6: stock voices retired (D41) ------------------------------------------------------
+
+
+def test_an_unusable_clone_backend_refuses_before_any_model_loads(ep, monkeypatch):
+    """D41: a character with no card while the clone backend can't run here stops the stage,
+    naming `fukikae backends setup`, before anything loads; nothing is assigned."""
+    _assign(ep, 1, _stock("am_adam"))
+    monkeypatch.setattr("fukikae.cards.auto.clone_problem", lambda *_: "worker env missing")
+    with pytest.raises(tts.CloneBackendError, match="backends setup fakeclone") as err:
+        TtsStage(CLONE_CFG).run(ep, CLONE_CFG)
+    assert "worker env missing" in str(err.value) and "D41" in str(err.value)
+    assert FakeSynth.LOG == []
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        assert reg.card_for(2, "en") is None
+    with pytest.raises(tts.CloneBackendError):
+        TtsStage(CLONE_CFG).prepare(ep, CLONE_CFG)
+
+
+def test_an_unset_clone_backend_refuses(ep):
+    _two_cards(ep)  # every character has a card: the extras still need clones
+    cfg = Config(raw={"tts": {"backend": "fake"}})
+    with pytest.raises(tts.CloneBackendError, match=r"set \[tts\] clone_backend"):
+        TtsStage(cfg).run(ep, cfg)
+    with pytest.raises(tts.CloneBackendError, match=r"set \[tts\] clone_backend"):
+        TtsStage(cfg).prepare(ep, cfg)
+    assert FakeSynth.LOG == []
+
+
+def test_an_episode_whose_cards_all_exist_renders_without_cloning(ep):
+    """D41: the refusal is about making cards; an episode with every card made renders as
+    before, with no clone backend set at all."""
+    _two_cards(ep)
+    _write_cues(ep, [c for c in CUES if c.character_id is not None])
+    cfg = Config(raw={"tts": {"backend": "fake"}})
+    TtsStage(cfg).run(ep, cfg)
+    assert sorted(_run(ep).rendered) == ["c0001", "c0002", "c0003"]
+
+
+def test_rendering_extras_on_an_unusable_clone_backend_refuses_before_loading(ep, monkeypatch):
+    """The extras' clone cards can be made from the backend's name alone; rendering them
+    can't, so a cache miss on an unusable clone backend stops the stage before any load."""
+    _two_cards(ep)
+    monkeypatch.setattr("fukikae.cards.auto.clone_problem", lambda *_: "no usable GPU")
+    with pytest.raises(tts.CloneBackendError, match="no usable GPU"):
+        TtsStage(CLONE_CFG).run(ep, CLONE_CFG)
+    assert FakeSynth.LOG == []
+
+
+def test_an_automatic_stock_card_is_repicked_by_the_tts_run(ep):
+    """D41: an existing workspace's automatic stock card becomes a clone at the next run."""
+    from fukikae.cards.auto import STOCK_NOTE
+
+    _assign(ep, 1, _stock("am_adam"))
+    old = _assign(ep, 2, _stock("af_heart"), by="auto")
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.lock_card(2, "en", False)
+    cfg = Config(raw=CLONE_CFG.raw, source_language="ja")
+    TtsStage(cfg).run(ep, cfg)
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        cur = reg.card_for(2, "en")
+    assert cur is not None and cur.card_id != old and (cur.note or "").startswith(STOCK_NOTE)
+    store = CardStore(ep.workspace_root)
+    assert store.get(cur.card_id or "").voice.source == "clone"
+    plan = _plan(ep)
+    stock_cues = [c for c in plan.cues if c.card_id and store.get(c.card_id).voice.source ==
+                  "stock" and c.character_id != 1]  # fmt: skip
+    assert stock_cues == []
+    assert any("Lucy" in line and STOCK_NOTE in line for line in _run(ep).report)

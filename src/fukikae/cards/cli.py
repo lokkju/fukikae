@@ -193,8 +193,8 @@ def assign(
     ref: str = typer.Argument(
         ...,
         metavar="CARD",
-        help="A card id in the workspace's store, a stock voice (stock:<backend>:<voice>), or "
-        "one character's card from a pack (<pack>:<character name or external id>).",
+        help="A card id in the workspace's store, or one character's card from a pack "
+        "(<pack>:<character name or external id>). Stock voices are retired (D41).",
     ),
     no_lock: bool = typer.Option(False, "--no-lock", help="Leave the assignment unlocked."),
     no_verify: bool = typer.Option(
@@ -211,8 +211,8 @@ def assign(
         copied: CopyReport | None = None
         try:
             if ref.startswith("stock:"):
-                ref = _stock(store, ref, language)
-            elif not is_card_id(ref) and ":" in ref:
+                raise _fail(STOCK_RETIRED)
+            if not is_card_id(ref) and ":" in ref:
                 ref, copied = _from_pack(workspace, store, ref, language)
             if not store.has(ref):
                 raise _fail(
@@ -250,8 +250,9 @@ def assign(
 
 
 CLIP_SECONDS = (3.0, 30.0)
-# Automatic stock cards restock re-pins; a clone stand-in keeps its mark so it is still upgraded.
-AUTO_STOCK_BY = ("auto", "auto-fallback", "restock")
+STOCK_RETIRED = (
+    "stock voices are retired (D41); `fukikae voices clone` or `fukikae studio` makes a clone"
+)
 
 
 def _check_clone_card(store: CardStore, card_id: str, who: str, language: str) -> None:
@@ -389,7 +390,7 @@ def _split_pack_ref(ref: str) -> tuple[Path, str]:
             return path, ref[i + 1 :]
     from fukikae.cards.packs import PackError
 
-    raise PackError(f"{ref!r} is not a card id, a stock voice or <pack>:<character>")
+    raise PackError(f"{ref!r} is not a card id or <pack>:<character>")
 
 
 def _from_pack(
@@ -429,73 +430,19 @@ def _copy_lines(copied: CopyReport) -> None:
         _echo(f"fingerprint conflict: {line}")
 
 
-def _stock(store: CardStore, ref: str, language: str) -> str:
-    """Put the card for a ``stock:<backend>:<voice>`` ref in the store; return its id."""
-    from fukikae.backends.loader import BackendUnavailable
-    from fukikae.cards.stock import check_stock_voice, parse_stock_ref, revision, stock_card
-    from fukikae.config import ConfigError
-
-    backend, voice = parse_stock_ref(ref)
-    try:
-        check_stock_voice(backend, voice)
-        return store.put(stock_card(backend, voice, language, revision(backend)))
-    except (ConfigError, BackendUnavailable) as e:
-        raise CardError(f"{ref}: {e}") from e
-
-
-@voices_app.command("restock")
+@voices_app.command("restock", hidden=True)
 def restock(
     workspace: Path = _WS,
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="List what would change; change nothing."
-    ),
+    dry_run: bool = typer.Option(False, "--dry-run", hidden=True),
     lang: str | None = _LANG,
 ) -> None:
-    """Re-pin automatic (or earlier restocked) stock cards to the revision their backend renders
-    with now: same voice, a new card, assigned by `restock` (unlocked, still uncurated, so the
-    next revision bump restocks it again). A curated card (locked, or chosen by an operator or
-    an import) is never touched."""
-    from fukikae.backends.loader import BackendUnavailable
-    from fukikae.cards.stock import revision, stock_card
-    from fukikae.config import ConfigError
-
-    with _session(workspace, lang) as (reg, store, language):
-        changed = 0
-        for char in reg.characters():
-            a = reg.card_for(char.id, language)
-            # CD9: automatic and restocked cards only; never a locked or curated one
-            if a is None or a.card_id is None or a.locked or a.chosen_by not in AUTO_STOCK_BY:
-                continue
-            if not store.has(a.card_id):
-                continue
-            v = store.get(a.card_id).voice
-            if v.source != "stock" or not v.voice:
-                continue
-            try:
-                rev = revision(v.backend)
-            except (CardError, ConfigError, BackendUnavailable) as e:
-                _echo(f"{_label(char)}: card {a.card_id} left alone ({e})")
-                continue
-            if v.model_revision == rev:
-                continue
-            new = stock_card(v.backend, v.voice, language, rev)
-            what = (
-                f"{_label(char)} {language}: {v.backend}:{v.voice} from revision "
-                f"{v.model_revision!r} to {rev!r}"
-            )
-            changed += 1
-            if dry_run:
-                _echo(f"would restock {what}")
-                continue
-            new_id = store.put(new)
-            n = reg.assign_card(
-                char.id, language, new_id,
-                by="auto-fallback" if a.chosen_by == "auto-fallback" else "restock", locked=False,
-                note=f"restocked from card {a.card_id}",
-            ).n  # fmt: skip
-            _echo(f"restocked {what}: card {new_id} (history row {n})")
-        if not changed:
-            _echo("nothing to restock")
+    """Retired with stock voices (D41, D43 #5): it re-pinned automatic stock cards, and the
+    next tts run now re-picks each of them as a clone. Kept only to say so."""
+    del workspace, dry_run, lang
+    raise _fail(
+        "`fukikae voices restock` is retired: stock voices are retired (D41), and the next tts "
+        "run re-picks every automatic stock card as a clone"
+    )
 
 
 @voices_app.command("history")

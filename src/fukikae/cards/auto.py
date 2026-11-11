@@ -1,8 +1,8 @@
 """Automatic voice assignment (D12): a card for each character that has none in the target
 language, and episode-local clone cards for extras (A2).
 
-Only characters with no assignment get one, ``by = "auto"``, unlocked. An automatic
-assignment never replaces a card: should one appear between the check and the write, the
+Only characters with no assignment get one, ``by = "auto"``, unlocked; the re-pick reasons
+below replace automatic cards only. Should a card appear between the check and the write, the
 registry refuses (``ProtectedAssignmentError``, rulings CD2, CD3 and CD9) and the existing
 card is kept.
 
@@ -10,8 +10,8 @@ With ``[tts] clone_backend`` set (IndexTTS2 in every profile since the operator'
 D24), each such character gets a clone card of that backend (``cloning``): reference clips
 from ``select.select_references``'s rules (CD5) over the character's turns in the
 workspace's episodes (``workspace_cloning``), in the episode where they add up to the most
-speech. Every speaker gets a clone of its own speech (A2, D41: never a stock voice while a
-clone can be made), in one of three tiers (``select.tiered_references``): ``floor`` (the D32
+speech. Every speaker gets a clone of its own speech (A2, D41: never a stock voice), in one
+of three tiers (``select.tiered_references``): ``floor`` (the D32
 floor), ``short`` (at least ``select.CLONE_MIN_S``, 3 s, of gated picks; flagged below the
 floor) and ``thin`` (the character's longest turns up to 15 s with the gates set aside,
 `character_thin`; flagged by `thin_lines`). Every clone card names its tier in
@@ -23,16 +23,18 @@ live in the tts stage's key, not the registry. A character that speaks but holds
 its own in any episode is cloned the same way, thin, from its own cues' source spans
 (`cue_references`), and flagged; when an episode it holds a cluster in was skipped because its
 assignments are older than its names, the flag names the characters-stage rerun.
-Without ``clone_backend`` automatic and
-extras cards are still stock voices, and while the clone backend can't run here a new
-character gets a stock stand-in, until the stock paths are retired (Task 6).
+No path here makes or assigns a stock card: without a usable clone backend a character
+without a card gets none and is flagged (the tts stage refuses first, ``stages.tts.
+CloneBackendError``). An automatic stock card from before D41 (``stock_cards``: ``auto``,
+``auto-fallback`` or ``restock``, unlocked) is re-picked as a clone, noted `STOCK_NOTE`; a
+curated, imported or locked one is kept and flagged on every run.
 
 Subtitle names (D27, D29 #4). In an episode whose names stage used names, a character's
 reference turns are its name-confirmed ones (`confirmed_labels`: sub-clusters it got by name,
 or by a lock on a key it answers to), never a span of an inner-voice or multi line
 (``names.excluded``); names-used episodes are tried first. Only when no episode's
 name-confirmed turns yield picks does the character's own acoustic speech count (its unnamed
-remainders included, and acoustic-only episodes), before a stock voice. In both, a turn with
+remainders included, and acoustic-only episodes), before the thin tier. In both, a turn with
 `STALE_OVERLAP` or more of it under speech the names give someone else (`foreign_spans`) is
 never a candidate. A clone card with a reference that much under another character's names is
 stale (`stale_cards`); unnamed speech never makes a card stale. ``ensure_assignments``
@@ -82,12 +84,9 @@ from fukikae.cards.select import (
     FOREIGN_MAX,
     Gated,
     floor_shortfall,
-    gender_of,
     meets_floor,
     share_inside,
-    speaker_f0,
 )
-from fukikae.cards.stock import check_stock_voice, pick_stock, revision, stock_card
 from fukikae.cards.store import CardStore
 from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW
 from fukikae.registry.store import AUTOMATIC_BY, ProtectedAssignmentError, replace_refusal
@@ -111,6 +110,7 @@ __all__ = [
     "FALLBACK_BY",
     "FLOOR_NOTE",
     "REPICK_NOTE",
+    "STOCK_NOTE",
     "STALE_OVERLAP",
     "CharacterRefs",
     "Cloning",
@@ -126,7 +126,6 @@ __all__ = [
     "ensure_assignments",
     "extras_cards",
     "extras_label",
-    "extras_voices",
     "find_references",
     "floor_lines",
     "floor_suffix",
@@ -139,13 +138,15 @@ __all__ = [
     "replace_refusal",
     "stale_cards",
     "stale_references",
+    "stock_cards",
     "thin_lines",
-    "tts_backend",
     "workspace_cloning",
 ]
 
 UNKNOWN_EXTRA = "unknown"
-FALLBACK_BY = "auto-fallback"  # a stock stand-in while the clone backend can't run here
+# The stock stand-in made while the clone backend couldn't run, before D41: read in history
+# rows and re-picked as a clone like any automatic stock card; never written again.
+FALLBACK_BY = "auto-fallback"
 # The seconds of picks the name-confirmed and acoustic tiers are searched at first, in that
 # order, and the minimum `_episode_key` reads past before a scored non-neutral pick (the rule
 # before D32 and D41). Only when neither tier reaches it are both searched again down to
@@ -163,6 +164,11 @@ FLOOR_NOTE = "re-picked: below the clone floor"
 FLOOR_FIX = "`fukikae voices clone` with a better clip replaces it"
 PURITY_NOTE = "re-picked: references fail the reference gates"
 PURITY_FIX = "listen in `fukikae studio`, or replace it with `fukikae voices clone`"
+STOCK_NOTE = "re-picked: stock voices are retired (D41)"
+STOCK_FIX = (
+    "stock voices are retired (D41): accept a clone in `fukikae studio` or use "
+    "`fukikae voices clone`"
+)
 GATE_WORDS = {"off_register": "off-register", "unvoiced": "unvoiced", "song_like": "song-like"}
 
 
@@ -197,7 +203,7 @@ class Cloning:
     backend: type[Synthesizer]
     source_language: str
     references: Callable[[int], CharacterRefs]
-    unavailable: str | None = None  # why the backend can't run here: stock for everyone
+    unavailable: str | None = None  # why the backend can't run here: no clone is made
 
 
 @dataclass(frozen=True)
@@ -512,7 +518,7 @@ def _floor_flag(reg: Registry, cid: int, card: str, phrase: str, why: str | None
 
 def clone_backend(cfg: Config) -> str | None:
     """``[tts] clone_backend``, the workspace's over the profile's; None when unset or empty
-    (automatic cards are then stock voices)."""
+    (no clone can be made, and the tts stage refuses to make or re-pick a card, D41)."""
     from fukikae.config import ConfigError
 
     name = None
@@ -529,19 +535,6 @@ def clone_backend(cfg: Config) -> str | None:
         if problem:
             raise ConfigError(problem)
     return name or None
-
-
-def tts_backend(cfg: Config) -> str:
-    """The ``[tts]`` backend: the one automatic cards and extras are made for (never an engine
-    of another backend's cards)."""
-    from fukikae.backends.loader import engine_problem
-    from fukikae.config import ConfigError
-
-    name = cfg.resolve("tts").backend
-    problem = engine_problem("tts", name, "[tts] backend")
-    if problem:
-        raise ConfigError(problem)
-    return name
 
 
 MEDIAN_WARNING = (
@@ -598,18 +591,6 @@ def character_spans(asg: Assignments) -> dict[int, list[tuple[float, float]]]:
     return out
 
 
-def _stock_voices_in_use(reg: Registry, store: CardStore, backend: str, language: str) -> list[str]:
-    used: list[str] = []
-    for c in reg.characters():
-        a = reg.card_for(c.id, language)
-        if a is None or a.card_id is None or not store.has(a.card_id):
-            continue
-        v = store.get(a.card_id).voice
-        if v.backend == backend and v.source == "stock" and v.voice:
-            used.append(v.voice)
-    return used
-
-
 def _label(reg: Registry, cid: int) -> str:
     name = next((c.name for c in reg.characters() if c.id == cid), None)
     return f"{cid} ({name})" if name else str(cid)
@@ -629,27 +610,27 @@ def ensure_assignments(
     store: CardStore,
     cfg: Config,
     character_spans: dict[int, list[tuple[float, float]]],
-    vocals: Path,
     *,
     cloning: Cloning | None = None,
     stale: Mapping[int, Sequence[dict]] | None = None,
     short: Mapping[int, Shortfall] | None = None,
     impure: Mapping[int, Impurity] | None = None,
+    stock: Mapping[int, str] | None = None,
     flags: list[str] | None = None,
 ) -> list[str]:
     """Give every character in ``character_spans`` without a ``cfg.target_language`` card
-    one: a clone card when ``cloning`` is given and the character has enough clean speech,
-    else a stock card from its gender's pool, most speech first (so the main cast gets the
-    first voices of each pool). Returns one report line per card assigned: the lines that
-    changed the registry.
+    one: a clone card from its own speech in one of the three tiers (A2), most speech first,
+    while ``cloning`` is usable. Never a stock voice (D41): without a usable clone backend a
+    character without a card gets none and is flagged (the tts stage refuses before it gets
+    here). Returns one report line per card assigned: the lines that changed the registry.
 
     ``stale`` (`stale_cards`) lists the characters whose clone card has references the
     subtitle names give someone else. While ``cloning`` is usable, an automatic card
     (``replace_refusal`` lets ``auto`` replace it) is re-picked the way a new card is made, a
     new card with a new ``auto`` row noted `REPICK_NOTE`: a clone from name-confirmed
-    references when there are enough, else from the character's own acoustic speech, else a
-    stock voice, so a character whose speech the names gave to others stops speaking in their
-    voice. A curated or imported card, and an automatic one while no clone can be made, is
+    references when there are enough, else from the character's own acoustic speech, else
+    the thin tier, so a character whose speech the names gave to others stops speaking in
+    their voice. A curated or imported card, and an automatic one while no clone can be made, is
     only flagged (D29 #4): the flag lines go to ``flags`` (when given), never to the returned
     lines, because they change nothing and would repeat on every run.
 
@@ -664,11 +645,17 @@ def ensure_assignments(
     picks, which pass every gate by construction; with none it is kept and flagged, never
     made stock. A curated, imported or locked one is flagged with the failing references,
     pointing at the studio and ``fukikae voices clone``. A card that is stale, under the
-    floor and impure at once gets one re-pick whose note gives every reason."""
+    floor and impure at once gets one re-pick whose note gives every reason.
+
+    ``stock`` (`stock_cards`) lists the characters that speak with a stock card. An automatic
+    one (``auto``, ``auto-fallback`` or ``restock``, unlocked) is re-picked as a clone, noted
+    `STOCK_NOTE`, whatever tier its picks reach; with no speech of its own to clone from it
+    is kept and flagged. A curated, imported or locked one is kept (CD2, CD3, CD9) and flagged
+    on every run, pointing at the studio and ``fukikae voices clone``."""
     language = cfg.target_language
     usable = cloning is not None and cloning.unavailable is None
     todo = []
-    fallbacks: set[int] = set()
+    restock: dict[int, str] = {}  # character -> its automatic stock card, re-picked (D41)
     repick: dict[int, str] = {}  # character -> its current card id
     floor: dict[int, Shortfall] = {}  # characters re-picked for the clone floor
     purity: dict[int, Impurity] = {}  # characters re-picked for impure references
@@ -686,11 +673,25 @@ def ensure_assignments(
             else:
                 why = _keep_why(a, cloning)
                 flagged.append(_impure_flag(reg, cid, a.card_id or "", imp, why))
+        held_stock = (stock or {}).get(cid)
+        if held_stock is not None and (a is None or a.card_id != held_stock):
+            held_stock = None  # read for another card
         if a is None or a.card_id is None:
-            todo.append((cid, spans))
-        elif usable and a.chosen_by == FALLBACK_BY and not a.locked:
-            todo.append((cid, spans))  # the stock stand-in for a clone that couldn't run
-            fallbacks.add(cid)
+            if usable:
+                todo.append((cid, spans))
+            else:
+                flagged.append(
+                    f"character {_label(reg, cid)} has no card, and {_no_clone(cloning)}; "
+                    "fukikae makes no stock voices (D41)"
+                )
+        elif held_stock is not None:
+            if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
+                flagged.append(_stock_flag(reg, cid, a))
+            elif usable:
+                todo.append((cid, spans))
+                restock[cid] = held_stock
+            else:
+                flagged.append(_stock_flag(reg, cid, a, f"kept while {_no_clone(cloning)}"))
         elif refs:
             where = _where(refs)
             also = floor_suffix(short, cid)
@@ -747,17 +748,18 @@ def ensure_assignments(
                 flagged.append(_impure_flag(reg, cid, a.card_id, imp, _keep_why(a, cloning)))
     if not todo:
         return lines
-    backend = tts_backend(cfg)
-    rev = revision(backend)
-    male_below, female_above = gender_thresholds(cfg)
-    used = _stock_voices_in_use(reg, store, backend, language)
+    assert cloning is not None
     todo.sort(key=lambda item: (-sum(e - s for s, e in item[1]), item[0]))
-    for cid, spans in todo:
-        found = cloning.references(cid) if usable else None  # type: ignore[union-attr]
-        voice: str | None = None
-        by = "auto"
-        if cid in fallbacks and not (found is not None and found.picks):
-            continue  # still too little speech: the stand-in stays until a clone can be made
+    for cid, _spans in todo:
+        found = cloning.references(cid)
+        if cid in restock and not found.picks:
+            a = reg.card_for(cid, language)
+            assert a is not None
+            hint = _skip_hint(found.skipped)
+            flagged.append(_stock_flag(
+                reg, cid, a, f"no speech of its own was found to clone a voice from{hint}",
+            ))  # fmt: skip
+            continue
         gated_picks = found is not None and bool(found.picks) and found.tier != "thin"
         if cid in purity and cid not in repick and not gated_picks:
             imp = purity[cid]
@@ -772,8 +774,8 @@ def ensure_assignments(
         below: str | None = None
         thin: str | None = None
         own_lines = found is not None and found.from_cues
-        if found is not None and found.picks:
-            new, note = _clone(cloning, found, store, language)  # type: ignore[arg-type]
+        if found.picks:
+            new, note = _clone(cloning, found, store, language)
             if found.tier == "thin":
                 thin = thin_phrase([p.seconds for p in found.picks])
                 note += f"; {thin}"
@@ -783,14 +785,12 @@ def ensure_assignments(
                 below = floor_shortfall([p.seconds for p in found.picks])
                 if below is not None:
                     note += f"; below the clone floor ({below})"
-            if cid in fallbacks:
-                note += "; replaces the stock fallback made while the clone backend couldn't run"
-        elif usable:
-            # D41: never a stock voice while a clone can be made. A character with no turn of
-            # its own in any episode has nothing to clone: a card it has stays, flagged, and
-            # one without a card is named (the tts stage then stops on its cues)
+        else:
+            # D41: never a stock voice. A character with no speech of its own anywhere, its
+            # cues included, has nothing to clone: a card it has stays, flagged, and one
+            # without a card is named (the tts stage then stops on its cues)
             cur = reg.card_for(cid, language)
-            hint = _skip_hint(found.skipped if found is not None else ())
+            hint = _skip_hint(found.skipped)
             if cur is not None and cur.card_id is not None:
                 flagged.append(
                     f"character {_label(reg, cid)}: card {cur.card_id} is kept, flagged: no "
@@ -803,26 +803,6 @@ def ensure_assignments(
                     f"voice from, so it has no card{hint}; `fukikae voices clone` makes one"
                 )
             continue
-        else:
-            f0, seconds = speaker_f0(vocals, spans)
-            gender = gender_of(f0, male_below, female_above)
-            voice = pick_stock(backend, language, gender, used)
-            check_stock_voice(backend, voice)
-            new = store.put(stock_card(backend, voice, language, rev))
-            estimate = (
-                f"gender estimate {gender}, F0 {f0:.0f} Hz (median) over {seconds:.1f} s"
-                if f0 is not None
-                else f"gender estimate u, too little voiced speech in {seconds:.1f} s"
-            )
-            note = f"stock {backend}:{voice}, card {new} ({estimate}); auto and unlocked"
-            if cloning is not None and cloning.unavailable is not None:
-                name = cloning.backend.name
-                note = (
-                    f"clone backend {name} is not usable ({cloning.unavailable}); stock voice "
-                    f"{voice}: {note}. Run `fukikae backends setup {name}`: the next run "
-                    "replaces this stand-in with a clone"
-                )
-                by = FALLBACK_BY
         again = "the current rules pick it again; kept, flagged for review"
         held = reg.card_for(cid, language)
         if (cid in repick or cid in floor or cid in purity) and held and new == held.card_id:
@@ -840,7 +820,7 @@ def ensure_assignments(
             elif below is not None:
                 flagged.append(_floor_flag(reg, cid, new, below, again))
             continue
-        reasons: list[str] = []
+        reasons: list[str] = [STOCK_NOTE] if cid in restock else []
         if cid in repick:
             reasons.append(f"{REPICK_NOTE} ({_where((stale or {})[cid])})")
         if cid in floor or (cid in repick and cid in (short or {})):
@@ -851,18 +831,56 @@ def ensure_assignments(
         if reasons:
             note = f"{'; '.join(reasons)}; {note}"
         try:
-            reg.assign_card(cid, language, new, by=by, locked=False, note=note)
+            reg.assign_card(cid, language, new, by="auto", locked=False, note=note)
         except ProtectedAssignmentError as e:
             lines.append(f"character {_label(reg, cid)}: kept its card ({e})")
             continue
-        if voice is not None:
-            used.append(voice)
         lines.append(f"character {_label(reg, cid)}: {note}")
         if below is not None:
             flagged.append(_floor_flag(reg, cid, new, below))
         if thin is not None:
             flagged.append(_thin_flag(reg, cid, new, thin, own=found))
     return lines
+
+
+def _no_clone(cloning: Cloning | None) -> str:
+    """Why no clone can be made here: no ``[tts] clone_backend``, or one that can't run."""
+    if cloning is None:
+        return "no [tts] clone_backend is set to clone one with"
+    name = cloning.backend.name
+    return (
+        f"the clone backend {name} can't run here ({cloning.unavailable}; `fukikae backends "
+        f"setup {name}`)"
+    )
+
+
+def _stock_flag(reg: Registry, cid: int, a: CardAssignment, why: str | None = None) -> str:
+    """The flag for a stock card that stays (D41): curated, imported or locked, or ``why``."""
+    state = f"{a.chosen_by}{', locked' if a.locked else ''}"
+    head = f"character {_label(reg, cid)} speaks with a stock card ({state})"
+    return f"{head}; {f'{why}; ' if why else ''}{STOCK_FIX}"
+
+
+def stock_cards(
+    reg: Registry, store: CardStore, ids: Iterable[int], language: str
+) -> dict[int, str]:
+    """Character -> its ``language`` card's id, for the characters whose card is a stock
+    voice (``voice.source == "stock"``), whoever chose it; a card that can't be read is
+    skipped (the tts stage's checks name it)."""
+    from fukikae.cards.card import CardError
+
+    out: dict[int, str] = {}
+    for cid in ids:
+        a = reg.card_for(cid, language)
+        if a is None or a.card_id is None or not store.has(a.card_id):
+            continue
+        try:
+            card = store.get(a.card_id)
+        except CardError:
+            continue
+        if card.voice.source == "stock":
+            out[cid] = a.card_id
+    return out
 
 
 def _keep_why(a: CardAssignment, cloning: Cloning | None) -> str:
@@ -906,25 +924,6 @@ def _clone(
     if found.names_used and not found.confirmed:
         note += "; references are not name-confirmed"
     return new, note
-
-
-def extras_voices(cues: Iterable[DubCue], cfg: Config) -> dict[str, str]:
-    """Extra label -> stock voice id from the ``[tts]`` backend's extras pools, in order of
-    first appearance over every cue (spoken or not), so a label keeps its voice when a
-    translation changes. Unknown genders, so the f and m extras pools alternate."""
-    backend = tts_backend(cfg)
-    out: dict[str, str] = {}
-    used: list[str] = []
-    for c in cues:
-        if c.character_id is not None:
-            continue
-        label = c.extra or UNKNOWN_EXTRA
-        if label in out:
-            continue
-        voice = pick_stock(backend, cfg.target_language, "u", used, extras=True)
-        out[label] = voice
-        used.append(voice)
-    return out
 
 
 def extras_label(cue: DubCue) -> str:
@@ -2151,10 +2150,11 @@ def card_status_lines(
     per card with every reason it has (review fix 7): references the subtitle names now give
     someone else (`stale_cards`; a kept stale card under the floor says so too,
     `floor_suffix`), under the clone floor (`floor_lines`) or a thin-reference clone
-    (`thin_lines`), and references the reference gates refuse (`impure_lines`). A card with
-    one reason gets that reason's line; one with several gets a line naming each and what the
-    next tts run does, as its single re-pick would. ``notes`` receives the episodes
-    `stale_cards` skipped."""
+    (`thin_lines`), and references the reference gates refuse (`impure_lines`), then stock
+    cards (D41: an automatic one is re-picked as a clone by the next tts run, a curated,
+    imported or locked one is kept). A card with one reason gets that reason's line; one with
+    several gets a line naming each and what the next tts run does, as its single re-pick
+    would. ``notes`` receives the episodes `stale_cards` skipped."""
     chars = sorted(set(characters))
     stale = stale_cards(ws, reg, store, chars, language, notes=notes)
     short = below_floor(reg, store, chars, language)
@@ -2216,6 +2216,21 @@ def card_status_lines(
             out.append(f"{head}; the next tts run re-picks it ({better})")
         else:
             out.append(f"{head}; a better pick exists ({better}), kept while {why}")
+    for cid, card in sorted(stock_cards(reg, store, chars, language).items()):
+        a = reg.card_for(cid, language)
+        assert a is not None
+        head = (
+            f"character {_label(reg, cid)}'s card {card} ({a.chosen_by}"
+            f"{', locked' if a.locked else ''}) is a stock card; stock voices are retired (D41)"
+        )
+        if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
+            out.append(
+                f"{head}: kept; accept a clone in `fukikae studio` or use `fukikae voices clone`"
+            )
+        elif (why := block()) is None:
+            out.append(f"{head}: the next tts run re-picks it as a clone")
+        else:
+            out.append(f"{head}: kept while {why}, then the next tts run re-picks it as a clone")
     return out
 
 

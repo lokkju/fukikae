@@ -1035,12 +1035,19 @@ def copy_cards(pack: Pack, store: CardStore, ids: list[str]) -> CopyReport:
     doesn't change; the fingerprint is outside it) and the old bytes kept for rollback. When
     both have fingerprints and they differ, the local one stays and the conflict is reported.
     On any failure the merged card files are restored before the error propagates; created
-    files stay (``CopyReport.rollback``)."""
+    files stay (``CopyReport.rollback``). A stock card among them refuses the whole copy before
+    anything is written (D41: no stock voice enters a workspace, a pack's included)."""
     report = CopyReport()
     try:
         wanted: set[str] = set()
         for cid in ids:
             _closure(cid, pack.cards, wanted)
+        stock = sorted(cid for cid in wanted if pack.cards[cid].voice.source == "stock")
+        if stock:
+            raise PackError(
+                f"card {', '.join(stock)} in the pack is a stock voice; stock voices are "
+                "retired (D41): `fukikae voices clone` or `fukikae studio` makes a clone"
+            )
         for cid in sorted(wanted):
             card = pack.cards[cid]
             theirs = card.voice.fingerprint

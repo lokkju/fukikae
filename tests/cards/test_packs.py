@@ -45,8 +45,10 @@ def _wav(path: Path, seconds: float = 1.0, freq: float = 220.0, rate: int = 8000
     return path
 
 
-def stock(voice: str = "af_heart", lang: str = "en") -> Card:
-    return Card(lang, Voice(backend="fake", model_revision="1.0", source="stock", voice=voice))
+def designed(voice: str = "af_heart", lang: str = "en") -> Card:
+    """A designed voice, distinct per ``voice`` (no stock voice: imports refuse those, D41)."""
+    return Card(lang, Voice(backend="fake", model_revision="1.0", source="design",
+                            description=f"a voice like {voice}"))  # fmt: skip
 
 
 def clone(store: CardStore, tmp: Path, freq: float = 220.0, seconds: float = 1.0) -> Card:
@@ -134,7 +136,7 @@ def good_pack_members(tmp_path: Path) -> list[tuple[tarfile.TarInfo, bytes | Non
     """The members of a valid exported pack, read back from a real export."""
     root, reg, store = workspace(tmp_path, "src-members")
     cid = character(reg, "Natsu")
-    reg.assign_card(cid, "en", store.put(stock()), by="auto", locked=False)
+    reg.assign_card(cid, "en", store.put(designed()), by="auto", locked=False)
     out = tmp_path / "good-dir"
     export_pack(reg, store, SERIES, out, characters=None, languages=None, no_clips=False,
                 title="FT voices", author="lokkju")  # fmt: skip
@@ -154,7 +156,7 @@ def test_export_import_round_trip_between_registries(tmp_path: Path):
     natsu = character(reg_a, "Natsu")
     lucy = character(reg_a, "Lucy", external_id="1234")
     unnamed = character(reg_a, None)  # unnamed: left out, listed
-    s = store_a.put(stock())
+    s = store_a.put(designed())
     reg_a.assign_card(unnamed, "en", s, by="auto", locked=False)
     c = store_a.put(with_fingerprint(store_a, tmp_path, clone(store_a, tmp_path)))
     reg_a.assign_card(natsu, "en", s, by="assign", locked=True)
@@ -187,7 +189,7 @@ def test_export_import_round_trip_between_registries(tmp_path: Path):
 
 def test_external_id_beats_name(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    reg_a.assign_card(character(reg_a, "Gray", external_id="77"), "en", store_a.put(stock()),
+    reg_a.assign_card(character(reg_a, "Gray", external_id="77"), "en", store_a.put(designed()),
                       by="auto", locked=False)  # fmt: skip
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
@@ -201,7 +203,7 @@ def test_external_id_beats_name(tmp_path: Path):
 
 def test_name_does_not_match_a_character_with_another_external_id(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    reg_a.assign_card(character(reg_a, "Gray", external_id="77"), "en", store_a.put(stock()),
+    reg_a.assign_card(character(reg_a, "Gray", external_id="77"), "en", store_a.put(designed()),
                       by="auto", locked=False)  # fmt: skip
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
@@ -220,13 +222,13 @@ def test_width_and_case_insensitive_names():
 
 def test_locked_character_skipped_without_replace(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    reg_a.assign_card(character(reg_a, "Natsu"), "en", store_a.put(stock("am_adam")),
+    reg_a.assign_card(character(reg_a, "Natsu"), "en", store_a.put(designed("am_adam")),
                       by="auto", locked=False)  # fmt: skip
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
     _, reg_b, store_b = workspace(tmp_path, "b")
     locked = character(reg_b, "Natsu")
-    mine = store_b.put(stock("af_heart"))
+    mine = store_b.put(designed("af_heart"))
     reg_b.assign_card(locked, "en", mine, by="auto", locked=True)
     with read_pack(tmp_path / "p") as pack:
         plan = plan_import(pack, reg_b, replace=False)
@@ -245,12 +247,12 @@ def test_locked_character_skipped_without_replace(tmp_path: Path):
 def test_operator_chosen_skipped_but_auto_and_earlier_import_replaced(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
     for name in ("A", "B", "C"):
-        reg_a.assign_card(character(reg_a, name), "en", store_a.put(stock("am_adam")),
+        reg_a.assign_card(character(reg_a, name), "en", store_a.put(designed("am_adam")),
                           by="auto", locked=False)  # fmt: skip
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
     _, reg_b, store_b = workspace(tmp_path, "b")
-    mine = store_b.put(stock("af_heart"))
+    mine = store_b.put(designed("af_heart"))
     a, b, c = (character(reg_b, n) for n in ("A", "B", "C"))
     reg_b.assign_card(a, "en", mine, by="assign", locked=False)  # operator-chosen, unlocked
     reg_b.assign_card(b, "en", mine, by="auto", locked=False)
@@ -263,13 +265,13 @@ def test_operator_chosen_skipped_but_auto_and_earlier_import_replaced(tmp_path: 
 
 def test_same_card_already_assigned_is_unchanged(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    s = store_a.put(stock())
+    s = store_a.put(designed())
     reg_a.assign_card(character(reg_a, "A"), "en", s, by="auto", locked=False)
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
     _, reg_b, store_b = workspace(tmp_path, "b")
     a = character(reg_b, "A")
-    reg_b.assign_card(a, "en", store_b.put(stock()), by="assign", locked=True)
+    reg_b.assign_card(a, "en", store_b.put(designed()), by="assign", locked=True)
     with read_pack(tmp_path / "p") as pack:
         plan = plan_import(pack, reg_b, replace=False)
     assert not plan.assign and not plan.skipped and [u.character_id for u in plan.unchanged] == [a]
@@ -277,7 +279,7 @@ def test_same_card_already_assigned_is_unchanged(tmp_path: Path):
 
 def test_conflicting_series_ids_refused_unless_forced(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(stock()), by="auto", locked=False)
+    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(designed()), by="auto", locked=False)
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
     with read_pack(tmp_path / "p") as pack:
@@ -303,7 +305,7 @@ def test_conflicting_series_ids_refused_unless_forced(tmp_path: Path):
 
 def test_title_match_warns_when_ids_absent(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(stock()), by="auto", locked=False)
+    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(designed()), by="auto", locked=False)
     export_pack(reg_a, store_a, SeriesInfo("Fairy Tail", "anime", {}), tmp_path / "p",
                 characters=None, languages=None, no_clips=False, title="t", author="")  # fmt: skip
     with read_pack(tmp_path / "p") as pack:
@@ -315,7 +317,7 @@ def test_title_match_warns_when_ids_absent(tmp_path: Path):
 
 def test_no_clips_lists_clone_cards_left_out(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(stock()), by="auto", locked=False)
+    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(designed()), by="auto", locked=False)
     c = store_a.put(clone(store_a, tmp_path))
     reg_a.assign_card(character(reg_a, "B"), "en", c, by="auto", locked=False)
     report = export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
@@ -341,8 +343,8 @@ def test_export_filters_characters_and_languages(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
     a, b = character(reg_a, "A"), character(reg_a, "B")
     for cid in (a, b):
-        reg_a.assign_card(cid, "en", store_a.put(stock()), by="auto", locked=False)
-        reg_a.assign_card(cid, "es", store_a.put(stock(lang="es")), by="auto", locked=False)
+        reg_a.assign_card(cid, "en", store_a.put(designed()), by="auto", locked=False)
+        reg_a.assign_card(cid, "es", store_a.put(designed(lang="es")), by="auto", locked=False)
     report = export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=[a],
                          languages=["es"], no_clips=False, title="t", author="")  # fmt: skip
     assert report.written == 1
@@ -355,7 +357,7 @@ def test_pack_never_contains_registry_ids(tmp_path: Path):
     for _ in range(5):
         character(reg_a, None)  # push the ids up so they'd be visible
     cid = character(reg_a, "Natsu", external_id="555")
-    reg_a.assign_card(cid, "en", store_a.put(stock()), by="auto", locked=False)
+    reg_a.assign_card(cid, "en", store_a.put(designed()), by="auto", locked=False)
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
     text = "\n".join(p.read_text() for p in (tmp_path / "p").rglob("*.toml"))
@@ -380,8 +382,9 @@ def test_tar_zst_round_trip_is_reproducible(tmp_path: Path):
 
 def test_blended_card_travels_with_its_blend(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    base = store_a.put(stock())
-    voice = Voice(backend="fake", model_revision="1.0", source="stock", voice="am_adam",
+    base = store_a.put(designed())
+    voice = Voice(backend="fake", model_revision="1.0", source="design",
+                  description="a voice like am_adam",
                   blend={"with": f"card:{base}", "weight": 0.3})  # fmt: skip
     blended = Card("en", voice)
     bid = store_a.put(blended)
@@ -615,7 +618,7 @@ def test_failed_apply_leaves_store_and_registry_unchanged(
 def test_cli_import_prints_mapping_and_unmatched(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
     for name in ("Natsu", "Happy"):
-        reg_a.assign_card(character(reg_a, name), "en", store_a.put(stock()), by="auto",
+        reg_a.assign_card(character(reg_a, name), "en", store_a.put(designed()), by="auto",
                           locked=False)  # fmt: skip
     export_pack(reg_a, store_a, SERIES, tmp_path / "p.tar.zst", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
@@ -633,7 +636,7 @@ def test_cli_import_prints_mapping_and_unmatched(tmp_path: Path):
 
 def test_cli_export_then_assign_from_pack(tmp_path: Path):
     src, reg_a, store_a = workspace(tmp_path, "a")
-    s = store_a.put(stock("am_adam"))
+    s = store_a.put(designed("am_adam"))
     reg_a.assign_card(character(reg_a, "Natsu"), "en", s, by="auto", locked=False)
     reg_a.close()
     pack = tmp_path / "p.tar.zst"
@@ -653,7 +656,7 @@ def test_cli_export_then_assign_from_pack(tmp_path: Path):
 def test_dump_card_is_what_the_pack_carries(tmp_path: Path):
     # the exported card file is the store's canonical dump, so its id checks on import
     _, reg_a, store_a = workspace(tmp_path, "a")
-    s = store_a.put(stock())
+    s = store_a.put(designed())
     reg_a.assign_card(character(reg_a, "A"), "en", s, by="auto", locked=False)
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
@@ -673,7 +676,7 @@ def test_deeply_nested_toml_refused(tmp_path: Path):
 def _fingerprinted_dir_pack(tmp_path: Path) -> tuple[Path, str]:
     """A directory pack of one fingerprinted stock card; returns it and the card file name."""
     _, reg_a, store_a = workspace(tmp_path, "fp-src")
-    cid = store_a.put(with_fingerprint(store_a, tmp_path, stock()))
+    cid = store_a.put(with_fingerprint(store_a, tmp_path, designed()))
     reg_a.assign_card(character(reg_a, "Natsu"), "en", cid, by="auto", locked=False)
     export_pack(reg_a, store_a, SERIES, tmp_path / "fp", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
@@ -732,7 +735,7 @@ def test_cd22_pack_fingerprint_merges_into_a_stored_card_without_one(tmp_path: P
     cid = card_file.removesuffix(".toml")
     _, reg_b, store_b = workspace(tmp_path, "b")
     character(reg_b, "Natsu")
-    store_b.put(stock())  # the same card, no fingerprint
+    store_b.put(designed())  # the same card, no fingerprint
     with read_pack(pack) as p:
         report = apply_import(plan_import(p, reg_b, replace=False), p, reg_b, store_b)
         pack_fp = p.cards[cid].voice.fingerprint
@@ -746,7 +749,7 @@ def test_cd22_rollback_restores_the_old_card_bytes(tmp_path: Path, monkeypatch: 
     pack, card_file = _fingerprinted_dir_pack(tmp_path)
     dst, reg_b, store_b = workspace(tmp_path, "b")
     character(reg_b, "Natsu")
-    store_b.put(stock())
+    store_b.put(designed())
     before = snapshot(dst)
 
     def boom(self, *a, **kw):  # noqa: ARG001
@@ -760,14 +763,14 @@ def test_cd22_rollback_restores_the_old_card_bytes(tmp_path: Path, monkeypatch: 
 
 def test_cd22_differing_fingerprints_keep_the_local_one_and_report_both(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    theirs = _fp(store_a, tmp_path, stock(), 0.5)
+    theirs = _fp(store_a, tmp_path, designed(), 0.5)
     cid = store_a.put(theirs)
     reg_a.assign_card(character(reg_a, "Natsu"), "en", cid, by="auto", locked=False)
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
     _, reg_b, store_b = workspace(tmp_path, "b")
     character(reg_b, "Natsu")
-    mine = _fp(store_b, tmp_path, stock(), 0.25)
+    mine = _fp(store_b, tmp_path, designed(), 0.25)
     assert store_b.put(mine) == cid
     with read_pack(tmp_path / "p") as p:
         report = apply_import(plan_import(p, reg_b, replace=False), p, reg_b, store_b)
@@ -793,7 +796,7 @@ def test_cli_import_merges_and_verifies_the_merged_fingerprint(
     pack, card_file = _fingerprinted_dir_pack(tmp_path)
     dst, reg_b, store_b = workspace(tmp_path, "b")
     character(reg_b, "Natsu")
-    store_b.put(stock())
+    store_b.put(designed())
     reg_b.close()
     r = runner.invoke(app, ["voices", "import", str(dst), str(pack)])
     assert r.exit_code == 0, r.output
@@ -807,7 +810,7 @@ def test_protection_has_one_predicate(tmp_path: Path):
 
     _, reg, store = workspace(tmp_path, "r")
     cid = character(reg, "A")
-    s1, s2 = store.put(stock("af_heart")), store.put(stock("am_adam"))
+    s1, s2 = store.put(designed("af_heart")), store.put(designed("am_adam"))
     for by, locked in (("assign", False), ("auto", True), ("import:x", False), ("auto", False)):
         reg.assign_card(cid, "en", s1, by=by, locked=locked, override=True)
         cur = reg.card_for(cid, "en")
@@ -831,7 +834,7 @@ def test_cli_import_reports_a_registry_refusal_and_rolls_back(
                 no_clips=False, title="t", author="")  # fmt: skip
     dst, reg_b, store_b = workspace(tmp_path, "b")
     natsu = character(reg_b, "Natsu")
-    reg_b.assign_card(natsu, "en", store_b.put(stock()), by="auto", locked=False)
+    reg_b.assign_card(natsu, "en", store_b.put(designed()), by="auto", locked=False)
     reg_b.close()
     real = packs.plan_import
 
@@ -866,7 +869,7 @@ def test_escape_in_a_card_key_never_reaches_stdout(tmp_path: Path):
 def test_escape_in_a_stored_card_never_reaches_stdout(tmp_path: Path):
     root, reg, store = workspace(tmp_path, "w")
     cid = character(reg, "Natsu")
-    sid = store.put(stock())
+    sid = store.put(designed())
     reg.assign_card(cid, "en", sid, by="assign", locked=True)
     reg.close()
     path = store.card_path(sid)
@@ -878,7 +881,7 @@ def test_escape_in_a_stored_card_never_reaches_stdout(tmp_path: Path):
 
 def test_assign_from_pack_with_a_colon_in_the_name(tmp_path: Path):
     src, reg_a, store_a = workspace(tmp_path, "a")
-    s = store_a.put(stock("am_adam"))
+    s = store_a.put(designed("am_adam"))
     reg_a.assign_card(character(reg_a, "Dr. Who: Origins"), "en", s, by="auto", locked=False)
     reg_a.close()
     pack = tmp_path / "p.tar.zst"
@@ -900,7 +903,7 @@ def test_assign_from_pack_merges_the_fingerprint(tmp_path: Path, monkeypatch: py
     pack, card_file = _fingerprinted_dir_pack(tmp_path)
     dst, reg_b, store_b = workspace(tmp_path, "b")
     character(reg_b, "Someone")
-    store_b.put(stock())
+    store_b.put(designed())
     reg_b.close()
     r = runner.invoke(
         app, ["voices", "assign", str(dst), "Someone", f"{pack}:Natsu", "--no-verify"]
@@ -911,7 +914,7 @@ def test_assign_from_pack_merges_the_fingerprint(tmp_path: Path, monkeypatch: py
 
 def test_import_notes_another_target_language(tmp_path: Path):
     _, reg_a, store_a = workspace(tmp_path, "a")
-    reg_a.assign_card(character(reg_a, "A"), "es", store_a.put(stock(lang="es")), by="auto",
+    reg_a.assign_card(character(reg_a, "A"), "es", store_a.put(designed(lang="es")), by="auto",
                       locked=False)  # fmt: skip
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
@@ -988,7 +991,7 @@ def test_tar_zst_refuses_a_huge_pax_header_without_buffering_it(tmp_path: Path):
 
 def _stock_in(lang: str) -> Card:
     return parse_card(
-        dump_card(stock()).replace('target_language = "en"', f'target_language = "{lang}"')
+        dump_card(designed()).replace('target_language = "en"', f'target_language = "{lang}"')
     )
 
 
@@ -1001,7 +1004,7 @@ def test_export_leaves_out_rows_import_would_refuse(tmp_path: Path):
     long_ext = character(reg, "Lucy")
     reg._con.execute("UPDATE characters SET external_id = ? WHERE id = ?", ("9" * 150, long_ext))
     bad_lang = character(reg, "Gray")
-    s = store.put(stock())
+    s = store.put(designed())
     for cid in (ok, long_name, long_ext):
         reg.assign_card(cid, "en", s, by="auto", locked=False)
     reg.assign_card(bad_lang, "pt_BR", store.put(_stock_in("pt_BR")), by="auto", locked=False)
@@ -1028,7 +1031,7 @@ def test_export_refuses_pack_fields_import_would_refuse(
     tmp_path: Path, series: SeriesInfo, author: str, notes: str, match: str
 ):
     _, reg, store = workspace(tmp_path, "a")
-    reg.assign_card(character(reg, "Natsu"), "en", store.put(stock()), by="auto", locked=False)
+    reg.assign_card(character(reg, "Natsu"), "en", store.put(designed()), by="auto", locked=False)
     out = tmp_path / "pack"
     with pytest.raises(PackError, match=match):
         export_pack(reg, store, series, out, characters=None, languages=None,
@@ -1058,7 +1061,7 @@ def test_rollback_never_deletes_content_addressed_files(tmp_path: Path):
 def test_import_warns_on_a_fingerprint_threshold_below_one_half(tmp_path: Path):
     """A11: a low threshold reports almost any render as a match; import says so."""
     src, reg_a, store_a = workspace(tmp_path, "a")
-    card = with_fingerprint(store_a, tmp_path, stock())
+    card = with_fingerprint(store_a, tmp_path, designed())
     assert card.voice.fingerprint is not None
     low = replace(card.voice.fingerprint, threshold=0.3)
     cid = store_a.put(Card(card.target_language, replace(card.voice, fingerprint=low)))
@@ -1071,3 +1074,21 @@ def test_import_warns_on_a_fingerprint_threshold_below_one_half(tmp_path: Path):
     r = runner.invoke(app, ["voices", "import", str(dst), str(tmp_path / "p"), "--dry-run"])
     assert r.exit_code == 0, r.output
     assert f"card {cid}" in r.output and "threshold 0.3" in r.output and "0.5" in r.output
+
+
+def test_pack_import_refuses_a_stock_card(tmp_path: Path):
+    """D41: a pack may not bring a stock voice into a workspace."""
+    from fukikae.cards.card import Card, Voice
+
+    _, reg_a, store_a = workspace(tmp_path, "a")
+    stock_voice = Card("en", Voice(backend="fake", model_revision="1.0", source="stock",
+                                   voice="af_heart"))  # fmt: skip
+    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(stock_voice), by="assign",
+                      locked=True)  # fmt: skip
+    export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
+                no_clips=False, title="t", author="")  # fmt: skip
+    _, reg_b, store_b = workspace(tmp_path, "b")
+    character(reg_b, "A")
+    with read_pack(tmp_path / "p") as pack, pytest.raises(PackError, match=r"D41"):
+        apply_import(plan_import(pack, reg_b, replace=False), pack, reg_b, store_b)
+    assert not list(store_b.root.glob("*.toml"))

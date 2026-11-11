@@ -105,10 +105,11 @@ from fukikae.cards.select import (
     reference_report,
     speaker_f0,
 )
-from fukikae.cards.stock import pick_stock, revision, stock_card
+from fukikae.cards.stock import revision, stock_card
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config
 from fukikae.eval.asr import normalize
+from fukikae.eval.stock import pick_stock
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript, Turn, Word

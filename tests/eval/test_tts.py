@@ -12,11 +12,11 @@ from typer.testing import CliRunner
 from fukikae.artifacts import write_json
 from fukikae.backends import loader
 from fukikae.backends.base import Synthesizer
-from fukikae.cards import stock
 from fukikae.cards.card import Voice, parse_card
 from fukikae.cards.store import CardStore
 from fukikae.cli import app
 from fukikae.config import BackendConfig, Config, SeriesInfo
+from fukikae.eval import stock
 from fukikae.eval import tts as ev
 from fukikae.eval.ledger import ledger_path, read_rows
 from fukikae.eval.report import build_matrix

@@ -241,3 +241,42 @@ def test_names_table_needs_no_backend(tmp_path):
     # R3's exemption: a settings table, like [resolve]; nothing asks it for a backend
     (tmp_path / "fukikae.toml").write_text('profile="anime"\n[names]\nuse="off"\n')
     assert load_config(tmp_path, user_config=None).names.use == "off"
+
+
+def test_workspace_tts_backend_warns_once(tmp_path, caplog, monkeypatch):
+    """D41: `[tts] backend` no longer chooses any card; a workspace that sets it is told once
+    per run, and the key stays accepted."""
+    import logging
+
+    from fukikae import config
+
+    monkeypatch.setattr(config, "_TTS_BACKEND_WARNED", set())
+    (tmp_path / "fukikae.toml").write_text('[tts]\nbackend = "kokoro"\n')
+    with caplog.at_level(logging.WARNING):
+        load_config(tmp_path, None)
+        load_config(tmp_path, None)
+    msgs = [r.getMessage() for r in caplog.records if "no longer chooses" in r.getMessage()]
+    assert msgs == [
+        "[tts] backend no longer chooses any card (D41); clone_backend makes every voice"
+    ]
+
+
+def test_profile_tts_backend_does_not_warn(tmp_path, caplog, monkeypatch):
+    import logging
+
+    from fukikae import config
+
+    monkeypatch.setattr(config, "_TTS_BACKEND_WARNED", set())
+    (tmp_path / "fukikae.toml").write_text("")
+    with caplog.at_level(logging.WARNING):
+        load_config(tmp_path, None)
+    assert not any("no longer chooses" in r.getMessage() for r in caplog.records)
+
+
+def test_profiles_set_no_tts_backend():
+    from fukikae.config import load_profile, profile_names
+
+    for name in profile_names():
+        tts = load_profile(name).get("tts", {})
+        assert "backend" not in tts, name
+        assert tts.get("clone_backend") == "indextts2", name

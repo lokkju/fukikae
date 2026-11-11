@@ -97,37 +97,6 @@ def test_assign_refuses_unknown_card_and_character(tmp_path: Path):
     assert r.exit_code == 1 and "Gray" in r.output
 
 
-def test_assign_stock_voice_makes_and_locks_a_stock_card(tmp_path: Path):
-    from fukikae.backends.tts.kokoro import REVISION
-
-    ws, cid, store = setup(tmp_path)
-    r = invoke("assign", str(ws.root), "Natsu", "stock:kokoro:af_heart")
-    assert r.exit_code == 0, r.output
-    with Registry(ws.registry_path) as reg:
-        cur = _cur(reg, cid, "en")
-    assert cur.by == "assign" and cur.locked and cur.card_id is not None
-    card = store.get(cur.card_id)
-    assert (card.voice.backend, card.voice.source, card.voice.voice) == (
-        "kokoro",
-        "stock",
-        "af_heart",
-    )
-    assert card.voice.model_revision == REVISION and card.target_language == "en"
-    assert cur.card_id in r.output
-
-
-def test_assign_stock_refuses_unknown_voice_or_backend(tmp_path: Path):
-    ws, cid, _ = setup(tmp_path)
-    r = invoke("assign", str(ws.root), "Natsu", "stock:kokoro:zz_nobody")
-    assert r.exit_code == 1 and "zz_nobody" in r.output
-    r = invoke("assign", str(ws.root), "Natsu", "stock:nosuch:af_heart")
-    assert r.exit_code == 1 and "nosuch" in r.output
-    r = invoke("assign", str(ws.root), "Natsu", "stock:kokoro")
-    assert r.exit_code == 1 and "stock:<backend>:<voice>" in r.output
-    with Registry(ws.registry_path) as reg:
-        assert reg.card_for(cid, "en") is None
-
-
 def test_history_lists_numbered_rows(tmp_path: Path):
     ws, cid, store = setup(tmp_path)
     a = store.put(parse_card(STOCK_CARD))
@@ -305,74 +274,6 @@ def test_show_prints_the_assignment_note(tmp_path: Path):
     _auto_stock(ws, store, cid, "af_heart", "old")
     r = invoke("show", str(ws.root), "Natsu")
     assert r.exit_code == 0 and "gender estimate f" in r.output
-
-
-def test_restock_repins_only_uncurated_auto_stock_cards(tmp_path: Path):
-    from fukikae.backends.tts.kokoro import REVISION
-
-    ws, natsu, store = setup(tmp_path)
-    with Registry(ws.registry_path) as reg:
-        lucy = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))[1]
-        gray = reg.create_actor_with_character(np.array([1.0, 1.0], dtype=np.float32))[1]
-    old = _auto_stock(ws, store, natsu, "am_adam", "old")
-    locked = _auto_stock(ws, store, lucy, "af_heart", "old")
-    chosen = _auto_stock(ws, store, gray, "am_puck", "old")
-    with Registry(ws.registry_path) as reg:
-        reg.lock_card(lucy, "en", True)
-        reg.assign_card(gray, "en", chosen, by="assign", locked=False)
-
-    r = invoke("restock", str(ws.root), "--dry-run")
-    assert r.exit_code == 0, r.output
-    assert "am_adam" in r.output and "af_heart" not in r.output and "am_puck" not in r.output
-    with Registry(ws.registry_path) as reg:
-        assert _cur(reg, natsu, "en").card_id == old
-
-    r = invoke("restock", str(ws.root))
-    assert r.exit_code == 0, r.output
-    with Registry(ws.registry_path) as reg:
-        cur = _cur(reg, natsu, "en")
-        assert cur.card_id != old and cur.by == "restock" and not cur.locked
-        assert store.get(cur.card_id).voice.model_revision == REVISION  # type: ignore[arg-type]
-        assert store.get(cur.card_id).voice.voice == "am_adam"  # type: ignore[arg-type]
-        assert _cur(reg, lucy, "en").card_id == locked
-        assert _cur(reg, gray, "en").card_id == chosen
-    r = invoke("restock", str(ws.root))
-    assert r.exit_code == 0 and "nothing to restock" in r.output
-
-
-def test_restock_follows_two_successive_revision_bumps(tmp_path: Path, monkeypatch):
-    """Ruling CD9: a restocked card is restocked again at the next revision bump."""
-    from fukikae.backends.tts.kokoro import KokoroSynthesizer
-
-    ws, natsu, store = setup(tmp_path)
-    _auto_stock(ws, store, natsu, "am_adam", "rev0")
-    for rev in ("rev1", "rev2"):
-        monkeypatch.setattr(KokoroSynthesizer, "model_revision", rev)
-        r = invoke("restock", str(ws.root))
-        assert r.exit_code == 0 and "restocked" in r.output, r.output
-        with Registry(ws.registry_path) as reg:
-            cur = _cur(reg, natsu, "en")
-        assert cur.by == "restock" and store.get(cur.card_id).voice.model_revision == rev  # type: ignore[arg-type]
-
-
-def test_restock_never_touches_a_locked_or_operator_assigned_card(tmp_path: Path, monkeypatch):
-    from fukikae.backends.tts.kokoro import KokoroSynthesizer
-
-    ws, natsu, store = setup(tmp_path)
-    with Registry(ws.registry_path) as reg:
-        lucy = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))[1]
-    restocked = _auto_stock(ws, store, natsu, "am_adam", "rev0")
-    mine = _auto_stock(ws, store, lucy, "af_heart", "rev0")
-    with Registry(ws.registry_path) as reg:
-        reg.assign_card(natsu, "en", restocked, by="restock", locked=False)
-        reg.lock_card(natsu, "en", True)
-        reg.assign_card(lucy, "en", mine, by="assign", locked=False)
-    monkeypatch.setattr(KokoroSynthesizer, "model_revision", "rev1")
-    r = invoke("restock", str(ws.root))
-    assert r.exit_code == 0 and "nothing to restock" in r.output
-    with Registry(ws.registry_path) as reg:
-        assert _cur(reg, natsu, "en").card_id == restocked
-        assert _cur(reg, lucy, "en").card_id == mine
 
 
 def test_show_warns_when_references_may_carry_emotion(tmp_path: Path):
@@ -1207,3 +1108,19 @@ def test_voices_list_and_names_show_print_one_line_per_card(tmp_path: Path, monk
     with Registry(ws.registry_path) as reg:
         lines = _card_lines(ws, reg, [natsu])
     assert [ln for ln in lines if f"card {card}" in ln] == [line]
+
+
+def test_voices_assign_refuses_a_stock_voice(tmp_path: Path):
+    ws, _, store = setup(tmp_path)
+    r = invoke("assign", str(ws.root), "Natsu", "stock:kokoro:af_heart")
+    assert r.exit_code == 1
+    assert "stock voices are retired (D41)" in r.output and "fukikae voices clone" in r.output
+    assert not list(store.root.glob("*.toml"))
+
+
+def test_voices_restock_is_retired(tmp_path: Path):
+    ws, _, _ = setup(tmp_path)
+    r = invoke("restock", str(ws.root))
+    assert r.exit_code == 1
+    assert "retired" in r.output and "D41" in r.output
+    assert "restock" not in invoke("--help").output.split("Commands")[-1]

@@ -33,7 +33,7 @@ class FakeSynth(Synthesizer):
     languages: ClassVar = "*"
     devices: ClassVar = frozenset({"cpu"})
     vram_mb: ClassVar[int] = 0
-    sources: ClassVar = frozenset({"stock", "clone"})
+    sources: ClassVar = frozenset({"stock", "clone", "design"})
     voice_keys: ClassVar = frozenset({"seed", "rate"})
     capabilities: ClassVar = frozenset()
     sample_rate: ClassVar[int] = 8000
@@ -130,8 +130,9 @@ def fakes(monkeypatch: pytest.MonkeyPatch):
 
 
 def card(seed: int = 1, backend: str = "fake", revision: str = "1.0", lang: str = "en") -> Card:
-    return Card(lang, Voice(backend=backend, model_revision=revision, source="stock",
-                            voice="af_heart", seed=seed))  # fmt: skip
+    """A designed voice (no stock voice: packs refuse those since D41)."""
+    return Card(lang, Voice(backend=backend, model_revision=revision, source="design",
+                            description="a calm voice", seed=seed))  # fmt: skip
 
 
 def run(c: Card, store: CardStore, tmp: Path, *, record: bool = False) -> tuple[VerifyResult, Card]:
