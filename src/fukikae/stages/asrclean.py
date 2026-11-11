@@ -2,14 +2,15 @@
 
 Reads ``03-asr/transcript.json`` and the separation stems, writes ``03b-asrclean/transcript.json``
 (the transcript without the dropped stretches), ``03b-asrclean/dropped.json`` (one
-``{start, end, text, reason}`` per dropped stretch: a whole segment, or one word run of a
-segment that keeps its other runs) and ``03b-asrclean/flagged.json`` (the same shape, one per
-kept stretch of a stock phrase the operator should check: a surviving fragment, or a phrase
-spoken over music). The rule is `fukikae.hallucinations.clean_segment`: a segment whose text
-is a stock outro phrase loses each of its word runs that lies over a theme song, sung music or
-no speech by the song detector (`fukikae.songs`, with ``[mix.songs]``) and the vocals' F0
-stability (`fukikae.pitch.is_sung`, through the workspace's pitch cache), and goes whole when
-every run does. Phrases match the transcript's own language only (its ``language``, else
+``{start, end, text, reason, kind}`` per dropped stretch: ``kind`` ``segment`` for a whole
+segment, ``run`` for one word run of a segment that keeps its other runs) and
+``03b-asrclean/flagged.json`` (``{start, end, text, reason}`` per kept stretch of a stock
+phrase the operator should check: a surviving fragment, or a phrase spoken over music). The
+rule is `fukikae.hallucinations.clean_segment`: a segment whose text is a stock outro phrase
+loses each of its word runs that lies over a theme song, sung music or no speech by the song
+detector (`fukikae.songs`, with ``[mix.songs]``) and the vocals' F0 stability
+(`fukikae.pitch.is_sung`, through the workspace's pitch cache), and goes whole when every run
+does. Phrases match the transcript's own language only (its ``language``, else
 ``source_language``), never another language's list.
 
 A stage of its own, CPU only, so that changing the filter never changes the asr key and reruns
@@ -60,7 +61,10 @@ def sung_test(vocals: Path, pitch_root: Path | None) -> hallucinations.SungTest:
 
 
 def _row(x: hallucinations.Drop | hallucinations.Flag) -> dict[str, Any]:
-    return {"start": round(x.start, 3), "end": round(x.end, 3), "text": x.text, "reason": x.reason}
+    row = {"start": round(x.start, 3), "end": round(x.end, 3), "text": x.text, "reason": x.reason}
+    if isinstance(x, hallucinations.Drop):
+        row["kind"] = "segment" if x.whole else "run"
+    return row
 
 
 class AsrCleanStage:
@@ -132,6 +136,8 @@ class AsrCleanStage:
                 tmp.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", "utf-8")
         if dropped or flagged:
             log.info(
-                "asrclean %s: %d stretch(es) dropped, %d kept and flagged",
-                ep.id, len(dropped), len(flagged),
+                "asrclean %s: dropped %d whole segment(s) and %d word run(s), "
+                "kept and flagged %d",
+                ep.id, sum(d["kind"] == "segment" for d in dropped),
+                sum(d["kind"] == "run" for d in dropped), len(flagged),
             )  # fmt: skip

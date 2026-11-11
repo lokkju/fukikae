@@ -103,6 +103,7 @@ def test_dropped_segments_are_listed_with_reasons(tmp_path, stage):
     assert kept.language == "ja" and kept.backend == "fake" and kept.word_timing
     (row,) = json.loads(dropped.read_text())
     assert row["text"] == STOCK and row["reason"] == "stock phrase over no speech"
+    assert row["kind"] == "segment"
     assert row["start"] == pytest.approx(11.0) and row["end"] == pytest.approx(OVER_SILENCE.end)
 
 
@@ -120,7 +121,7 @@ def test_only_the_runs_over_no_speech_are_dropped(tmp_path, stage):
     assert [w.text for w in kept.segments[1].words or []] == list(STOCK[:3])
     (row,) = json.loads(dropped.read_text())
     assert row["text"] == STOCK[3:] and row["reason"] == "stock phrase over no speech"
-    assert row["start"] == pytest.approx(14.0)
+    assert row["start"] == pytest.approx(14.0) and row["kind"] == "run"
     (flag,) = json.loads(flagged.read_text())  # the surviving fragment, kept and flagged
     assert flag["text"] == STOCK[:3] and flag["reason"] == "surviving fragment of a stock phrase"
     assert flag["start"] == pytest.approx(1.0)

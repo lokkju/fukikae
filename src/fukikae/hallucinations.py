@@ -99,7 +99,7 @@ HALLUCINATION_ACTIVE_MAX = 0.3
 RUN_GAP_S = 10.0
 # Languages whose kept words join with no space when a segment's text is rewritten.
 NO_SPACE_LANGUAGES = frozenset({"ja", "zh", "yue"})
-VERSION = 3
+VERSION = 4
 
 # Whether the vocals over ``lo``-``hi`` seconds are sung (`fukikae.pitch.is_sung` on their F0
 # track); the asrclean stage builds one from the vocals stem.
@@ -214,25 +214,30 @@ def drop_reason(
 
 
 def word_runs(words: Sequence[Word], gap: float = RUN_GAP_S) -> list[list[Word]]:
-    """The words in time order, split where one ends more than ``gap`` seconds before the
-    next starts."""
+    """The words in time order, split where the next starts more than ``gap`` seconds after
+    the latest end of the run so far."""
     runs: list[list[Word]] = []
+    end = -math.inf
     for w in sorted(words, key=lambda w: (w.start, w.end)):
-        if runs and w.start - runs[-1][-1].end <= gap:
+        if runs and w.start - end <= gap:
             runs[-1].append(w)
+            end = max(end, w.end)
         else:
             runs.append([w])
+            end = w.end
     return runs
 
 
 @dataclass(frozen=True)
 class Drop:
-    """A dropped stretch of a segment: its span, text and why."""
+    """A dropped stretch of a segment: its span, text, why, and whether it is the whole
+    segment (else one word run of a segment that keeps its other runs)."""
 
     start: float
     end: float
     text: str
     reason: str
+    whole: bool = True
 
 
 @dataclass(frozen=True)
@@ -306,7 +311,7 @@ def clean_segment(
         return seg, [], flags
     kept = [w for r, v in zip(runs, verdicts, strict=True) if v is None for w in r]
     drops = [
-        Drop(a, b, _join(r, language), v)
+        Drop(a, b, _join(r, language), v, whole=False)
         for r, (a, b), v in zip(runs, extents, verdicts, strict=True)
         if v is not None
     ]

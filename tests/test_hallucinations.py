@@ -189,6 +189,22 @@ def _long(seconds: int = 3800) -> tuple[np.ndarray, np.ndarray]:
     return np.zeros(seconds, dtype=bool), np.ones(seconds * 10, dtype=bool)
 
 
+def test_word_runs_measure_gaps_from_the_runs_latest_end():
+    """A long word ending after a later short one still bridges the gap to the next word."""
+    words = [Word(start=0.0, end=12.0, text="a"), Word(start=1.0, end=1.5, text="b"),
+             Word(start=20.0, end=20.5, text="c")]  # fmt: skip
+    assert ["".join(w.text for w in r) for r in word_runs(words)] == ["abc"]
+
+
+def test_drops_say_whether_they_are_whole_segments_or_runs():
+    song_like, active = _long()
+    _, dropped, _ = clean_segment(_sb_seg(), "ja", SB_THEME, song_like, active)
+    assert [d.whole for d in dropped] == [False]
+    _, dropped, _ = clean_segment(_sb_seg(), "ja", [SongSpan(3500.0, 3740.0, "detector")],
+                                  song_like, active)  # fmt: skip
+    assert [d.whole for d in dropped] == [True]
+
+
 def test_word_runs_split_at_gaps():
     runs = word_runs(_sb_seg().words or [])
     assert ["".join(w.text for w in r) for r in runs] == ["お疲", "れ様でした"]
