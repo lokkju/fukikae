@@ -1606,3 +1606,208 @@ def test_an_automatic_stock_card_is_repicked_by_the_tts_run(ep):
                   "stock" and c.character_id != 1]  # fmt: skip
     assert stock_cues == []
     assert any("Lucy" in line and STOCK_NOTE in line for line in _run(ep).report)
+
+
+# ---- A3: the line gate on emotion_audio ---------------------------------------------------
+
+
+def _est(gender: str, median: float | None) -> Any:
+    from fukikae.pitch import GenderEstimate
+
+    return GenderEstimate(cast(Any, gender), 1.0 if gender != "u" else 0.0, median, 1.5)
+
+
+def _emotion_card(monkeypatch) -> tuple[Any, type[Synthesizer]]:
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    return parse_card(_stock("af_heart")), FakeSynth
+
+
+def test_wrong_gender_line_passes_no_emotion_audio(monkeypatch):
+    card, cls = _emotion_card(monkeypatch)
+    cue = _cue(1, 2, "lucy one")
+    passed = tts.delivery_passed(cue, card, cls, 2.0, line=_est("m", 130), voice="f")
+    assert "emotion_audio" not in passed and passed["emotion_dropped"] == "gender"
+    passed = tts.delivery_passed(cue, card, cls, 2.0, line=_est("f", 260), voice="m")
+    assert passed == {"emotion_dropped": "gender"}
+
+
+def test_a_same_gender_line_keeps_its_emotion_audio(monkeypatch):
+    card, cls = _emotion_card(monkeypatch)
+    cue = _cue(1, 2, "lucy one")
+    plain = tts.delivery_passed(cue, card, cls, 2.0)
+    assert tts.delivery_passed(cue, card, cls, 2.0, line=_est("f", 250), voice="f") == plain
+    assert "emotion_audio" in plain
+
+
+def test_unknown_on_either_side_never_gates(monkeypatch):
+    card, cls = _emotion_card(monkeypatch)
+    cue = _cue(1, 2, "lucy one")
+    assert "emotion_audio" in tts.delivery_passed(
+        cue, card, cls, 2.0, line=_est("u", 185), voice="f"
+    )
+    assert "emotion_audio" in tts.delivery_passed(
+        cue, card, cls, 2.0, line=_est("m", 130), voice="u"
+    )
+    assert "emotion_audio" in tts.delivery_passed(cue, card, cls, 2.0, line=None, voice="f")
+
+
+def test_a_backend_without_emotion_audio_is_never_gated():
+    """Nothing to strip: no emotion_dropped, so the key stays the ungated one."""
+    card = parse_card(_stock("af_heart"))
+    cue = _cue(1, 2, "lucy one")
+    assert tts.delivery_passed(cue, card, FakeSynth, 2.0, line=_est("m", 130), voice="f") == {}
+
+
+def _speech_at(x: np.ndarray, start: float, hz: float, seconds: float, seed: int) -> None:
+    from tests.fixtures.speechlike import speech
+
+    a = round(start * 16000)
+    seg = speech(hz, seconds, seed=seed, voiced_share=0.7)
+    x[a : a + len(seg)] = seg
+
+
+def _gcue(cid: str, character: int | None, ref: tuple[float, float], text: str,
+          extra: str | None = None) -> DubCue:  # fmt: skip
+    return DubCue(
+        id=cid, start=ref[0], end=ref[1], character_id=character, extra=extra, speaker="x",
+        source_text="src", text=text, budget=40, delivery=Delivery(reference=ref),
+    )  # fmt: skip
+
+
+# Lucy (2) speaks only in the female band; Natsu (1) as much in one band as the other, so he
+# has no established gender; the extras cluster S5 is female; c0106 has no cluster.
+GATE_CUES = [
+    _gcue("c0101", 2, (50.0, 52.0), "lucy low"),       # male-sounding: gated
+    _gcue("c0102", 2, (52.5, 54.5), "lucy high"),      # her own register: kept
+    _gcue("c0103", 2, (55.0, 57.0), "lucy middle"),    # between the bands: never gates
+    _gcue("c0104", 1, (57.5, 59.5), "natsu high"),     # an unknown character: never gates
+    _gcue("c0105", None, (10.0, 12.0), "extra low", extra="S5"),  # gated, extras too
+    _gcue("c0106", None, (13.0, 15.0), "who low"),     # cloned from itself: never gates
+]  # fmt: skip
+
+
+def _gendered(ep: Episode) -> None:
+    x = np.zeros(60 * 16000, np.float32)
+    for i, (start, hz) in enumerate([
+        (20.0, 250), (24.0, 250),                    # S5's turns
+        (30.0, 250), (34.0, 250), (38.0, 250),       # Lucy's turns
+        (42.0, 120), (46.0, 250),                    # Natsu's turns: 3 s each band
+        (50.0, 120), (52.5, 250), (55.0, 182), (57.5, 250), (10.0, 120), (13.0, 120),
+    ]):  # fmt: skip
+        _speech_at(x, start, hz, 3.0 if start < 50 and start >= 20 else 2.0, seed=i)
+    with wave.open(str(ep.work / "01-separate" / "vocals.wav"), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
+    path = ep.work / "05-characters" / "assignments.json"
+    asg = read_json(path, Assignments)
+    asg.clusters.append(ClusterAssignment(
+        cluster="S5", actor_id=None, character_id=None, score=None, clean_seconds=6,
+        status="extra",
+    ))  # fmt: skip
+    asg.turns = [
+        Turn(start=20.0, end=23.0, speaker="S5"), Turn(start=24.0, end=27.0, speaker="S5"),
+        Turn(start=30.0, end=33.0, speaker="S1"), Turn(start=34.0, end=37.0, speaker="S1"),
+        Turn(start=38.0, end=41.0, speaker="S1"),
+        Turn(start=42.0, end=45.0, speaker="S0"), Turn(start=46.0, end=49.0, speaker="S0"),
+    ]  # fmt: skip
+    write_json(path, asg)
+    _write_cues(ep, GATE_CUES)
+
+
+GATE_CFG = Config(raw=CLONE_CFG.raw, source_language="ja")
+
+
+def test_gate_inputs_class_each_line_and_each_speaker(ep):
+    _gendered(ep)
+    gate = tts.gender_gate(ep.work, GATE_CUES, ep.workspace_root)
+    assert {k: v.gender for k, v in gate.lines.items()} == {
+        "c0101": "m", "c0102": "f", "c0103": "u", "c0104": "f", "c0105": "m", "c0106": "m",
+    }  # fmt: skip
+    assert gate.voices == {
+        "c0101": "f", "c0102": "f", "c0103": "f", "c0104": "u", "c0105": "f", "c0106": "u",
+    }  # fmt: skip
+
+
+def test_established_gender_needs_a_clear_majority(ep):
+    _gendered(ep)
+    vocals = ep.work / "01-separate" / "vocals.wav"
+    root = ep.workspace_root
+    assert tts.established_gender(vocals, [(30.0, 33.0), (34.0, 37.0)], root) == "f"
+    assert tts.established_gender(vocals, [(42.0, 45.0), (46.0, 49.0)], root) == "u"  # 1:1
+    # two female turns against one male: 2x, a clear majority
+    assert tts.established_gender(vocals, [(30.0, 33.0), (34.0, 37.0), (42.0, 45.0)], root) == "f"
+    assert tts.established_gender(vocals, [], root) == "u"
+    # the operator's gender wins over the speech (Part B stores it)
+    assert tts.established_gender(vocals, [(30.0, 33.0)], root, operator="m") == "m"
+
+
+def test_gated_line_keeps_its_characters_card_and_drops_emotion_audio(ep, monkeypatch):
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    _natsu, lucy = _two_cards(ep)
+    _gendered(ep)
+    TtsStage(GATE_CFG).run(ep, GATE_CFG)
+    plan = {c.cue_id: c for c in _plan(ep).cues}
+    low = plan["c0101"]
+    assert low.card_id == lucy and low.gender_gate and low.source_gender == "m"
+    assert low.passed == {"emotion_dropped": "gender"}
+    assert _kw("lucy low")["emotion_audio"] is None
+    assert plan["c0102"].card_id == lucy and not plan["c0102"].gender_gate
+    assert "emotion_audio" in plan["c0102"].passed and plan["c0102"].source_gender == "f"
+    assert _kw("lucy high")["emotion_audio_exists"]
+    for kept in ("c0103", "c0104", "c0106"):
+        assert "emotion_audio" in plan[kept].passed and not plan[kept].gender_gate, kept
+
+
+def test_extras_never_get_a_wrong_gender_prompt(ep, monkeypatch):
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    _two_cards(ep)
+    _gendered(ep)
+    TtsStage(GATE_CFG).run(ep, GATE_CFG)
+    plan = {c.cue_id: c for c in _plan(ep).cues}
+    assert plan["c0105"].gender_gate and plan["c0105"].passed == {"emotion_dropped": "gender"}
+    assert _kw("extra low")["emotion_audio"] is None
+    # a cluster-less line is cloned from its own span: the same audio, never gated
+    assert "emotion_audio" in plan["c0106"].passed
+
+
+def test_gate_flags_land_in_run_json(ep, monkeypatch):
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    _two_cards(ep)
+    _gendered(ep)
+    TtsStage(GATE_CFG).run(ep, GATE_CFG)
+    gated = [f for f in _run(ep).flags if "rendered without emotion audio" in f]
+    assert len(gated) == 2, gated
+    assert gated[0].startswith("character 2 (Lucy): cue c0101 source is m (")
+    assert "Hz) against the character's f; rendered without emotion audio" in gated[0]
+    assert gated[1].startswith("extra S5: cue c0105 source is m (")
+    assert "against the cluster's f" in gated[1]
+
+
+def test_plan_json_omits_the_gate_fields_at_their_defaults(ep):
+    _two_cards(ep)
+    TtsStage(CFG).run(ep, CFG)
+    raw = (ep.work / "07-tts" / "plan.json").read_text(encoding="utf-8")
+    assert "gender_gate" not in raw and "source_gender" not in raw
+
+
+def test_only_gated_cues_change_cache_keys(ep, monkeypatch):
+    """The gate's renders key differently (no emotion audio is a different render); every
+    other cue keeps the key it had without the gate."""
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    _two_cards(ep)
+    _gendered(ep)
+    TtsStage(GATE_CFG).run(ep, GATE_CFG)
+    gated = {c.cue_id: c.key for c in _plan(ep).cues}
+    monkeypatch.setattr(tts, "gender_gate", lambda *_a, **_k: tts.GenderGate({}, {}))
+    TtsStage(GATE_CFG).run(ep, GATE_CFG)
+    ungated = {c.cue_id: c.key for c in _plan(ep).cues}
+    assert {k for k in gated if gated[k] != ungated[k]} == {"c0101", "c0105"}
+
+
+def test_stage_key_holds_the_gate_version_and_bands(ep):
+    _two_cards(ep)
+    key = TtsStage(CFG).config_key(CFG, ep)
+    assert key["gender_gate"] == {"version": tts.GATE_VERSION, "bands": [165.0, 200.0]}
+    assert ep.work / "05-characters" / "assignments.json" in TtsStage(CFG).inputs(ep)

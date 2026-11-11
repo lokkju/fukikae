@@ -806,13 +806,17 @@ def _render(
     engines: dict[str, str] | None = None,
 ) -> tuple[list[RenderedCue], dict[str, BackendConfig], dict[str, bool]]:
     """Each picked cue rendered through the tts stage's own render path (ruling CD12), each
-    card by its backend or the engine ``engines`` names for it."""
+    card by its backend or the engine ``engines`` names for it, with the stage's line gate
+    (A3: `gender_gate` over the episode's whole cue list, so a speaker's established gender is
+    the stage's)."""
     from fukikae.stages.tts import (
         DELIVERY_CAPS,
+        GenderGate,
         LazySynth,
         backend_config,
         capped,
         check_card,
+        gender_gate,
         prepare_cue,
         render_guarded,
         synth_device,
@@ -833,7 +837,17 @@ def _render(
     base = ws.root / ".fukikae" / "eval" / "tts"
     cache = ws.root / ".fukikae" / "tts-cache"
     cache.mkdir(parents=True, exist_ok=True)
-    events = {e: tag_events(ws.work_dir(e)) for e in sorted({e for e, _ in picked})}
+    episodes = sorted({e for e, _ in picked})
+    events = {e: tag_events(ws.work_dir(e)) for e in episodes}
+    takes_audio = any(
+        "emotion_audio" in cls.capabilities_for(card.voice.source) for card, cls in checked.values()
+    )
+    gates = {
+        e: gender_gate(ws.work_dir(e), _cues(ws, [e], cfg.target_language)[e].cues, ws.root)
+        if takes_audio
+        else GenderGate({}, {})
+        for e in episodes
+    }
     out: list[RenderedCue] = []
     for b in backends:
         jobs = [(e, c) for e, c in picked if checked[cards[_cid(c)]][1].name == b]
@@ -850,6 +864,7 @@ def _render(
                 job = prepare_cue(
                     c, card_ref, cfg, store, who=who(_cid(c)), checked=checked[card_ref],
                     identity=idents[b], vocals=vocals, events=events[e],
+                    line=gates[e].line(c.id), voice=gates[e].voice(c.id),
                 )  # fmt: skip
                 # the stage's cache and render guards (ruling CD18), then a copy named by key
                 g = render_guarded(job, lazy, cache, store, ref_dir=folder / "ref" / e)

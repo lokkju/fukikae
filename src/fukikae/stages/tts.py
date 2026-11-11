@@ -76,6 +76,19 @@ that seed; if it still fails, or the backend takes no seed, ``plan.json`` marks 
 crying (``04b-tag/tags.json``, an input when present) passes no emotion audio
 (``emotion_dropped`` in ``passed``).
 
+Line gate (A3, D41; `gender_gate`): each spoken cue's source span is classed by pitch
+(``fukikae.pitch``'s bands on the median, 165 and 200 Hz, at ``LINE_MIN_VOICED_S`` 0.4 s
+voiced) and set against its speaker's established gender (`established_gender`: the
+operator's when one is stored, else the clear majority register of the speaker's turns in
+the episode, the larger class needing ``pitch.BIMODAL_GATE_RATIO`` (2x) the other's seconds,
+else ``u``). A line in the other band (``m`` against ``f`` or the reverse; ``u`` on either
+side never gates) renders in its own speaker's card with no emotion audio
+(``emotion_dropped: "gender"``, which also gives it its own cache key), is marked
+``gender_gate`` in ``plan.json`` and flagged in ``run.json``. Extras clusters are gated
+against their own turns' register; a cluster-less line, cloned from its own span, never is.
+The rule is in `delivery_passed`, so ``eval tts`` holds it too (CD12). ``GATE_VERSION`` and
+the bands are in the stage key.
+
 ``[tts]``'s own options go to ``[tts] backend`` when a workspace still names one (it chooses no
 card since D41, and the profiles name none), else to ``[tts] clone_backend``.
 ``[tts.<backend>]`` holds one backend's own options and its ``device`` (ruling CD14): the device
@@ -113,6 +126,7 @@ from fukikae.backends.identity import identity_key
 from fukikae.backends.tts import worker
 from fukikae.backends.tts.remote import WorkerSynthesizer
 from fukikae.cards.auto import (
+    UNKNOWN_EXTRA,
     CharacterRefs,
     Cloning,
     ExtraCard,
@@ -142,6 +156,17 @@ from fukikae.models import (
     TtsPlan,
     TtsPlanCue,
     TtsRun,
+)
+from fukikae.pitch import (
+    BIMODAL_GATE_RATIO,
+    FEMALE_ABOVE,
+    LINE_MIN_VOICED_S,
+    MALE_BELOW,
+    Gender,
+    GenderEstimate,
+    band_seconds,
+    cached_track,
+    turn_classes,
 )
 from fukikae.registry.store import Registry
 from fukikae.workspace import Episode, Workspace
@@ -179,6 +204,10 @@ GUARD_SHORT = 0.3
 # Tag events that make a source span a bad emotion prompt (the clone laughs instead of speaking),
 # when they cover at least DROP_EVENT_SHARE of it.
 DROP_EVENTS = frozenset({"laughter", "crying"})
+# A3: bump when the line gate changes which lines it gates for the same audio.
+GATE_VERSION = 1
+GATE_BANDS = (float(MALE_BELOW), float(FEMALE_ABOVE))
+GATE_DROPPED = "gender"
 DROP_EVENT_SHARE = 0.3
 # The delivery fields each capability hands the backend.
 _DELIVERY_BY_CAP = {
@@ -700,25 +729,140 @@ def dropping_event(
     return best if best is not None and cover >= DROP_EVENT_SHARE * length else None
 
 
+def wrong_gender(line: GenderEstimate | None, voice: Gender) -> bool:
+    """Whether a source line's class is the other band from its speaker's: ``m`` against
+    ``f`` or the reverse; ``u`` (or no measurement) on either side never is."""
+    return line is not None and {line.gender, voice} == {"m", "f"}
+
+
+@dataclass(frozen=True)
+class GenderGate:
+    """The line gate's inputs for an episode's cues (A3): each spoken cue's source line class
+    (``lines``) and its speaker's established gender (``voices``), both by cue id."""
+
+    lines: Mapping[str, GenderEstimate]
+    voices: Mapping[str, Gender]
+
+    def line(self, cue_id: str) -> GenderEstimate | None:
+        return self.lines.get(cue_id)
+
+    def voice(self, cue_id: str) -> Gender:
+        return self.voices.get(cue_id, "u")
+
+
+def line_genders(
+    vocals: Path, cues: Sequence[DubCue], root: Path, bands: tuple[float, float] = GATE_BANDS
+) -> dict[str, GenderEstimate]:
+    """Each cue's source line class: the pitch class of its ``delivery.reference`` span on
+    ``vocals`` at ``LINE_MIN_VOICED_S``, each span read against its own loudness (one group
+    per span), through the workspace's pitch cache."""
+    if not cues:
+        return {}
+    spans = [(float(c.delivery.reference[0]), float(c.delivery.reference[1])) for c in cues]
+    track = cached_track(root, vocals, spans, list(range(len(spans))))
+    classes = turn_classes(track, bands, LINE_MIN_VOICED_S)
+    return {c.id: est for c, est in zip(cues, classes, strict=True)}
+
+
+def established_gender(
+    vocals: Path,
+    spans: Sequence[tuple[float, float]],
+    root: Path,
+    bands: tuple[float, float] = GATE_BANDS,
+    operator: Gender | None = None,
+) -> Gender:
+    """A speaker's established gender for the line gate: ``operator`` (the gender the operator
+    stored, Part B) when it is ``f`` or ``m``; else the register of the speaker's turns
+    (``spans``, each classed on its own median as A1's register gate classes them) when one
+    class holds at least ``BIMODAL_GATE_RATIO`` (2x) the other's seconds; else ``u``."""
+    if operator in ("f", "m"):
+        return operator
+    if not spans:
+        return "u"
+    secs = band_seconds(cached_track(root, vocals, list(spans)), bands)
+    m, f = secs["m"], secs["f"]
+    if m > 0 and m >= BIMODAL_GATE_RATIO * f:
+        return "m"
+    if f > 0 and f >= BIMODAL_GATE_RATIO * m:
+        return "f"
+    return "u"
+
+
+def gender_gate(
+    work: Path, cues: Sequence[DubCue], root: Path, bands: tuple[float, float] = GATE_BANDS
+) -> GenderGate:
+    """The line gate's inputs for an episode (``work``) and its cues: every spoken cue's line
+    class, and its speaker's `established_gender`: a character's from its own turns in
+    ``05-characters/assignments.json`` (extras and review clusters left out), an extras
+    cluster's from that cluster's turns, either from its own cues' source spans when it has no
+    turn there; a cluster-less line's is ``u`` (its clone is the line itself)."""
+    vocals = work / "01-separate" / "vocals.wav"
+    spoken = [c for c in cues if TtsStage._skipped(c) is None]
+    if not spoken or not vocals.exists():
+        return GenderGate({}, {})
+    asg_path = work / "05-characters" / "assignments.json"
+    asg = read_json(asg_path, Assignments) if asg_path.exists() else None
+    turns = list(asg.turns or []) if asg is not None else []
+    chars = character_spans(asg) if asg is not None else {}
+
+    def own_lines(same: Any) -> list[tuple[float, float]]:
+        return [
+            (float(x.delivery.reference[0]), float(x.delivery.reference[1]))
+            for x in spoken
+            if same(x)
+        ]
+
+    speaker: dict[str, str | None] = {}
+    spans: dict[str, list[tuple[float, float]]] = {}
+    for c in spoken:
+        if c.character_id is not None:
+            key = f"character {c.character_id}"
+            if key not in spans:
+                cid = c.character_id
+                spans[key] = chars.get(cid) or own_lines(lambda x, cid=cid: x.character_id == cid)
+        else:
+            label = extras_label(c)
+            if label.startswith(f"{UNKNOWN_EXTRA}~"):
+                speaker[c.id] = None
+                continue
+            key = f"extra {label}"
+            if key not in spans:
+                mine = [(float(t.start), float(t.end)) for t in turns if t.speaker == label]
+                spans[key] = mine or own_lines(
+                    lambda x, label=label: x.character_id is None and extras_label(x) == label
+                )
+        speaker[c.id] = key
+    established: dict[str | None, Gender] = {None: "u"}
+    for k, v in spans.items():
+        established[k] = established_gender(vocals, v, root, bands)
+    voices: dict[str, Gender] = {cue_id: established[k] for cue_id, k in speaker.items()}
+    return GenderGate(line_genders(vocals, spoken, root, bands), voices)
+
+
 def delivery_passed(
     c: DubCue,
     card: Card,
     cls: type[Synthesizer],
     slot: float,
     events: Sequence[tuple[float, float, str]] = (),
+    line: GenderEstimate | None = None,
+    voice: Gender = "u",
 ) -> dict[str, Any]:
     """What the backend gets beyond the card and the text, by its capabilities for the card's
     source; with ``emotion_strength`` 0, no emotion audio, vector or instruction. A source span
     the tag stage marks as laughter or crying (``events``) passes no emotion audio, recorded as
     ``emotion_dropped`` (ruling CD18: dropped rather than scaled down, since IndexTTS2 carried
-    E12 c0232's laugh at emotion strength 0.8, and a weaker prompt still holds the laugh)."""
+    E12 c0232's laugh at emotion strength 0.8, and a weaker prompt still holds the laugh).
+    Nor does a source line (``line``, its pitch class) in the other band from the speaker's
+    established gender (``voice``), whatever the card (A3, `wrong_gender`): recorded as
+    ``emotion_dropped: "gender"``, ahead of a laugh, so every such line is flagged."""
     caps = cls.capabilities_for(card.voice.source)
     if card.voice.emotion_strength == 0:
         caps = caps - DELIVERY_CAPS
     out: dict[str, Any] = {}
     d = c.delivery
     if "emotion_audio" in caps and d.reference[1] - d.reference[0] >= MIN_REFERENCE_S:
-        dropped = dropping_event(d.reference, events)
+        dropped = GATE_DROPPED if wrong_gender(line, voice) else dropping_event(d.reference, events)
         if dropped is not None:
             out["emotion_dropped"] = dropped
         else:
@@ -751,12 +895,14 @@ def prepare_cue(
     identity: dict[str, Any] | None = None,
     vocals: Path | None = None,
     events: Sequence[tuple[float, float, str]] = (),
+    line: GenderEstimate | None = None,
+    voice: Gender = "u",
 ) -> RenderJob:
     """The render job of one cue with ``card_id``: the card checked (``check_card`` with the
     config's ``[tts] engines``, unless ``checked`` holds its result), its backend config, the
     cache key and the delivery passed. ``identity`` is the backend's ``identity_key``, looked up
     when not given. ``vocals`` (the episode's separated vocals) is needed when the backend takes
-    ``emotion_audio``."""
+    ``emotion_audio``; ``line`` and ``voice`` are the line gate's (`GenderGate`)."""
     card, cls = (
         checked
         if checked is not None
@@ -765,7 +911,7 @@ def prepare_cue(
     bc = backend_config(cfg, cls.name)
     ident = identity if identity is not None else identity_key("tts", bc)
     slot = cue.end - cue.start
-    passed = delivery_passed(cue, card, cls, slot, events)
+    passed = delivery_passed(cue, card, cls, slot, events, line, voice)
     ref_digest = None
     if "emotion_audio" in passed:
         if vocals is None:
@@ -1125,10 +1271,12 @@ class TtsStage:
         cards = self._assigned(ep, self._cues(ep, cfg), cfg.target_language)
         store = CardStore(ep.workspace_root)
         tags = ep.work / "04b-tag" / "tags.json"
+        asg = ep.work / "05-characters" / "assignments.json"
         return [
             self._cues_path(ep, cfg),
             ep.work / "01-separate" / "vocals.wav",
             *([tags] if tags.exists() else []),
+            *([asg] if asg.exists() else []),  # the speakers' turns, for the line gate (A3)
             *(store.card_path(card) for _, card in sorted(cards.items())),
         ]
 
@@ -1164,6 +1312,7 @@ class TtsStage:
             **pause_key(cfg),
             "cards": {str(k): v for k, v in sorted(cards.items())},
             "extras": self._extras_key(ep, cues, cfg, store),
+            "gender_gate": {"version": GATE_VERSION, "bands": list(GATE_BANDS)},
             "version": RENDER_VERSION,
         }
 
@@ -1223,6 +1372,14 @@ class TtsStage:
         }
 
         events = tag_events(ep.work)
+        # A3: the line gate is measured only when some card's backend takes emotion audio
+        takes_audio = any(
+            "emotion_audio" in cls.capabilities_for(card.voice.source)
+            for card, cls in checked.values()
+        )
+        gate = (
+            gender_gate(ep.work, spoken, ep.workspace_root) if takes_audio else GenderGate({}, {})
+        )
         jobs: dict[str, list[RenderJob]] = {}
         for c in spoken:
             card_id = card_of[c.id]
@@ -1237,8 +1394,23 @@ class TtsStage:
                 identity=identities[backend],
                 vocals=vocals,
                 events=events,
+                line=gate.line(c.id),
+                voice=gate.voice(c.id),
             )
             jobs.setdefault(backend, []).append(job)
+        gated = [
+            j for v in jobs.values() for j in v if j.passed.get("emotion_dropped") == GATE_DROPPED
+        ]
+        for c in [c for c in spoken if any(j.cue.id == c.id for j in gated)]:
+            est = gate.line(c.id)
+            assert est is not None and est.median is not None
+            whose = "character's" if c.character_id is not None else "cluster's"
+            line = (
+                f"{who(c)}: cue {c.id} source is {est.gender} ({est.median:.0f} Hz) against the "
+                f"{whose} {gate.voice(c.id)}; rendered without emotion audio"
+            )
+            log.warning("tts: %s", line)
+            flags.append(line)
 
         cache = ep.workspace_root / ".fukikae" / "tts-cache"
         cache.mkdir(parents=True, exist_ok=True)
@@ -1294,6 +1466,7 @@ class TtsStage:
                         retry_seed=guard.retry_seed,
                         suspect=guard.suspect,
                         **self._stripped(job),
+                        **self._gate_fields(job, gate),
                     )
             finally:
                 lazy.close()
@@ -1542,6 +1715,17 @@ class TtsStage:
         }
         n = worker.markup_stripped(req, extra)
         return {"stripped_markup": n > 0, "stripped_count": n}
+
+    @staticmethod
+    def _gate_fields(job: RenderJob, gate: GenderGate) -> dict[str, Any]:
+        """``source_gender`` and ``gender_gate`` for the plan (A3), when the line was measured."""
+        est = gate.line(job.cue.id)
+        if est is None:
+            return {}
+        return {
+            "source_gender": est.gender,
+            "gender_gate": job.passed.get("emotion_dropped") == GATE_DROPPED,
+        }
 
     @staticmethod
     def _link(src: Path, dest: Path) -> None:

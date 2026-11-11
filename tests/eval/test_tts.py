@@ -1173,3 +1173,53 @@ def test_heldout_headline_and_ceiling_are_both_per_character():
     o = ev.summarize(scores, max_speedup=1.25).overall
     assert o["speaker_similarity_heldout"] == pytest.approx(0.4)  # (0.6 + 0.2) / 2
     assert o["speaker_similarity_ceiling"] == pytest.approx(0.6)
+
+
+def test_eval_tts_applies_the_same_gate(tmp_path, monkeypatch):
+    """CD12: eval tts renders through delivery_passed with the stage's line gate, so a
+    wrong-gender source line never reaches a card as emotion_audio here either."""
+    from tests.fixtures.speechlike import speech
+
+    root = _workspace(tmp_path, emotions=False)
+    ws = Workspace(root)
+    work = ws.work_dir("S01E11")
+    x = np.zeros(40 * 16000, np.float32)
+    for i, (a, b, hz) in enumerate([(0, 2, 120), (3, 5, 250), (6, 8, 120), (9, 12, 250)]):
+        seg = speech(hz, b - a, seed=i, voiced_share=0.7)
+        x[a * 16000 : a * 16000 + len(seg)] = seg
+    with wave.open(str(work / "01-separate" / "vocals.wav"), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
+
+    def c(cid: str, who: int, ref: tuple[float, float], text: str) -> DubCue:
+        return DubCue(
+            id=cid, start=ref[0], end=ref[1], character_id=who, extra=None, speaker="x",
+            source_text="src", text=text, budget=40, delivery=Delivery(reference=ref),
+        )  # fmt: skip
+
+    cues = [
+        c("c0001", 1, (0.0, 2.0), "natsu low"),   # Natsu (male turns) in his own register
+        c("c0002", 2, (6.0, 8.0), "lucy low"),    # Lucy (female turns) on a male line
+        c("c0003", 1, (9.0, 11.0), "natsu high"),  # Natsu on a female line
+    ]  # fmt: skip
+    write_json(
+        work / "06-translate" / "cues.en.json",
+        DubCues(episode="S01E11", source_language="ja", target_language="en", path="asr",
+                cues=cues),
+    )  # fmt: skip
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    got: dict[str, Any] = {}
+    real = FakeSynth.synthesize
+
+    def spy(self, text, voice, language, out, **kw):
+        got[text] = kw.get("emotion_audio")
+        return real(self, text, voice, language, out, **kw)
+
+    monkeypatch.setattr(FakeSynth, "synthesize", spy)
+    with Registry(ws.registry_path) as reg:
+        cards = {cid: str(reg.card_for(cid, "en").card_id) for cid in (1, 2)}  # type: ignore[union-attr]
+    ev._render(ws, ws.config, CardStore(root), [("S01E11", q) for q in cues], cards, {})
+    assert got["natsu low"] is not None
+    assert got["lucy low"] is None and got["natsu high"] is None

@@ -164,8 +164,12 @@ class TtsPlanCue(BaseModel):
     the fit asked for (1.0 when none). ``passed`` is what the backend got beyond the card and
     the text, and ``neutral_only`` says the backend takes no delivery at all. ``retry_seed``
     and ``suspect`` are the render guards'. ``skipped`` says why a cue has no audio (``skip:
-    ...`` or ``error: ...`` from translate, or ``no text``). Nothing here depends on the run
-    that wrote it, so the same audio always gives the same file."""
+    ...`` or ``error: ...`` from translate, or ``no text``). ``source_gender`` is the source
+    line's pitch class (A3, measured when the cue's backend takes ``emotion_audio``) and
+    ``gender_gate`` says the line gate held its emotion audio back, the line's class being the
+    other band from its speaker's (``passed`` then records ``emotion_dropped: "gender"``);
+    both are left out of the JSON at their defaults. Nothing here depends on the run that
+    wrote it, so the same audio always gives the same file."""
 
     cue_id: str
     character_id: int | None
@@ -185,6 +189,18 @@ class TtsPlanCue(BaseModel):
     # the worker took control markup out of the cue's text, direction or the card (ruling CD20)
     stripped_markup: bool = False
     stripped_count: int = 0
+    # A3: the source line's pitch class, and whether the line gate dropped its emotion audio
+    source_gender: Literal["f", "m", "u"] | None = None
+    gender_gate: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_defaults(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        out: dict[str, Any] = handler(self)
+        if self.source_gender is None:
+            out.pop("source_gender", None)
+        if not self.gender_gate:
+            out.pop("gender_gate", None)
+        return out
 
 
 class TtsPlan(BaseModel):
