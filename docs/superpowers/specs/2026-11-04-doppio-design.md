@@ -42,7 +42,7 @@ The cross-episode character identity is the reason this exists rather than just 
 - Python, managed with uv (`uv sync`, `uv run`), ruff, pyright, pre-commit, per the user's python-project conventions. License PolyForm Shield 1.0.0.
 - pyannote's gated models need a Hugging Face token with the model terms accepted.
 - ffmpeg and ffprobe are required external binaries, not assumed on the host (the GPU host has neither); the repo pins them through mise, and `fukikae doctor` checks for them.
-- Test material: Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Copied once from the NAS media share (no longer mounted on the GPU host since 2026-11-04) into `~/fukikae-ws/media/<Show>/Season 1/` on ml-01, owner-only permissions. fukikae treats that directory as read-only source, the same as it would a media share.
+- Test material: Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Copied once from the NAS media share (no longer mounted on the GPU host since 2026-11-04) into `~/fukikae-ws/media/<Show>/Season 1/` on the GPU host, owner-only permissions. fukikae treats that directory as read-only source, the same as it would a media share.
 - The GitHub repo, when it exists, comes from the operator's infrastructure-as-code config, not `gh repo create`. Until then the project is a local git repo.
 
 ## Architecture
