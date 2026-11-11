@@ -29,6 +29,7 @@ def test_headline_metrics():
         "embedder": "nc_overall",
         "tts": "speaker_similarity",
         "names": "cue_accuracy",
+        "gender": "mismatch_rate",
     }
 
 

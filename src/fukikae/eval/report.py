@@ -20,6 +20,7 @@ HEADLINE = {
     "embedder": "nc_overall",
     "tts": "speaker_similarity",
     "names": "cue_accuracy",
+    "gender": "mismatch_rate",
 }
 MISSING = "-"
 # Shares in [0, 1] shown to two places, as `eval identity` prints them; others to four
@@ -34,6 +35,8 @@ _SHARES = frozenset(
         "cue_accuracy",
         "reference_purity",
         "hidden_accuracy",
+        "mismatch_rate",
+        "mismatch_rate_cut",
     }
 )
 
