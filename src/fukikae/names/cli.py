@@ -428,48 +428,18 @@ def _merge_suggestions(
 
 
 def _card_lines(ws: Workspace, reg: Registry, characters: list[int]) -> list[str]:
-    """Stale or flagged clone cards of the episode's characters (`stale_cards`), with what
-    replaces each (a kept one under the clone floor too says so, `floor_suffix`), then
-    automatic clone cards under the clone floor (`floor_lines`, D32), then thin-reference
-    clones (`thin_lines`, A2), then clone cards with references the reference gates refuse
-    (`impure_lines`, A1)."""
+    """The flagged cards of the episode's characters, one line per card with every reason
+    (``cards.auto.card_status_lines``: stale references, under the clone floor or thin, impure
+    references), then the episodes stale detection skipped."""
     from fukikae.cards import auto
-    from fukikae.cards.auto import AUTOMATIC_BY, repick_blocker, replace_refusal, stale_cards
     from fukikae.cards.store import CardStore
 
-    cfg = ws.config
-    language = cfg.target_language
     notes: list[str] = []
     store = CardStore(ws.root)
-    stale = stale_cards(ws, reg, store, characters, language, notes=notes)
-    short = auto.below_floor(reg, store, list(stale), language)
-    out: list[str] = []
-    blocker: list[str | None] = []
-    for cid in sorted(stale):
-        a = reg.card_for(cid, language)
-        if a is None:
-            continue
-        said = sorted({k for r in stale[cid] for k in r.get("names") or []})
-        if a.chosen_by in AUTOMATIC_BY and replace_refusal(a, "auto") is None:
-            if not blocker:
-                blocker.append(repick_blocker(cfg))
-            fix = (
-                "the next tts run re-picks it"
-                if blocker[0] is None
-                else f"kept while {blocker[0]}; `fukikae voices clone` replaces it"
-                + auto.floor_suffix(short, cid)
-            )
-        else:
-            fix = "`fukikae voices clone` replaces it" + auto.floor_suffix(short, cid)
-        out.append(
-            f"{_char(reg, cid)}'s card {a.card_id} ({a.chosen_by}) was cloned from turns now "
-            f"named {', '.join(k.upper() for k in said) or 'otherwise'}; {fix}"
-        )
-    rest = [cid for cid in characters if cid not in stale]  # a stale card's line says it all
-    floor = auto.floor_lines(ws, reg, store, rest, language)
-    thin = auto.thin_lines(reg, store, rest, language)
-    impure = auto.impure_lines(ws, reg, store, characters, language)
-    return out + floor + thin + impure + notes
+    lines = auto.card_status_lines(
+        ws, reg, store, characters, ws.config.target_language, notes=notes
+    )
+    return lines + notes
 
 
 def _unnamed_exemplars(ws: Workspace, reg: Registry, characters: list[int]) -> list[str]:

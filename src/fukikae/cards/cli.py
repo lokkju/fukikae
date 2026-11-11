@@ -123,16 +123,13 @@ def _current(reg: Registry, char: Character, lang: str) -> CardAssignment:
 
 @voices_app.command("list")
 def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
-    """List every character with its card for the target language, then each clone card
-    cloned from turns the subtitle names now give someone else (D29 #4): the next tts run
-    re-picks an automatic one; a curated or imported one stays until `voices clone` (with
-    the clone floor's shortfall appended when the kept card is under it too). Then
-    each automatic clone card under the clone floor (2 clips, 10 s; D32): re-picked by the
-    next tts run when a better pick exists, else flagged for review. Then each clone card
-    with references the reference gates refuse (A1): an automatic one is re-picked by the
-    next tts run when a gate-passing pick exists; a curated, imported or locked one stays."""
+    """List every character with its card for the target language, then each flagged card,
+    one line per card with every reason (``cards.auto.card_status_lines``): cloned from turns
+    the subtitle names now give someone else (D29 #4), under the clone floor (2 clips, 10 s;
+    D32) or a thin-reference clone (A2), references the reference gates refuse (A1); each
+    says whether the next tts run re-picks an automatic card or the card stays (a curated,
+    imported or locked one stays until `voices clone`)."""
     from fukikae.cards import auto
-    from fukikae.cards.auto import AUTOMATIC_BY, repick_blocker, replace_refusal, stale_cards
 
     with _session(workspace, lang) as (reg, store, language):
         _echo(f"character\tname\t{language} card\tby\tstate")
@@ -143,38 +140,10 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
                 _echo(f"{c.id}\t{c.name or '-'}\t-\t-\t-")
             else:
                 _echo(f"{c.id}\t{c.name or '-'}\t{a.card_id}\t{a.by}\t{_state(a)}")
-        ws = Workspace(workspace)
         notes: list[str] = []
-        stale = stale_cards(ws, reg, store, [c.id for c in chars], language, notes=notes)
-        short = auto.below_floor(reg, store, list(stale), language)
-        blocker: list[str | None] = []  # worked out once, only for an automatic stale card
-        for c in chars:
-            refs = stale.get(c.id)
-            a = reg.card_for(c.id, language)
-            if not refs or a is None:
-                continue
-            said = sorted({k for r in refs for k in r.get("names") or []})
-            now = f"now named {', '.join(k.upper() for k in said)}" if said else "now named"
-            if a.chosen_by in AUTOMATIC_BY and replace_refusal(a, "auto") is None:
-                if not blocker:
-                    blocker.append(repick_blocker(ws.config))
-                fix = (
-                    "the next tts run re-picks it"
-                    if blocker[0] is None
-                    else f"kept while {blocker[0]}; `fukikae voices clone` replaces it"
-                    + auto.floor_suffix(short, c.id)
-                )
-            else:
-                fix = "`fukikae voices clone` replaces it" + auto.floor_suffix(short, c.id)
-            _echo(
-                f"character {_label(c)}'s card ({a.chosen_by}) was cloned from turns {now}; {fix}"
-            )
-        rest = [c.id for c in chars if c.id not in stale]  # a stale card's line says it all
-        for line in auto.floor_lines(ws, reg, store, rest, language):
-            _echo(line)
-        for line in auto.thin_lines(reg, store, rest, language):
-            _echo(line)
-        for line in auto.impure_lines(ws, reg, store, [c.id for c in chars], language):
+        ws = Workspace(workspace)
+        ids = [c.id for c in chars]
+        for line in auto.card_status_lines(ws, reg, store, ids, language, notes=notes):
             _echo(line)
         for note in notes:
             _echo(note)

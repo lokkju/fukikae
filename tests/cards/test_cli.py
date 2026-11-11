@@ -963,16 +963,17 @@ def test_list_flags_cards_cloned_from_turns_names_now_give_someone_else(
         clusters = [{**c, "character_id": natsu if c["character_id"] == 1 else other}
                     for c in NATSU_CLUSTERS]  # fmt: skip
         _named_episode(ws.root, NAMED_EP, NATSU_TURNS, clusters, names=NATSU_NAMES)
-        _auto_clone(reg, store, natsu, [(NAMED_EP, 30.0, 35.0)], by="assign", locked=True)
-        _auto_clone(reg, store, other, [(NAMED_EP, 0.0, 5.0)])
+        mine = _auto_clone(reg, store, natsu, [(NAMED_EP, 30.0, 35.0)], by="assign",
+                           locked=True)  # fmt: skip
+        theirs = _auto_clone(reg, store, other, [(NAMED_EP, 0.0, 5.0)])
     monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
     r = invoke("list", str(ws.root))
     assert r.exit_code == 0, r.output
     flags = [ln for ln in r.output.splitlines() if "was cloned from" in ln]
     assert flags == [
-        f"character {natsu} (Natsu)'s card (assign) was cloned from turns now named WENDY; "
-        "`fukikae voices clone` replaces it",
-        f"character {other}'s card (auto) was cloned from turns now named NATSU; "
+        f"character {natsu} (Natsu)'s card {mine} (assign) was cloned from turns now named "
+        "WENDY; `fukikae voices clone` replaces it",
+        f"character {other}'s card {theirs} (auto) was cloned from turns now named NATSU; "
         "the next tts run re-picks it",
     ]
 
@@ -1102,12 +1103,12 @@ def test_list_appends_the_floor_to_a_kept_stale_cards_line(tmp_path: Path):
         clusters = [{**c, "character_id": natsu if c["character_id"] == 1 else other}
                     for c in NATSU_CLUSTERS]  # fmt: skip
         _named_episode(ws.root, NAMED_EP, NATSU_TURNS, clusters, names=NATSU_NAMES)
-        _auto_clone(reg, store, natsu, [(NAMED_EP, 30.0, 35.0)], locked=True)
+        card = _auto_clone(reg, store, natsu, [(NAMED_EP, 30.0, 35.0)], locked=True)
     r = invoke("list", str(ws.root))
     assert r.exit_code == 0, r.output
     (line,) = [ln for ln in r.output.splitlines() if "clone floor" in ln or "cloned from" in ln]
     assert line == (
-        f"character {natsu} (Natsu)'s card (auto) was cloned from turns now named WENDY; "
+        f"character {natsu} (Natsu)'s card {card} (auto) was cloned from turns now named WENDY; "
         "`fukikae voices clone` replaces it; below the clone floor (1 clip and 5.0 s, under "
         "the floor of 2 clips and 10 s)"
     )
@@ -1178,3 +1179,31 @@ def test_names_show_card_lines_include_the_thin_flag(tmp_path: Path):
     assert any(ln.endswith("is a thin-reference clone (2.0 s from 1 turn); listen in "
                            "`fukikae studio`, or `fukikae voices clone` with a better clip")
                for ln in lines)  # fmt: skip
+
+
+def test_voices_list_and_names_show_print_one_line_per_card(tmp_path: Path, monkeypatch):
+    """Review fix 7: a card that is under the floor and impure gets one line with both
+    reasons and what the next tts run does, in `voices list` and in `names show`."""
+    from fukikae.names.cli import _card_lines
+    from tests.cards.test_auto import GATE_HZ, GATE_TURNS, NAMED_EP, _auto_clone, _named_episode
+    from tests.cards.test_select import _voices
+
+    ws, natsu, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        clusters = [{"cluster": "S0~natsu", "character_id": natsu}]
+        work = _named_episode(ws.root, NAMED_EP, GATE_TURNS, clusters)
+        _voices(work / "01-separate" / "vocals.wav",
+                [(a, b, hz, n) for (a, b, _, n), hz in zip(GATE_TURNS, GATE_HZ, strict=True)],
+                seconds=120.0)  # fmt: skip
+        card = _auto_clone(reg, store, natsu, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 0, r.output
+    (line,) = [ln for ln in r.output.splitlines() if f"card {card}" in ln]
+    assert line.startswith(f"character {natsu} (Natsu)'s card {card} (auto) is below the clone "
+                           "floor (2 clips and 9.5 s")  # fmt: skip
+    assert f"has references that fail the reference gates ({NAMED_EP} 60.00-64.50" in line
+    assert line.endswith("the next tts run re-picks it (2 clips, 10.0 s)")
+    with Registry(ws.registry_path) as reg:
+        lines = _card_lines(ws, reg, [natsu])
+    assert [ln for ln in lines if f"card {card}" in ln] == [line]

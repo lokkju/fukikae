@@ -2088,12 +2088,22 @@ def thin_lines(reg: Registry, store: CardStore, ids: Iterable[int], language: st
 
 
 def impure_lines(
-    ws: Workspace, reg: Registry, store: CardStore, characters: Iterable[int], language: str
+    ws: Workspace,
+    reg: Registry,
+    store: CardStore,
+    characters: Iterable[int],
+    language: str,
+    *,
+    impure: Mapping[int, Impurity] | None = None,
 ) -> list[str]:
-    """One line per clone card with references the A1 gates refuse (`impure_cards`) for
-    `voices list` and `names show`: whether the next tts run re-picks it (automatic, a
-    gate-passing pick exists, cloning can run here) or it stays flagged."""
-    impure = impure_cards(ws, reg, store, language, characters)
+    """One line per clone card with references the A1 gates refuse (`impure_cards`, or the
+    ``impure`` already measured) for `voices list` and `names show`: whether the next tts
+    run re-picks it (automatic, a gate-passing pick exists, cloning can run here) or it stays
+    flagged."""
+    chars = set(characters)
+    if impure is None:
+        impure = impure_cards(ws, reg, store, language, chars)
+    impure = {cid: imp for cid, imp in impure.items() if cid in chars}
     if not impure:
         return []
     loaded: dict[str, EpisodeArtifacts | None] = {}
@@ -2126,3 +2136,115 @@ def impure_lines(
         else:
             out.append(f"{head}; a gate-passing pick exists ({better}), kept while {blocker[0]}")
     return out
+
+
+def card_status_lines(
+    ws: Workspace,
+    reg: Registry,
+    store: CardStore,
+    characters: Iterable[int],
+    language: str,
+    *,
+    notes: list[str] | None = None,
+) -> list[str]:
+    """The flagged cards of ``characters`` for ``voices list`` and ``names show``, one line
+    per card with every reason it has (review fix 7): references the subtitle names now give
+    someone else (`stale_cards`; a kept stale card under the floor says so too,
+    `floor_suffix`), under the clone floor (`floor_lines`) or a thin-reference clone
+    (`thin_lines`), and references the reference gates refuse (`impure_lines`). A card with
+    one reason gets that reason's line; one with several gets a line naming each and what the
+    next tts run does, as its single re-pick would. ``notes`` receives the episodes
+    `stale_cards` skipped."""
+    chars = sorted(set(characters))
+    stale = stale_cards(ws, reg, store, chars, language, notes=notes)
+    short = below_floor(reg, store, chars, language)
+    impure = impure_cards(ws, reg, store, language, chars)
+    multi = {cid for cid in impure if cid in stale or cid in short}
+    blocker: list[str | None] = []
+
+    def block() -> str | None:
+        if not blocker:
+            blocker.append(repick_blocker(ws.config))
+        return blocker[0]
+
+    out = [
+        _stale_line(reg, cid, language, stale[cid], short, block)
+        for cid in sorted(stale)
+        if cid not in multi and reg.card_for(cid, language) is not None
+    ]
+    rest = [cid for cid in chars if cid not in stale and cid not in multi]
+    out += floor_lines(ws, reg, store, rest, language)
+    out += thin_lines(reg, store, rest, language)
+    out += impure_lines(
+        ws, reg, store, [cid for cid in chars if cid not in multi], language, impure=impure
+    )
+    loaded: dict[str, EpisodeArtifacts | None] = {}
+    exclusions: dict[str, list[tuple[float, float]]] = {}
+    for cid in sorted(multi):
+        a = reg.card_for(cid, language)
+        assert a is not None
+        imp, sf, refs = impure[cid], short.get(cid), stale.get(cid)
+        reasons: list[str] = []
+        if refs:
+            reasons.append(f"was cloned from turns {_now_named(refs)}")
+        if sf is not None:
+            reasons.append(
+                f"is a thin-reference clone ({sf.phrase.removeprefix(f'{THIN_NOTE}: ')})"
+                if sf.thin
+                else f"is below the clone floor ({sf.phrase})"
+            )
+        reasons.append(f"has references that fail the reference gates ({imp.phrase})")
+        head = (
+            f"character {_label(reg, cid)}'s card {imp.card_id} ({a.chosen_by}"
+            f"{', locked' if a.locked else ''}) {'; '.join(reasons)}"
+        )
+        refusal = replace_refusal(a, "auto")
+        if a.chosen_by not in AUTOMATIC_BY or refusal is not None:
+            out.append(f"{head}; kept{f': {refusal}' if refusal else ''}: {PURITY_FIX}")
+            continue
+        found = find_references(ws, _all_episodes(ws), cid, None, loaded, exclusions)
+        gated = bool(found.picks) and found.tier != "thin"
+        repicks = bool(refs and found.picks) or gated or (sf is not None and _better(found, sf))
+        if not repicks:
+            out.append(f"{head}; no better reference pick exists; flagged: {PURITY_FIX}")
+            continue
+        picks = found.picks or []
+        n = len(picks)
+        better = f"{n} clip{'' if n == 1 else 's'}, {sum(p.seconds for p in picks):.1f} s"
+        why = block()
+        if why is None:
+            out.append(f"{head}; the next tts run re-picks it ({better})")
+        else:
+            out.append(f"{head}; a better pick exists ({better}), kept while {why}")
+    return out
+
+
+def _now_named(refs: Sequence[dict]) -> str:
+    said = sorted({k for r in refs for k in r.get("names") or []})
+    return f"now named {', '.join(k.upper() for k in said) or 'otherwise'}"
+
+
+def _stale_line(
+    reg: Registry,
+    cid: int,
+    language: str,
+    refs: Sequence[dict],
+    short: Mapping[int, Shortfall],
+    block: Callable[[], str | None],
+) -> str:
+    """A stale card's line: what replaces it (a kept one under the floor says so too)."""
+    a = reg.card_for(cid, language)
+    assert a is not None
+    if a.chosen_by in AUTOMATIC_BY and replace_refusal(a, "auto") is None:
+        why = block()
+        fix = (
+            "the next tts run re-picks it"
+            if why is None
+            else f"kept while {why}; `fukikae voices clone` replaces it" + floor_suffix(short, cid)
+        )
+    else:
+        fix = "`fukikae voices clone` replaces it" + floor_suffix(short, cid)
+    return (
+        f"character {_label(reg, cid)}'s card {a.card_id} ({a.chosen_by}) was cloned from "
+        f"turns {_now_named(refs)}; {fix}"
+    )
