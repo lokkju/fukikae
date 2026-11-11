@@ -82,6 +82,9 @@ class AsrCleanStage:
         return {
             "rule": hallucinations.rule_constants(),
             "songs": songs.detector_constants(_song_settings(cfg)),
+            # The music branch reads F0 stability through `pitch.is_sung`.
+            "pitch": pitch.VERSION,
+            "sung": [pitch.SUNG_JITTER_ST, pitch.SUNG_RUN_S],
         }
 
     def run(self, ep: Episode, cfg: Config) -> None:

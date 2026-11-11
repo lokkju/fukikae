@@ -316,3 +316,21 @@ def test_consumers_read_the_cleaned_transcript(tmp_path, stage, monkeypatch):
     arts = episode_artifacts(Workspace(ep.workspace_root), "e1")
     assert arts is not None
     assert [s.text for s in arts.transcript.segments] == ["燃えてきたぞ"]
+
+
+@pytest.mark.parametrize(
+    ("attr", "value"),
+    [("VERSION", 999), ("SUNG_JITTER_ST", 9.9), ("SUNG_RUN_S", 9.9)],
+)
+def test_a_pitch_or_sung_change_reruns_the_stage(tmp_path, stage, monkeypatch, attr, value):
+    from fukikae import pitch
+
+    ep = _episode(tmp_path, [SPEECH, OVER_SILENCE])
+    cfg = Config()
+    key = stage.config_key(cfg, ep)
+    assert key["pitch"] == pitch.VERSION
+    assert key["sung"] == [pitch.SUNG_JITTER_ST, pitch.SUNG_RUN_S]
+    assert job.run_stages(ep, cfg, [stage]) == ["asrclean"]
+    assert job.run_stages(ep, cfg, [stage]) == []
+    monkeypatch.setattr(pitch, attr, value)
+    assert job.run_stages(ep, cfg, [stage]) == ["asrclean"]
