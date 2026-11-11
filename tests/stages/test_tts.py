@@ -1811,3 +1811,60 @@ def test_stage_key_holds_the_gate_version_and_bands(ep):
     key = TtsStage(CFG).config_key(CFG, ep)
     assert key["gender_gate"] == {"version": tts.GATE_VERSION, "bands": [165.0, 200.0]}
     assert ep.work / "05-characters" / "assignments.json" in TtsStage(CFG).inputs(ep)
+
+
+# ---- Task 6 review: the render refusal --------------------------------------------------------
+
+
+def _usable_clone(ep: Episode, character: int, backend: str = "fake") -> str:
+    """A curated clone card with its reference clip in the store."""
+    store = CardStore(ep.workspace_root)
+    clip = ep.workspace_root / "ref.wav"
+    tone_wav(clip, 3.0, 16000)
+    ref = store.add_sidecar(clip, "clip")
+    text = CLONE.replace('backend = "fake"', f'backend = "{backend}"').replace(
+        "sha256:9e1f000000000000000000000000000000000000000000000000000000000000", ref
+    )
+    return _assign(ep, character, text)
+
+
+class FakeCloneEngine(FakeClone):
+    name: ClassVar[str] = "fakeclone_fast"
+    card_backend: ClassVar[str] = "fakeclone"
+
+
+def test_the_render_refusal_reads_the_engine_that_renders(ep, monkeypatch):
+    """A machine with only the clone backend's engine set up (TensorRT, say) renders; the
+    refusal reads the class that renders the card, not its card backend."""
+    monkeypatch.setitem(CLASSES, "fakeclone_fast", FakeCloneEngine)
+    _two_cards(ep)
+    _with_extras_turns(ep)
+    monkeypatch.setattr(
+        "fukikae.cards.auto.clone_problem",
+        lambda cls, _cfg: "worker env missing" if cls is FakeClone else None,
+    )
+    cfg = Config(
+        raw={"tts": {**CLONE_CFG.raw["tts"], "engines": {"fakeclone": "fakeclone_fast"}}},
+        source_language="ja",
+    )
+    TtsStage(cfg).run(ep, cfg)
+    assert "load fakeclone_fast" in FakeSynth.LOG and "load fakeclone" not in FakeSynth.LOG
+    # without the engine, the same machine refuses, naming the backend that can't run
+    with pytest.raises(tts.CloneBackendError, match="backends setup fakeclone"):
+        TtsStage(CLONE_CFG).run(ep, CLONE_CFG)
+
+
+def test_an_uncached_clone_render_refuses_without_a_clone_backend(ep):
+    """D41: with [tts] clone_backend unset, a clone card's render that isn't in the cache
+    stops the stage before anything loads, naming the missing setting."""
+    _usable_clone(ep, 1)
+    _assign(ep, 2, _stock("af_heart"))
+    _write_cues(ep, [c for c in CUES if c.character_id is not None])
+    cfg = Config(raw={"tts": {"backend": "fake"}})
+    with pytest.raises(tts.CloneBackendError, match=r"set \[tts\] clone_backend"):
+        TtsStage(cfg).run(ep, cfg)
+    assert FakeSynth.LOG == []
+    # once the renders are cached, nothing needs the backend
+    TtsStage(CLONE_CFG).run(ep, CLONE_CFG)
+    TtsStage(cfg).run(ep, cfg)
+    assert _run(ep).renders == 0

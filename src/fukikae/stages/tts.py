@@ -137,7 +137,6 @@ from fukikae.cards.auto import (
     extras_cards,
     extras_label,
     impure_cards,
-    repick_blocker,
     replace_refusal,
     stale_cards,
     stock_cards,
@@ -557,9 +556,13 @@ class CloneBackendError(ConfigError):
     stock voice in its place (D41)."""
 
 
-def clone_refusal(cfg: Config, what: str) -> CloneBackendError | None:
+def clone_refusal(
+    cfg: Config, what: str, renderer: type[Synthesizer] | None = None
+) -> CloneBackendError | None:
     """The refusal for ``what`` (the cues or cards that need a clone) when ``[tts]
-    clone_backend`` is unset or can't run here (``cards.auto.clone_problem``), else None."""
+    clone_backend`` is unset or can't run here (``cards.auto.clone_problem``), else None.
+    ``renderer`` is the class that will render (an engine from ``[tts] engines``, such as
+    indextts2_trt); without it, the clone backend's own class, which makes the cards."""
     from fukikae.cards.auto import clone_problem
 
     name = clone_backend(cfg)
@@ -568,7 +571,9 @@ def clone_refusal(cfg: Config, what: str) -> CloneBackendError | None:
             f"{what} need a clone voice and no [tts] clone_backend is set: set [tts] "
             "clone_backend (IndexTTS2 in every profile); fukikae renders no stock voices (D41)"
         )
-    problem = clone_problem(cast(type[Synthesizer], loader.backend_class("tts", name)), cfg)
+    cls = renderer or cast(type[Synthesizer], loader.backend_class("tts", name))
+    name = cls.name
+    problem = clone_problem(cls, cfg)
     if problem is None:
         return None
     return CloneBackendError(
@@ -1427,13 +1432,21 @@ class TtsStage:
         # until it turns out cached; only renders advance the count.
         n_cues = sum(len(v) for v in jobs.values())
         to_render = sum(not (cache / f"{j.key}.wav").exists() for v in jobs.values() for j in v)
+        # D41: a clone card's render that isn't cached needs the clone backend, set and able
+        # to run here; the class checked is the one that renders it ([tts] engines included)
         clone = clone_backend(cfg)
-        uncached = sorted({
-            users[j.card_id] for v in jobs.values() for j in v
-            if j.card.voice.backend == clone and not (cache / f"{j.key}.wav").exists()
-        })  # fmt: skip
-        if uncached and repick_blocker(cfg) is not None:
-            refusal = clone_refusal(cfg, f"{ep.id}: renders for {', '.join(uncached)}")
+        uncached: dict[str, list[RenderJob]] = {}
+        for j in (j for v in jobs.values() for j in v):
+            if j.card.voice.source == "clone" and not (cache / f"{j.key}.wav").exists():
+                uncached.setdefault(j.cls.name, []).append(j)
+        for name in sorted(uncached):
+            on_clone = [j for j in uncached[name] if j.card.voice.backend == clone]
+            if clone is not None and not on_clone:
+                continue  # another backend's clone card: its own load reports a problem
+            whose = sorted({users[j.card_id] for j in (on_clone or uncached[name])})
+            refusal = clone_refusal(
+                cfg, f"{ep.id}: renders for {', '.join(whose)}", uncached[name][0].cls
+            )
             if refusal is not None:
                 raise refusal
         progress.start(to_render, "cues", cached=n_cues - to_render)
