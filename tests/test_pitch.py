@@ -65,7 +65,7 @@ def test_constants_match_the_spec():
     assert (pitch.SPEAKER_MIN_VOICED_S, pitch.LINE_MIN_VOICED_S) == (1.0, 0.4)
     assert pitch.CONFIDENCE_ST == 4.0
     assert (pitch.BIMODAL_MIN_S, pitch.BIMODAL_MIN_SHARE) == (5.0, 0.15)
-    assert pitch.VERSION == 1
+    assert pitch.VERSION == 2  # bumped with every estimator change (the cache key)
 
 
 def test_harmonic_tone_reads_its_fundamental(tmp_path: Path):
@@ -80,6 +80,89 @@ def test_strong_second_harmonic_does_not_halve_f0(tmp_path: Path):
     wav = write_wav(tmp_path / "h2.wav", tone(200, 2.0, partials=(0.5, 1.0, 0.2)))
     s = summarize(f0_track(wav, [(0.0, 2.0)]))
     assert s.median is not None and abs(12 * math.log2(s.median / 200)) < 0.5
+
+
+def test_rich_low_voice_reads_its_fundamental(tmp_path: Path):
+    # a weak fundamental under strong partials 2 to 8 (even ones strongest): the window's taper
+    # shrank the long-lag peak at the period under 90% of the half-period's, and 90 to 110 Hz
+    # read an octave high before the window correction
+    rich = (0.3, 1.0, 0.4, 1.0, 0.4, 0.8, 0.3, 0.6)
+    for hz in (90, 100, 110, 120):
+        wav = write_wav(tmp_path / f"rich{hz}.wav", tone(hz, 2.0, partials=rich))
+        s = summarize(f0_track(wav, [(0.0, 2.0)]))
+        assert s.median is not None and abs(12 * math.log2(s.median / hz)) < 0.5, (hz, s.median)
+
+
+def _write_any(path: Path, x: np.ndarray, rate: int = RATE) -> Path:
+    from scipy.io import wavfile
+
+    wavfile.write(path, rate, x)
+    return path
+
+
+def test_int16_stereo_float_and_8bit_wavs_read_alike(tmp_path: Path):
+    x = tone(220, 2.0)
+    x44 = np.interp(np.arange(88200) / 44100, np.arange(len(x)) / RATE, x)
+    files = {
+        "float32": _write_any(tmp_path / "f.wav", x),
+        "int16 stereo": _write_any(
+            tmp_path / "s.wav", (np.stack([x, 0.5 * x], axis=1) * 32767).astype("<i2")
+        ),
+        "int32": _write_any(tmp_path / "i32.wav", (x * (2**31 - 1)).astype("<i4")),
+        "uint8": _write_any(tmp_path / "u8.wav", (x * 127 + 128).astype(np.uint8)),
+        "44.1 kHz": _write_any(
+            tmp_path / "44k.wav",
+            (x44 * 32767).astype("<i2"),
+            44100,
+        ),
+    }
+    for name, wav in files.items():
+        s = summarize(f0_track(wav, [(0.0, 2.0)]))
+        assert s.median is not None and abs(12 * math.log2(s.median / 220)) < 0.5, (name, s.median)
+        assert s.seconds == pytest.approx(2.0, abs=0.01), name
+
+
+def test_reversed_and_zero_length_spans_keep_their_place(tmp_path: Path):
+    wav = write_harmonic(tmp_path, 260, 2.0)
+    track = f0_track(wav, [(1.0, 1.0), (0.0, 2.0), (1.5, 0.5)])
+    assert track.spans == 3
+    np.testing.assert_allclose(track.span_seconds, [0.0, 2.0, 0.0], atol=0.01)
+    assert set(np.unique(track.span_index)) == {1}
+    assert summarize(track, 0).median is None and summarize(track, 0).seconds == 0.0
+    assert summarize(track, 2).median is None
+    assert [c.gender for c in turn_classes(track, (165, 200))] == ["u", "f", "u"]
+
+
+def test_batched_track_equals_one_batch(tmp_path: Path, monkeypatch):
+    wav, spans = _turns(tmp_path, [(130, 1.3), (0, 0.5), (260, 2.1), (185, 0.7), (420, 1.0)])
+    spans = [*spans, (0.2, 4.9), (3.0, 3.0)]
+    monkeypatch.setattr(pitch, "_BATCH", 1 << 30)
+    whole = f0_track(wav, spans)
+    monkeypatch.setattr(pitch, "_BATCH", 7)
+    batched = f0_track(wav, spans)
+    np.testing.assert_array_equal(whole.f0, batched.f0)
+    np.testing.assert_array_equal(whole.span_index, batched.span_index)
+    np.testing.assert_array_equal(whole.span_seconds, batched.span_seconds)
+    assert whole.seconds == batched.seconds
+
+
+def test_long_track_memory_stays_bounded(tmp_path: Path):
+    import tracemalloc
+
+    minutes = 10
+    x = np.tile(tone(220, 3.0), 20 * minutes)
+    wav = write_wav(tmp_path / "long.wav", x)
+    del x
+    tracemalloc.start()
+    try:
+        track = f0_track(wav, [(0.0, 60.0 * minutes)])
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # every frame materialised at once peaked at 438 MB here; batches keep it flat in length
+    assert peak < 80e6, peak / 1e6
+    s = summarize(track)
+    assert s.median is not None and abs(s.median - 220) < 5
 
 
 def test_noise_is_unvoiced(tmp_path: Path):
@@ -195,3 +278,34 @@ def test_cached_track_is_reused_and_keyed_by_spans(tmp_path: Path, monkeypatch):
     assert len(calls) == 3
     s = summarize(c)
     assert s.median is not None and abs(s.median - 130) < 5
+
+
+def test_cached_track_recomputes_a_truncated_cache_file(tmp_path: Path, monkeypatch):
+    wav = write_harmonic(tmp_path, 220, 2.0)
+    root = tmp_path / "ws"
+    first = cached_track(root, wav, [(0.0, 2.0)])
+    (path,) = (root / ".fukikae" / "pitch-cache").glob("*.npz")
+    path.write_bytes(path.read_bytes()[: path.stat().st_size // 2])
+    calls: list[int] = []
+    real = pitch.f0_track
+
+    def counting(vocals, spans):
+        calls.append(1)
+        return real(vocals, spans)
+
+    monkeypatch.setattr(pitch, "f0_track", counting)
+    again = cached_track(root, wav, [(0.0, 2.0)])
+    assert calls == [1]
+    np.testing.assert_array_equal(first.f0, again.f0)
+    path.write_bytes(b"")  # an empty file is EOFError for np.load
+    cached_track(root, wav, [(0.0, 2.0)])
+    assert calls == [1, 1]
+    with np.load(path) as z:  # rewritten whole
+        np.testing.assert_array_equal(z["f0"], first.f0)
+
+
+def test_cache_key_names_the_estimator_version(tmp_path: Path, monkeypatch):
+    wav = write_harmonic(tmp_path, 220, 1.0)
+    key = pitch.track_key(wav, [(0.0, 1.0)])
+    monkeypatch.setattr(pitch, "VERSION", pitch.VERSION + 1)
+    assert pitch.track_key(wav, [(0.0, 1.0)]) != key

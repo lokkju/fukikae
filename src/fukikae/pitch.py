@@ -3,12 +3,16 @@ register ("gender": the register as heard, never the character's gender in the s
 the median.
 
 ``f0_track`` reads the given spans of a vocals wav (any rate, width or channel count) and runs
-an autocorrelation per 40 ms frame (20 ms hop) between ``F0_MIN`` and ``F0_MAX`` (60 to 800 Hz).
-Only local maxima of the normalized autocorrelation count, and the shortest lag whose peak is
-within 90% of the best is taken, which keeps a strong subharmonic from halving F0. A frame is
-voiced when its best peak reaches ``VOICED_PEAK``; frames quieter than ``QUIET`` of the loudest
-decile of the whole track are never voiced. Unvoiced frames are NaN, and each frame records the
-input span it came from, so one track answers both a speaker's summary and each turn's.
+an autocorrelation per 40 ms Hann-windowed frame (20 ms hop) between ``F0_MIN`` and ``F0_MAX``
+(60 to 800 Hz). The autocorrelation is divided by the window's own, so a low voice's long period
+isn't penalized for the window's taper (without it, rich voices under about 120 Hz read an
+octave high). Only local maxima count, and the shortest lag whose peak is within ``PEAK_SHARE``
+(80%) of the best is taken, which keeps a subharmonic from halving F0. A frame is voiced when
+its best peak reaches ``VOICED_PEAK``; frames quieter than ``QUIET`` of the loudest decile of
+the whole track are never voiced. Unvoiced frames are NaN, and each frame records the input
+span it came from, so one track answers both a speaker's summary and each turn's. Frames are
+read and processed ``_BATCH`` at a time in two passes (loudness, then F0), so memory stays
+flat on a whole-episode span.
 
 ``classify`` bands a summary's median: ``m`` under ``male_below`` (``MALE_BELOW``, 165 Hz),
 ``f`` over ``female_above`` (``FEMALE_ABOVE``, 200 Hz), else ``u``, and ``u`` too under a
@@ -17,7 +21,8 @@ minimum of voiced speech (``SPEAKER_MIN_VOICED_S`` 1.0 s for a speaker,
 nearest band edge over ``CONFIDENCE_ST`` (4), capped at 1, and 0 for ``u``.
 
 ``cached_track`` keeps tracks in ``<root>/.fukikae/pitch-cache/<key>.npz``; the key is the
-sha256 of the vocals file's bytes, the spans and ``VERSION``.
+sha256 of the vocals file's bytes, the spans and ``VERSION``, which is bumped with every change
+to the estimator. An unreadable cache file (truncated, empty, another layout) is recomputed.
 
 CPU only, numpy and scipy only; this is pipeline code and never imports ``fukikae.eval``.
 """
@@ -27,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,7 +42,9 @@ import numpy as np
 
 Gender = Literal["f", "m", "u"]
 
-VERSION = 1
+# In the cache key: bump it with any change to what f0_track returns (frame sizes, range,
+# peak rule, voicing or loudness thresholds), or old tracks are served from the cache.
+VERSION = 2
 
 F0_MIN = 60
 F0_MAX = 800
@@ -59,8 +67,11 @@ VOICED_PEAK = 0.5
 QUIET = 0.1
 # Fewer voiced frames than this (0.2 s) give no median.
 MIN_VOICED_FRAMES = 10
-# Frames per autocorrelation batch, which bounds memory on a long track.
-_BATCH = 4096
+# A peak within this share of the best (window-corrected) peak at a shorter lag wins, which
+# keeps a subharmonic from halving F0.
+PEAK_SHARE = 0.8
+# Frames per batch (about 5 MB of float64 frames at 16 kHz), which bounds memory on a long track.
+_BATCH = 1024
 
 
 @dataclass(frozen=True)
@@ -103,21 +114,38 @@ def pcm_float(seg: np.ndarray) -> np.ndarray:
     return seg.astype(np.float32) / float(np.iinfo(seg.dtype).max)
 
 
-def read_spans(vocals: Path, spans: Sequence[tuple[float, float]]) -> tuple[list[np.ndarray], int]:
-    """Each span's samples as mono float32, in input order (an empty array for a span outside
-    the file), read from a wav of any rate, width or channels."""
+def _mono(seg: np.ndarray) -> np.ndarray:
+    """Samples as mono float32: integer PCM scaled before any mixdown, channels averaged."""
+    if seg.dtype.kind in "iu":
+        seg = pcm_float(seg)
+    if seg.ndim > 1:
+        seg = seg.mean(axis=1)
+    return seg.astype(np.float32)
+
+
+def _open(vocals: Path) -> tuple[int, np.ndarray]:
     from scipy.io import wavfile
 
     rate, data = wavfile.read(vocals, mmap=True)
-    pieces: list[np.ndarray] = []
-    for start, end in spans:
-        seg = np.asarray(data[max(0, int(start * rate)) : max(0, int(end * rate))])
-        if seg.dtype.kind in "iu":  # scale integer PCM before any mixdown
-            seg = pcm_float(seg)
-        if seg.ndim > 1:
-            seg = seg.mean(axis=1)
-        pieces.append(seg.astype(np.float32))
-    return pieces, int(rate)
+    return int(rate), data
+
+
+def _bounds(data: np.ndarray, rate: int, span: tuple[float, float]) -> tuple[int, int]:
+    """Sample offsets of a span, clipped to the file; empty when reversed or outside it."""
+    a = max(0, int(span[0] * rate))
+    b = min(len(data), max(0, int(span[1] * rate)))
+    return a, max(a, b)
+
+
+def read_spans(vocals: Path, spans: Sequence[tuple[float, float]]) -> tuple[list[np.ndarray], int]:
+    """Each span's samples as mono float32, in input order (an empty array for a span outside
+    the file), read from a wav of any rate, width or channels."""
+    rate, data = _open(vocals)
+    pieces = []
+    for span in spans:
+        a, b = _bounds(data, rate, span)
+        pieces.append(_mono(np.asarray(data[a:b])))
+    return pieces, rate
 
 
 def frames(x: np.ndarray, rate: int) -> np.ndarray:
@@ -129,40 +157,78 @@ def frames(x: np.ndarray, rate: int) -> np.ndarray:
     return x[idx]
 
 
+def _frame_count(length: int, rate: int) -> int:
+    n, hop = int(FRAME_S * rate), int(HOP_S * rate)
+    return 0 if length < n else 1 + (length - n) // hop
+
+
+def _batches(data: np.ndarray, rate: int, a: int, b: int):
+    """The frames of samples ``a`` to ``b`` as mean-removed float64 rows, ``_BATCH`` frames at
+    a time, read from the (memory-mapped) file one batch at a time."""
+    n, hop = int(FRAME_S * rate), int(HOP_S * rate)
+    count = _frame_count(b - a, rate)
+    for i in range(0, count, _BATCH):
+        j = min(count, i + _BATCH)
+        seg = _mono(np.asarray(data[a + i * hop : a + (j - 1) * hop + n]))
+        fr = frames(seg, rate).astype(np.float64)
+        fr -= fr.mean(axis=1, keepdims=True)
+        yield fr
+
+
+WINDOW_FLOOR = 1e-3
+
+
+def _window_ac(n: int) -> np.ndarray:
+    """The Hann window's own normalized autocorrelation, which a windowed frame's ACF is
+    divided by so a long lag (a low voice's period) is not penalized for the window's taper."""
+    w = np.hanning(n)
+    wa = np.fft.irfft(np.abs(np.fft.rfft(w, 2 * n)) ** 2)[:n]
+    return np.maximum(wa / wa[0], WINDOW_FLOOR)
+
+
 def _frame_f0(fr: np.ndarray, rate: int) -> np.ndarray:
     """F0 in Hz per (mean-removed, float64) frame, NaN where unvoiced."""
     n = fr.shape[1]
     spec = np.fft.rfft(fr * np.hanning(n), 2 * n, axis=1)
     ac = np.fft.irfft(np.abs(spec) ** 2, axis=1)[:, :n]
     ac /= np.maximum(ac[:, :1], 1e-12)
+    ac /= _window_ac(n)[None, :]
     lo, hi = max(1, int(rate / F0_MAX)), min(n - 2, int(rate / F0_MIN))
     window = ac[:, lo : hi + 1]
     # only local maxima count, so a slope still falling from lag 0 is never a period
     peak = (window >= ac[:, lo - 1 : hi]) & (window >= ac[:, lo + 1 : hi + 2])
     window = np.where(peak, window, -np.inf)
     best = window.max(axis=1)
-    lag = lo + np.argmax(window >= 0.9 * best[:, None], axis=1)
+    lag = lo + np.argmax(window >= PEAK_SHARE * best[:, None], axis=1)
     return np.where(best >= VOICED_PEAK, rate / lag, np.nan)
 
 
 def f0_track(vocals: Path, spans: Sequence[tuple[float, float]]) -> F0Track:
-    """The F0 track of ``spans`` (in input order) of ``vocals``."""
+    """The F0 track of ``spans`` (in input order) of ``vocals``. Two passes over the frames,
+    ``_BATCH`` at a time: the first measures each frame's RMS for the loudness threshold, the
+    second runs the autocorrelation on the frames above it, so a whole-episode span never
+    holds more than one batch of frames."""
     if not spans:
         return F0Track(np.empty(0), np.empty(0, np.int64), 0.0, np.empty(0))
-    pieces, rate = read_spans(vocals, spans)
-    span_seconds = np.array([len(p) / rate for p in pieces], np.float64)
-    per = [frames(p, rate) for p in pieces]
-    index = np.concatenate([np.full(len(f), i, np.int64) for i, f in enumerate(per)])
+    rate, data = _open(vocals)
+    bounds = [_bounds(data, rate, span) for span in spans]
+    span_seconds = np.array([(b - a) / rate for a, b in bounds], np.float64)
+    counts = [_frame_count(b - a, rate) for a, b in bounds]
+    index = np.concatenate([np.full(c, i, np.int64) for i, c in enumerate(counts)])
     f0 = np.full(len(index), np.nan)
     if len(index):
-        fr = np.concatenate(per).astype(np.float64)
-        fr -= fr.mean(axis=1, keepdims=True)
-        rms = np.sqrt((fr**2).mean(axis=1))
+        rms = np.concatenate(
+            [np.sqrt((fr**2).mean(axis=1)) for a, b in bounds for fr in _batches(data, rate, a, b)]
+        )
         loud = float(np.quantile(rms, 0.9))
-        keep = np.flatnonzero(rms > max(1e-4, QUIET * loud)) if loud > 0 else np.empty(0, int)
-        for at in range(0, len(keep), _BATCH):
-            rows = keep[at : at + _BATCH]
-            f0[rows] = _frame_f0(fr[rows], rate)
+        floor = max(1e-4, QUIET * loud) if loud > 0 else math.inf
+        at = 0
+        for a, b in bounds:
+            for fr in _batches(data, rate, a, b):
+                rows = np.flatnonzero(rms[at : at + len(fr)] > floor)
+                if len(rows):
+                    f0[at + rows] = _frame_f0(fr[rows], rate)
+                at += len(fr)
     return F0Track(f0, index, float(span_seconds.sum()), span_seconds)
 
 
@@ -285,7 +351,7 @@ def cached_track(root: Path, vocals: Path, spans: Sequence[tuple[float, float]])
     try:
         with np.load(path) as z:
             return F0Track(z["f0"], z["span_index"], float(z["seconds"]), z["span_seconds"])
-    except (OSError, KeyError, ValueError):
+    except (OSError, EOFError, KeyError, ValueError, zipfile.BadZipFile):
         pass
     track = f0_track(vocals, spans)
     path.parent.mkdir(parents=True, exist_ok=True)
