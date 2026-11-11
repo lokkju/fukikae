@@ -49,16 +49,15 @@ It never falls back to a stock voice or another character's card.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fukikae.cards.select import (
-    FEMALE_ABOVE,
     FLOOR_CLIPS,
     FOREIGN_MAX,
-    MALE_BELOW,
     floor_shortfall,
     gender_of,
     meets_floor,
@@ -67,6 +66,7 @@ from fukikae.cards.select import (
 )
 from fukikae.cards.stock import check_stock_voice, pick_stock, revision, stock_card
 from fukikae.cards.store import CardStore
+from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW
 from fukikae.registry.store import AUTOMATIC_BY, ProtectedAssignmentError, replace_refusal
 
 if TYPE_CHECKING:
@@ -78,6 +78,8 @@ if TYPE_CHECKING:
     from fukikae.names.models import NamesResult
     from fukikae.registry.store import Registry
     from fukikae.workspace import Workspace
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "AUTOMATIC_BY",
@@ -267,9 +269,19 @@ def tts_backend(cfg: Config) -> str:
     return name
 
 
+MEDIAN_WARNING = (
+    "[tts.gender] now reads the median F0, not the 20th percentile; "
+    "check male_below and female_above"
+)
+_MEDIAN_WARNED: set[tuple[tuple[str, object], ...]] = set()
+
+
 def gender_thresholds(cfg: Config) -> tuple[float, float]:
     """(male_below, female_above) in Hz from ``[tts] gender``, the workspace's over the
-    profile's; F0 between them is an unknown gender."""
+    profile's, else ``fukikae.pitch``'s ``MALE_BELOW`` and ``FEMALE_ABOVE`` (165 and 200 Hz,
+    calibrated on the median); F0 between them is an unknown gender. A workspace (not a
+    profile) that sets either key was tuned on the old 20th-percentile estimate, which gets a
+    warning once per run."""
     from fukikae.config import ConfigError
 
     g: dict = {}
@@ -286,6 +298,13 @@ def gender_thresholds(cfg: Config) -> tuple[float, float]:
             raise ConfigError(f"[tts] gender thresholds must be numbers (Hz), not {v!r}")
     if lo > hi:
         raise ConfigError(f"[tts] gender male_below ({lo}) is above female_above ({hi})")
+    ws = cfg.raw.get("tts")
+    ws_gender = ws.get("gender") if isinstance(ws, dict) else None
+    if isinstance(ws_gender, dict) and {"male_below", "female_above"} & set(ws_gender):
+        key = tuple(sorted(ws_gender.items()))
+        if key not in _MEDIAN_WARNED:
+            _MEDIAN_WARNED.add(key)
+            log.warning(MEDIAN_WARNING)
     return float(lo), float(hi)
 
 

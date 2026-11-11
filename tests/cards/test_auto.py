@@ -268,16 +268,53 @@ def test_gender_reads_the_median_not_the_low_end(tmp_path: Path):
 
 def test_gender_thresholds_come_from_config(vocals: Path):
     assert estimate_gender(vocals, [(6.0, 10.0)], female_above=300.0) == "u"
-    assert auto.gender_thresholds(CFG) == (165.0, 180.0)
     band = Config(raw={"tts": {"backend": "kokoro", "gender": {"female_above": 300.0}}})
     assert auto.gender_thresholds(band) == (165.0, 300.0)
 
 
-def test_anime_profile_has_a_wide_unknown_band():
+def test_default_bands_come_from_pitch():
+    from fukikae.cards import select
+    from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW
+
+    assert auto.gender_thresholds(CFG) == (MALE_BELOW, FEMALE_ABOVE) == (165.0, 200.0)
+    assert (select.MALE_BELOW, select.FEMALE_ABOVE) == (MALE_BELOW, FEMALE_ABOVE)
+
+
+def test_anime_profile_keeps_its_band_until_the_operator_decides():
+    """Task 2's calibration passed no band (docs/results/2026-11-11-gender-bands.md), so the
+    anime override stays until the operator rules on it."""
     from fukikae.config import load_profile
 
     g = load_profile("anime")["tts"]["gender"]
     assert g["male_below"] == 165.0 and g["female_above"] == 300.0
+
+
+@pytest.fixture
+def fresh_warning(monkeypatch):
+    monkeypatch.setattr(auto, "_MEDIAN_WARNED", set())
+
+
+@pytest.mark.usefixtures("fresh_warning")
+def test_workspace_gender_table_warns_about_the_median(caplog):
+    band = Config(raw={"tts": {"backend": "kokoro", "gender": {"female_above": 300.0}}})
+    with caplog.at_level("WARNING", logger="fukikae.cards.auto"):
+        auto.gender_thresholds(band)
+        auto.gender_thresholds(band)  # once per run
+    warned = [r for r in caplog.records if "median F0" in r.getMessage()]
+    assert len(warned) == 1
+    assert "[tts.gender] now reads the median F0, not the 20th percentile" in warned[0].getMessage()
+    assert "male_below and female_above" in warned[0].getMessage()
+
+
+@pytest.mark.usefixtures("fresh_warning")
+def test_profile_gender_table_does_not_warn(caplog):
+    band = Config(
+        raw={"tts": {"backend": "kokoro"}},
+        profile_raw={"tts": {"gender": {"male_below": 160.0, "female_above": 210.0}}},
+    )
+    with caplog.at_level("WARNING", logger="fukikae.cards.auto"):
+        assert auto.gender_thresholds(band) == (160.0, 210.0)
+    assert not [r for r in caplog.records if "median F0" in r.getMessage()]
 
 
 def test_ensure_assignments_uses_the_configured_band(tmp_path: Path, vocals: Path):

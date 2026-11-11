@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from fukikae.pitch import pcm_float
+from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW, pcm_float
 
 if TYPE_CHECKING:
     from fukikae.backends.base import Synthesizer
@@ -51,9 +51,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Defaults; a profile can widen the unknown band between them ([tts] gender, the anime one does).
-MALE_BELOW = 165.0
-FEMALE_ABOVE = 180.0
+# The bands are fukikae.pitch's (MALE_BELOW, FEMALE_ABOVE: 165 and 200 Hz on the median,
+# calibrated in docs/results/2026-11-11-gender-bands.md); [tts] gender overrides them.
+
 # Seconds of speech read per character by ``speaker_f0``; more doesn't move a median.
 MAX_SECONDS = 120.0
 
@@ -98,7 +98,7 @@ def estimate_gender(
     male_below: float = MALE_BELOW,
     female_above: float = FEMALE_ABOVE,
 ) -> Literal["f", "m", "u"]:
-    """``m`` under ``male_below`` (165 Hz) median F0, ``f`` over ``female_above`` (180 Hz),
+    """``m`` under ``male_below`` (165 Hz) median F0, ``f`` over ``female_above`` (200 Hz),
     else (or with too little voiced speech) ``u``."""
     return gender_of(speaker_f0(vocals, spans)[0], male_below, female_above)
 
