@@ -1,8 +1,8 @@
 # Identification workflow Part A: Sol Bianca S00E01 and the Fairy Tail names arm (Task 11)
 
-_Run 2026-11-11 on the GPU host (RTX 3090, index 0 under the GPU lock), branch feat/identification-part-a at 72021ee. Sol Bianca's "after" is a fresh copy of `~/fukikae-scratch/sol-bianca` at `~/fukikae-ws/t-ident/sb-final` (extract, separate, language, ASR and diarize hard-linked; registry, cards, caches and every later stage copied), run with `fukikae run <copy> S00E01`: asrclean, translate, tts, timefit and mix reran (characters and names were current). Fairy Tail is a fresh copy of the D27 names arm (`~/fukikae-ws/t-ident/ft-names-a1`, built with `scripts/names-eval/make_arm.sh`) at `ft-t11`, run with `fukikae run <copy> S01E12 --to tts`: asrclean, tag, translate and tts reran (names and characters were current). Scores are `fukikae eval gender` (A0 estimator, bands 165/200 Hz, lines under 0.4 s voiced are u) and `fukikae eval names`. Ledger rows (gender and names, tags `t11-*`) are in `2026-11-11-identification-part-a.jsonl`. Nothing was tuned on Sol Bianca or E14._
+_Run 2026-11-11 on the GPU host (RTX 3090, index 0 under the GPU lock), branch feat/identification-part-a at 72021ee. Sol Bianca's "after" is a fresh copy of `~/fukikae-scratch/sol-bianca` at `~/fukikae-ws/t-ident/sb-final` (extract, separate, language, ASR and diarize hard-linked; registry, cards, caches and every later stage copied), run with `fukikae run <copy> S00E01`: asrclean, translate, tts, timefit and mix reran (characters and names were current). Fairy Tail is a fresh copy of the D27 names arm (`~/fukikae-ws/t-ident/ft-names-a1`, built with `scripts/names-eval/make_arm.sh`) at `ft-t11`, run with `fukikae run <copy> S01E12 --to tts`: asrclean, tag, translate and tts reran (names and characters were current). Scores are `fukikae eval gender` (A0 estimator, bands 165/200 Hz, lines under 0.4 s voiced are u) and `fukikae eval names`. Ledger rows (gender and names, tags `t11-*`) are in `2026-11-11-identification-part-a.jsonl`; the two Sol Bianca gender rows were re-scored after the Task 10 review fixes (at ad946ce, reference purity by the pipeline's gate rule, read-only with `--pitch-cache` under `/tmp`; outputs in `~/fukikae-ws/t-ident/t11-eval/gaterule/`). Nothing was tuned on Sol Bianca or E14._
 
-**Verdict on the spec's Sol Bianca targets:** stock-voiced cues 51 to 0, extras disagreement 13 of 22 to 3 of 22, wrong-gender emotion prompts 23 to 0 and char 11 gone all pass. Strict mismatches stay at 25 against a target of 15 or fewer, a miss, and reference purity on chars 1, 2 and 10 is not 100% by the evaluation's 4-semitone measure while the pipeline flags none of them, a second miss. On Fairy Tail, cue accuracy and the names metric's reference purity don't move; gender mismatches on E12 rise from 10 to 13 (a third miss); E14's purity is 63.9% against D27's 73.9%, the drop the ledger already recorded at Task 3.
+**Verdict on the spec's Sol Bianca targets:** stock-voiced cues 51 to 0, extras disagreement 13 of 22 to 3 of 22, wrong-gender emotion prompts 23 to 0, char 11 gone and reference purity (27 of 27 references pass the pipeline's gates, from 19 of 27) all pass. Strict mismatches stay at 25 against a target of 15 or fewer, a miss. By the spec's 4-semitone distance, kept as a diagnostic, chars 1, 2, 7, 8 and 10 each still hold one clip outside it (22 of 27). On Fairy Tail, cue accuracy and the names metric's reference purity don't move; gender mismatches on E12 rise from 10 to 13 (a third miss); E14's purity is 63.9% against D27's 73.9%, the drop the ledger already recorded at Task 3.
 
 ## Sol Bianca: the measures
 
@@ -21,11 +21,12 @@ The "before" is the original v1 dub, scored by the same `eval gender` (so the nu
 | cues in song spans | 16 | 0 | |
 | asrclean drops | - | 3 segments (18 cues) | |
 | character 11 | 12 cues | gone | gone: met |
-| references passing purity | 17 of 27 | 22 of 27 | 100% on chars 1, 2, 3, 10 or flagged: **missed** |
+| references passing the pipeline's gates | 19 of 27 | 27 of 27 | 100% on chars 1, 2, 3, 10 or flagged: met |
+| references within 4 st of the majority (diagnostic) | 17 of 27 | 22 of 27 | |
 | render-vs-source cosine, clones | 0.33 (519 cues) | 0.34 (552 cues) | |
 | render-vs-source cosine, stock / former stock | 0.07 (51 cues) | 0.44 (39 cues) | reported, no target |
 
-The 18 dropped cues are asrclean's three segments: お疲れ様でした over the ending's first song (3564-3685 s) and two ご視聴ありがとうございました segments over the second (3775-3819 s). They took char 11's 12 cues and three each from chars 2 and 3.
+The 18 dropped cues are asrclean's three segments: お疲れ様でした over the ending's first song (3564-3685 s) and two ご視聴ありがとうございました segments over the second (3775-3819 s). They took char 11's 12 cues and three each from chars 2 and 3. The Task 10 review made the music branch require sung vocals (`pitch.is_sung`), so a stock phrase spoken over loud background music stays, flagged; a read-only re-check on this episode drops the same three: お疲れ様でした's first run (3564-3570 s) reads sung (jitter 0.32 st, median voiced run 0.40 s), its second (3677-3685 s) isn't sung but lies inside the theme span (3658-3740 s), and both ご視聴ありがとうございました segments lie inside the second theme span (3767-3820 s).
 
 ### Why strict mismatches didn't fall
 
@@ -71,18 +72,18 @@ The tts stage re-picked four cards for failing the reference gates (A1), all off
 | 7 | 180, 198, 293 | 198, 293, 226 | 2 off-register refused; needs a split |
 | 10 | 133, 209, 148 | 209, 318, 194 | 4 off-register refused; needs a split |
 
-Purity by the evaluation's measure (within 4 semitones of the speaker's majority median, voiced at least 50%, outside song-like audio):
+Purity, by the controller's ruling on Task 11, is the pipeline's own gate rule: each clip's origin span gets the verdict `cards.auto.reference_gates` gives (refused when its class crosses the speaker's register, the other band or between the bands under a register a full 4 st inside its band; no pitch gate for a near-even bimodal register; none for a clip inside the character's name-confirmed turns; refused under 35% voiced or as song). The spec's 4-semitone distance on the clip file stays beside it as a diagnostic:
 
-| char | majority (Hz) | passing before | passing after | failing after | pipeline flag after |
-|---|---|---|---|---|---|
-| 1 | 264 | 0/3 | 2/3 | 236 Hz clip read as song-like | none |
-| 2 | 408 | 1/3 | 2/3 | 289 Hz (6 st low) | none |
-| 3 | 420 | 2/2 | 2/2 | | none |
-| 7 | 274 | 1/3 | 2/3 | 198 Hz (5.6 st low) | none |
-| 8 | 92 | 2/3 | 2/3 | 116 Hz (4 st high) | none |
-| 10 | 233 | 1/3 | 2/3 | 318 Hz (5.4 st high) | none |
+| char | majority (Hz) | gates before | gates after | refused before | 4 st before | 4 st after | outside 4 st after |
+|---|---|---|---|---|---|---|---|
+| 1 | 264 | 0/3 | 3/3 | 179, 171, 170 Hz off-register | 0/3 | 2/3 | 236 Hz clip read as song-like |
+| 2 | 408 | 1/3 | 3/3 | 192, 198 Hz off-register | 1/3 | 2/3 | 289 Hz (6 st low) |
+| 3 | 420 | 2/2 | 2/2 | | 2/2 | 2/2 | |
+| 7 | 274 | 2/3 | 3/3 | 180 Hz off-register | 1/3 | 2/3 | 198 Hz (5.6 st low) |
+| 8 | 92 | 3/3 | 3/3 | | 2/3 | 2/3 | 116 Hz (4 st high) |
+| 10 | 233 | 1/3 | 3/3 | 133, 148 Hz off-register | 1/3 | 2/3 | 318 Hz (5.4 st high) |
 
-The gap is a definition gap, not a pipeline fault: the ruling at Task 3 made the register gate refuse cross-class candidates only (the other band, or between bands at full confidence), while the evaluation measures the spec's 4-semitone distance. A 289 Hz clip for a 408 Hz speaker is the same class and passes the pipeline. Char 1's failing clip is the reverse: the pipeline's song gate refused one song-like candidate and kept this one, which the evaluation's song check calls song-like. Both go to the ledger as a ruling for the controller (tighten the gate to the spec's distance, or report purity by the gate's own rule).
+Every clip the v1 cards held across the register now goes, and the v2 cards pass the gates whole, which is what the pipeline reports (no impure flag). The five clips outside 4 st are the same class as their speaker (a 289 Hz clip for a 408 Hz speaker), which the Task 3 ruling lets through on purpose, and char 1's 236 Hz clip is speech the song gate kept that the diagnostic's whole-clip song check calls song-like. Char 7's v1 clip that reads 198 Hz as a file passed the gates: they read its origin on the episode's vocals over the speaker's own turns, at 203 Hz, inside the female band. Among the extras, five of the 13 cluster-less thin clones (c0146, c0222, c0288, c0420, c0460) fail the voicing gate on their own spans; thin clones set the gates aside by design (A2), so the pipeline flags them as thin, not impure.
 
 Tiers after: all ten characters and SPEAKER_09 and SPEAKER_11 at the floor; SPEAKER_08 (4.7 s), SPEAKER_10 (7.2 s) and SPEAKER_00 (3.5 s) short; SPEAKER_01 thin (9.1 s from 10 turns); the 13 cluster-less lines thin, each from its own 0.3-1.3 s span. Seven of those spans are unvoiced or music by the voicing check (c0028, c0146, c0221, c0222, c0260, c0288, c0420, c0460 flag as impure), so their clones may be nobody's voice.
 
@@ -136,7 +137,7 @@ E12 cue gender (`eval gender`, the before being the arm's existing E12 renders):
 | stock-voiced cues | 5 | 0 |
 | emotion audio against a wrong-gender line | 20 | 0 |
 | gated lines | 0 | 17 |
-| references passing purity | 19 of 32 | 34 of 55 |
+| references within 4 st of the majority (the measure before the gate-rule ruling; not re-scored) | 19 of 32 | 34 of 55 |
 
 7 of the 13 after-mismatches are gated lines, and most of those are shouts the median reads in the other band, rendered correctly in the character's own voice: Laxus's "Roaring Thunder!" (383 Hz), Gray's "I do not!" (432 Hz), Wraith at 209 and 322 Hz, Natsu at 164 Hz. The metric counts a correct render of a shouted line as a mismatch, which is Natsu's pitch limit from the calibration (D44). The other six are Nebaru (character 1) five times, the same five as before on an unchanged card (a near-even bimodal cluster, no cross-class gate by the Task 4 ruling), and one Jellal line on his new card.
 
@@ -161,5 +162,5 @@ E13 was not rerun: before, it has 83 stock-voiced cues and 57 of 214 strict mism
 - **Char 3's insert song (#37).** Her first reference is still the 9.8 s English insert song from mid-episode. The song detector covers the head and the ending only, and the sung-ness gate doesn't catch this clip, so neither the pipeline nor the evaluation flags it.
 - **Identity.** Chars 7 and 10 need a split (the stage says so); chars 2 and 3 are probably one speaker split in two (centroid cosine 0.76); 13 lines have no cluster. Part A routes what it can and flags the rest; the studio (Part B) is where the operator splits, merges and names.
 - **Translation in Mandarin.** The translator returned Chinese for a block of about 30 cues (c0283-c0312, 34:25-36:10) in both dubs (21 cues in v1, 30 in v2), and IndexTTS2 speaks it. That is a translate-stage fault outside this plan.
-- **One bug found and fixed on the way.** With D41 the profiles set no `[tts] backend`, and `pause_caps` and `tts_engines` resolved the stage without one, so tts on any such workspace stopped after prepare with "no backend configured for 'tts'". Fixed in 72021ee (`stages.tts.stage_options`). `fukikae backends setup`'s option lookup (`cli._worker_setup_options`) has the same blind spot and returns no options for the clone backend; not fixed here.
-- **Character 11 stays in Sol Bianca's registry** with its retired stock card and no cues; `voices list` still says the next tts run re-picks it, which no run will do while it has no cues.
+- **One bug found and fixed on the way.** With D41 the profiles set no `[tts] backend`, and `pause_caps` and `tts_engines` resolved the stage without one, so tts on any such workspace stopped after prepare with "no backend configured for 'tts'". Fixed in 72021ee (`stages.tts.stage_options`). `fukikae backends setup`'s option lookup (`cli._worker_setup_options`) turned out not to share it: it reads through `stages.tts.backend_config`, whose `stage_settings` already routes `[tts]`'s options to `clone_backend`; a test now pins that.
+- **Character 11 stays in Sol Bianca's registry** with its retired stock card and no cues. `voices list` and `names show` now say it has no lines in any episode, so no tts run re-picks it, instead of promising a re-pick.
