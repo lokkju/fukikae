@@ -145,7 +145,7 @@ from fukikae.cards.auto import (
 from fukikae.cards.card import Card, CardError, validate_for_backend
 from fukikae.cards.stock import check_stock_voice
 from fukikae.cards.store import CardStore
-from fukikae.config import BackendConfig, Config, ConfigError
+from fukikae.config import TTS_BACKEND_WARNING, BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import (
@@ -516,7 +516,35 @@ def stage_settings(cfg: Config) -> tuple[BackendConfig, str | None]:
     options = {
         k: v for k, v in bc.options.items() if k not in STAGE_KEYS and not _is_backend_table(k, v)
     }
+    _warn_routed_options(cfg, bc.backend)
     return BackendConfig(bc.backend, options), device
+
+
+_ROUTED_WARNED: set[tuple[str, tuple[str, ...]]] = set()
+
+
+def _warn_routed_options(cfg: Config, backend: str) -> None:
+    """Say once per process (per backend and keys) that a workspace's own ``[tts]`` options,
+    set without ``[tts] backend``, now configure the clone backend (D41); with ``[tts]
+    backend`` set, the config's own warning has said it."""
+    table = cfg.raw.get("tts")
+    if not isinstance(table, dict) or "backend" in table:
+        return
+    keys = tuple(
+        sorted(k for k, v in table.items() if k not in STAGE_KEYS and not _is_backend_table(k, v))
+    )
+    if not keys or (backend, keys) in _ROUTED_WARNED:
+        return
+    _ROUTED_WARNED.add((backend, keys))
+    where = f"clone_backend {backend}" if backend else "no backend (none is set)"
+    log.warning(
+        "%s; [tts] %s, set without [tts] backend, now go%s to %s: move %s to [tts.<backend>]",
+        TTS_BACKEND_WARNING,
+        ", ".join(keys),
+        "es" if len(keys) == 1 else "",
+        where,
+        "it" if len(keys) == 1 else "them",
+    )
 
 
 def backend_table(cfg: Config, backend: str) -> dict[str, Any]:

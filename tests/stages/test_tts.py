@@ -958,7 +958,6 @@ def test_an_auto_fallback_card_builds_the_clone_source(ep, monkeypatch):
     _assign(ep, 2, _stock("af_heart"))
     seen: dict = {}
     monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
-    monkeypatch.setattr("fukikae.stages.tts.repick_blocker", lambda _cfg: None)
     monkeypatch.setattr(
         "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
     )
@@ -1868,3 +1867,26 @@ def test_an_uncached_clone_render_refuses_without_a_clone_backend(ep):
     TtsStage(CLONE_CFG).run(ep, CLONE_CFG)
     TtsStage(cfg).run(ep, cfg)
     assert _run(ep).renders == 0
+
+
+def test_tts_options_without_a_tts_backend_warn_once_that_they_reach_the_clone_backend(
+    monkeypatch, caplog
+):
+    """D41: with no [tts] backend, [tts]'s own options configure clone_backend: said once."""
+    from fukikae.config import TTS_BACKEND_WARNING
+
+    monkeypatch.setattr(tts, "_ROUTED_WARNED", set())
+    cfg = Config(raw={"tts": {"clone_backend": "fakeclone", "speed": 1.2, "device": "cpu"}})
+    with caplog.at_level("WARNING", logger="fukikae.stages.tts"):
+        assert tts.stage_settings(cfg)[0] == BackendConfig("fakeclone", {"speed": 1.2})
+        tts.stage_settings(cfg)
+    msgs = [r.getMessage() for r in caplog.records if TTS_BACKEND_WARNING in r.getMessage()]
+    assert len(msgs) == 1 and "[tts] speed" in msgs[0] and "fakeclone" in msgs[0]
+    caplog.clear()
+    for quiet in (
+        Config(raw={"tts": {"clone_backend": "fakeclone", "device": "cpu"}}),  # stage keys
+        Config(raw={"tts": {"backend": "fake", "speed": 1.2}}),  # the config warns for this
+    ):
+        with caplog.at_level("WARNING", logger="fukikae.stages.tts"):
+            tts.stage_settings(quiet)
+    assert not [r for r in caplog.records if TTS_BACKEND_WARNING in r.getMessage()]
