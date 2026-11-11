@@ -49,6 +49,7 @@ LOCK_ROOT = Path("/tmp")  # noqa: S108 - a fixed, per-user subdirectory, checked
 WORKER_MARK = "fukikae.backends.tts.worker"
 LLAMA_MARK = "fukikae-llama-key-"  # the per-run API key file llama_server passes
 POLL_S = 2.0
+WAIT_LOG_S = 60.0  # how often a waiter repeats "waiting for GPU N, held by ..."
 # The host card a containerised worker runs on (its own view is always device 0).
 GPU_INDEX_ENV = "FUKIKAE_GPU_INDEX"
 
@@ -237,6 +238,15 @@ def _holder(fd: int) -> tuple[int | None, str]:
     return (int(pid) if pid.isdigit() else None), what
 
 
+def _held_since(fd: int) -> float | None:
+    """When the holder took the lock: the file's mtime, since the holder writes its line
+    straight after the ``flock`` (a waiter's open changes nothing)."""
+    try:
+        return os.fstat(fd).st_mtime
+    except OSError:
+        return None
+
+
 def _listed(found: list[tuple[int, str]]) -> str:
     return ", ".join(f"pid {pid} ({cmd[:200]})" for pid, cmd in found)
 
@@ -259,12 +269,14 @@ def _open_lock(path: Path) -> int:
 
 
 def _acquire(index: int, what: str, timeout_s: float | None, poll_s: float) -> int:
+    from fukikae import progress
+
     path = lock_path(index)
     fd = _open_lock(path)
     locked = False  # whether fd holds the lock (and the file names us)
     try:
         started = time.monotonic()
-        logged = False
+        logged_at: float | None = None
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -282,24 +294,28 @@ def _acquire(index: int, what: str, timeout_s: float | None, poll_s: float) -> i
             except OSError as e:
                 if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
                     raise
-            pid, held_for = _holder(fd)
+            pid, held_what = _holder(fd)
             if pid is not None and not _alive(pid):
                 # the job that took it is gone and a child of it still holds the lock
                 found = leftover_jobs(index)
                 raise GpuBusy(
-                    f"GPU {index} is locked by what is left of pid {pid} ({held_for}), which "
+                    f"GPU {index} is locked by what is left of pid {pid} ({held_what}), which "
                     f"exited: {_listed(found) or 'a child of it still runs'}; stop it "
                     "(`kill <pid>`) and run again"
                 )
-            waited = time.monotonic() - started
-            holder = f"pid {pid} ({held_for})" if pid is not None else "another fukikae job"
+            now = time.monotonic()
+            waited = now - started
+            holder = f"pid {pid} ({held_what})" if pid is not None else "another fukikae job"
             if timeout_s is not None and waited >= timeout_s:
                 raise GpuBusy(
                     f"GPU {index} is held by {holder}; gave up after {waited:.0f} s (lock {path})"
                 )
-            if not logged:
-                log.warning("waiting for GPU %d: %s holds it", index, holder)
-                logged = True
+            since = _held_since(fd)
+            progress.gpu_waiting(index, pid, held_what, since)
+            if logged_at is None or now - logged_at >= WAIT_LOG_S:
+                held = f" for {progress.fmt_duration(time.time() - since)}" if since else ""
+                log.warning("waiting for GPU %d, held by %s%s", index, holder, held)
+                logged_at = now
             pause = poll_s if timeout_s is None else max(0.0, min(poll_s, timeout_s - waited))
             time.sleep(pause)
         found = leftover_jobs(index)
@@ -338,11 +354,18 @@ def gpu_lock(
         else:
             fd = -1
     if fd < 0:
+        from fukikae import progress
+
         # another thread of this process holding the card makes this flock wait, as another
         # process would: flock locks belong to the open file, and this is a new one
-        fd = _acquire(index, what, timeout_s, poll_s)
+        try:
+            fd = _acquire(index, what, timeout_s, poll_s)
+        except BaseException:
+            progress.gpu_released(index)  # no longer waiting
+            raise
         with _mutex:
             _held[key] = [fd, 1]
+        progress.gpu_held(index, what)
     try:
         yield fd
     finally:
@@ -353,9 +376,12 @@ def gpu_lock(
             if done:
                 del _held[key]
         if done:
+            from fukikae import progress
+
             with contextlib.suppress(OSError):
                 os.ftruncate(fd, 0)
             os.close(fd)
+            progress.gpu_released(index)
 
 
 def gpu_job(gpu_device: int, device: str, what: str) -> contextlib.AbstractContextManager[object]:

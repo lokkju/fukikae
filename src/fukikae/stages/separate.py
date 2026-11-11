@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from fukikae import media, runctx
+from fukikae import media, progress, runctx
 from fukikae.artifacts import atomic_path
 from fukikae.backends.base import Separator
 from fukikae.backends.identity import identity_key
@@ -77,6 +77,7 @@ class SeparateStage:
         scratch = out_dir / ".scratch"
         shutil.rmtree(scratch, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
+        progress.start(None, phase=bc.backend)
         try:
             backend.load()
             sep = cast(Separator, backend).separate(self.inputs(ep)[0], scratch)

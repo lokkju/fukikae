@@ -51,7 +51,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, cast
 
-from fukikae import media, runctx
+from fukikae import media, progress, runctx
 from fukikae.artifacts import read_json, write_json
 from fukikae.backends.base import Translator
 from fukikae.backends.identity import identity_key
@@ -708,8 +708,10 @@ class TranslateStage:
     ) -> None:
         previous: list[tuple[str, str]] = []
         in_a_row = 0
+        progress.start(len(todo), "cues", phase=None if mode == "translate" else mode)
         for window in windows(todo):
             self._render(backend, window, previous, styles, glossary, src, target, mode)
+            progress.advance(len(window))
             if all((c.error or "").startswith("translate: backend:") for c in window):
                 in_a_row += 1
                 if in_a_row >= MAX_BACKEND_FAILURES:

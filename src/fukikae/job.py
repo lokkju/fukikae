@@ -13,6 +13,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+from fukikae import progress
 from fukikae.artifacts import read_json, write_json
 from fukikae.config import Config
 from fukikae.workspace import Episode
@@ -194,7 +195,8 @@ def run_stages(
                 continue
             started = datetime.now(UTC)
             try:
-                stage.run(ep, cfg)
+                with progress.stage(ep.id, stage.name):
+                    stage.run(ep, cfg)
             except BaseException as e:
                 manifest.stages[stage.name] = StageRecord(
                     key=key,
@@ -268,10 +270,13 @@ def run_episodes(
 
     def run_tail(ep: Episode) -> None:
         try:
+            progress.episode(ep.id, "tail")
             results[ep.id].ran += run_stages(ep, cfg, rest, tail_from)
+            progress.episode(ep.id, "done")
         except BaseException as e:
             results[ep.id].error = e
             failed.set()
+            progress.episode(ep.id, "failed")
             log.error("%s: %s: %s", ep.id, type(e).__name__, e)
 
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="fukikae-tail") as pool:
@@ -281,14 +286,19 @@ def run_episodes(
                 break
             results[ep.id] = EpisodeResult()
             try:
+                progress.episode(ep.id, "head")
                 results[ep.id].ran += run_stages(ep, cfg, head, head_from) if head else []
             except BaseException as e:
                 results[ep.id].error = e
                 failed.set()
+                progress.episode(ep.id, "failed")
                 if not isinstance(e, Exception):
                     raise
                 break
-            if rest:
+            if not rest:
+                progress.episode(ep.id, "done")
+            else:
+                progress.episode(ep.id, "waiting for tail")
                 if pending is not None:
                     pending.result()  # one tail at a time
                 pending = pool.submit(run_tail, ep)

@@ -27,7 +27,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from fukikae import runctx
+from fukikae import progress, runctx
 from fukikae.artifacts import atomic_path, write_json
 from fukikae.backends.base import Diarizer, Embedder
 from fukikae.backends.identity import identity_key
@@ -119,6 +119,7 @@ class DiarizeStage:
         turns_path.parent.mkdir(parents=True, exist_ok=True)
 
         diarizer = create("diarize", diar_cfg, device)
+        progress.start(None, phase="diarize")
         self._gpu_wait(cfg, device, diarizer.vram_mb)
         try:
             diarizer.load()
@@ -146,6 +147,7 @@ class DiarizeStage:
         vectors = np.zeros((0, dim), dtype=np.float32)
         if flat:
             self._gpu_wait(cfg, device, embedder.vram_mb)
+            progress.start(None, phase=f"embed {len(flat)} spans")
             try:
                 embedder.load()
                 vectors = cast(Embedder, embedder).embed(audio, flat)

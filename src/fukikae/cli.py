@@ -148,6 +148,28 @@ def _setup_options(kind: str, name: str, workspace: Path | None) -> dict[str, ob
 
 
 @app.command()
+def status(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    as_json: bool = typer.Option(
+        False, "--json", help="Print the runs' files as {runs: [...]}, each with `live` added."
+    ),
+) -> None:
+    """Show what the runs in the workspace are doing: each live run's threads, episode, stage,
+    counts and ETA, the GPU lock and the last log line, then the most recent run that ended;
+    or that no run is in progress. Deletes the files of dead runs older than a day."""
+    import json
+
+    from fukikae import progress
+
+    runs = progress.read_runs(workspace, clean=True)
+    if as_json:
+        shown = [r | {"live": progress.is_live(r)} for r in progress.shown_runs(runs)]
+        typer.echo(json.dumps({"runs": shown}, indent=2))
+        return
+    typer.echo(progress.describe_runs(runs))
+
+
+@app.command()
 def doctor() -> None:
     """Check ffmpeg, the GPU, the Hugging Face token and installed backends."""
     from fukikae.doctor import doctor as checks
@@ -224,7 +246,7 @@ def run(
     no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
 ) -> None:
     """Run the pipeline stages for one episode, or several in order."""
-    from fukikae import job, runctx
+    from fukikae import job, progress, runctx
     from fukikae.errors import user_errors
     from fukikae.workspace import Workspace
 
@@ -234,10 +256,11 @@ def run(
     if len(episodes) > 1:
         try:
             eps = [ws.find_episode(e) for e in episodes]
-            results = job.run_episodes(
-                eps, ws.config, pipeline_stages(ws.config), tail=CPU_TAIL,
-                from_stage=from_stage, to_stage=to_stage,
-            )  # fmt: skip
+            with progress.run(ws.root, [ep.id for ep in eps]):
+                results = job.run_episodes(
+                    eps, ws.config, pipeline_stages(ws.config), tail=CPU_TAIL,
+                    from_stage=from_stage, to_stage=to_stage,
+                )  # fmt: skip
         except user_errors() as e:
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(1) from e
@@ -266,7 +289,13 @@ def run(
     try:
         ep = ws.find_episode(episodes[0])
         stages = pipeline_stages(ws.config)
-        ran = job.run_stages(ep, ws.config, stages, from_stage, to_stage)
+        with progress.run(ws.root, [ep.id]):
+            try:
+                ran = job.run_stages(ep, ws.config, stages, from_stage, to_stage)
+            except BaseException:
+                progress.episode(ep.id, "failed")
+                raise
+            progress.episode(ep.id, "done")
     except user_errors() as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e

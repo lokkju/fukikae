@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from fukikae import runctx
+from fukikae import progress, runctx
 from fukikae.artifacts import read_json, write_json
 from fukikae.backends.base import Aligner, Transcriber
 from fukikae.backends.identity import identity_key
@@ -110,6 +110,7 @@ class AsrStage:
 
         asr = create("asr", self._asr_cfg(cfg, lang), device)
         self._gpu_wait(cfg, device, asr.vram_mb)
+        progress.start(None, phase="transcribe")
         try:
             asr.load()
             transcript = cast(Transcriber, asr).transcribe(audio, lang)
@@ -135,6 +136,7 @@ class AsrStage:
             )
             aligner = create("align", base, device)
         self._gpu_wait(cfg, device, aligner.vram_mb)
+        progress.start(None, phase="align")
         try:
             aligner.load()
             return cast(Aligner, aligner).align(audio, transcript)

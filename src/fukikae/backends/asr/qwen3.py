@@ -11,11 +11,13 @@ from __future__ import annotations
 import gc
 import wave
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import numpy as np
 
+from fukikae import progress
 from fukikae.models import Segment, Transcript
 
 # Qwen's language names (the model card's 30) -> fukikae's ISO 639-1 codes.
@@ -180,7 +182,11 @@ class Qwen3AsrTranscriber:
         return self._model
 
     def _run(
-        self, samples: np.ndarray, chunks: list[tuple[float, float]], language: str | None
+        self,
+        samples: np.ndarray,
+        chunks: list[tuple[float, float]],
+        language: str | None,
+        on_batch: Callable[[int], None] | None = None,
     ) -> list[Any]:
         model = self._require()
         audio = [
@@ -191,6 +197,8 @@ class Qwen3AsrTranscriber:
         for i in range(0, len(audio), self.batch_size):
             part = audio[i : i + self.batch_size]
             results.extend(model.transcribe(audio=part, language=[language] * len(part)))
+            if on_batch is not None:
+                on_batch(len(part))
         return results
 
     def detect_language(self, audio: Path) -> tuple[str, float]:
@@ -212,7 +220,10 @@ class Qwen3AsrTranscriber:
         self._require()
         samples = read_wav16k(audio)
         chunks = plan_chunks(samples, max_s=self.max_chunk_s)
-        results = self._run(samples, chunks, code_to_name(language) if language else None)
+        progress.start(len(chunks), "chunks", phase="transcribe")
+        results = self._run(
+            samples, chunks, code_to_name(language) if language else None, progress.advance
+        )
         segments: list[Segment] = []
         votes: Counter[str] = Counter()
         for (a, b), r in zip(chunks, results, strict=True):

@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
+from fukikae import progress
 from fukikae.backends.embed._common import cut, free_gpu, read_wav16k
 from fukikae.backends.tag.sensevoice import MIN_TURN_S, split_turn
 from fukikae.models import Tags, TagSpan, Turn
@@ -94,7 +95,9 @@ class Emotion2vecTagger:
             raise RuntimeError("Emotion2vecTagger.tag called before load()")
         wav = read_wav16k(audio)
         emotions: list[TagSpan] = []
+        progress.start(len(turns), "turns", phase=self.name)
         for turn in sorted(turns, key=lambda t: (t.start, t.end)):
+            progress.advance()
             for a, b in split_turn(turn):
                 if b - a < MIN_TURN_S:
                     continue
