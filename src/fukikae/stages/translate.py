@@ -289,19 +289,34 @@ class TranslateStage:
 
     @staticmethod
     def _rates(ep: Episode, cfg: Config, cards: dict[int, str]) -> dict[str, Any]:
-        """The speech rates budgets use (C4): ``extras`` (the ``[tts]`` backend),
-        ``unassigned`` (``unassigned_cps``) and per character the backend of its assigned card
-        (a card that can't be read counts as unassigned; tts reports it). Only rates that
-        differ from ``unassigned`` are listed, so a card whose voice speaks at the same rate
-        (the clone tts assigns by default) never re-translates."""
+        """The speech rates budgets use (C4): ``extras`` (``speech_cps``: the ``[tts]``
+        backend a workspace still names, else the clone backend), ``unassigned``
+        (``unassigned_cps``) and per character the backend of its assigned card. A card that
+        can't be read counts as unassigned (tts reports it), and so does an automatic, unlocked
+        stock card (``replace_refusal(a, "auto")`` is None), since the next tts run re-picks it
+        as a clone (D41): the character is budgeted for that clone now, and translate reruns
+        once, not again after the re-pick. Only rates that differ from ``unassigned`` are
+        listed, so a card whose voice speaks at the same rate (the clone tts assigns by
+        default) never re-translates."""
+        from fukikae.cards.auto import replace_refusal
+
         store = CardStore(ep.workspace_root)
         unassigned = unassigned_cps(cfg)
         per: dict[str, float] = {}
+        path = Workspace(ep.workspace_root).registry_path
+        rows = {}
+        if cards and path.exists():
+            with Registry(path) as reg:
+                rows = {cid: reg.card_for(cid, cfg.target_language) for cid in cards}
         for cid, card in sorted(cards.items()):
             try:
-                backend = store.get(card).voice.backend
+                voice = store.get(card).voice
             except CardError:
                 continue
+            a = rows.get(cid)
+            if voice.source == "stock" and a is not None and replace_refusal(a, "auto") is None:
+                continue  # re-picked as a clone by the next tts run (D41)
+            backend = voice.backend
             cps = backend_cps(backend, cfg.target_language)
             if cps != unassigned:
                 per[str(cid)] = cps

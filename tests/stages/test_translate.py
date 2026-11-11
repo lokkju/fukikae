@@ -894,3 +894,19 @@ def test_same_track_file_and_track_branches(tmp_path):
     assert _same_track({"how": "target"}, None, None)
     assert not _same_track({"how": "other-language"}, f, None)
     assert not _same_track(None, f, None)
+
+
+def test_an_automatic_stock_card_budgets_as_unassigned(ep):
+    """D41: tts re-picks an automatic, unlocked stock card as a clone, so translate budgets
+    its character as unassigned already and reruns once, not twice; a stock card someone
+    assigned or locked stays and keeps its backend's rate."""
+    stage = TranslateStage()
+    before = stage.config_key(CFG, ep)["cps"]
+    text = CARD.replace('backend = "fake"', 'backend = "kokoro"').format(voice="am_adam")
+    card = CardStore(ep.workspace_root).put(parse_card(text))
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.assign_card(1, "en", card, "auto", False)
+    assert stage.config_key(CFG, ep)["cps"] == before
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.lock_card(1, "en", True)
+    assert "1" in stage.config_key(CFG, ep)["cps"]["characters"]
