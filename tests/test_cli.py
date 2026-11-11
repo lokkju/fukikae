@@ -273,3 +273,26 @@ def test_run_reports_every_episode_before_raising_a_bug(tmp_path, monkeypatch):
     assert "S01E02: ran extract" in r.output
     assert "error: S01E03: bad input" in r.output
     assert r.exit_code != 0
+
+
+@pytest.mark.parametrize("profile", ["anime", "default"])
+def test_backends_setup_options_reach_the_clone_backend_without_a_tts_backend(tmp_path, profile):
+    """D41 profiles name only [tts] clone_backend: `backends setup` must still hand that
+    backend [tts]'s own options and its [tts.<backend>] table (the blind spot Task 11 fixed
+    in stages.tts.stage_options)."""
+    from fukikae.cli import _worker_setup_options
+    from fukikae.config import load_config
+    from fukikae.stages.tts import clone_backend
+
+    (tmp_path / "fukikae.toml").write_text(
+        f'profile = "{profile}"\nsource_language = "ja"\ntarget_language = "en"\n'
+        '[tts]\nclone_backend = "indextts2"\nmax_pause_ms = 300\nuse_fp16 = true\n'
+        "[tts.indextts2]\nnum_beams = 2\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path, None)
+    assert "backend" not in (cfg.raw.get("tts") or {}) and clone_backend(cfg) == "indextts2"
+    options = _worker_setup_options("indextts2", tmp_path)
+    assert options["use_fp16"] is True and options["num_beams"] == 2
+    assert "max_pause_ms" not in options and "clone_backend" not in options  # stage keys
+    assert _worker_setup_options("cosyvoice3", tmp_path) == {}  # [tts] names another backend
