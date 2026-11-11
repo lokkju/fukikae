@@ -1100,9 +1100,11 @@ def clone_card(
 ) -> Card:
     """A clone card of ``backend`` from the picks: each cut to a 24 kHz mono wav sidecar,
     with its transcript and ``origin = {episode, start, end}``; ``seed = 1234``, the default
-    ``emotion_strength`` (0.8), the backend's ``model_revision``. A ``thin`` tier is recorded
-    in ``[meta] reference_tier`` (outside the card id), which the thin flags read. Not put in
-    the store."""
+    ``emotion_strength`` (0.8), the backend's ``model_revision``. The tier is always recorded
+    in ``[meta] reference_tier`` (outside the card id; the thin flags read it), so a re-put of
+    the same id replaces the stored tier (``CardStore.put`` keeps stored ``[meta]`` only for a
+    card with none). With no ``tier``, the picks' own: ``floor`` when they reach the D32 floor,
+    ``short`` from `CLONE_MIN_S`, else ``thin``. Not put in the store."""
     from fukikae.cards.card import Card, Reference, Voice
 
     refs: list[Reference] = []
@@ -1119,8 +1121,10 @@ def clone_card(
             )
     labels = sorted({p.emotion for p in picks if p.emotion})
     meta: dict[str, Any] = {"reference_emotions": labels} if labels else {}
-    if tier == "thin":
-        meta["reference_tier"] = "thin"
+    if tier is None:
+        seconds = sum(p.seconds for p in picks)
+        tier = "floor" if meets_floor(picks) else "short" if seconds >= CLONE_MIN_S else "thin"
+    meta["reference_tier"] = tier
     return Card(
         target_language=target_language,
         voice=Voice(

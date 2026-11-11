@@ -1089,3 +1089,30 @@ def test_thin_picks_carry_their_transcript(tmp_path):
     turns, tr, vocals = _gate_case(tmp_path, [(10, 12, 240.0, 0.01)])
     _, (pick,) = tiered_references(turns, "A", tr, None, vocals, register=("f", 240.0))
     assert pick.transcript == "line at 10"
+
+
+def test_clone_card_always_records_its_tier(tmp_path):
+    """Review fix 3: every clone card names its tier, so a re-put of the same id (a thin card
+    whose picks now pass the gates) replaces the stored tier instead of keeping it."""
+    from fukikae.cards.auto import is_thin
+
+    turns = [Turn(start=10, end=15, speaker="A"), Turn(start=20, end=26, speaker="A")]
+    vocals = _vocals(tmp_path / "v.wav", [(10, 15, 0.01), (20, 26, 0.01)])
+    picks = select_references(turns, "A", _transcript(turns), None, vocals)
+    assert picks is not None
+    store = CardStore(tmp_path / "ws")
+    thin = clone_card(CloneSynth, picks, store, vocals, "ja", "en", "S01E11", "thin")
+    cid = store.put(thin)
+    assert is_thin(store.get(cid))
+    gated = clone_card(CloneSynth, picks, store, vocals, "ja", "en", "S01E11", "floor")
+    assert store.put(gated) == cid
+    assert store.get(cid).meta["reference_tier"] == "floor" and not is_thin(store.get(cid))
+    for tier in ("short", "thin"):
+        again = clone_card(CloneSynth, picks, store, vocals, "ja", "en", "S01E11", tier)
+        store.put(again)
+        assert store.get(cid).meta["reference_tier"] == tier
+    # with no tier given, the picks' own: 11 s in 2 clips reach the floor
+    plain = clone_card(CloneSynth, picks, store, vocals, "ja", "en", "S01E11")
+    assert plain.meta["reference_tier"] == "floor"
+    short = clone_card(CloneSynth, picks[:1], store, vocals, "ja", "en", "S01E11")
+    assert short.meta["reference_tier"] == "short"

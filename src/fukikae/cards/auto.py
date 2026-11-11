@@ -14,7 +14,8 @@ speech. Every speaker gets a clone of its own speech (A2, D41: never a stock voi
 clone can be made), in one of three tiers (``select.tiered_references``): ``floor`` (the D32
 floor), ``short`` (at least ``select.CLONE_MIN_S``, 3 s, of gated picks; flagged below the
 floor) and ``thin`` (the character's longest turns up to 15 s with the gates set aside,
-`character_thin`; flagged by `thin_lines` and marked ``[meta] reference_tier = "thin"``).
+`character_thin`; flagged by `thin_lines`). Every clone card names its tier in
+``[meta] reference_tier``.
 Both tiers are searched at `PRE_FLOOR_S` (6 s) first, so a character that had that much
 speech keeps the picks it had. An extras cluster gets an episode-local clone from its own
 turns, and each cluster-less (``unknown``) line one from its own span (`extras_cards`); they

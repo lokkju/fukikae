@@ -2153,3 +2153,20 @@ def test_extras_label_keys_cluster_less_lines_by_cue():
     assert extras_label(_extra_cue("c0007", 1.0, 2.0, "S9")) == "S9"
     assert extras_label(_extra_cue("c0007", 1.0, 2.0, "unknown")) == "unknown~c0007"
     assert extras_label(_extra_cue("c0008", 1.0, 2.0, None)) == "unknown~c0008"
+
+
+def test_extras_cards_record_their_tier(tmp_path: Path):
+    """Review fix 3: an extras card names its tier like a character's, a thin one too."""
+    from fukikae.cards.auto import extras_cards
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    cues = [
+        _extra_cue("c0101", 60.0, 65.0, "S9"),
+        _extra_cue("c0102", 70.0, 76.0, "S9"),
+        _extra_cue("c0103", 20.0, 22.0, None),
+    ]
+    cards, _ = extras_cards(_extras_ep(ws, cues), cues, CFG, store, _clone_source())
+    assert store.get(cards["S9"]).meta["reference_tier"] == "floor"
+    assert store.get(cards["unknown~c0103"]).meta["reference_tier"] == "thin"
+    reg.close()
