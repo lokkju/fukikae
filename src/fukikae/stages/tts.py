@@ -1206,7 +1206,14 @@ class TtsStage:
         rates = SpeechRates()
         rendered = 0
         fresh: set[str] = set()
-        progress.start(sum(len(v) for v in jobs.values()), "cues")
+        # Progress counts the cues that need a render (#29): a cue whose first render is in
+        # the cache takes no synth call, and counting it would make the rate and ETA (and the
+        # next run's ETA from history) far too fast. The cache check is the first render's
+        # key at the card's own rate, so a cue first rendered faster still counts as needed
+        # until it turns out cached; only renders advance the count.
+        n_cues = sum(len(v) for v in jobs.values())
+        to_render = sum(not (cache / f"{j.key}.wav").exists() for v in jobs.values() for j in v)
+        progress.start(to_render, "cues", cached=n_cues - to_render)
         for backend in sorted(jobs):
             cls = jobs[backend][0].cls
             lazy = LazySynth(backend_config(cfg, backend), synth_device(cfg, cls), cfg)
@@ -1218,8 +1225,8 @@ class TtsStage:
                     rendered += calls
                     if calls:
                         fresh.add(job.cue.id)
+                        progress.advance()
                     self._link(cache / f"{key}.wav", out_dir / f"{job.cue.id}.wav")
-                    progress.advance()
                     done[job.cue.id] = TtsPlanCue(
                         cue_id=job.cue.id,
                         character_id=job.cue.character_id,
@@ -1239,6 +1246,8 @@ class TtsStage:
                     )
             finally:
                 lazy.close()
+        if len(fresh) * 2 < n_cues:
+            progress.skip_history()  # mostly cached: not this stage's usual time
 
         plan: list[TtsPlanCue] = []
         for c in cues:

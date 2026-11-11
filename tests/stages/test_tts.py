@@ -1316,3 +1316,33 @@ def test_reports_each_cue_to_the_run_progress(ep):
     history = json.loads((ep.workspace_root / ".fukikae" / "stage-history.json").read_text())
     assert history["tts"][-1]["total"] == 6 and history["tts"][-1]["episode"] == ep.id
     assert progress.read_status(ep.workspace_root)["state"] == "finished"  # type: ignore[index]
+
+
+def test_progress_counts_only_cues_that_need_a_render(ep, caplog):
+    """#29 review: a rerun whose cues are all in the cache counts none of them (they take no
+    synth call, so a rate over them is meaningless), says how many were cached, and leaves the
+    ETA history alone."""
+    import io
+    import json
+    import logging
+
+    from fukikae import job, progress
+
+    _two_cards(ep)
+    caplog.set_level(logging.INFO, logger="fukikae")
+    starts: list[tuple[float | None, int]] = []
+    real = progress.Reporter.start
+
+    def spy(self, total, unit, phase, cached=0):
+        real(self, total, unit, phase, cached)
+        starts.append((total, cached))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(progress.Reporter, "start", spy)
+        for _ in range(2):
+            with progress.run(ep.workspace_root, [ep.id], stream=io.StringIO(), tty=False):
+                assert job.run_stages(ep, CFG, [TtsStage(CFG)], from_stage="tts") == ["tts"]
+    assert starts == [(6, 0), (0, 6)]
+    assert any(m.endswith(": 6 cues cached") for m in caplog.messages)
+    history = json.loads((ep.workspace_root / ".fukikae" / "stage-history.json").read_text())
+    assert len(history["tts"]) == 1 and history["tts"][0]["total"] == 6
