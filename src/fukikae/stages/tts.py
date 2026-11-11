@@ -1304,6 +1304,7 @@ class TtsStage:
                         "tier": e.tier,
                         "seconds": e.seconds,
                         "clips": len(e.clips),
+                        **({"issue": e.issue} if e.issue else {}),
                     }
                     for label, e in sorted(extras.items())
                 },  # fmt: skip

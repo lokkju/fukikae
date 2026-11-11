@@ -1531,3 +1531,47 @@ def test_a_character_with_no_turn_of_its_own_never_stops_a_batch(ep):
     flags = _run(e2).flags
     assert any(f"character {stranger}: card {cur.card_id} is a thin-reference" in f
                and "no turn of its own" in f for f in flags), flags  # fmt: skip
+
+
+def test_extras_cards_are_made_once_per_run(ep, monkeypatch):
+    """Review fix 6: the key and the run share one extras computation (clips are cut once)."""
+    from fukikae.cards import select
+
+    _two_cards(ep)
+    _with_extras_turns(ep)
+    cut: list[str] = []
+    real = select.clone_card
+
+    def counting(backend, picks, *a, **k):
+        cut.append(backend.name)
+        return real(backend, picks, *a, **k)
+
+    monkeypatch.setattr(select, "clone_card", counting)
+    stage = TtsStage(CLONE_CFG)
+    stage.prepare(ep, CLONE_CFG)
+    stage.config_key(CLONE_CFG, ep)
+    stage.run(ep, CLONE_CFG)
+    assert len(cut) == 2  # S5 and S9, once each
+
+
+def test_the_extras_key_follows_the_vocals(ep):
+    """Review fix 6: new vocals under the same turns cut other clips, so other extras cards."""
+    _two_cards(ep)
+    _with_extras_turns(ep)
+    stage = TtsStage(CLONE_CFG)
+    before = stage.config_key(CLONE_CFG, ep)["extras"]
+    tone_wav(ep.work / "01-separate" / "vocals.wav", 30.0, 16000, amp=0.2)
+    after = stage.config_key(CLONE_CFG, ep)["extras"]
+    assert set(after) == set(before) and all(after[k] != before[k] for k in before)
+
+
+def test_an_unknown_line_over_silence_is_cloned_and_flagged(ep):
+    """Review fix 6: an unknown line whose span is silence (or music) is still cloned from
+    itself (D41) and surfaced in run.json."""
+    _two_cards(ep)
+    cues = [*CUES, _cue(9, None, "who one", extra="unknown")]
+    _write_cues(ep, cues)
+    TtsStage(CLONE_CFG).run(ep, CLONE_CFG)
+    run = _run(ep)
+    assert run.extras["unknown~c0009"]["issue"] == "silence"
+    assert any("unknown line c0009 (27.00-29.00) is silence" in f for f in run.flags), run.flags

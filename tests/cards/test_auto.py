@@ -2310,3 +2310,20 @@ def _speaker_cue(cid: str, start: float, end: float, character: int, text: str =
         speaker=f"char{character}",
         source_text="セリフ", text=text, budget=20, delivery=Delivery(reference=(start, end)),
     )  # fmt: skip
+
+
+def test_span_issues_name_silence_music_and_unvoiced_spans(tmp_path: Path):
+    """Review fix 6: a cluster-less line's span is checked before its own clone is made."""
+    from fukikae.cards.auto import span_issues
+
+    rng = np.random.default_rng(0)
+    x = np.concatenate([
+        harmonic(140, 3), np.zeros(3 * RATE, np.float32),
+        (rng.standard_normal(3 * RATE) * 0.2).astype(np.float32), harmonic(150, 3),
+    ])  # fmt: skip
+    path = write_wav(tmp_path / "v.wav", x)
+    mask = np.zeros(12, dtype=bool)
+    mask[9:12] = True
+    spans = [(0.0, 3.0), (3.0, 6.0), (6.0, 9.0), (9.0, 12.0)]
+    assert span_issues(path, spans, mask, []) == [None, "silence", "unvoiced", "music"]
+    assert span_issues(path, spans[3:], None, [(8.0, 12.0)]) == ["music"]

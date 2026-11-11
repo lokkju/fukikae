@@ -933,11 +933,14 @@ def extras_label(cue: DubCue) -> str:
 
 @dataclass(frozen=True)
 class ExtraCard:
-    """An extras label's episode-local clone card (A2): its id, tier and reference clips."""
+    """An extras label's episode-local clone card (A2): its id, tier and reference clips, and
+    for a cluster-less line whose span is no speech, what it is (``silence``, ``music`` or
+    ``unvoiced``; `span_issue`)."""
 
     card_id: str
     tier: Tier
     clips: tuple[float, ...]
+    issue: str | None = None
 
     @property
     def seconds(self) -> float:
@@ -965,8 +968,13 @@ def extras_cards(
     cluster (``unknown``) gets ``unknown~<cue id>`` and a card cloned from its own source span
     (``delivery.reference``), always thin. Cards are made for ``cloning``'s backend and put in
     the store; they get no registry row, and the same turns give the same card ids on every
-    run. Flags: one line per short or thin extras card, and one per episode counting the
-    cluster-less lines. ``cards`` receives each label's `ExtraCard`."""
+    run. Flags: one line per short or thin extras card, one per episode counting the
+    cluster-less lines, and one per cluster-less line whose span is silence, music (the song
+    mask or an accepted song span over half of it) or unvoiced (A0's loud-frame voiced
+    fraction under ``REF_VOICED_MIN``): it is cloned anyway (D41) and surfaced (`span_issue`).
+    ``cards`` receives each label's `ExtraCard`. The result is computed once per process for
+    the same cues' spans, backend, settings and files (the stage key and the run share it),
+    while every card it names is still in the store."""
     from fukikae.artifacts import read_json
     from fukikae.cards.select import (
         clone_card,
@@ -984,6 +992,19 @@ def extras_cards(
     if not spoken:
         return {}, []
     work = ep.work
+    songs = mix_settings(cfg).songs
+    memo_key = (
+        str(work), str(store.root), cloning.backend.name,
+        getattr(cloning.backend, "model_revision", None), cloning.source_language,
+        cfg.target_language, cfg.source_language, repr(songs),
+        tuple((extras_label(c), tuple(c.delivery.reference), c.source_text) for c in spoken),
+        _stamp(*_candidate_files(work), *_exclusion_files(work)),
+    )  # fmt: skip
+    hit = _EXTRAS_MEMO.get(memo_key)
+    if hit is not None and all(store.has(cid) for cid in hit[0].values()):
+        if cards is not None:
+            cards.update(hit[2])
+        return dict(hit[0]), list(hit[1])
     vocals = work / "01-separate" / "vocals.wav"
     asg_path, tr_path = (
         work / "05-characters" / "assignments.json",
@@ -1005,7 +1026,6 @@ def extras_cards(
     language = transcript.language or cloning.source_language or cfg.source_language or ""
     ws = Workspace(ep.workspace_root)
     theme = _episode_exclusions(ws, ep.id, tags, {})
-    songs = mix_settings(cfg).songs
     gkey = (str(work), repr(songs), _stamp(*_exclusion_files(work)))
     if gkey not in _GATING_MEMO:
         _remember(_GATING_MEMO, gkey, reference_gating(work, songs))
@@ -1018,7 +1038,7 @@ def extras_cards(
     out: dict[str, str] = {}
     made: dict[str, ExtraCard] = {}
     flags: list[str] = []
-    unknown = 0
+    unknown: list[tuple[str, DubCue]] = []
 
     def put(label: str, tier: Tier, picks: list[RefPick]) -> None:
         card = clone_card(cloning.backend, picks, store, vocals, language, target, ep.id, tier)
@@ -1032,7 +1052,7 @@ def extras_cards(
         if label.startswith(f"{UNKNOWN_EXTRA}~"):
             a, b = (float(x) for x in c.delivery.reference)
             put(label, "thin", [span_reference(vocals, transcript, a, b, c.source_text)])
-            unknown += 1
+            unknown.append((label, c))
             continue
         mine = [t for t in turns if t.speaker == label]
         if mine:
@@ -1066,13 +1086,72 @@ def extras_cards(
                 f"({floor_shortfall(ec.clips)}); {THIN_FIX}"
             )
     if unknown:
+        n = len(unknown)
         flags.append(
-            f"{ep.id}: {unknown} unknown line{'' if unknown == 1 else 's'} cloned from "
+            f"{ep.id}: {n} unknown line{'' if n == 1 else 's'} cloned from "
             "themselves (no cluster: each line's own source span is its voice)"
         )
+        spans = [tuple(float(x) for x in c.delivery.reference) for _, c in unknown]
+        issues = span_issues(vocals, spans, mask, accepted, ws.root)  # type: ignore[arg-type]
+        for (label, c), (a, b), issue in zip(unknown, spans, issues, strict=True):
+            if issue is None:
+                continue
+            made[label] = replace(made[label], issue=issue)
+            flags.append(
+                f"{ep.id}: unknown line {c.id} ({a:.2f}-{b:.2f}) is {issue}, not speech: "
+                f"cloned from itself anyway (D41), so its voice may be no one's; {THIN_FIX}"
+            )
+    _remember(_EXTRAS_MEMO, memo_key, (dict(out), list(flags), dict(made)))
     if cards is not None:
         cards.update(made)
     return out, flags
+
+
+# A span quieter than this RMS (about -70 dBFS) is silence, whatever its voicing reads.
+SILENCE_RMS = 3e-4
+
+
+def span_issues(
+    vocals: Path,
+    spans: Sequence[tuple[float, float]],
+    song_like: np.ndarray | None,
+    accepted: Sequence[tuple[float, float]],
+    pitch_root: Path | None = None,
+) -> list[str | None]:
+    """What each span is when it is not speech, for a cluster-less line's own clone (review
+    fix 6): ``silence`` (RMS under `SILENCE_RMS`), ``music`` (``REF_SONG_SHARE`` or more of it
+    song-like by the song detector's mask, or inside its accepted song spans), ``unvoiced``
+    (A0's loud-frame voiced fraction under ``REF_VOICED_MIN``), else None."""
+    import numpy as np
+    from scipy.io import wavfile
+
+    from fukikae.cards.select import (
+        _samples,
+        measure_candidates,
+        song_share,
+    )
+    from fukikae.pitch import REF_SONG_SHARE, REF_VOICED_MIN
+
+    if not spans:
+        return []
+    rate, data = wavfile.read(vocals, mmap=True)
+    measured = measure_candidates(vocals, spans, None, pitch_root)
+    out: list[str | None] = []
+    for (a, b), m in zip(spans, measured, strict=True):
+        x = _samples(data, int(rate), a, b).astype(np.float64)
+        rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+        music = (song_like is not None and song_share(a, b, song_like) >= REF_SONG_SHARE) or (
+            bool(accepted) and share_inside(a, b, accepted) >= REF_SONG_SHARE
+        )
+        if rms < SILENCE_RMS:
+            out.append("silence")
+        elif music:
+            out.append("music")
+        elif m.voiced_fraction < REF_VOICED_MIN:
+            out.append("unvoiced")
+        else:
+            out.append(None)
+    return out
 
 
 # -- the production clone source -------------------------------------------------------------
@@ -1477,6 +1556,8 @@ _EXCLUSIONS_MEMO: dict[tuple, list[tuple[float, float]]] = {}
 _GATING_MEMO: dict[tuple, np.ndarray | None] = {}
 _SONG_SPANS_MEMO: dict[tuple, list[tuple[float, float]]] = {}
 _REGISTER_MEMO: dict[tuple, Register] = {}
+# each episode's extras cards (extras_cards): the stage key and the run ask once
+_EXTRAS_MEMO: dict[tuple, tuple[dict[str, str], list[str], dict[str, ExtraCard]]] = {}
 _MEMO_MAX = 4096
 
 
