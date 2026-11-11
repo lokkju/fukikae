@@ -1490,3 +1490,44 @@ def test_without_a_clone_backend_extras_keep_the_key_they_had(ep):
     _two_cards(ep)
     key = TtsStage(CFG).config_key(CFG, ep)
     assert key["extras"] == {"S5": "xf_one", "S9": "xm_one"}
+
+
+def _second_episode(ep: Episode, cues: list[DubCue]) -> Episode:
+    """Episode e2 of ep's workspace: the same two characters' clusters, ``cues`` to speak."""
+    work = ep.workspace_root / ".fukikae" / "episodes" / "e2"
+    for d in ("01-separate", "05-characters", "06-translate"):
+        (work / d).mkdir(parents=True)
+    tone_wav(work / "01-separate" / "vocals.wav", 30.0, 16000, amp=0.0)
+    shutil.copy(ep.work / "05-characters" / "assignments.json", work / "05-characters")
+    e2 = Episode(source=ep.source, id="e2", work=work, workspace_root=ep.workspace_root)
+    write_json(
+        work / "06-translate" / "cues.en.json",
+        DubCues(episode="e2", source_language="ja", target_language="en", path="asr", cues=cues),
+    )
+    return e2
+
+
+def test_a_character_with_no_turn_of_its_own_never_stops_a_batch(ep):
+    """Review fix 1: a character that speaks in e2 but holds no turn in any episode is cloned
+    thin from its own lines and flagged; both episodes of the run finish."""
+    from fukikae.job import run_episodes
+
+    _two_cards(ep)
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        _, stranger = reg.create_actor_with_character(np.ones(4, dtype=np.float32))
+    e2 = _second_episode(ep, [
+        _cue(1, 1, "natsu again"), _cue(2, stranger, "stranger one"),
+        _cue(4, stranger, "stranger two"),
+    ])  # fmt: skip
+    cfg = Config(raw=CLONE_CFG.raw, source_language="ja")
+    results = run_episodes([ep, e2], cfg, [TtsStage(cfg)], tail=())
+    assert {e: r.error for e, r in results.items()} == {"e1": None, "e2": None}
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        cur = reg.card_for(stranger, "en")
+    assert cur is not None and cur.card_id is not None
+    card = CardStore(ep.workspace_root).get(cur.card_id)
+    assert card.voice.source == "clone" and card.meta["reference_tier"] == "thin"
+    assert sorted((r.origin or {})["start"] for r in card.voice.references) == [6.0, 12.0]
+    flags = _run(e2).flags
+    assert any(f"character {stranger}: card {cur.card_id} is a thin-reference" in f
+               and "no turn of its own" in f for f in flags), flags  # fmt: skip

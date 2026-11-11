@@ -2231,3 +2231,82 @@ def test_a_stale_repick_that_picks_the_same_card_keeps_the_stale_flag(tmp_path: 
     assert lines == [] and reg.card_for(a, "en").card_id == old  # type: ignore[union-attr]
     assert any("now name otherwise" in f and "S01E12 6.00-10.00 (wendy)" in f for f in flags), flags
     reg.close()
+
+
+def test_a_character_with_no_turn_is_cloned_thin_from_its_own_lines(tmp_path: Path):
+    """Review fix 1: a character that speaks but holds no turn in any episode is cloned from
+    its own cues' source spans, thin and flagged, the way an unknown line is."""
+    from fukikae.cards.auto import workspace_cloning
+
+    reg, _, ws = _ws_named(tmp_path)
+    store = CardStore(ws.root)
+    reg.create_actor_with_character(np.ones(4, dtype=np.float32))  # character 3: no cluster
+    cues = [
+        _speaker_cue("c0201", 40.0, 41.0, 3),
+        _speaker_cue("c0202", 50.0, 52.5, 3),
+        _speaker_cue("c0203", 0.0, 3.0, 1),
+    ]
+    cfg = Config(raw={"tts": {"clone_backend": "indextts2"}})
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("fukikae.cards.auto.clone_problem", lambda *_: None)
+        cloning = workspace_cloning(ws.root, cfg, NAMED_EP, cues=cues)
+    assert cloning is not None
+    found = cloning.references(3)
+    assert found.tier == "thin" and found.from_cues
+    assert sorted((p.start, p.end) for p in found.picks or []) == [(40.0, 41.0), (50.0, 52.5)]
+    import dataclasses
+
+    from tests.cards.test_select import CloneSynth
+
+    flags: list[str] = []
+    (line,) = ensure_assignments(reg, store, CFG, {3: []}, ws.root / "v.wav",
+                                 cloning=dataclasses.replace(cloning, backend=CloneSynth),
+                                 flags=flags)  # fmt: skip
+    cur = reg.card_for(3, "en")
+    assert cur is not None and cur.card_id is not None
+    card = store.get(cur.card_id)
+    assert card.voice.source == "clone" and card.meta["reference_tier"] == "thin"
+    assert "its own lines' source spans" in line
+    (flag,) = flags
+    assert flag.startswith(f"character 3: card {cur.card_id} is a thin-reference clone (3.5 s")
+    assert "no turn of its own in any episode" in flag and "--from characters" not in flag
+    reg.close()
+
+
+def test_a_skipped_episode_tells_the_operator_to_rerun_characters(tmp_path: Path):
+    """Review fix 1: when the character's turns sit in an episode skipped because its
+    assignments are older than its names, the flag says to rerun that characters stage."""
+    from fukikae.cards.auto import find_references
+
+    reg, _, ws = _ws_named(tmp_path)
+    _stale_pair(ws, "turns")
+    found = find_references(ws, [NAMED_EP], 1)
+    assert found.picks is None and found.skipped == (NAMED_EP,)
+    import dataclasses
+
+    from fukikae.cards.auto import CharacterRefs, Cloning
+    from fukikae.cards.select import RefPick
+    from tests.cards.test_select import CloneSynth
+
+    vocals = ws.work_dir(NAMED_EP) / "01-separate" / "vocals.wav"
+    thin = dataclasses.replace(
+        found, picks=[RefPick(0.0, 2.0, "x", 30.0)], episode=NAMED_EP, vocals=vocals,
+        language="ja", tier="thin", from_cues=True,
+    )  # fmt: skip
+    cloning = Cloning(CloneSynth, "ja", lambda _cid: thin)
+    store = CardStore(ws.root)
+    flags: list[str] = []
+    ensure_assignments(reg, store, CFG, {1: []}, vocals, cloning=cloning, flags=flags)
+    (flag,) = flags
+    assert f"{NAMED_EP} was skipped" in flag
+    assert f"`fukikae run <ws> {NAMED_EP} --from characters`" in flag
+    assert isinstance(found, CharacterRefs)
+    reg.close()
+
+
+def _speaker_cue(cid: str, start: float, end: float, character: int, text: str = "hi"):
+    return DubCue(
+        id=cid, start=start, end=end, character_id=character, extra=None,
+        speaker=f"char{character}",
+        source_text="セリフ", text=text, budget=20, delivery=Delivery(reference=(start, end)),
+    )  # fmt: skip

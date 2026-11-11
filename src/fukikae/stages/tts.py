@@ -1391,7 +1391,7 @@ class TtsStage:
                 if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
             ]
             work = bool(todo or stale or fallback or repickable or repurify)
-            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if work else None
+            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id, cues=cues) if work else None
             if work:  # the gender estimate never reads a theme song or tagged singing
                 exclude = _song_spans(ep, cfg)
                 spans = {
