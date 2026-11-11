@@ -19,7 +19,7 @@ Test sets in hand: Fairy Tail 100YQ E11-E14 (~/fukikae-ws/fairytail, run through
 | T1-T9 self | tests vs code vs files | consistent |
 
 Ruling R1: matchers live in `src/fukikae/registry/matchers.py` from Task 3 on; `eval/identity` imports them. — Keeps the pipeline free of eval imports. — If wrong: a module move.
-Ruling R2: Task 4 first copies The Cyberfarm S02E01-E04 from the Plex share (read-only Docker NFS volume, as the foundation did) into ~/fukikae-ws/media/. — The set is required (live action) and not yet local. — If wrong: nothing; it's a copy.
+Ruling R2: Task 4 first copies The Cyberfarm S02E01-E04 from the NAS media share (read-only Docker NFS volume, as the foundation did) into ~/fukikae-ws/media/. — The set is required (live action) and not yet local. — If wrong: nothing; it's a copy.
 
 ## Tasks
 Task 1: dispatched (BASE d5a75ad, implementer a1f11c877bc446721, sonnet)

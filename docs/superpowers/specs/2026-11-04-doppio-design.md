@@ -14,7 +14,7 @@ The cross-episode character identity is the reason this exists rather than just 
 
 1. A CLI that runs the whole pipeline on one episode, or on a season directory, unattended.
 2. Every model stage is a pluggable backend chosen in config, and the choice can differ per language: the STT model for Japanese can differ from the one for Spanish, the translator can differ per source/target pair, and the TTS backend and voice are chosen per character.
-3. Translation defaults to a lightweight model, not a frontier API. Any OpenAI-compatible endpoint works, so the homelab LLM gateway, a local vLLM or llama.cpp server, or a hosted API are all one backend with different settings. The gateway today serves only the resident 27B, so the default (my call) is a `managed` mode: fukikae starts a llama.cpp server with a small GGUF translation model on its own card for the translate stage and stops it afterwards, like any other stage's model. Pointing `base_url` at the gateway or anywhere else skips that and needs no infra change.
+3. Translation defaults to a lightweight model, not a frontier API. Any OpenAI-compatible endpoint works, so a self-hosted LLM gateway, a local vLLM or llama.cpp server, or a hosted API are all one backend with different settings. The gateway today serves only the resident 27B, so the default (my call) is a `managed` mode: fukikae starts a llama.cpp server with a small GGUF translation model on its own card for the translate stage and stops it afterwards, like any other stage's model. Pointing `base_url` at the gateway or anywhere else skips that and needs no infra change.
 4. A season-level character registry that survives across episodes and resolves new diarization clusters to existing characters.
 5. A subtitle-first path that uses human English subtitles, when the release has them, instead of ASR plus machine translation.
 6. Every stage is resumable and idempotent, with its artifacts on disk, so a hand-corrected artifact can be fed back in and only downstream stages re-run.
@@ -37,13 +37,13 @@ The cross-episode character identity is the reason this exists rather than just 
 
 ## Constraints
 
-- Runs on ml-01: two RTX 3090s (24 GB each). One is resident vLLM serving the LLM gateway; the other is shared with the llama.cpp trial and GPU CI. Stages load one model at a time and release VRAM before the next stage, so the whole pipeline fits on a single 24 GB card.
-- Where it runs (my call): v1 runs on the ml-01 host under uv, against the shared card, selected by `CUDA_VISIBLE_DEVICES` in config. Before a GPU stage loads, the runner checks free VRAM on that card against the backend's declared need and waits (or fails with `--no-wait`) rather than colliding with llama.cpp or CI. fukikae never depends on Kubernetes: the CLI on one machine with a GPU (or CPU, slowly) is the product. A k8s Job launcher requesting `nvidia.com/gpu` may come later as an optional extra; the job model already keeps all state in the series directory, so nothing changes but the launcher.
+- Runs on a GPU host with two RTX 3090s (24 GB each). One is resident vLLM serving the LLM gateway; the other is shared with other GPU jobs (a llama.cpp server, CI). Stages load one model at a time and release VRAM before the next stage, so the whole pipeline fits on a single 24 GB card.
+- Where it runs (my call): v1 runs on the GPU host under uv, against the shared card, selected by `CUDA_VISIBLE_DEVICES` in config. Before a GPU stage loads, the runner checks free VRAM on that card against the backend's declared need and waits (or fails with `--no-wait`) rather than colliding with llama.cpp or CI. fukikae never depends on Kubernetes: the CLI on one machine with a GPU (or CPU, slowly) is the product. A k8s Job launcher requesting `nvidia.com/gpu` may come later as an optional extra; the job model already keeps all state in the series directory, so nothing changes but the launcher.
 - Python, managed with uv (`uv sync`, `uv run`), ruff, pyright, pre-commit, per the user's python-project conventions. License PolyForm Shield 1.0.0.
 - pyannote's gated models need a Hugging Face token with the model terms accepted.
-- ffmpeg and ffprobe are required external binaries, not assumed on the host (ml-01 has neither); the repo pins them through mise, and `fukikae doctor` checks for them.
-- Test material: Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Copied once from the Plex library's TrueNAS share (`/mnt/mega/media/ums/media/TV`, no longer mounted on ml-01 since 2026-11-04) into `~/fukikae-ws/media/<Show>/Season 1/` on ml-01, owner-only permissions. fukikae treats that directory as read-only source, the same as it would a media share.
-- The GitHub repo, when it exists, comes from the infra Pulumi `repos` config, not `gh repo create`. Until then the project is a local git repo.
+- ffmpeg and ffprobe are required external binaries, not assumed on the host (the GPU host has neither); the repo pins them through mise, and `fukikae doctor` checks for them.
+- Test material: Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Copied once from the NAS media share (no longer mounted on the GPU host since 2026-11-04) into `~/fukikae-ws/media/<Show>/Season 1/` on ml-01, owner-only permissions. fukikae treats that directory as read-only source, the same as it would a media share.
+- The GitHub repo, when it exists, comes from the operator's infrastructure-as-code config, not `gh repo create`. Until then the project is a local git repo.
 
 ## Architecture
 
@@ -109,7 +109,7 @@ backend = "openai_compat"
 mode = "managed"          # fukikae runs llama-server for the stage; "external" uses base_url
 model = "qwen3-8b-q6_k.gguf"
 # mode = "external"
-# base_url = "https://gateway.lab.lokkju.com/v1"
+# base_url = "https://llm-gateway.example/v1"
 # api_key_env = "FUKIKAE_LLM_KEY"
 max_speed = 1.25          # used to compute the length budget per cue
 

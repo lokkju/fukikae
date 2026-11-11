@@ -2,7 +2,7 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-04-foundation-and-registry.md
 
 Repo: ~/projects/doppio, branch feat/foundation (from main 2d705b6). Spec: docs/superpowers/specs/2026-11-04-doppio-design.md (reachable).
-Test media: ~/doppio-ws/media/{Chimera (2021),Death Note}/Season 1/ (local copies; ums share unmounted on ml-01 since 2026-11-04).
+Test media: ~/doppio-ws/media/{Chimera (2021),Death Note}/Season 1/ (local copies; the media share has not been mounted on the GPU host since 2026-11-04).
 
 ## Pre-flight scan
 
@@ -28,7 +28,7 @@ Test media: ~/doppio-ws/media/{Chimera (2021),Death Note}/Season 1/ (local copie
 
 Ruling R1: T5 creates `src/doppio/workspace.py` with the `Episode` dataclass `(source: Path, id: str, work: Path, workspace_root: Path)`; T7 adds `Workspace` and `find_episode` to the same file. cache_key treats paths under `ep.workspace_root` as workspace artifacts. — The plan's T5 can't reference a type that doesn't exist yet; workspace_root is the minimal field the fingerprint rule needs. — If wrong: one field rename in T7.
 Ruling R2: `AsrStage.__init__(self, backend: str | None = None, out_dir: str = "03-asr")`; `backend` overrides the resolved ASR backend name (options still from the resolved per-language table when the names match, else the backend's defaults); T11 uses `AsrStage(backend=b, out_dir=f"eval/asr-{b}")`. — T11's contract requires it and the plan didn't define the hook. — If wrong: a constructor tweak in T9/T11.
-Ruling R3: add pytest marker `ffmpeg` (tests needing only the ffmpeg binary; run by default when ffmpeg is on PATH, skip otherwise). T7's read-only/awkward-path test uses `ffmpeg`, not `media`. — Review Focus 1, 2 and 5 must run without Plex media to be useful. — If wrong: a marker rename.
+Ruling R3: add pytest marker `ffmpeg` (tests needing only the ffmpeg binary; run by default when ffmpeg is on PATH, skip otherwise). T7's read-only/awkward-path test uses `ffmpeg`, not `media`. — Review Focus 1, 2 and 5 must run without library media to be useful. — If wrong: a marker rename.
 
 ## Tasks
 Task 1: dispatched (BASE 2d705b6, implementer a6d2b2a48bd0582e4, sonnet)

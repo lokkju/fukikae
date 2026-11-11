@@ -1,6 +1,6 @@
 # Live-action ground truth: test sets, profile pick and held-out verdicts
 
-_Run 2026-11-08 and 2026-11-09 on ml-01 (RTX 3090, index 0), branch feat/ground-truth. The sweep used tuning episodes only. The live-action profile was committed in `6bb10c2` before any held-out episode was scored, and each held-out episode was scored once after that, with nothing re-tuned (Ruling R18). Recurring means 5 s of labelled speech per episode compared (R6); a set passes when 90% of its recurring characters keep 80% of their speech on one id and no two share a modal id. Ledger rows (662, exported with `fukikae eval report --export`; the tags are listed under "Reproducing"): `docs/results/2026-11-09-live-action-ground-truth.jsonl` holds the baselines, diagnostics, held-out and clip-set rows (176), and `2026-11-09-live-action-ground-truth-sweep-ct{0.4,0.5,0.6}.jsonl` the sweep, 162 rows per clustering value, split to stay under the repository's 500 KB file limit. Kaze, Kaoru's held-out E11 finished downloading later and was scored once on 2026-11-10, with the profile committed here (follow-up under GT15)._
+_Run 2026-11-08 and 2026-11-09 on the GPU host (RTX 3090, index 0), branch feat/ground-truth. The sweep used tuning episodes only. The live-action profile was committed in `6bb10c2` before any held-out episode was scored, and each held-out episode was scored once after that, with nothing re-tuned (Ruling R18). Recurring means 5 s of labelled speech per episode compared (R6); a set passes when 90% of its recurring characters keep 80% of their speech on one id and no two share a modal id. Ledger rows (662, exported with `fukikae eval report --export`; the tags are listed under "Reproducing"): `docs/results/2026-11-09-live-action-ground-truth.jsonl` holds the baselines, diagnostics, held-out and clip-set rows (176), and `2026-11-09-live-action-ground-truth-sweep-ct{0.4,0.5,0.6}.jsonl` the sweep, 162 rows per clustering value, split to stay under the repository's 500 KB file limit. Kaze, Kaoru's held-out E11 finished downloading later and was scored once on 2026-11-10, with the profile committed here (follow-up under GT15)._
 
 ## Test sets and how each label set was made
 
@@ -106,19 +106,19 @@ Each held-out episode ran once after `6bb10c2`: in a hard-linked copy of the ct 
 - **Bazinga TBBT** fails on PAL and film alike, and the default profile fails identically. Six characters recur against four in tuning. Howard keeps only 0.52 (PAL) and 0.49 (film) of his E05 speech on his id, and Raj has no tuning id at all (2 s in E01, too little to recur in tuning) and scores 0.00. Leslie, who has 22 s in tuning, holds 0.98.
 - **Bazinga Office** passes on both conditions: Michael, Jim and Pam recur on E05 (Dwight is under 5 s there), each at 0.88 or above.
 - **Korean (Grid E05)**, scored because the pick differs from the provisional setting: 4 clean, no merge, 0.80. 종이 fails at 0.00; she has 2.3 s and 3.5 s in the tuning pair, too little for a tuning id, and 8.9 s on E05. The provisional profile also scored 0.80 on E05, but with a 새하 + 어진 merge.
-- **Japanese (Kaze E11)** fails on both profiles, on the merge the Limits section predicted. 直美 recurs on E11 (8.6 s against りん's 43 s), and all of her speech lands on りん's tuning id 3, which counts as passing for her alone, while りん keeps 0.76 there (0.73 under the default profile), under the bar. Id 3 is 73% りん and 19% 直美 on E11, and 4.4 s more of りん went to a new id. Coverage is 17%. I scored it once on 2026-11-10, after week 3 completed, with nothing re-tuned. The retimed captions reproduce byte for byte from `eval subalign` (144 anchors, 100% inliers, offset -0.55 s, scale 1.000033, rms 11 ms, max residual 19 ms), and lead speech on E11 by a median +0.41 s (pyannote, 20 gap-led cues matched) and +0.38 s (energy VAD, 22 matched), IQR about +0.13 to +0.60 s; that is about 0.1 s more than E01-E03's 0.24-0.31 s on a thin count, and I didn't treat it as the step-3 stop. The commands, run once each from the repository root (the source files are mode 0710 for group `users`, hence `--group-add 100`):
+- **Japanese (Kaze E11)** fails on both profiles, on the merge the Limits section predicted. 直美 recurs on E11 (8.6 s against りん's 43 s), and all of her speech lands on りん's tuning id 3, which counts as passing for her alone, while りん keeps 0.76 there (0.73 under the default profile), under the bar. Id 3 is 73% りん and 19% 直美 on E11, and 4.4 s more of りん went to a new id. Coverage is 17%. I scored it once on 2026-11-10, after week 3 completed, with nothing re-tuned. The retimed captions reproduce byte for byte from `eval subalign` (144 anchors, 100% inliers, offset -0.55 s, scale 1.000033, rms 11 ms, max residual 19 ms), and lead speech on E11 by a median +0.41 s (pyannote, 20 gap-led cues matched) and +0.38 s (energy VAD, 22 matched), IQR about +0.13 to +0.60 s; that is about 0.1 s more than E01-E03's 0.24-0.31 s on a thin count, and I didn't treat it as the step-3 stop. The commands, run once each from the repository root (the source files are mode 0710 for group `users`, hence `--group-add 100`; `<nas>`, `<media-export>` and `<kaze-dir>` stand for the NAS, its media export and the show's folder on it):
 
 ```bash
-# 1. Copy EP011 (week 3 must be under complete/tv/, nothing of it under incomplete/)
+# 1. Copy EP011 from the NAS media share (week 3 must be complete there)
 docker volume create --driver local --opt type=nfs \
-  --opt o=addr=truenas.storage.lodenheim.lokkju.com,ro,nfsvers=4 \
-  --opt device=:/mnt/mega/media/ums fukikae-ums-ro
-docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-ums-ro:/ums:ro alpine:3.20 \
-  sh -c 'ls /ums/downloads/torrents/incomplete/tv | grep -i kaze; C=/ums/downloads/torrents/complete/tv; ls -l "$C"/*Kaze*Week*03*/Kaze.Kaoru.EP011.*.mkv; du -k "$C"/*Kaze*Week*03*/Kaze.Kaoru.EP011.*.mkv'
-docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-ums-ro:/ums:ro \
+  --opt o=addr=<nas>,ro,nfsvers=4 \
+  --opt device=:<media-export> fukikae-media-ro
+docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-media-ro:/share:ro alpine:3.20 \
+  sh -c 'C=/share/<kaze-dir>; ls -l "$C"/*Week*03*/Kaze.Kaoru.EP011.*.mkv; du -k "$C"/*Week*03*/Kaze.Kaoru.EP011.*.mkv'
+docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-media-ro:/share:ro \
   -v ~/fukikae-ws/media:/out alpine:3.20 \
-  sh -c 'set -e; f=$(ls /ums/downloads/torrents/complete/tv/*Kaze*/Kaze.Kaoru.EP011.*.mkv); cp "$f" "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"; chmod 0640 "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"'
-docker volume rm fukikae-ums-ro
+  sh -c 'set -e; f=$(ls /share/<kaze-dir>/*Week*03*/Kaze.Kaoru.EP011.*.mkv); cp "$f" "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"; chmod 0640 "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"'
+docker volume rm fukikae-media-ro
 # 2. Live-action pick: diarize E11 at clustering 0.5 and run its characters stage
 KAZE_EPS=S01E11 scripts/ground-truth/holdout_run.sh kaze-pick
 # 3. Caption onsets against speech on E11 (Task 7b measured a +0.24 to +0.31 s lead; record the

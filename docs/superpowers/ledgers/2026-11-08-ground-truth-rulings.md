@@ -1,7 +1,7 @@
 # Ground-truth plan: execution ledger
 
 Plan: docs/superpowers/plans/2026-11-08-ground-truth.md (c75fcc5). Branch feat/ground-truth from main c75fcc5.
-Operator scope: D9, D14, D16 (2026-11-08). Media: BBT S01 grabbed by the operator; Kaze, Kaoru weeks 1-3 downloading via qBittorrent (not importable by Sonarr; copy from the download folder); Alice in Borderland in the library.
+Operator scope: D9, D14, D16 (2026-11-08). Media: BBT S01 grabbed by the operator; Kaze, Kaoru weeks 1-3 still arriving (not in the library; copy from the share's incoming folder); Alice in Borderland in the library.
 Controller rulings: Kaze splits tune E01-E03, hold out E11; colour map may use held-out named lines (ground truth, not tuning).
 
 Task 1: dispatched (BASE c75fcc5, opus)
@@ -69,8 +69,8 @@ Task 6: scoped re-review 2 dispatched (sonnet).
 Task 6: fix round 2/5 (6 addressed, 0 open; commits 8a5e716..4591303)
 Task 6: complete (commits 3f83029..4591303, review clean)
 Task 7: dispatched (opus, HEAD 4591303, sole committer; extras in task-7-brief-extras.md)
-Task 7: BLOCKED on Kaze only (packs 10-16% at 11:12 UTC in /mnt/mega/media/ums/downloads/torrents/incomplete/tv/). BBT S01 (Bluray-1080p) and Alice S01E01-E03 (WEBDL-720p) available. / has 137 GB free.
-Ruling GT7: Task 7 proceeds now with BBT (en/de/es) and Alice; Kaze is set up as Task 7b when the packs complete (copied from /mnt/mega/media/ums/downloads/torrents/complete/tv/ via a read-only volume on the parent export /mnt/mega/media/ums, removed after). Task 8 waits for Kaze. — No reason to idle two ready sets. — If wrong: nothing lost.
+Task 7: BLOCKED on Kaze only (packs 10-16% at 11:12 UTC on the media share). BBT S01 (Bluray-1080p) and Alice S01E01-E03 (WEBDL-720p) available. / has 137 GB free.
+Ruling GT7: Task 7 proceeds now with BBT (en/de/es) and Alice; Kaze is set up as Task 7b when the packs complete (copied from the media share via a read-only volume, removed after). Task 8 waits for Kaze. — No reason to idle two ready sets. — If wrong: nothing lost.
 D18 (operator, 2026-11-08): yes. Task 7c (Bazinga English sets + transcript-aligner check vs gold) added between Task 7 and Task 8; brief in task-7c-brief.md; the plan doc gets the amendment after Task 7 commits (sole-committer rule). Bazinga download dispatched now (no repo writes).
 Bazinga subset downloaded (rev 96db30ff) to ~/fukikae-ws/bazinga/data/{TheBigBangTheory,TheOffice}: S01E01-E05 wav+txt, characters/credits/episodes.txt (390 MB). Task 7c waits for Task 7 to finish committing.
 Task 7: implementer DONE_WITH_CONCERNS (dcb4935 wav2vec2 de/es alignment; 1389155 ledger doc). BBT en: 4/4 clean, 0 merges, pass (both profiles). BBT de: 2 clean, 1 merge (Leonard+Sheldon). BBT es: 1 clean, 3 merges. aib: 2 recurring (thin), 0 clean, scored with --force (overlap 56-66%). Kaze text steps done (subalign 15/15, colour map written); audio steps in task-7b-kaze.md. BBT English subs are image-only: OCR'd with tesseract. Dubs merge leads at 0.6 although NC 96-99% (threshold question for Task 8).

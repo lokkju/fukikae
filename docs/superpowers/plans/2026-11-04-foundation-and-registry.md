@@ -39,7 +39,7 @@
 ```
 pyproject.toml  LICENSE  README.md  CLAUDE.md  .pre-commit-config.yaml
 .mise/config.toml                      # python, uv, ffmpeg
-scripts/make-fixtures                  # cuts test clips from the Plex episodes into $FUKIKAE_TEST_MEDIA
+scripts/make-fixtures                  # cuts test clips from the library episodes into $FUKIKAE_TEST_MEDIA
 src/fukikae/
   __init__.py  cli.py                  # typer root; subcommands registered from the modules below
   models.py                            # Word, Segment, Transcript, Turn, Separation, Assignment (pydantic)
@@ -346,7 +346,7 @@ def test_extract_on_readonly_source_with_spaces(tmp_path, readonly_copy):
     ]  # nothing written beside the source
 ```
 
-(The 5.1 tone fixture uses `ffmpeg -f lavfi`, so this test needs ffmpeg but no Plex media; mark it `media` only because it shells out. Keep it running in CI-less local runs via `-m media`.)
+(The 5.1 tone fixture uses `ffmpeg -f lavfi`, so this test needs ffmpeg but no library media; mark it `media` only because it shells out. Keep it running in CI-less local runs via `-m media`.)
 
 - [ ] **Step 2:** Run, expect FAIL.
 - [ ] **Step 3:** Implement.

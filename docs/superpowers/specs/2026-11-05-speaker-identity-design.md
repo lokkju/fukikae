@@ -86,10 +86,10 @@ Steps 2-5 each end with a results note and a keep/drop decision recorded as a ru
 
 ## Constraints
 
-- Same as the foundation: uv, backends behind entry points, optional extras, ml-01's free 3090 (index 0), artifacts on disk, resumable stages.
-- Compute: ml-01's 3090 index 0 is free (index 1 is vLLM). Re-running separation per candidate (hours, in the background) is acceptable; embeddings are cached per (segmentation, embedder) so matching experiments don't touch the GPU.
+- Same as the foundation: uv, backends behind entry points, optional extras, the GPU host's free 3090 (index 0), artifacts on disk, resumable stages.
+- Compute: the GPU host's 3090 index 0 is free (index 1 is vLLM). Re-running separation per candidate (hours, in the background) is acceptable; embeddings are cached per (segmentation, embedder) so matching experiments don't touch the GPU.
 - New model families go into their own extras so `uv sync --all-extras` stays resolvable (transformers is capped < 5 by qwen-asr).
-- Test media stays local and uncommitted; new episodes are copied from the Plex share through a read-only Docker NFS volume.
+- Test media stays local and uncommitted; new episodes are copied from the NAS media share through a read-only Docker NFS volume.
 
 ## Left to the builder
 

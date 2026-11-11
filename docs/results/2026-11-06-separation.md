@@ -1,6 +1,6 @@
 # Dialogue separation versus Demucs
 
-_Run 2026-11-06 and 2026-11-07 on ml-01 (RTX 3090, index 0), branch feat/speaker-identity. Tuning pairs only: no `--holdout` was passed. One tuning pair per show (the Japanese track and the dub are the same show, so anime is one pair of episodes twice), one chunking setting and the shipped pyannote clustering: read every row as "on this pair"._
+_Run 2026-11-06 and 2026-11-07 on the GPU host (RTX 3090, index 0), branch feat/speaker-identity. Tuning pairs only: no `--holdout` was passed. One tuning pair per show (the Japanese track and the dub are the same show, so anime is one pair of episodes twice), one chunking setting and the shipped pyannote clustering: read every row as "on this pair"._
 
 ## Backend and model
 

@@ -1,6 +1,6 @@
 # Segmentation and matching variants
 
-_Run 2026-11-05 and 2026-11-06 on ml-01 (RTX 3090, index 0), branch feat/speaker-identity. Tuning pairs only: no `--holdout` was passed and nothing here was chosen by looking at a held-out episode. Match threshold 0.6 for centroid, knn and multi-centroid (the threshold sweep is Task 9)._
+_Run 2026-11-05 and 2026-11-06 on the GPU host (RTX 3090, index 0), branch feat/speaker-identity. Tuning pairs only: no `--holdout` was passed and nothing here was chosen by looking at a held-out episode. Match threshold 0.6 for centroid, knn and multi-centroid (the threshold sweep is Task 9)._
 
 ## What was compared
 

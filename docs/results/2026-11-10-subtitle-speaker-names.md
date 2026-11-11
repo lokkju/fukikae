@@ -1,6 +1,6 @@
 # Subtitle speaker names on Fairy Tail E11 to E14: results
 
-_Run 2026-11-10 on ml-01 (RTX 3090, index 0), branch `plan/subtitle-speaker-names`, Task 11 of `docs/superpowers/plans/2026-11-10-subtitle-speaker-names.md`. Every run used copies under `~/fukikae-scratch/names-t11/`; no original workspace changed. The commands are `scripts/names-eval/run_arms.sh`; the ledger rows are exported to `2026-11-10-subtitle-speaker-names.jsonl` (tags `t11b-names-<language>-<arm>`). Every table is the t11b re-measure: the arms rebuilt and rescored on b8afe4c (the remainder rule, below) and 9ad5be5 (eval names follow-ups); the t11 rows are retracted._
+_Run 2026-11-10 on the GPU host (RTX 3090, index 0), branch `plan/subtitle-speaker-names`, Task 11 of `docs/superpowers/plans/2026-11-10-subtitle-speaker-names.md`. Every run used copies under `~/fukikae-scratch/names-t11/`; no original workspace changed. The commands are `scripts/names-eval/run_arms.sh`; the ledger rows are exported to `2026-11-10-subtitle-speaker-names.jsonl` (tags `t11b-names-<language>-<arm>`). Every table is the t11b re-measure: the arms rebuilt and rescored on b8afe4c (the remainder rule, below) and 9ad5be5 (eval names follow-ups); the t11 rows are retracted._
 
 ## Setup
 
