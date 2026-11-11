@@ -289,3 +289,45 @@ def test_run_episodes_honours_from_and_to(tmp_path):
     assert {e: r.ran for e, r in results.items()} == {"e1": ["b"], "e2": ["b"]}
     results = run_episodes(eps, cfg, stages, tail=("b",), from_stage="a")
     assert {e: r.ran for e, r in results.items()} == {"e1": ["a", "b"], "e2": ["a", "b"]}
+
+
+def test_run_episodes_shows_each_episode_and_thread_in_the_status(tmp_path):
+    """#29: while e1's tail runs beside e2's head, the status names both threads' stages, and
+    each episode's position (head, tail, done)."""
+    import io
+
+    from fukikae import progress
+
+    eps = _eps(tmp_path, 2)
+    cfg = make_cfg(eps[0].workspace_root, "x")
+    tail_started = threading.Event()
+    snaps: list[dict] = []
+
+    class SeeingHead(FakeA):
+        def run(self, ep, cfg):
+            if ep.id == "e2":
+                assert tail_started.wait(10)
+                r = progress.active()
+                assert r is not None
+                snaps.append(r.snapshot())
+            super().run(ep, cfg)
+
+    class SlowTail(FakeB):
+        def run(self, ep, cfg):
+            tail_started.set()
+            if ep.id == "e1":
+                while not snaps:
+                    threading.Event().wait(0.01)
+            super().run(ep, cfg)
+
+    counts: dict = {}
+    root = eps[0].workspace_root
+    with progress.run(root, ["e1", "e2"], stream=io.StringIO(), tty=False):
+        run_episodes(eps, cfg, [SeeingHead(counts), SlowTail(counts)], tail=("b",))
+    (snap,) = snaps
+    threads = {k: (v["episode"], v["stage"]) for k, v in snap["threads"].items()}
+    assert threads == {"head": ("e2", "a"), "tail": ("e1", "b")}
+    assert snap["episodes"] == [{"id": "e1", "position": "tail"}, {"id": "e2", "position": "head"}]
+    final = progress.read_status(root)
+    assert final is not None and final["state"] == "finished"
+    assert [e["position"] for e in final["episodes"]] == ["done", "done"]
