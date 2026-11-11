@@ -5,9 +5,11 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Collection
+from pathlib import Path
 from typing import Literal
 
-from fukikae.cards.card import CardError
+from fukikae.cards.card import Card, CardError
+from fukikae.cards.store import CardStore
 
 Gender = Literal["f", "m", "u"]
 # The stock baseline backend when a workspace names none (the profiles name no [tts] backend).
@@ -72,3 +74,22 @@ def pick_stock(
             return voice
     counts = Counter(v for v in used if v in pool)
     return min(pool, key=lambda v: (counts[v], pool.index(v)))
+
+
+class ScratchStore(CardStore):
+    """A card store for an evaluation's stock baseline cards (D41: a stock card never enters
+    the workspace's store): cards are written under ``scratch`` (a temporary directory), while
+    reads fall through to ``base``, so the workspace's cards and sidecars render beside them."""
+
+    def __init__(self, scratch: Path, base: CardStore) -> None:
+        super().__init__(scratch)
+        self.base = base
+
+    def has(self, card_id: str) -> bool:
+        return super().has(card_id) or self.base.has(card_id)
+
+    def get(self, card_id: str) -> Card:
+        return super().get(card_id) if super().has(card_id) else self.base.get(card_id)
+
+    def _find(self, ref: str) -> Path | None:
+        return super()._find(ref) or self.base._find(ref)

@@ -57,6 +57,7 @@ import numpy as np
 if TYPE_CHECKING:
     from fukikae.cards.store import CardStore
     from fukikae.config import Config
+    from fukikae.eval.stock import ScratchStore
     from fukikae.stages.tts import RenderJob
     from fukikae.workspace import Workspace
 
@@ -1110,6 +1111,7 @@ def gather_set(
     from fukikae.backends import loader
     from fukikae.cards.store import CardStore
     from fukikae.eval import tts as ev
+    from fukikae.eval.stock import ScratchStore
     from fukikae.registry.store import Registry
     from fukikae.stages.tts import check_card, prepare_cue, tag_events
     from fukikae.timefit import apply_fit, fit_settings, plan_fit
@@ -1121,7 +1123,9 @@ def gather_set(
     e = spec.episode
     docs = ev._cues(ws, [e], target)
     doc = docs[e]
-    store = CardStore(ws.root)
+    # stock baseline cards stay in a scratch store under the pack's tmp (D41); reads fall
+    # through to the workspace's store, where clone cards still go
+    store = ScratchStore(tmp / spec.name / "stock-cards", CardStore(ws.root))
     picked = ev.sample_cues(docs, SAMPLE_PER_CHARACTER, SAMPLE_SEED)
     chars = sorted({ev._cid(c) for _, c in picked})
     with Registry(ws.registry_path) as reg:
@@ -1146,7 +1150,7 @@ def gather_set(
         sources = getattr(cls, "sources", frozenset())
         if "clone" in sources and "stock" not in sources:
             clone_backends.add(cand.name)
-            cards[cand.name] = ev._clone_cards(ws, ccfg, store, cls, refs, doc.source_language)
+            cards[cand.name] = ev._clone_cards(ws, ccfg, store.base, cls, refs, doc.source_language)
         else:
             cards[cand.name] = ev._stock_cards(ws, ccfg, store, cand.backend, picked, assigned)
     covered = set(chars)
@@ -1271,7 +1275,7 @@ def _scene(
     ws: Workspace,
     cfg: Config,
     cfgs: Mapping[str, Config],
-    store: CardStore,
+    store: ScratchStore,
     cards: Mapping[str, Mapping[int, str]],
     covered: set[int],
     names: Mapping[int, str],
@@ -1324,7 +1328,7 @@ def _scene(
     from fukikae.workspace import Episode
 
     here = Episode(source=work, id=e, work=work, workspace_root=ws.root)
-    extra_cards = TtsStage(cfg)._extra_cards(here, doc.cues, cfg, store)[0]
+    extra_cards = TtsStage(cfg)._extra_cards(here, doc.cues, cfg, store.base)[0]
     chars = sorted({c.character_id for c in spoken if c.character_id is not None})
     stock = ev._stock_cards(
         ws, cfg, store, default_backend, [(e, c) for c in spoken if c.character_id is not None],

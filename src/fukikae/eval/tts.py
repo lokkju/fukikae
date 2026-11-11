@@ -85,6 +85,7 @@ import hashlib
 import math
 import random
 import shutil
+import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,7 +110,7 @@ from fukikae.cards.stock import revision, stock_card
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config
 from fukikae.eval.asr import normalize
-from fukikae.eval.stock import pick_stock
+from fukikae.eval.stock import ScratchStore, pick_stock
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript, Turn, Word
@@ -673,13 +674,14 @@ def _cues(ws: Workspace, episodes: Sequence[str], target: str) -> dict[str, DubC
 def _stock_cards(
     ws: Workspace,
     cfg: Config,
-    store: CardStore,
+    store: ScratchStore,
     backend: str,
     picked: list[tuple[str, DubCue]],
     assigned: dict[int, str],
 ) -> dict[int, str]:
     """A card of ``backend`` per character: its assigned card when that is on ``backend``,
-    else a stock voice of its estimated gender (put in the store, never assigned)."""
+    else a stock voice of its estimated gender, put in ``store``, a scratch store (never the
+    workspace's, D41), and never assigned."""
     from fukikae.cards.auto import character_spans, gender_thresholds
 
     male_below, female_above = gender_thresholds(cfg)
@@ -1039,6 +1041,33 @@ def evaluate(
     floor_episode: str | None = None,
     characters: Sequence[int] | None = None,
 ) -> EvalResult:
+    """One eval tts run; the stock baseline cards it makes live in a temporary card store
+    (`ScratchStore`, D41) that is gone when it returns."""
+    with tempfile.TemporaryDirectory(prefix="fukikae-eval-stock-") as scratch:
+        return _evaluate(
+            root, episodes, backend=backend, per_character=per_character, seed=seed,
+            min_slot=min_slot, reference_workspace=reference_workspace, floor_subs=floor_subs,
+            floor_workspace=floor_workspace, floor_episode=floor_episode, characters=characters,
+            scratch=Path(scratch),
+        )  # fmt: skip
+
+
+def _evaluate(
+    root: Path,
+    /,
+    episodes: Sequence[str],
+    *,
+    backend: str | None = None,
+    per_character: int = 8,
+    seed: int = 0,
+    min_slot: float = MIN_SLOT_S,
+    reference_workspace: Path | None = None,
+    floor_subs: Path | None = None,
+    floor_workspace: Path | None = None,
+    floor_episode: str | None = None,
+    characters: Sequence[int] | None = None,
+    scratch: Path,
+) -> EvalResult:
     from fukikae.eval.autolabel import gt_path_for
     from fukikae.registry.store import Registry
     from fukikae.stages.tts import max_speedup
@@ -1140,6 +1169,7 @@ def evaluate(
                 if not picked:
                     raise ValueError("no sampled character has enough clean speech for a clone")
         else:
+            store = ScratchStore(scratch, store)  # stock cards stay out of the workspace (D41)
             cards = _stock_cards(ws, cfg, store, backend, picked, assigned)
             mode = "stock"
 

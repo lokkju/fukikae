@@ -1223,3 +1223,12 @@ def test_eval_tts_applies_the_same_gate(tmp_path, monkeypatch):
     ev._render(ws, ws.config, CardStore(root), [("S01E11", q) for q in cues], cards, {})
     assert got["natsu low"] is not None
     assert got["lucy low"] is None and got["natsu high"] is None
+
+
+def test_stock_baseline_cards_never_enter_the_workspace_store(tmp_path):
+    """D41: eval tts keeps the stock cards it makes in a scratch store."""
+    root = _workspace(tmp_path, emotions=False)
+    before = sorted(p.name for p in CardStore(root).root.glob("*.toml"))
+    res = _invoke(str(root), "--episodes", "S01E11", "--backend", "fake2", "--no-ledger")
+    assert res.exit_code == 0, res.output
+    assert sorted(p.name for p in CardStore(root).root.glob("*.toml")) == before
