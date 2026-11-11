@@ -85,17 +85,19 @@ def stage():
 def test_output_is_byte_identical_when_nothing_is_dropped(tmp_path, stage):
     ep = _episode(tmp_path, [SPEECH, SAID_TO_CAMERA])
     stage.run(ep, Config())
-    cleaned, dropped = stage.outputs(ep)
+    cleaned, dropped, flagged = stage.outputs(ep)
     assert cleaned.read_bytes() == (ep.work / "03-asr" / "transcript.json").read_bytes()
     assert json.loads(dropped.read_text()) == []
+    assert json.loads(flagged.read_text()) == []
 
 
 def test_dropped_segments_are_listed_with_reasons(tmp_path, stage):
     ep = _episode(tmp_path, [SPEECH, SAID_TO_CAMERA, OVER_SILENCE])
     stage.run(ep, Config())
-    cleaned, dropped = stage.outputs(ep)
+    cleaned, dropped, flagged = stage.outputs(ep)
     assert cleaned == ep.work / "03b-asrclean" / "transcript.json"
     assert dropped == ep.work / "03b-asrclean" / "dropped.json"
+    assert flagged == ep.work / "03b-asrclean" / "flagged.json"
     kept = read_json(cleaned, Transcript)
     assert [s.text for s in kept.segments] == ["燃えてきたぞ", STOCK]
     assert kept.language == "ja" and kept.backend == "fake" and kept.word_timing
@@ -111,7 +113,7 @@ def test_only_the_runs_over_no_speech_are_dropped(tmp_path, stage):
     split = Segment(start=0.5, end=words[-1].end, text=STOCK, words=words)
     ep = _episode(tmp_path, [SPEECH, split])
     stage.run(ep, Config())
-    cleaned, dropped = stage.outputs(ep)
+    cleaned, dropped, flagged = stage.outputs(ep)
     kept = read_json(cleaned, Transcript)
     assert [s.text for s in kept.segments] == ["燃えてきたぞ", STOCK[:3]]
     assert kept.segments[1].start == pytest.approx(1.0)
@@ -119,6 +121,60 @@ def test_only_the_runs_over_no_speech_are_dropped(tmp_path, stage):
     (row,) = json.loads(dropped.read_text())
     assert row["text"] == STOCK[3:] and row["reason"] == "stock phrase over no speech"
     assert row["start"] == pytest.approx(14.0)
+    (flag,) = json.loads(flagged.read_text())  # the surviving fragment, kept and flagged
+    assert flag["text"] == STOCK[:3] and flag["reason"] == "surviving fragment of a stock phrase"
+    assert flag["start"] == pytest.approx(1.0)
+
+
+def _bgm_episode(tmp_path: Path, vocals: np.ndarray, segments: list[Segment]) -> Episode:
+    """An episode whose background is a loud chord all through (within 3 dB of the voice, so
+    the song detector's per-second test calls every voiced second song-like)."""
+    ep = _episode(tmp_path, segments)
+    sep = ep.work / "01-separate"
+    t = np.arange(DUR * RATE) / RATE
+    bed = 0.08 * np.sin(2 * np.pi * np.outer([110.0, 138.6, 164.8], t)).sum(axis=0)
+    _mono(sep / "background.wav", bed)
+    _mono(sep / "vocals.wav", vocals)
+    _mono(sep / "vocals_16k.wav", vocals)
+    return ep
+
+
+def _voice(kind: str) -> np.ndarray:
+    from tests.fixtures.speechlike import speech, sung
+
+    x = np.zeros(DUR * RATE, np.float32)
+    x[RATE : 9 * RATE] = (speech if kind == "speech" else sung)(240, 8.0, amp=0.3)
+    return x
+
+
+def test_a_stock_phrase_spoken_over_loud_bgm_is_kept_and_flagged(tmp_path, stage, caplog):
+    """「お疲れ様でした」 said by a character over a loud score: the music share alone passes,
+    the vocals aren't sung, so the line stays, flagged (Task 10 review ruling)."""
+    from fukikae import songs
+
+    line = _seg(2.0, "お疲れ様でした")
+    ep = _bgm_episode(tmp_path, _voice("speech"), [line])
+    sep = ep.work / "01-separate"
+    s = songs.SongSettings()
+    feats = songs.frame_features(sep / "background.wav", sep / "vocals.wav", s.active_db)
+    assert songs.song_like_mask(*feats, s)[2:5].mean() >= 0.6  # the music share alone passes
+    with caplog.at_level(logging.INFO):
+        stage.run(ep, Config())
+    cleaned, dropped, flagged = stage.outputs(ep)
+    assert [x.text for x in read_json(cleaned, Transcript).segments] == ["お疲れ様でした"]
+    assert json.loads(dropped.read_text()) == []
+    (flag,) = json.loads(flagged.read_text())
+    assert flag["reason"] == "stock phrase spoken over music (not sung)"
+    assert "kept and flagged" in caplog.text
+
+
+def test_a_stock_phrase_over_sung_music_is_dropped(tmp_path, stage):
+    ep = _bgm_episode(tmp_path, _voice("sung"), [_seg(2.0, "お疲れ様でした")])
+    stage.run(ep, Config())
+    cleaned, dropped, _ = stage.outputs(ep)
+    assert read_json(cleaned, Transcript).segments == []
+    (row,) = json.loads(dropped.read_text())
+    assert row["reason"] == "stock phrase over sung music"
 
 
 def test_inputs_outputs_and_key(tmp_path, stage):
@@ -145,7 +201,7 @@ def test_missing_stems_keep_every_segment(tmp_path, stage, caplog):
     (ep.work / "01-separate" / "background.wav").unlink()
     with caplog.at_level(logging.WARNING):
         stage.run(ep, Config())
-    cleaned, _ = stage.outputs(ep)
+    cleaned, _, _ = stage.outputs(ep)
     assert cleaned.read_bytes() == (ep.work / "03-asr" / "transcript.json").read_bytes()
     assert "stems" in caplog.text
 

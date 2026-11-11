@@ -2,6 +2,8 @@ import numpy as np
 import pytest
 
 from fukikae.hallucinations import (
+    FLAG_FRAGMENT,
+    FLAG_SPOKEN,
     HALLUCINATION_ACTIVE_MAX,
     HALLUCINATION_MUSIC_SHARE,
     HALLUCINATION_PHRASES,
@@ -20,6 +22,14 @@ from fukikae.songs import SongSpan
 
 DUR = 60  # seconds
 STOCK = "ご視聴ありがとうございました"
+
+
+def SUNG(lo: float, hi: float) -> bool:  # noqa: ARG001, N802
+    return True
+
+
+def SPOKEN(lo: float, hi: float) -> bool:  # noqa: ARG001, N802
+    return False
 
 
 def _seg(start: float, end: float, text: str = STOCK, words: bool = False) -> Segment:
@@ -73,11 +83,20 @@ def test_phrase_over_a_theme_song_is_dropped():
     assert reason == "stock phrase over a theme song"
 
 
-def test_phrase_over_music_is_dropped():
+def test_phrase_over_sung_music_is_dropped():
     mask = _quiet_mask()
     mask[10:30] = True
-    reason = drop_reason(_seg(10, 30), "ja", [], mask, _active(0.9))
-    assert reason == "stock phrase over music"
+    reason = drop_reason(_seg(10, 30), "ja", [], mask, _active(0.9), SUNG)
+    assert reason == "stock phrase over sung music"
+
+
+def test_phrase_spoken_over_loud_music_is_kept():
+    """The per-second mask reads a loud score under speech as song-like; without a sung signal
+    the line is speech and stays (Task 10 review ruling)."""
+    mask = _quiet_mask()
+    mask[10:30] = True
+    assert drop_reason(_seg(10, 30), "ja", [], mask, _active(0.9), SPOKEN) is None
+    assert drop_reason(_seg(10, 30), "ja", [], mask, _active(0.9)) is None  # no sung test
 
 
 def test_phrase_over_silence_is_dropped():
@@ -100,9 +119,10 @@ def test_other_text_over_music_is_kept():
 def test_thresholds_are_the_edges():
     mask = _quiet_mask()
     mask[10 : 10 + round(10 * HALLUCINATION_MUSIC_SHARE)] = True  # exactly the share
-    assert drop_reason(_seg(10, 20), "ja", [], mask, _active(0.9)) == "stock phrase over music"
+    reason = drop_reason(_seg(10, 20), "ja", [], mask, _active(0.9), SUNG)
+    assert reason == "stock phrase over sung music"
     mask[10] = False
-    assert drop_reason(_seg(10, 20), "ja", [], mask, _active(0.9)) is None
+    assert drop_reason(_seg(10, 20), "ja", [], mask, _active(0.9), SUNG) is None
     at_max = _active(HALLUCINATION_ACTIVE_MAX)
     assert drop_reason(_seg(10, 20), "ja", [], _quiet_mask(), at_max) is None
 
@@ -124,7 +144,7 @@ def test_span_is_the_words_extent():
     assert segment_span(seg) == (20.0, 29.02)
     mask = _quiet_mask()
     mask[20:30] = True  # music only where the words are
-    assert drop_reason(seg, "ja", [], mask, _active(0.9)) == "stock phrase over music"
+    assert drop_reason(seg, "ja", [], mask, _active(0.9), SUNG) == "stock phrase over sung music"
     assert segment_span(_seg(1, 2)) == (1, 2)
 
 
@@ -177,20 +197,23 @@ def test_word_runs_split_at_gaps():
 
 def test_only_the_run_inside_the_theme_is_dropped():
     song_like, active = _long()
-    kept, dropped = clean_segment(_sb_seg(), "ja", SB_THEME, song_like, active)
+    kept, dropped, flags = clean_segment(_sb_seg(), "ja", SB_THEME, song_like, active)
     assert kept is not None and kept.text == "お疲"
     assert [w.text for w in kept.words or []] == ["お", "疲"]
     assert kept.start == pytest.approx(3564.4337) and kept.end == pytest.approx(3569.6941)
     (d,) = dropped
     assert d.text == "れ様でした" and d.reason == "stock phrase over a theme song"
     assert (d.start, d.end) == (pytest.approx(3677.2224), pytest.approx(3684.463))
+    (f,) = flags  # the surviving fragment is kept and flagged
+    assert f.text == "お疲" and f.reason == "surviving fragment of a stock phrase"
+    assert (f.start, f.end) == (pytest.approx(3564.4337), pytest.approx(3569.6941))
 
 
 def test_a_segment_whose_every_run_passes_goes_whole():
     song_like, active = _long()
     theme = [SongSpan(3500.0, 3740.0, "detector")]
-    kept, dropped = clean_segment(_sb_seg(), "ja", theme, song_like, active)
-    assert kept is None
+    kept, dropped, flags = clean_segment(_sb_seg(), "ja", theme, song_like, active)
+    assert kept is None and flags == []
     (d,) = dropped
     assert d.text == "お疲れ様でした" and (d.start, d.end) == segment_span(_sb_seg())
 
@@ -198,19 +221,19 @@ def test_a_segment_whose_every_run_passes_goes_whole():
 def test_a_segment_with_no_run_passing_is_kept_as_is():
     song_like, active = _long()
     seg = _sb_seg()
-    assert clean_segment(seg, "ja", [], song_like, active) == (seg, [])
+    assert clean_segment(seg, "ja", [], song_like, active) == (seg, [], [])
 
 
 def test_other_text_is_never_split():
     song_like, active = _long()
     seg = _sb_seg().model_copy(update={"text": "燃えてきたぞ"})
-    assert clean_segment(seg, "ja", SB_THEME, song_like, active) == (seg, [])
+    assert clean_segment(seg, "ja", SB_THEME, song_like, active) == (seg, [], [])
 
 
 def test_a_segment_without_words_is_judged_whole():
     seg = _seg(10, 30)
     spans = [SongSpan(0.0, 60.0, "detector")]
-    kept, dropped = clean_segment(seg, "ja", spans, _quiet_mask(), _active(0.9))
+    kept, dropped, _ = clean_segment(seg, "ja", spans, _quiet_mask(), _active(0.9))
     assert kept is None and [d.text for d in dropped] == [STOCK]
 
 
@@ -221,7 +244,38 @@ def test_kept_words_join_with_spaces_in_a_spaced_language():
                      (40.0, " thanks"), (40.3, " for"), (40.6, " watching")]
     ]  # fmt: skip
     seg = Segment(start=0.0, end=41.0, text="thanks for watching thanks for watching", words=words)
-    kept, dropped = clean_segment(seg, "en", [SongSpan(35.0, 50.0, "detector")],
+    kept, dropped, _ = clean_segment(seg, "en", [SongSpan(35.0, 50.0, "detector")],
                                   _quiet_mask(), _active(0.9))  # fmt: skip
     assert kept is not None and kept.text == "thanks for watching"
     assert dropped[0].text == "thanks for watching"
+
+
+def test_a_run_spoken_over_music_is_kept_and_flagged():
+    """Sol Bianca's お疲 run sits over music the per-second mask calls song-like; spoken, it is
+    kept and flagged, while the run inside the theme still goes."""
+    song_like, active = _long()
+    song_like[3564:3571] = True
+    kept, dropped, flags = clean_segment(_sb_seg(), "ja", SB_THEME, song_like, active, SPOKEN)
+    assert kept is not None and kept.text == "お疲"
+    assert [d.text for d in dropped] == ["れ様でした"]
+    (f,) = flags
+    assert f.reason == f"{FLAG_FRAGMENT}; {FLAG_SPOKEN}"
+    kept, dropped, flags = clean_segment(_sb_seg(), "ja", SB_THEME, song_like, active, SUNG)
+    assert kept is None and flags == []
+    assert dropped[0].reason == "stock phrase over sung music; stock phrase over a theme song"
+
+
+def test_a_whole_segment_spoken_over_music_is_kept_and_flagged():
+    mask = _quiet_mask()
+    mask[10:30] = True
+    seg = _seg(10, 30)
+    kept, dropped, flags = clean_segment(seg, "ja", [], mask, _active(0.9), SPOKEN)
+    assert kept == seg and dropped == []
+    assert [(f.text, f.reason) for f in flags] == [
+        (STOCK, "stock phrase spoken over music (not sung)")
+    ]
+
+
+def test_a_phrase_said_over_quiet_dialogue_is_not_flagged():
+    seg = _seg(10, 14, words=True)
+    assert clean_segment(seg, "ja", [], _quiet_mask(), _active(0.9), SPOKEN) == (seg, [], [])
