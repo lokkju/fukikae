@@ -328,3 +328,17 @@ def test_an_ellipsis_cue_keeps_its_longer_pause(ep, gappy):
     TtsStage(CFG).run(ep, CFG)
     rate, data = wavfile.read(ep.work / "07-tts" / "c0001.wav")
     assert longest_pause_ms(data, rate) == 450
+
+
+def test_stage_keys_read_without_a_tts_backend():
+    # D41's profiles set only `clone_backend`; a workspace that names no `[tts] backend`
+    # (Sol Bianca on the anime profile) must still read the stage-wide keys.
+    cfg = Config(
+        raw={"tts": {"max_pause_ms": 250}},
+        profile="anime",
+        profile_raw={"tts": {"clone_backend": "indextts2"}},
+    )
+    assert tts.pause_caps(cfg) == (250, 500)
+    assert tts.tts_engines(cfg) == {}
+    assert tts.pause_caps(Config(raw={})) == (200, 500)
+    assert tts.tts_engines(Config(raw={})) == {}

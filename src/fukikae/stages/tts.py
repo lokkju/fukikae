@@ -359,7 +359,7 @@ def pause_caps(cfg: Config) -> tuple[int, int]:
     """``[tts] max_pause_ms`` and ``max_pause_ms_ellipsis`` (ruling D33), the workspace's over
     the profile's; 200 and 500 when unset. Each is 0 (no cap) or whole milliseconds of at
     least ``PAUSE_MIN_MS``."""
-    options = cfg.resolve("tts").options
+    options = stage_options(cfg)
     out: list[int] = []
     for key, default in zip(PAUSE_KEYS, PAUSE_DEFAULTS, strict=True):
         value = options.get(key, default)
@@ -498,6 +498,12 @@ def _is_backend_table(key: str, value: Any) -> bool:
 
 
 _NO_BACKEND = "\x00none"
+
+
+def stage_options(cfg: Config) -> dict[str, Any]:
+    """Every ``[tts]`` option, the workspace's over the profile's, stage keys included. Needs
+    no backend: since D41 a profile names only ``clone_backend``."""
+    return cfg.resolve("tts", default=_NO_BACKEND).options
 
 
 def stage_settings(cfg: Config) -> tuple[BackendConfig, str | None]:
@@ -649,7 +655,7 @@ def tts_engines(cfg: Config) -> dict[str, str]:
     workspace's over the profile's (D28: ``{ indextts2 = "indextts2_trt" }``). The renders
     carry the engine's name and identity in their cache keys; the cards stay as they are. An
     engine must declare that it renders that backend's cards (``card_backend``)."""
-    raw = cfg.resolve("tts").options.get("engines")
+    raw = stage_options(cfg).get("engines")
     if raw is None:
         return {}
     if not isinstance(raw, dict) or not all(
