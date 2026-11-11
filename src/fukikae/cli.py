@@ -150,21 +150,23 @@ def _setup_options(kind: str, name: str, workspace: Path | None) -> dict[str, ob
 @app.command()
 def status(
     workspace: Path = typer.Argument(..., help="Workspace directory."),
-    as_json: bool = typer.Option(False, "--json", help="Print status.json, with `live` added."),
+    as_json: bool = typer.Option(
+        False, "--json", help="Print the runs' files as {runs: [...]}, each with `live` added."
+    ),
 ) -> None:
-    """Show what a run in the workspace is doing: each thread's episode, stage, counts and
-    ETA, the GPU lock, the last log line; or that no run is in progress."""
+    """Show what the runs in the workspace are doing: each live run's threads, episode, stage,
+    counts and ETA, the GPU lock and the last log line, then the most recent run that ended;
+    or that no run is in progress. Deletes the files of dead runs older than a day."""
     import json
 
     from fukikae import progress
 
-    data = progress.read_status(workspace)
+    runs = progress.read_runs(workspace, clean=True)
     if as_json:
-        out = dict(data or {})
-        out["live"] = bool(data) and progress.is_live(data or {})
-        typer.echo(json.dumps(out, indent=2))
+        shown = [r | {"live": progress.is_live(r)} for r in progress.shown_runs(runs)]
+        typer.echo(json.dumps({"runs": shown}, indent=2))
         return
-    typer.echo(progress.describe(data))
+    typer.echo(progress.describe_runs(runs))
 
 
 @app.command()

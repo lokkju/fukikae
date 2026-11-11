@@ -399,11 +399,14 @@ def test_a_waiter_names_the_holder_and_how_long_it_has_held_the_card(monkeypatch
         os.close(fake_holder)  # lets go of the lock
 
     try:
-        with progress.run(tmp_path, ["S01E12"], stream=io.StringIO(), tty=False, status_every=0):
+        with progress.run(
+            tmp_path, ["S01E12"], stream=io.StringIO(), tty=False, status_every=0
+        ) as reporter:
+            assert reporter is not None
             t = threading.Thread(target=watch)
             t.start()
             with gpu_lock(0, "asr", timeout_s=5, poll_s=0.05):
-                held = json.loads((tmp_path / ".fukikae" / "status.json").read_text())["gpu"]
+                held = json.loads(reporter.status_path.read_text())["gpu"]
             t.join(5)
     finally:
         with contextlib.suppress(OSError):
