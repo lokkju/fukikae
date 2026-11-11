@@ -71,9 +71,11 @@ from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW
 from fukikae.registry.store import AUTOMATIC_BY, ProtectedAssignmentError, replace_refusal
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from fukikae.backends.base import Synthesizer
     from fukikae.cards.card import Card
-    from fukikae.cards.select import RefPick
+    from fukikae.cards.select import RefPick, Register
     from fukikae.config import Config
     from fukikae.models import Assignments, ClusterAssignment, DubCue, Tags, Transcript
     from fukikae.names.models import NamesResult
@@ -794,9 +796,9 @@ def character_candidates(
     `gender_thresholds`: a profile band tuned on the old estimator, such as the anime
     profile's 300 Hz pending D44, would keep only the turns above it and push the register
     up by 2 to 4 semitones on Sol Bianca). The voicing gate runs in both tiers, gate 3 reads
-    the song detector's per-second mask and voicing (``select.reference_gating``), and the
-    pitch tracks go through the workspace's pitch cache. ``gated`` receives each episode's
-    `Gated` counts.
+    the song detector's per-second mask (``select.reference_gating``) and each candidate's
+    sung-ness, and the pitch tracks go through the workspace's pitch cache. ``gated``
+    receives each episode's `Gated` counts (``split`` when the register is bimodal).
 
     In an episode whose names were used (``owner`` answers keys, the workspace's registry by
     default), the candidates are the character's name-confirmed turns (`confirmed_labels`),
@@ -805,6 +807,7 @@ def character_candidates(
     it under someone else's names (`foreign_spans`). A names-used episode whose assignments
     are older than its names (``skipped``) offers nothing."""
     from fukikae.cards.select import (
+        Register,
         eligible_references,
         reference_exclusions,
         reference_gating,
@@ -853,14 +856,14 @@ def character_candidates(
         gkey = (str(work), repr(songs), _stamp(*_exclusion_files(work)))
         if gkey not in _GATING_MEMO:
             _remember(_GATING_MEMO, gkey, reference_gating(work, songs))
-        song_like, voicing = _GATING_MEMO[gkey]
+        song_like = _GATING_MEMO[gkey]
         spans = [(t.start, t.end) for t in a.assignments.turns if t.speaker in speakers]
         rkey = (str(work), tuple(spans), bands, _stamp(a.vocals))
         if rkey not in _REGISTER_MEMO:
             _remember(_REGISTER_MEMO, rkey, speaker_register(a.vocals, spans, bands, ws.root))
         register = _REGISTER_MEMO[rkey]
         if confirmed:
-            register = ("u", register[1])  # names vouch for the speaker: no register gate
+            register = Register("u", register.median)  # names vouch: no gate, no split flag
         key = (
             str(work), tuple(sorted(speakers)), tuple(exclude), tuple(foreign), register,
             gkey, _stamp(*_candidate_files(work)),
@@ -869,8 +872,8 @@ def character_candidates(
             counts: list[Gated] = []
             picks = eligible_references(
                 a.assignments.turns, speakers, a.transcript, a.tags, a.vocals, exclude=exclude,
-                foreign=foreign, register=register, song_like=song_like, voicing=voicing,
-                voiced_share=songs.voiced_share, pitch_root=ws.root, gated=counts,
+                foreign=foreign, register=register, song_like=song_like, bands=bands,
+                pitch_root=ws.root, gated=counts,
             )  # fmt: skip
             _remember(_CANDIDATES_MEMO, key, (picks, counts[0] if counts else Gated()))
         picks, found = _CANDIDATES_MEMO[key]
@@ -887,9 +890,9 @@ def character_candidates(
 # review: a flagged character with no better pick is looked up again on each run).
 _CANDIDATES_MEMO: dict[tuple, tuple[list[RefPick], Gated]] = {}
 _EXCLUSIONS_MEMO: dict[tuple, list[tuple[float, float]]] = {}
-# each episode's gate 3 evidence (song mask, voicing) and each speaker's register (A1)
-_GATING_MEMO: dict[tuple, tuple] = {}
-_REGISTER_MEMO: dict[tuple, tuple] = {}
+# each episode's gate 3 evidence (the song mask) and each speaker's register (A1)
+_GATING_MEMO: dict[tuple, np.ndarray | None] = {}
+_REGISTER_MEMO: dict[tuple, Register] = {}
 _MEMO_MAX = 4096
 
 

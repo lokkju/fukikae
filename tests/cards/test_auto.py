@@ -1578,7 +1578,7 @@ def test_reference_candidates_are_read_once_per_process_until_a_file_changes(
 # shout the names gave him).
 GATE_TURNS = [
     (0.0, 5.0, "S0~natsu", 0.02), (30.0, 35.0, "S0~natsu", 0.02),
-    (60.0, 65.0, "S0~natsu", 0.0005), (90.0, 95.0, "S0~natsu", 0.02),
+    (60.0, 64.5, "S0~natsu", 0.0005), (90.0, 95.0, "S0~natsu", 0.02),
 ]  # fmt: skip
 GATE_HZ = [130.0, 130.0, 240.0, 130.0]
 

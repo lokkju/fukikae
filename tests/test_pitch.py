@@ -22,6 +22,7 @@ from fukikae.pitch import (
     summarize,
     turn_classes,
 )
+from tests.fixtures.speechlike import noise_bursts, speech, sung
 
 RATE = 16000
 
@@ -65,7 +66,7 @@ def test_constants_match_the_spec():
     assert (pitch.SPEAKER_MIN_VOICED_S, pitch.LINE_MIN_VOICED_S) == (1.0, 0.4)
     assert pitch.CONFIDENCE_ST == 4.0
     assert (pitch.BIMODAL_MIN_S, pitch.BIMODAL_MIN_SHARE) == (5.0, 0.15)
-    assert pitch.VERSION == 3  # bumped with every estimator change (the cache key)
+    assert pitch.VERSION == 4  # bumped with every estimator change (the cache key)
 
 
 def test_harmonic_tone_reads_its_fundamental(tmp_path: Path):
@@ -267,9 +268,9 @@ def test_cached_track_is_reused_and_keyed_by_spans(tmp_path: Path, monkeypatch):
     calls: list[int] = []
     real = pitch.f0_track
 
-    def counting(vocals, spans):
+    def counting(vocals, spans, groups=None):
         calls.append(1)
-        return real(vocals, spans)
+        return real(vocals, spans, groups)
 
     monkeypatch.setattr(pitch, "f0_track", counting)
     a = cached_track(root, wav, [(0.0, 1.0)])
@@ -299,9 +300,9 @@ def test_cached_track_recomputes_a_truncated_cache_file(tmp_path: Path, monkeypa
     calls: list[int] = []
     real = pitch.f0_track
 
-    def counting(vocals, spans):
+    def counting(vocals, spans, groups=None):
         calls.append(1)
-        return real(vocals, spans)
+        return real(vocals, spans, groups)
 
     monkeypatch.setattr(pitch, "f0_track", counting)
     again = cached_track(root, wav, [(0.0, 2.0)])
@@ -319,3 +320,78 @@ def test_cache_key_names_the_estimator_version(tmp_path: Path, monkeypatch):
     key = pitch.track_key(wav, [(0.0, 1.0)])
     monkeypatch.setattr(pitch, "VERSION", pitch.VERSION + 1)
     assert pitch.track_key(wav, [(0.0, 1.0)]) != key
+
+
+# -- loud frames and groups (A1 voicing over a candidate's own speech) ------------------------
+
+
+def test_voiced_share_of_loud_frames_ignores_pauses(tmp_path: Path):
+    """Speech with long pauses is half voiced over all its frames but voiced over its loud
+    ones: the pauses are speech's, not junk."""
+    wav = write_wav(tmp_path / "s.wav", speech(240, 6.0, voiced_share=0.35))
+    s = summarize(f0_track(wav, [(0.0, 6.0)]), 0)
+    assert s.voiced_fraction < 0.5
+    assert s.loud_voiced_fraction >= 0.7
+
+
+def test_loud_noise_is_unvoiced_among_loud_frames(tmp_path: Path):
+    wav = write_noise(tmp_path, 3.0)
+    s = summarize(f0_track(wav, [(0.0, 3.0)]), 0)
+    assert s.loud_voiced_fraction < 0.1
+
+
+def test_each_group_has_its_own_loudness_floor(tmp_path: Path):
+    """A quiet speaker read in one track with a loud one: alone, or in a group of its own, its
+    frames are loud enough to read; in a shared group the loud one's floor silences them."""
+    quiet = 0.02 * speech(240, 3.0, seed=1) / 0.25
+    loud = speech(240, 3.0, seed=2)
+    wav = write_wav(tmp_path / "q.wav", np.concatenate([loud, quiet]))
+    spans = [(0.0, 3.0), (3.0, 6.0)]
+    shared = summarize(f0_track(wav, spans), 1)
+    alone = summarize(f0_track(wav, [(3.0, 6.0)]), 0)
+    grouped = f0_track(wav, spans, groups=[0, 1])
+    own = summarize(grouped, 1)
+    assert shared.voiced_s < alone.voiced_s / 2
+    assert own == alone
+    np.testing.assert_array_equal(grouped.groups, [0, 1])
+
+
+def test_summarize_a_group_reads_every_span_in_it(tmp_path: Path):
+    wav = write_wav(
+        tmp_path / "g.wav", np.concatenate([tone(240, 2.0), np.zeros(RATE), tone(240, 2.0)])
+    )
+    track = f0_track(wav, [(0.0, 2.0), (3.0, 5.0), (0.0, 1.0)], groups=[0, 0, 1])
+    g0 = pitch.summarize_group(track, 0)
+    assert g0.seconds == pytest.approx(4.0)
+    assert g0.voiced_s == pytest.approx(summarize(track, 0).voiced_s + summarize(track, 1).voiced_s)
+    assert pitch.summarize_group(track, 1).seconds == pytest.approx(1.0)
+
+
+def test_cache_keeps_groups_and_loud_frames(tmp_path: Path):
+    wav = write_harmonic(tmp_path, 220, 2.0)
+    root = tmp_path / "ws"
+    a = cached_track(root, wav, [(0.0, 1.0), (1.0, 2.0)], groups=[0, 1])
+    b = cached_track(root, wav, [(0.0, 1.0), (1.0, 2.0)], groups=[0, 1])
+    np.testing.assert_array_equal(a.loud, b.loud)
+    np.testing.assert_array_equal(b.groups, [0, 1])
+    assert pitch.track_key(wav, [(0.0, 1.0), (1.0, 2.0)], [0, 1]) != pitch.track_key(
+        wav, [(0.0, 1.0), (1.0, 2.0)]
+    )
+
+
+def test_held_notes_are_sung_and_speech_is_not(tmp_path: Path):
+    """A0's sung-ness: song holds notes (long voiced runs, little pitch change from frame to
+    frame); speech moves in short syllables that glide."""
+    wav = write_wav(tmp_path / "x.wav", np.concatenate([sung(330, 6.0), speech(330, 6.0)]))
+    track = f0_track(wav, [(0.0, 6.0), (6.0, 12.0)], groups=[0, 1])
+    song, talk = pitch.stability(track, 0), pitch.stability(track, 1)
+    assert song.jitter_st is not None and song.jitter_st <= pitch.SUNG_JITTER_ST
+    assert song.run_s >= pitch.SUNG_RUN_S and pitch.is_sung(song)
+    assert talk.run_s < pitch.SUNG_RUN_S and not pitch.is_sung(talk)
+
+
+def test_noise_bursts_are_neither_voiced_nor_sung(tmp_path: Path):
+    wav = write_wav(tmp_path / "n.wav", noise_bursts(5.0))
+    track = f0_track(wav, [(0.0, 5.0)], groups=[0])
+    assert pitch.summarize_group(track, 0).loud_voiced_fraction < pitch.REF_VOICED_MIN
+    assert not pitch.is_sung(pitch.stability(track, 0))

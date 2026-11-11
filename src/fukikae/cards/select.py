@@ -29,13 +29,20 @@ separated song vocals are clean and loud, so they would otherwise rank first.
 
 Reference gates (A1, identification workflow). After those checks, ``eligible_references``
 can drop candidates by three gates; they filter only, and the survivors keep the CD5 order.
-With ``register`` (the speaker's majority register in the episode, `speaker_register`), a
-candidate whose median F0 is more than ``REF_PITCH_ST`` (4 semitones) from the register's
-median is ``off_register`` (no pitch gate when the register is ``u``), and one under
-``REF_VOICED_MIN`` (half) voiced frames is ``unvoiced``. With ``song_like`` (the song
-detector's per-second mask, ``songs.song_like_seconds``), a candidate with ``REF_SONG_SHARE``
-(half) or more of its seconds song-like and a voicing share (``voicing``, the detector's
-``songs.voiced_share``) of at least ``voiced_share`` is ``song_like``: an insert song in no
+Each candidate is measured on its own speech: the speaker's turns inside it (a join's gaps are
+left out), read as one loudness group of the F0 track (``fukikae.pitch``), so its verdict
+never depends on which other candidates share the track (`measure_candidates`,
+`verdict`). With ``register`` (the speaker's majority register in the episode,
+`speaker_register`), a candidate is ``off_register`` when its own class (``pitch.classify``
+of its median at the line minimum) crosses the register's: the other band, or between the
+bands under a register that sits a full ``CONFIDENCE_ST`` (4 st) inside its band. A candidate
+in the register's own band is never refused, however far from the register's median, and a
+``u`` register or a bimodal one (``pitch.bimodal``: a cluster with two voices, flagged as
+needing a split) gates no pitch. A candidate under ``REF_VOICED_MIN`` (0.35) of its loud
+frames voiced is ``unvoiced`` (whispers, effects, processed voices). With ``song_like`` (the
+song detector's per-second mask, ``songs.song_like_seconds``), a candidate with
+``REF_SONG_SHARE`` (half) or more of its seconds song-like whose frames are sung
+(``pitch.is_sung``: held notes, not gliding syllables) is ``song_like``: an insert song in no
 theme span. Each candidate's verdict (`RefVerdict`) can be collected, and `Gated` counts the
 refusals for ``reference_report``. The fourth gate is about the set: ``pick_references``
 takes at most one clip per scene (starts within ``SCENE_GAP_S``, 60 s, of a taken pick) until
@@ -52,14 +59,14 @@ import tempfile
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import numpy as np
 
 from fukikae.pitch import (
     FEMALE_ABOVE,
+    LINE_MIN_VOICED_S,
     MALE_BELOW,
-    REF_PITCH_ST,
     REF_SONG_SHARE,
     REF_VOICED_MIN,
     Gender,
@@ -144,10 +151,12 @@ class RefPick:
     snr_db: float
     emotion: str | None = None  # the label when a scored source calls the turn non-neutral
     # measured by the A1 gates (None when they didn't run): median F0 in Hz, the share of
-    # voiced frames, and the share of the turn's seconds the song detector calls song-like
+    # loud frames voiced, the share of the turn's seconds the song detector calls song-like,
+    # and whether its frames hold notes (pitch.is_sung)
     median: float | None = None
     voiced_fraction: float | None = None
     song_share: float | None = None
+    sung: bool | None = None
 
     @property
     def seconds(self) -> float:
@@ -321,12 +330,23 @@ def _split(
 
 # Gate 4: picks whose starts are this close count as one scene (`pick_references`).
 SCENE_GAP_S = 60.0
-# The song detector's voicing threshold (``SongSettings.voiced_share``), the default for gate 3.
-SONG_VOICED_SHARE = 0.7
 
 Gate = Literal["off_register", "unvoiced", "song_like"]
 GATES: tuple[Gate, ...] = ("off_register", "unvoiced", "song_like")
-type Register = tuple[Gender, float | None]
+type Bands = tuple[float, float]
+
+
+type RegisterLike = Register | tuple[Gender, float | None]
+
+
+class Register(NamedTuple):
+    """A speaker's register in an episode: the majority class, the median of that class's
+    turns, and whether the turns are bimodal (two voices: no pitch gate, flagged for a
+    split). A plain ``(gender, median)`` pair is accepted wherever a register is."""
+
+    gender: Gender
+    median: float | None
+    bimodal: bool = False
 
 
 @dataclass(frozen=True)
@@ -346,12 +366,14 @@ class RefVerdict:
 @dataclass(frozen=True)
 class Gated:
     """How many candidates each gate refused (a candidate refused by several counts under
-    each), and ``top``: how many refused candidates would have ranked in the first three."""
+    each), ``top``: how many refused candidates would have ranked in the first three, and
+    ``split``: the speaker's turns are bimodal, so no pitch gate ran and it needs a split."""
 
     off_register: int = 0
     unvoiced: int = 0
     song_like: int = 0
     top: int = 0
+    split: bool = False
 
     def phrase(self) -> str:
         parts = [
@@ -366,22 +388,32 @@ class Gated:
         return ", ".join(parts)
 
 
+def as_register(r: RegisterLike) -> Register:
+    """A `Register` from a register or a plain ``(gender, median)`` pair."""
+    return r if isinstance(r, Register) else Register(r[0], r[1])
+
+
+SPLIT_NOTE = "needs a split: the speaker's turns are in both registers, so no register gate ran"
+
+
 def speaker_register(
     vocals: Path,
     spans: Sequence[tuple[float, float]],
-    bands: tuple[float, float] = (MALE_BELOW, FEMALE_ABOVE),
+    bands: Bands = (MALE_BELOW, FEMALE_ABOVE),
     root: Path | None = None,
 ) -> Register:
     """The speaker's register in these turns (`fukikae.pitch.majority_register`: the
-    majority class by seconds, each turn classed on its own median) and the median of that
-    class's turns only, so a mixed cluster gets its larger part's register. ``u`` (no class,
-    or a tie) gates no pitch. ``root`` reads through the workspace's pitch cache."""
-    from fukikae.pitch import cached_track, f0_track, majority_register
+    majority class by seconds, each turn classed on its own median), the median of that
+    class's turns only, so a mixed cluster gets its larger part's register, and whether the
+    turns are bimodal (``pitch.bimodal`` on ``pitch.band_seconds``). ``u`` (no class, or a
+    tie) and bimodal registers gate no pitch. ``root`` reads through the workspace's pitch
+    cache."""
+    from fukikae.pitch import band_seconds, bimodal, cached_track, f0_track, majority_register
 
     spans = list(spans)
     track = cached_track(root, vocals, spans) if root is not None else f0_track(vocals, spans)
     gender, summary = majority_register(track, bands)
-    return gender, summary.median
+    return Register(gender, summary.median, bimodal(band_seconds(track, bands)))
 
 
 def song_share(start: float, end: float, song_like: np.ndarray) -> float:
@@ -396,63 +428,143 @@ def song_share(start: float, end: float, song_like: np.ndarray) -> float:
     return covered / (end - start)
 
 
+def own_pieces(
+    start: float, end: float, turn_spans: Sequence[tuple[float, float]] | None
+) -> list[tuple[float, float]]:
+    """The parts of ``turn_spans`` (the speaker's turns) inside ``start``-``end``, merged where
+    they overlap; the whole span when no turn falls in it (or none are given)."""
+    pieces = sorted(
+        (max(a, start), min(b, end)) for a, b in (turn_spans or ()) if a < end and b > start
+    )
+    out: list[tuple[float, float]] = []
+    for a, b in pieces:
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out or [(start, end)]
+
+
+@dataclass(frozen=True)
+class Measured:
+    """What the A1 gates read of one candidate's own speech."""
+
+    median: float | None
+    voiced_fraction: float  # voiced share of its loud frames
+    voiced_s: float
+    sung: bool
+
+
+def measure_candidates(
+    vocals: Path,
+    spans: Sequence[tuple[float, float]],
+    turn_spans: Sequence[tuple[float, float]] | None = None,
+    pitch_root: Path | None = None,
+) -> list[Measured]:
+    """Each candidate's `Measured`, from one F0 track where each candidate (the speaker's
+    turns inside it, `own_pieces`) is its own loudness group, so no candidate's reading
+    depends on another's. ``pitch_root`` reads through the workspace's pitch cache."""
+    from fukikae.pitch import (
+        cached_track,
+        f0_track,
+        is_sung,
+        stability,
+        summarize_group,
+    )
+
+    if not spans:
+        return []
+    pieces: list[tuple[float, float]] = []
+    groups: list[int] = []
+    for i, (start, end) in enumerate(spans):
+        own = own_pieces(start, end, turn_spans)
+        pieces += own
+        groups += [i] * len(own)
+    track = (
+        cached_track(pitch_root, vocals, pieces, groups)
+        if pitch_root is not None
+        else f0_track(vocals, pieces, groups)
+    )
+    out = []
+    for i in range(len(spans)):
+        s = summarize_group(track, i)
+        out.append(
+            Measured(s.median, round(s.loud_voiced_fraction, 3), s.voiced_s,
+                     is_sung(stability(track, i)))
+        )  # fmt: skip
+    return out
+
+
+def _cross_class(m: Measured, register: Register, bands: Bands) -> bool:
+    """Whether the candidate's own class crosses the register's (see the module notes)."""
+    from fukikae.pitch import F0Summary, classify
+
+    if register.gender == "u" or register.bimodal or m.median is None:
+        return False
+    s = F0Summary(m.median, m.median, m.median, m.median, m.voiced_s, m.voiced_s, 1.0, 1.0)
+    own = classify(s, bands[0], bands[1], LINE_MIN_VOICED_S)
+    if own.gender not in ("u", register.gender):
+        return True
+    if own.gender == "u" and own.voiced_s >= LINE_MIN_VOICED_S and register.median is not None:
+        centre = register.median
+        reg = F0Summary(centre, centre, centre, centre, 9e9, 9e9, 1.0, 1.0)
+        return classify(reg, bands[0], bands[1]).confidence >= 1.0
+    return False
+
+
+def verdict(
+    m: Measured,
+    *,
+    register: RegisterLike | None = None,
+    song: float | None = None,
+    bands: Bands = (MALE_BELOW, FEMALE_ABOVE),
+) -> tuple[Gate, ...]:
+    """The gates refusing a measured candidate: 1 and 2 when ``register`` is given (gate 1
+    only for a classed, unimodal register), 3 when ``song`` (its song-like share) is."""
+    gates: list[Gate] = []
+    if register is not None:
+        reg = as_register(register)
+        if _cross_class(m, reg, bands):
+            gates.append("off_register")
+        if m.voiced_fraction < REF_VOICED_MIN:
+            gates.append("unvoiced")
+    if song is not None and song >= REF_SONG_SHARE and m.sung:
+        gates.append("song_like")
+    return tuple(gates)
+
+
 def gate_candidates(
     ranked: Sequence[RefPick],
     vocals: Path,
     *,
-    register: Register | None = None,
+    register: RegisterLike | None = None,
     song_like: np.ndarray | None = None,
-    voicing: Callable[[float, float], float] | None = None,
-    voiced_share: float = SONG_VOICED_SHARE,
+    turn_spans: Sequence[tuple[float, float]] | None = None,
+    bands: Bands = (MALE_BELOW, FEMALE_ABOVE),
     pitch_root: Path | None = None,
 ) -> list[RefVerdict]:
-    """Each of ``ranked``'s verdicts, in order: gates 1 and 2 when ``register`` is given (the
-    candidates' F0 read in one track), gate 3 when ``song_like`` is given (``voicing`` is
-    asked only of a turn the mask calls song-like, and without it the mask alone decides)."""
-    from fukikae.pitch import cached_track, f0_track, summarize
-
-    medians: list[float | None] = [None] * len(ranked)
-    voiced: list[float | None] = [None] * len(ranked)
-    if register is not None and ranked:
-        spans = [(p.start, p.end) for p in ranked]
-        track = (
-            cached_track(pitch_root, vocals, spans)
-            if pitch_root is not None
-            else f0_track(vocals, spans)
-        )
-        for i in range(len(ranked)):
-            summary = summarize(track, i)
-            medians[i], voiced[i] = summary.median, round(summary.voiced_fraction, 3)
+    """Each of ``ranked``'s verdicts, in order (`measure_candidates`, `verdict`): gates 1
+    and 2 when ``register`` is given, gate 3 when ``song_like`` is. ``turn_spans`` are the
+    speaker's turns, so a joined candidate is read without its gaps."""
+    if register is None and song_like is None:
+        return [RefVerdict(p, (), i) for i, p in enumerate(ranked)]
+    spans = [(p.start, p.end) for p in ranked]
+    measured = measure_candidates(vocals, spans, turn_spans, pitch_root)
     out: list[RefVerdict] = []
-    for i, p in enumerate(ranked):
-        gates: list[Gate] = []
-        med, frac = medians[i], voiced[i]
-        if register is not None:
-            gender, centre = register
-            off = centre and med and abs(12 * math.log2(med / centre)) > REF_PITCH_ST
-            if gender != "u" and off:
-                gates.append("off_register")
-            if frac is not None and frac < REF_VOICED_MIN:
-                gates.append("unvoiced")
-        share = None
-        if song_like is not None:
-            share = round(song_share(p.start, p.end, song_like), 3)
-            sung = share >= REF_SONG_SHARE and (
-                voicing is None or voicing(p.start, p.end) >= voiced_share
-            )
-            if sung:
-                gates.append("song_like")
+    for i, (p, m) in enumerate(zip(ranked, measured, strict=True)):
+        share = None if song_like is None else round(song_share(p.start, p.end, song_like), 3)
+        gates = verdict(m, register=register, song=share, bands=bands)
         pick = RefPick(
             p.start, p.end, p.transcript, p.snr_db, p.emotion,
-            None if med is None else round(med, 1), frac, share,
+            None if m.median is None else round(m.median, 1), m.voiced_fraction, share, m.sung,
         )  # fmt: skip
         for gate in gates:
             log.debug("%.2f-%.2f: gated as a reference (%s)", p.start, p.end, gate)
-        out.append(RefVerdict(pick, tuple(gates), i))
+        out.append(RefVerdict(pick, gates, i))
     return out
 
 
-def count_gated(verdicts: Sequence[RefVerdict]) -> Gated:
+def count_gated(verdicts: Sequence[RefVerdict], split: bool = False) -> Gated:
     """`Gated` of these verdicts; ``top`` counts refused ones ranked in the first three."""
     refused = [v for v in verdicts if not v.passed]
     return Gated(
@@ -460,6 +572,7 @@ def count_gated(verdicts: Sequence[RefVerdict]) -> Gated:
         unvoiced=sum("unvoiced" in v.gates for v in refused),
         song_like=sum("song_like" in v.gates for v in refused),
         top=sum(v.rank < 3 for v in refused),
+        split=split,
     )
 
 
@@ -474,10 +587,9 @@ def eligible_references(
     exclude: Sequence[tuple[float, float]] = (),
     foreign: Sequence[tuple[float, float]] = (),
     join_gap: float = JOIN_GAP_S,
-    register: Register | None = None,
+    register: RegisterLike | None = None,
     song_like: np.ndarray | None = None,
-    voicing: Callable[[float, float], float] | None = None,
-    voiced_share: float = SONG_VOICED_SHARE,
+    bands: Bands = (MALE_BELOW, FEMALE_ABOVE),
     pitch_root: Path | None = None,
     gated: list[Gated] | None = None,
     verdicts: list[RefVerdict] | None = None,
@@ -489,9 +601,10 @@ def eligible_references(
 
     Then the A1 gates (`gate_candidates`) when ``register`` or ``song_like`` is given: the
     refused candidates are dropped, the survivors keep their order and carry what the gates
-    measured. ``gated`` receives one `Gated` and ``verdicts`` every candidate's `RefVerdict`
-    (out-parameters, so existing callers are unchanged). A joined candidate a gate refuses is
-    dropped whole, not split again.
+    measured, each measured on the speaker's own turns inside it. ``gated`` receives one
+    `Gated` and ``verdicts`` every candidate's `RefVerdict` (out-parameters, so existing
+    callers are unchanged). A joined candidate a gate refuses is dropped whole, not split
+    again.
 
     Before the length check, the speaker's clean turns (overlapping no other speaker, outside
     ``exclude`` and ``foreign``) at most ``join_gap`` apart (`JOIN_GAP_S`) are joined, when no
@@ -554,11 +667,12 @@ def eligible_references(
             verdicts += [RefVerdict(p, (), i) for i, p in enumerate(eligible)]
         return eligible
     judged = gate_candidates(
-        eligible, vocals, register=register, song_like=song_like, voicing=voicing,
-        voiced_share=voiced_share, pitch_root=pitch_root,
+        eligible, vocals, register=register, song_like=song_like, turn_spans=spans,
+        bands=bands, pitch_root=pitch_root,
     )  # fmt: skip
     if gated is not None:
-        gated.append(count_gated(judged))
+        split = register is not None and as_register(register).bimodal
+        gated.append(count_gated(judged, split))
     if verdicts is not None:
         verdicts += judged
     return [v.pick for v in judged if v.passed]
@@ -617,7 +731,8 @@ def pick_references(
 
     When the clip cap stops the fill short of the floor, the combinations of ``floor_clips``
     to ``count`` of the `SEARCH_POOL` best-ranked turns within ``total[1]`` that reach it are
-    searched (`_floor_combination`), one clip per scene preferred. Under the floor the best
+    searched (`_floor_combination`), fewest scored non-neutral clips first, then one clip per
+    scene. Under the floor the best
     picks there are are still returned (`meets_floor` tells)."""
     order = {id(p): i for i, p in enumerate(ranked)}
     picks: list[RefPick] = []
@@ -668,11 +783,12 @@ def _floor_combination(
 ) -> list[RefPick] | None:
     """The best combination of ``floor_clips`` to ``count`` of the `SEARCH_POOL` best-ranked
     turns within ``total[1]`` seconds that reaches the floor, in rank order; None when none
-    does. Best is the fewest pairs in one scene (starts within ``scene_gap``; A1 gate 4, so a
-    second clip of a scene is taken only when the floor needs it), then dropping the fewest
-    of the greedy fill's neutral picks (none, when any combination keeps them all: the floor
-    wins only when it must), then the highest-ranked clips (rank positions compared in
-    order)."""
+    does. Best is the fewest scored non-neutral clips (CD5 takes them only to make up the
+    floor, so a neutral second clip of a scene beats an emotional new scene, as the greedy
+    passes order it), then the fewest pairs in one scene (starts within ``scene_gap``; A1
+    gate 4), then dropping the fewest of the greedy fill's neutral picks (none, when any
+    combination keeps them all: the floor wins only when it must), then the highest-ranked
+    clips (rank positions compared in order)."""
     pool = list(ranked[:SEARCH_POOL])
     secs = [p.seconds for p in pool]
     longest = sorted(secs, reverse=True)[:count]
@@ -688,16 +804,18 @@ def _floor_combination(
             abs(starts[i] - starts[j]) < scene_gap for i, j in itertools.combinations(combo, 2)
         )
 
-    best: tuple[int, int, tuple[int, ...]] | None = None
+    emotional = [p.emotion is not None for p in pool]
+    best: tuple[int, int, int, tuple[int, ...]] | None = None
     for k in range(floor_clips, count + 1):
         for combo in itertools.combinations(range(len(pool)), k):
             seconds = sum(secs[i] for i in combo)
             if seconds > total[1] or round(seconds, 1) < total[0]:
                 continue
-            key = (repeats(combo), len(neutral.difference(combo)), combo)
+            scored = sum(emotional[i] for i in combo)
+            key = (scored, repeats(combo), len(neutral.difference(combo)), combo)
             if best is None or key < best:
                 best = key
-    return None if best is None else [pool[i] for i in best[2]]
+    return None if best is None else [pool[i] for i in best[3]]
 
 
 def select_references(
@@ -752,34 +870,31 @@ def reference_exclusions(
     return out
 
 
-def reference_gating(
-    work: Path, settings: Any = None
-) -> tuple[np.ndarray | None, Callable[[float, float], float] | None]:
-    """Gate 3's evidence for an episode work dir: the song detector's per-second song-like
-    mask over the whole episode (``songs.song_like_seconds`` with ``settings``, a
-    ``SongSettings``) and its per-turn voicing share on ``vocals_16k.wav``. (None, None)
-    without the background or vocals stem; no voicing (the mask alone decides) without the
-    16 kHz vocals."""
+def reference_gating(work: Path, settings: Any = None) -> np.ndarray | None:
+    """Gate 3's bed evidence for an episode work dir: the song detector's per-second
+    song-like mask over the whole episode (``songs.song_like_seconds`` with ``settings``, a
+    ``SongSettings``); None without the background or vocals stem. Whether a candidate is
+    sung is read from its own F0 track (``pitch.is_sung``)."""
     from fukikae import songs
 
     s = settings or songs.SongSettings()
     sep = work / "01-separate"
-    background, vocals, v16 = sep / "background.wav", sep / "vocals.wav", sep / "vocals_16k.wav"
+    background, vocals = sep / "background.wav", sep / "vocals.wav"
     if not (background.exists() and vocals.exists()):
-        return None, None
-    mask = songs.song_like_seconds(background, vocals, s)
-    if not v16.exists():
-        return mask, None
-    return mask, lambda a, b: songs.voiced_share(v16, a, b, s.voiced_strength)
+        return None
+    return songs.song_like_seconds(background, vocals, s)
 
 
 def reference_report(picks: list[RefPick], gated: Gated | None = None) -> list[str]:
-    """The CD5 warning for chosen references a scored source calls non-neutral, if any, and
-    the A1 line when a gate refused a candidate that would have ranked in the first three."""
+    """The CD5 warning for chosen references a scored source calls non-neutral, if any, the
+    A1 line when a gate refused a candidate that would have ranked in the first three, and
+    `SPLIT_NOTE` when the speaker's turns are bimodal."""
     labels = sorted({p.emotion for p in picks if p.emotion})
     out = [f"references may carry emotion: {', '.join(labels)}"] if labels else []
     if gated is not None and gated.top > 0:
         out.append(f"gated: {gated.phrase()}")
+    if gated is not None and gated.split:
+        out.append(SPLIT_NOTE)
     return out
 
 

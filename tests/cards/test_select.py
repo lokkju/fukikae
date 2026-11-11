@@ -19,6 +19,7 @@ from fukikae.cards.select import (
 )
 from fukikae.cards.store import CardStore
 from fukikae.models import Segment, Tags, TagSpan, Transcript, Turn, Word
+from tests.fixtures.speechlike import noise_bursts, speech, sung
 
 RATE = 16000
 
@@ -610,33 +611,69 @@ def _gate_case(tmp_path, spans):
 
 
 def test_off_register_candidate_is_gated(tmp_path):
-    """Character 1's shape: speech at 240 Hz; a clean, loud 175 Hz turn (the narration) would
-    rank first by SNR, 5.5 st under her register."""
+    """Character 1's shape: speech at 264 Hz, a full 4 st inside the female band; a clean,
+    loud 175 Hz turn (the narration, between the bands) would rank first by SNR."""
     from fukikae.cards.select import Gated, eligible_references
 
     spans = [(10, 18, 175.0, 0.0005)]
-    spans += [(100 + 20 * i, 106 + 20 * i, 240.0, 0.01) for i in range(4)]
+    spans += [(100 + 20 * i, 106 + 20 * i, 264.0, 0.01) for i in range(4)]
     turns, tr, vocals = _gate_case(tmp_path, spans)
     assert eligible_references(turns, "A", tr, None, vocals)[0].start == 10  # ungated
     gated: list[Gated] = []
-    picks = eligible_references(turns, "A", tr, None, vocals, register=("f", 240.0), gated=gated)
+    picks = eligible_references(turns, "A", tr, None, vocals, register=("f", 264.0), gated=gated)
     assert sorted(p.start for p in picks) == [100, 120, 140, 160]
-    assert all(p.median and abs(12 * np.log2(p.median / 240)) <= 4 for p in picks)
     assert gated == [Gated(off_register=1, unvoiced=0, song_like=0, top=1)]
 
 
+def test_register_refuses_only_cross_class_candidates(tmp_path):
+    """The register gate refuses the other band, and the ambiguous band only under a register
+    a full 4 st inside its own; a same-band candidate passes however far from the median
+    (the old 4 st rule refused the 360 Hz turn below)."""
+    from fukikae.cards.select import RefVerdict, eligible_references
+
+    spans = [(10, 16, 140.0, 0.01), (30, 36, 180.0, 0.01), (50, 56, 230.0, 0.01)]
+    spans += [(70, 76, 360.0, 0.01)]
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    verdicts: list[RefVerdict] = []
+    eligible_references(turns, "A", tr, None, vocals, register=("f", 264.0), verdicts=verdicts)
+    by = {v.pick.start: v.gates for v in verdicts}
+    assert by == {10: ("off_register",), 30: ("off_register",), 50: (), 70: ()}
+    verdicts = []  # a register near the band edge: 215 Hz is 1.3 st inside it
+    eligible_references(turns, "A", tr, None, vocals, register=("f", 215.0), verdicts=verdicts)
+    by = {v.pick.start: v.gates for v in verdicts}
+    assert by == {10: ("off_register",), 30: (), 50: (), 70: ()}
+
+
 def test_mixed_cluster_uses_its_majority_register(tmp_path):
-    """Character 10's shape: two loud male turns and five female ones; the register is the
-    female majority's, so only female turns are references."""
+    """One loud male turn (4 s, under the bimodal minimum) among five female ones: the
+    register is the female majority's, so only female turns are references."""
     from fukikae.cards.select import eligible_references, speaker_register
+
+    spans = [(10, 14, 120.0, 0.0005)]
+    spans += [(100 + 20 * i, 106 + 20 * i, 240.0, 0.01) for i in range(5)]
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    register = speaker_register(vocals, [(t.start, t.end) for t in turns], (165.0, 200.0))
+    assert register.gender == "f" and register.median == pytest.approx(240, rel=0.03)
+    assert not register.bimodal
+    picks = eligible_references(turns, "A", tr, None, vocals, register=register)
+    assert picks and all(p.start >= 100 for p in picks)
+
+
+def test_bimodal_cluster_gates_no_pitch_and_needs_a_split(tmp_path):
+    """Character 10's shape: two male turns (12 s, 29%) and five female: two voices, so the
+    register gate is skipped and the speaker is flagged as needing a split."""
+    from fukikae.cards.select import SPLIT_NOTE, Gated, eligible_references, speaker_register
 
     spans = [(10, 16, 120.0, 0.0005), (30, 36, 125.0, 0.0005)]
     spans += [(100 + 20 * i, 106 + 20 * i, 240.0, 0.01) for i in range(5)]
     turns, tr, vocals = _gate_case(tmp_path, spans)
     register = speaker_register(vocals, [(t.start, t.end) for t in turns], (165.0, 200.0))
-    assert register[0] == "f" and register[1] == pytest.approx(240, rel=0.03)
-    picks = eligible_references(turns, "A", tr, None, vocals, register=register)
-    assert picks and all(p.start >= 100 for p in picks)
+    assert register.gender == "f" and register.bimodal
+    gated: list[Gated] = []
+    picks = eligible_references(turns, "A", tr, None, vocals, register=register, gated=gated)
+    assert {10, 30} <= {p.start for p in picks}
+    assert gated[0].split and gated[0].off_register == 0
+    assert SPLIT_NOTE in reference_report(picks, gated[0])
 
 
 def test_unknown_register_gates_no_pitch(tmp_path):
@@ -662,37 +699,44 @@ def test_unvoiced_candidate_is_gated(tmp_path):
     assert gated[0].unvoiced == 1 and gated[0].top == 1
 
 
+def _clips(path: Path, clips: list[tuple[float, np.ndarray]], seconds: float = 600.0) -> Path:
+    x = np.zeros(int(seconds * RATE), np.float32)
+    for start, clip in clips:
+        a = int(start * RATE)
+        x[a : a + len(clip)] = clip
+    wavfile.write(path, RATE, (np.clip(x, -1, 1) * 32767).astype("<i2"))
+    return path
+
+
 def test_song_like_candidate_is_gated_outside_theme_spans(tmp_path):
-    """Character 3's insert song: a sung turn mid-episode, in no theme span; the per-second
-    song mask covers it and its voicing is the detector's 0.9."""
-    from fukikae.cards.select import eligible_references
+    """Character 3's insert song: a sung turn mid-episode, in no theme span, under the song
+    mask; dialogue under the same mask (speech over a loud bed) is not sung and stays."""
+    from fukikae.cards.select import RefVerdict, eligible_references
 
-    spans = [(300, 309, 330.0, 0.0005), (100, 106, 400.0, 0.01), (130, 136, 400.0, 0.01)]
-    turns, tr, vocals = _gate_case(tmp_path, spans)
-    mask = np.zeros(600, bool)
-    mask[298:312] = True
-    asked: list[tuple[float, float]] = []
-
-    def sung(a: float, b: float) -> float:
-        asked.append((a, b))
-        return 0.9
-
-    picks = eligible_references(turns, "A", tr, None, vocals, song_like=mask, voicing=sung)
-    assert not any(p.start == 300 for p in picks)
-    assert asked == [(300, 309)]  # voicing is measured only on a song-like turn
-    shouted = eligible_references(
-        turns, "A", tr, None, vocals, song_like=mask, voicing=lambda _a, _b: 0.4
+    turns = [Turn(start=s, end=s + 8, speaker="A") for s in (100, 300, 400)]
+    vocals = _clips(
+        tmp_path / "v.wav",
+        [(100, speech(400, 8, seed=1)), (300, sung(400, 8)), (400, speech(400, 8, seed=2))],
     )
-    assert shouted[0].start == 300  # over the bed but not sung: kept
+    mask = np.zeros(600, bool)
+    mask[298:410] = True  # the song and the dialogue at 400 s are both over a loud bed
+    verdicts: list[RefVerdict] = []
+    picks = eligible_references(
+        turns, "A", _transcript(turns), None, vocals, song_like=mask, verdicts=verdicts
+    )
+    assert sorted(p.start for p in picks) == [100, 400]
+    by = {v.pick.start: v for v in verdicts}
+    assert by[300].gates == ("song_like",) and by[300].pick.sung
+    assert by[400].pick.song_share == 1.0 and not by[400].pick.sung
 
 
 def test_verdicts_name_every_gate_per_turn(tmp_path):
     from fukikae.cards.select import RefVerdict, eligible_references
 
-    spans = [(10, 16, None, 0.0005), (30, 38, 175.0, 0.0005), (100, 106, 240.0, 0.01)]
+    spans = [(10, 16, None, 0.0005), (30, 38, 175.0, 0.0005), (100, 106, 264.0, 0.01)]
     turns, tr, vocals = _gate_case(tmp_path, spans)
     verdicts: list[RefVerdict] = []
-    eligible_references(turns, "A", tr, None, vocals, register=("f", 240.0), verdicts=verdicts)
+    eligible_references(turns, "A", tr, None, vocals, register=("f", 264.0), verdicts=verdicts)
     by = {v.pick.start: v for v in verdicts}
     assert by[10].gates == ("unvoiced",) and not by[10].passed
     assert by[30].gates == ("off_register",)
@@ -794,7 +838,7 @@ def test_report_names_gated_top_candidates():
     assert reference_report([]) == []
 
 
-def test_reference_gating_reads_the_song_mask_and_voicing_from_the_stems(tmp_path):
+def test_reference_gating_reads_the_song_mask_from_the_stems(tmp_path):
     from fukikae.cards.select import reference_gating
 
     sep = tmp_path / "01-separate"
@@ -805,10 +849,92 @@ def test_reference_gating_reads_the_song_mask_and_voicing_from_the_stems(tmp_pat
     vo = np.where(t < 2, 0.1 * np.sin(2 * np.pi * 300 * t), 0.0)
     for name, x in (("background.wav", bg), ("vocals.wav", vo)):
         wavfile.write(sep / name, rate, (x * 32767).astype("<i2"))
-    mask, voicing = reference_gating(tmp_path)
+    mask = reference_gating(tmp_path)
     assert mask is not None and list(mask) == [True, True, False, False]
-    assert voicing is None  # no vocals_16k.wav: the mask alone decides
-    wavfile.write(sep / "vocals_16k.wav", RATE, (np.zeros(RATE) * 1).astype("<i2"))
-    assert reference_gating(tmp_path)[1] is not None
     (sep / "background.wav").unlink()
-    assert reference_gating(tmp_path) == (None, None)
+    assert reference_gating(tmp_path) is None
+
+
+def test_a_join_with_gaps_passes_the_voicing_gate(tmp_path):
+    """Two turns of speech with pauses, 0.5 s apart, joined into one candidate (D32 #1): its
+    voicing is read over its turns' loud frames, not over the join's gap and the pauses."""
+    from fukikae.cards.select import RefVerdict, eligible_references
+
+    turns = [Turn(start=100, end=103.2, speaker="A"), Turn(start=103.7, end=107.0, speaker="A")]
+    vocals = _clips(
+        tmp_path / "v.wav",
+        [(100, speech(240, 3.2, seed=3, voiced_share=0.35)),
+         (103.7, speech(240, 3.3, seed=4, voiced_share=0.35))],
+    )  # fmt: skip
+    verdicts: list[RefVerdict] = []
+    picks = eligible_references(
+        turns, "A", _transcript(turns), None, vocals, register=("f", 240.0), verdicts=verdicts
+    )
+    assert [(p.start, p.end) for p in picks] == [(100.0, 107.0)]
+    from fukikae import pitch
+
+    whole = pitch.summarize(pitch.f0_track(vocals, [(100.0, 107.0)]), 0)
+    assert whole.voiced_fraction < 0.5  # what the gate read before: refused
+    vf = verdicts[0].pick.voiced_fraction
+    assert verdicts[0].passed and vf is not None and vf >= 0.7
+
+
+def test_speech_with_pauses_passes_the_voicing_gate(tmp_path):
+    """Erza's E13 shape: calm speech, mostly pauses, refused as unvoiced when the pauses
+    counted against it."""
+    from fukikae.cards.select import eligible_references
+
+    turns = [Turn(start=100, end=106, speaker="A"), Turn(start=200, end=206, speaker="A")]
+    vocals = _clips(
+        tmp_path / "v.wav",
+        [(100, speech(240, 6, seed=5, voiced_share=0.3)), (200, speech(240, 6, seed=6))],
+    )
+    picks = eligible_references(turns, "A", _transcript(turns), None, vocals, register=("f", 240.0))
+    assert sorted(p.start for p in picks) == [100, 200]
+
+
+def test_whisper_like_candidate_is_gated_as_unvoiced(tmp_path):
+    from fukikae.cards.select import RefVerdict, eligible_references
+
+    turns = [Turn(start=100, end=106, speaker="A"), Turn(start=200, end=206, speaker="A")]
+    vocals = _clips(tmp_path / "v.wav", [(100, noise_bursts(6)), (200, speech(240, 6))])
+    verdicts: list[RefVerdict] = []
+    picks = eligible_references(
+        turns, "A", _transcript(turns), None, vocals, register=("f", 240.0), verdicts=verdicts
+    )
+    assert [p.start for p in picks] == [200]
+    assert {v.pick.start: v.gates for v in verdicts}[100] == ("unvoiced",)
+
+
+def test_a_verdict_does_not_depend_on_the_other_candidates(tmp_path):
+    """A quiet speaker's turn read alone, and beside a loud turn, measures the same: each
+    candidate is its own loudness group."""
+    from fukikae.cards.select import RefVerdict, eligible_references
+
+    quiet = 0.02 * speech(240, 6, seed=7) / 0.25
+    vocals = _clips(tmp_path / "v.wav", [(100, quiet), (200, speech(240, 6, seed=8))])
+    alone = [Turn(start=100, end=106, speaker="A")]
+    both = [*alone, Turn(start=200, end=206, speaker="A")]
+    got: list[list[RefVerdict]] = []
+    for turns in (alone, both):
+        verdicts: list[RefVerdict] = []
+        eligible_references(
+            turns, "A", _transcript(turns), None, vocals, register=("f", 240.0),
+            verdicts=verdicts,
+        )  # fmt: skip
+        got.append([v for v in verdicts if v.pick.start == 100])
+    assert got[0][0].pick == got[1][0].pick and got[0][0].gates == got[1][0].gates == ()
+
+
+def test_the_floor_search_prefers_neutral_clips_to_a_new_scene():
+    """Fewest scored non-neutral clips first: an all-neutral set reaching the floor with a
+    second clip of a scene beats one with an angry clip from a new scene."""
+    from fukikae.cards.select import pick_references
+
+    ranked = _ranked([
+        _p(0, 4.0, 40), _p(20, 5.0, 39), _p(300, 3.0, 38), _p(600, 2.9, 37),
+        _p(900, 6.0, 45, "angry"),
+    ])  # fmt: skip
+    picks = pick_references(ranked)
+    assert picks is not None and all(p.emotion is None for p in picks)
+    assert [p.start for p in picks] == [20, 300, 600]  # one per scene; the old key took 900
