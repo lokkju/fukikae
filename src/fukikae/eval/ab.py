@@ -873,11 +873,11 @@ The folder is self-contained: the page makes no network requests and every path 
 relative, so it works wherever the folder goes.
 
   Copy it to your machine and open index.html there:
-    rsync -a ml-01:{{this folder}}/ ~/ab-review/      (or scp -r)
+    rsync -a <gpu-host>:{{this folder}}/ ~/ab-review/      (or scp -r)
 
   Or serve it from here, bound to localhost only, and tunnel the port:
-    on ml-01:   python3 -m http.server 8765 --bind 127.0.0.1 --directory {{this folder}}
-    locally:    ssh -N -L 8765:127.0.0.1:8765 ml-01
+    remotely:   python3 -m http.server 8765 --bind 127.0.0.1 --directory {{this folder}}
+    locally:    ssh -N -L 8765:127.0.0.1:8765 <gpu-host>
     then open   localhost:8765 in your browser; stop the server with Ctrl-C afterwards.
 
   Or play single files in the terminal session with mpv or ffplay -nodisp -autoexit
