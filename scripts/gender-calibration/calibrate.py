@@ -111,9 +111,9 @@ def stats(frames: np.ndarray | None) -> dict[str, float | None]:
 def gt_lines(ws: Path, episode: str, kind: str, gt_file: Path | None, n: int) -> list[dict]:
     """Ground-truth lines (start, end, speaker), or the ASR transcript's (speaker None)."""
     if kind == "none":
-        tr = json.loads(
-            (ws / ".fukikae" / "episodes" / episode / "03-asr" / "transcript.json").read_text()
-        )
+        from fukikae.transcripts import transcript_path
+
+        tr = json.loads(transcript_path(ws / ".fukikae" / "episodes" / episode).read_text())
         return [{"start": s["start"], "end": s["end"], "speaker": None} for s in tr["segments"]]
     from fukikae.eval.autolabel import gt_path_for
     from fukikae.eval.groundtruth import read_ground_truth

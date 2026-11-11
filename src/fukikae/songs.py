@@ -314,7 +314,7 @@ def find_candidates(
     return out
 
 
-def _spans(cands: list[Candidate], gap: float = 0.0) -> list[SongSpan]:
+def merge_spans(cands: list[Candidate], gap: float = 0.0) -> list[SongSpan]:
     """Accepted candidates as spans, merged where they overlap or lie within ``gap`` s."""
     merged: list[SongSpan] = []
     for c in sorted((c for c in cands if c.accepted), key=lambda c: c.start):
@@ -328,7 +328,8 @@ def _spans(cands: list[Candidate], gap: float = 0.0) -> list[SongSpan]:
     return merged
 
 
-def _gap(s: SongSettings) -> float:
+def merge_gap(s: SongSettings) -> float:
+    """How close accepted spans must be to merge: ``grow_s`` with ``tail_repeat``, else 0."""
     return float(s.grow_s) if s.tail_repeat else 0.0
 
 
@@ -342,7 +343,7 @@ def theme_songs(
 ) -> list[SongSpan]:
     """Opening and ending theme spans from per-second features (see the module docstring)."""
     s = settings or SongSettings()
-    return _spans(find_candidates(bg_db, vo_db, active, s, voiced), _gap(s))
+    return merge_spans(find_candidates(bg_db, vo_db, active, s, voiced), merge_gap(s))
 
 
 def detect_theme_songs(
@@ -354,4 +355,4 @@ def detect_theme_songs(
     cands = find_candidates(
         *feats, s, voiced=lambda a, b: voiced_share(vocals_16k, a, b, s.voiced_strength)
     )
-    return _spans(cands, _gap(s)), cands
+    return merge_spans(cands, merge_gap(s)), cands

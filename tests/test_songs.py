@@ -228,14 +228,14 @@ def test_the_usual_single_ending_is_unchanged():
 
 
 def test_spans_within_grow_s_merge():
-    from fukikae.songs import Candidate, _spans
+    from fukikae.songs import Candidate, merge_spans
 
     a = Candidate("tail", 100.0, 180.0, 0.9, 0.8, True, "accepted")
     b = Candidate("tail2", 184.0, 214.0, 0.8, 0.8, True, "accepted")
     far = Candidate("tail3", 230.0, 260.0, 0.8, 0.8, True, "accepted")
-    got = [(s.start, s.end) for s in _spans([a, b, far], gap=5)]
+    got = [(s.start, s.end) for s in merge_spans([a, b, far], gap=5)]
     assert got == [(100.0, 214.0), (230.0, 260.0)]
-    assert [(s.start, s.end) for s in _spans([a, b])] == [(100.0, 180.0), (184.0, 214.0)]
+    assert [(s.start, s.end) for s in merge_spans([a, b])] == [(100.0, 180.0), (184.0, 214.0)]
 
 
 def test_tail_settings_are_checked():
@@ -252,3 +252,19 @@ def test_detector_constants_carry_version_3():
     assert VERSION == 3 and k["version"] == 3
     assert k["tail_window_s"] == 30 and k["tail_repeat"] is True
     assert detector_constants(SongSettings(tail_repeat=False)) != k
+
+
+def test_span_merging_is_public():
+    """scripts/song_scores.py merges candidates the way the detector does, through these."""
+    from fukikae.songs import Candidate, SongSettings, merge_gap, merge_spans
+
+    assert merge_gap(SongSettings(tail_repeat=False)) == 0.0
+    s = SongSettings(tail_repeat=True)
+    assert merge_gap(s) == float(s.grow_s)
+    cands = [
+        Candidate("ed", 100.0, 150.0, 0.9, None, True, ""),
+        Candidate("ed2", 155.0, 170.0, 0.8, None, True, ""),
+        Candidate("op", 0.0, 60.0, 0.1, None, False, "score"),
+    ]
+    assert [(p.start, p.end) for p in merge_spans(cands, 10.0)] == [(100.0, 170.0)]
+    assert [(p.start, p.end) for p in merge_spans(cands)] == [(100.0, 150.0), (155.0, 170.0)]

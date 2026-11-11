@@ -20,7 +20,14 @@ from pathlib import Path
 
 import numpy as np
 
-from fukikae.songs import SongSettings, _gap, _spans, find_candidates, frame_features, voiced_share
+from fukikae.songs import (
+    SongSettings,
+    find_candidates,
+    frame_features,
+    merge_gap,
+    merge_spans,
+    voiced_share,
+)
 
 
 def _best(
@@ -58,7 +65,7 @@ def main(dirs: list[str]) -> int:
             voiced = "-" if c.voiced is None else f"{c.voiced:.2f}"
             print(f"{name} {c.region}: {c.start:.0f}-{c.end:.0f} s score {c.score:.2f} "
                   f"voiced {voiced} {c.reason}")  # fmt: skip
-        spans = ", ".join(f"{sp.start:.0f}-{sp.end:.0f}" for sp in _spans(cands, _gap(s)))
+        spans = ", ".join(f"{sp.start:.0f}-{sp.end:.0f}" for sp in merge_spans(cands, merge_gap(s)))
         print(f"{name} spans: {spans or 'none'}")
         good = ((act >= s.active_share) & (bg >= vo - s.music_margin_db)).astype(np.float64)
         dur = len(good)
