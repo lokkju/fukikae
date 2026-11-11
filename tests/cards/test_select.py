@@ -524,6 +524,17 @@ def test_two_neutral_clips_at_9_96_s_reach_the_floor_and_take_no_filler():
     assert picks is not None and [p.start for p in picks] == [0, 10]
 
 
+def test_the_floor_search_runs_when_the_seconds_cap_skipped_a_turn():
+    """12 s taken first leaves no room under 20 s for any other turn: one clip, under the
+    floor. The search finds the 9 + 9.5 s pair that reaches it."""
+    from fukikae.cards.select import meets_floor, pick_references
+
+    ranked = _ranked([_p(0, 12.0, 50), _p(100, 9.0, 40), _p(200, 9.5, 30), _p(300, 11.0, 20)])
+    picks = pick_references(ranked)
+    assert picks is not None and meets_floor(picks)
+    assert [p.start for p in picks] == [100, 200]
+
+
 def test_a_run_of_three_that_fails_splits_at_the_failing_gap(tmp_path):
     """The gap between the second and third pieces is inside a song: the first two still join,
     and the third is a reference alone."""
@@ -1072,7 +1083,8 @@ def test_thin_tier_stops_at_fifteen_seconds(tmp_path):
     turns, tr, vocals = _gate_case(tmp_path, spans)
     tier, picks = tiered_references(turns, "A", tr, None, vocals, register=("f", 240.0))
     assert tier == "thin" and THIN_MAX_S == 15.0
-    assert [(p.start, p.end) for p in picks] == [(10.0, 18.0), (100.0, 107.0)]
+    # 8 + 7 s is 15 s of speech but 15.2 s of prompt with IndexTTS2's 0.2 s join
+    assert [(p.start, p.end) for p in picks] == [(10.0, 18.0), (200.0, 206.0)]
 
 
 def test_thin_tier_cuts_one_long_turn_to_fifteen_seconds(tmp_path):
@@ -1081,6 +1093,59 @@ def test_thin_tier_cuts_one_long_turn_to_fifteen_seconds(tmp_path):
     turns, tr, vocals = _gate_case(tmp_path, [(10, 30, 120.0, 0.01)])
     tier, picks = tiered_references(turns, "A", tr, None, vocals, register=("f", 240.0))
     assert tier == "thin" and [(p.start, p.end) for p in picks] == [(10.0, 25.0)]
+
+
+def test_thin_tier_young_rob(tmp_path):
+    """Young Rob's shape (Fairy Tail E12, times less 500 s): six turns, two of them 17 ms
+    blips cut from the end of a 0.79 s turn. The blips join that turn, and the three longest
+    pieces are taken: at most 3 clips."""
+    from fukikae.cards.select import THIN_MAX_CLIPS, tiered_references
+
+    spans = [
+        (20.355, 22.397, 120.0, 0.01), (58.104, 59.64, 120.0, 0.01),
+        (64.01, 65.208, 120.0, 0.01), (39.44, 40.233, 120.0, 0.01),
+        (40.233, 40.25, 120.0, 0.01), (40.25, 40.267, 120.0, 0.01),
+    ]  # fmt: skip
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    tier, picks = tiered_references(turns, "A", tr, None, vocals, register=("f", 240.0))
+    assert tier == "thin" and THIN_MAX_CLIPS == 3
+    assert [(p.start, p.end) for p in picks] == [
+        (20.355, 22.397), (58.104, 59.64), (64.01, 65.208)
+    ]  # fmt: skip
+
+
+def test_thin_tier_joins_contiguous_turns_and_near_ones(tmp_path):
+    """Turns touching or at most 0.6 s apart are one piece; another speaker's turn in the gap
+    keeps them apart."""
+    from fukikae.cards.select import thin_references
+
+    spans = [(10, 10.4, 120.0, 0.01), (10.4, 11.0, 120.0, 0.01), (11.5, 12.0, 120.0, 0.01)]
+    spans += [(30, 30.8, 120.0, 0.01), (31.2, 32.0, 120.0, 0.01)]
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    turns.append(Turn(start=30.9, end=31.1, speaker="B"))
+    picks = thin_references(turns, "A", tr, vocals)
+    assert [(p.start, p.end) for p in picks] == [(10.0, 12.0), (30.0, 30.8), (31.2, 32.0)]
+
+
+def test_thin_tier_skips_pieces_under_half_a_second_unless_nothing_else_is_left(tmp_path):
+    from fukikae.cards.select import thin_references
+
+    turns, tr, vocals = _gate_case(tmp_path, [(10, 10.3, 120.0, 0.01), (20, 21, 120.0, 0.01)])
+    assert [(p.start, p.end) for p in thin_references(turns, "A", tr, vocals)] == [(20.0, 21.0)]
+    turns, tr, vocals = _gate_case(tmp_path, [(10, 10.3, 120.0, 0.01), (20, 20.2, 120.0, 0.01)])
+    picks = thin_references(turns, "A", tr, vocals)
+    assert [(p.start, p.end) for p in picks] == [(10.0, 10.3), (20.0, 20.2)]
+
+
+def test_thin_tier_counts_the_prompt_join_in_its_budget(tmp_path):
+    """5 + 5 + 4.8 s is 14.8 s of speech and 15.2 s of prompt: the third piece doesn't fit."""
+    from fukikae.cards.select import PROMPT_GAP_S, thin_references
+
+    spans = [(10, 15, 120.0, 0.01), (20, 25, 120.0, 0.01), (30, 34.8, 120.0, 0.01)]
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    assert PROMPT_GAP_S == 0.2
+    picks = thin_references(turns, "A", tr, vocals)
+    assert [(p.start, p.end) for p in picks] == [(10.0, 15.0), (20.0, 25.0)]
 
 
 def test_thin_picks_carry_their_transcript(tmp_path):

@@ -58,9 +58,11 @@ slot; ``scene_gap=None`` turns it off (narrators).
 Reference tiers (A2, D41: fukikae never renders a stock voice). `tiered_references` is the one
 entry point for any speaker, a character or an extras cluster: ``floor`` when the gated picks
 reach the D32 floor (2 clips, 10 s); ``short`` when they reach ``CLONE_MIN_S`` (3 s, after
-D32's fragment join) but not the floor; else ``thin``: the speaker's longest turns, whole,
-up to ``THIN_MAX_S`` (15 s, IndexTTS2's prompt limit; a single longer turn is cut to it),
-with the A1 gates and the length, SNR and sparse-text checks set aside. Two exclusions still
+D32's fragment join) but not the floor; else ``thin``: the speaker's turns joined across gaps
+of at most ``JOIN_GAP_S``, longest first, whole, at most 3 clips, up to ``THIN_MAX_S`` (15 s,
+IndexTTS2's prompt limit, counting its 0.2 s join between clips; a single longer piece is cut
+to it), pieces under half a second only when nothing longer is left, with the A1 gates and
+the length, SNR and sparse-text checks set aside. Two exclusions still
 hold in the thin tier, because breaking either clones a voice that is not the speaker's: a
 turn overlapping a theme song span and a turn with `FOREIGN_MAX` or more of it under speech
 the subtitle names give someone else. When they leave nothing, the speaker's own turns are
@@ -773,7 +775,8 @@ def pick_references(
     are those turns taken, in rank order, until the floor is reached. ``None`` turns the gate
     off (narrators). The picks come back in rank order.
 
-    When the clip cap stops the fill short of the floor, the combinations of ``floor_clips``
+    When the clip cap, or the ``total[1]`` seconds cap (a long first pick leaving no room for
+    a second), stops the fill short of the floor, the combinations of ``floor_clips``
     to ``count`` of the `SEARCH_POOL` best-ranked turns within ``total[1]`` that reach it are
     searched (`_floor_combination`), fewest scored non-neutral clips first, then one clip per
     scene. Under the floor the best
@@ -781,6 +784,7 @@ def pick_references(
     order = {id(p): i for i, p in enumerate(ranked)}
     picks: list[RefPick] = []
     used = 0.0
+    over_total = False  # a turn the fill wanted didn't fit under total[1]
 
     def floor() -> bool:
         return reaches_floor([q.seconds for q in picks], total[0], floor_clips)
@@ -807,9 +811,11 @@ def pick_references(
             if used + p.seconds <= total[1]:
                 picks.append(p)
                 used += p.seconds
+            else:
+                over_total = True
     picks.sort(key=lambda p: order[id(p)])
     capped = len(picks) >= count and len(ranked) > len(picks)
-    if capped and not floor():
+    if (capped or over_total) and not floor():
         found = _floor_combination(ranked, picks, count, total, floor_clips, scene_gap)
         if found is not None:
             picks = found
@@ -894,8 +900,14 @@ Tier = Literal["floor", "short", "thin"]
 # Under this many seconds of gated picks a clone is made from the speaker's longest turns
 # (the thin tier) and flagged harder (open decision 3: the top of D41's 2 to 3 s range).
 CLONE_MIN_S = 3.0
-# The most reference speech the thin tier takes: IndexTTS2's prompt limit.
+# The most reference speech the thin tier takes: IndexTTS2's prompt limit, which counts the
+# PROMPT_GAP_S of silence IndexTTS2 puts between clips (backends/tts/impl_indextts2.py).
 THIN_MAX_S = 15.0
+PROMPT_GAP_S = 0.2
+# The thin tier takes at most this many clips (the CD5 cap), and passes over pieces shorter
+# than THIN_PIECE_MIN_S (a diarizer's 20 ms blip) while any longer piece is left.
+THIN_MAX_CLIPS = 3
+THIN_PIECE_MIN_S = 0.5
 
 
 def span_reference(
@@ -920,13 +932,17 @@ def thin_references(
     foreign: Sequence[tuple[float, float]] = (),
     fallback: bool = True,
 ) -> list[RefPick]:
-    """The thin tier's picks: the speaker's turns, longest first, whole, while they fit in
-    ``THIN_MAX_S`` (a turn that doesn't fit is passed over for a shorter one; a first turn
-    longer than the limit is cut to it), leaving out turns overlapping ``theme_spans`` and
-    turns with `FOREIGN_MAX` or more under ``foreign``; when that leaves nothing, from all of
-    the speaker's turns (with ``fallback``; else nothing). Empty only for a speaker with no
-    turn, or with ``fallback`` off. Gates, lengths, SNR order and
-    text checks are set aside; the picks carry their ASR text (possibly empty) and SNR."""
+    """The thin tier's picks: the speaker's turns joined into pieces (turns at most
+    `JOIN_GAP_S` apart, touching ones included, with no other speaker's turn and no left-out
+    turn of its own between them), longest first, whole, at most `THIN_MAX_CLIPS`, while they
+    fit in ``THIN_MAX_S`` with `PROMPT_GAP_S` counted per join of two clips (a piece that
+    doesn't fit is passed over for a shorter one; a first piece longer than the limit is cut
+    to it). Pieces under `THIN_PIECE_MIN_S` are taken only when no longer piece is left.
+    Turns overlapping ``theme_spans`` and turns with `FOREIGN_MAX` or more under ``foreign``
+    are left out; when that leaves nothing, all of the speaker's turns are used (with
+    ``fallback``; else nothing). Empty only for a speaker with no turn, or with ``fallback``
+    off. Gates, lengths, SNR order and text checks are set aside; the picks carry their ASR
+    text (possibly empty) and SNR."""
     from scipy.io import wavfile
 
     mine = {speaker} if isinstance(speaker, str) else set(speaker)
@@ -937,23 +953,35 @@ def thin_references(
             if t.speaker in mine and t.end > t.start
         }
     )
+    others = [(t.start, t.end) for t in turns if t.speaker not in mine]
 
     def allowed(a: float, b: float) -> bool:
         if any(x < b and a < y for x, y in theme_spans):
             return False
         return not (foreign and share_inside(a, b, foreign) >= FOREIGN_MAX)
 
-    pool = [sp for sp in own if allowed(*sp)] or (own if fallback else [])
+    kept = [sp for sp in own if allowed(*sp)]
+    if not kept and fallback:
+        kept = own
+    left_out = [sp for sp in own if sp not in set(kept)]
+    pieces = [
+        (run[0][0], max(b for _, b in run))
+        for run in _chains(kept, [*others, *left_out], JOIN_GAP_S)
+    ]
+    pool = [sp for sp in pieces if sp[1] - sp[0] >= THIN_PIECE_MIN_S - 1e-9] or pieces
     pool.sort(key=lambda sp: (-(sp[1] - sp[0]), sp[0]))
     chosen: list[tuple[float, float]] = []
     used = 0.0
     for a, b in pool:
+        if len(chosen) >= THIN_MAX_CLIPS:
+            break
         if not chosen and b - a > THIN_MAX_S:
             chosen.append((a, round(a + THIN_MAX_S, 3)))
             break
-        if used + (b - a) <= THIN_MAX_S + 1e-9:
+        need = (b - a) + (PROMPT_GAP_S if chosen else 0.0)
+        if used + need <= THIN_MAX_S + 1e-9:
             chosen.append((a, b))
-            used += b - a
+            used += need
     if not chosen:
         return []
     rate, data = wavfile.read(vocals, mmap=True)
