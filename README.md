@@ -31,7 +31,7 @@ To listen, open `out/<episode>.fukikae.mkv` in any player (mpv switches audio wi
 
 ## Watching a run
 
-Every stage `fukikae run` runs logs a start line, with the stage's usual duration on earlier runs when there is one, and a finish line with its time. The long stages count their work: tts its cues, translate its cues, ASR the seconds of audio decoded (faster-whisper) or its chunks (Qwen3-ASR), the tag backends their windows and turns. Separation, diarization, embedding and the mix are single calls, so they show only their elapsed time and the ETA from earlier runs. On a terminal the counts are a single line at the bottom of stderr; in a log (no TTY) each stage writes a line at most every 30 s:
+Every stage `fukikae run` runs logs a start line, with the stage's usual duration on earlier runs when there is one, and a finish line with its time. The long stages count their work: tts its cues, translate its cues, ASR the seconds of audio decoded (faster-whisper) or its chunks (Qwen3-ASR), SenseVoice the seconds of audio it has tagged and then its turns, emotion2vec its turns. tts counts only the cues that need a render: cues already in the render cache are logged once (`tts S01E12: 200 cues cached`) and left out of the rate and ETA, and a tts run that was mostly cached doesn't go into the ETA history. Separation, diarization, embedding and the mix are single calls, so they show only their elapsed time and the ETA from earlier runs, which keep moving while the call runs. On a terminal (not `TERM=dumb`) the counts are a single line at the bottom of stderr, redrawn as time passes and cleared for each log line; in a log (no TTY) each stage writes a line at most every 30 s, counted or not:
 
 ```
 2026-11-11 09:31:12,410 [INFO] tts S01E12: started (about 14 min on earlier runs)
@@ -40,9 +40,11 @@ Every stage `fukikae run` runs logs a start line, with the stage's usual duratio
 
 A job waiting for the GPU lock says who holds it, at once and every minute: `waiting for GPU 0, held by pid 81234 (tts indextts2) for 4 min 10 s`.
 
-From another shell, `fukikae status <workspace>` reads `.fukikae/status.json`, which the run rewrites (atomically) every couple of seconds and at each stage boundary:
+Each run keeps its own file, `.fukikae/runs/<host>-<pid>.json`, which it rewrites (atomically) every couple of seconds and at each stage boundary. From another shell, `fukikae status <workspace>` reads them all and shows every live run, then the most recent run that ended:
 
 ```
+2 runs in progress
+
 run b6920f53c6ca, pid 2480371, started 2026-11-11 09:17:38 (32 min ago)
 episodes: S01E11 tail, S01E12 head
 head: tts S01E12: 120/325 cues, 3.4 s/cue, 6 min 53 s elapsed, ETA 12 min
@@ -50,9 +52,16 @@ tail: mix S01E11: 41 s elapsed, ETA 1 min 10 s (earlier runs)
 GPU 0 (head): held by this run (tts indextts2)
 last log: tts: 3 cards checked
 updated 2 s ago
+
+run 51d07c2e9a14, pid 2481902, started 2026-11-11 09:44:10 (6 min ago)
+episodes: S02E01 head
+head: asr S02E01 (transcribe): 600/1420 s audio, 20.0 s audio/s, 1 min 05 s elapsed, ETA 41 s
+updated 1 s ago
+
+last finished run: finished at 2026-11-11 08:12:40; episodes: S01E10 done
 ```
 
-`head` is the thread that runs the GPU stages and `tail` the one running the previous episode's timefit and mix in a multi-episode run (D26). `--json` prints the file itself, with `live` added. When the run's pid is gone the command says so: `no run in progress (last run died at 2026-11-11 09:52:04; episodes: S01E12 head)`. ETAs before a stage's first count come from `.fukikae/stage-history.json` (the last 20 runs of each stage: duration, and count where the stage counts), or failing that from the durations in the episodes' manifests.
+`head` is the thread that runs the GPU stages and `tail` the one running the previous episode's timefit and mix in a multi-episode run (D26). `--json` prints the runs shown as `{"runs": [...]}`, each file with `live` added. When a run's pid is gone the command says so: `no run in progress (last run died at 2026-11-11 09:52:04; episodes: S01E12 head)`. A run on another host (a workspace on shared storage) can't have its pid checked, so it is live while its file keeps being updated, and stopped once the file is two minutes old: `running on render-box (pid not checkable here), updated 3 s ago`. On Linux a reused pid is told from the run by the process's start time in `/proc`; elsewhere a dead run whose pid was reused reads as live. The command deletes the files of dead runs older than a day, keeping the most recent one. ETAs before a stage's first count come from `.fukikae/stage-history.json` (the last 20 runs of each stage: duration, and count where the stage counts; runs sharing a workspace take a file lock to add to it), or failing that from the durations in the episodes' manifests.
 
 ## Subtitle speaker names
 
