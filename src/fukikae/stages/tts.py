@@ -118,7 +118,7 @@ from typing import Any, Protocol, cast
 
 import numpy as np
 
-from fukikae import progress, runctx
+from fukikae import pitch, progress, runctx
 from fukikae.artifacts import atomic_path, read_json, write_json
 from fukikae.backends import loader
 from fukikae.backends.base import Synthesizer
@@ -1346,7 +1346,14 @@ class TtsStage:
             **pause_key(cfg),
             "cards": {str(k): v for k, v in sorted(cards.items())},
             "extras": self._extras_key(ep, cues, cfg, store),
-            "gender_gate": {"version": GATE_VERSION, "bands": list(GATE_BANDS)},
+            # the line gate's pitch tracks: a new estimator or voiced minimum can move a line
+            # across a band
+            "gender_gate": {
+                "version": GATE_VERSION,
+                "bands": list(GATE_BANDS),
+                "pitch": pitch.VERSION,
+                "line_min_voiced_s": LINE_MIN_VOICED_S,
+            },
             "version": RENDER_VERSION,
         }
 

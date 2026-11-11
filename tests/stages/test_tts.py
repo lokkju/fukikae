@@ -1808,8 +1808,30 @@ def test_only_gated_cues_change_cache_keys(ep, monkeypatch):
 def test_stage_key_holds_the_gate_version_and_bands(ep):
     _two_cards(ep)
     key = TtsStage(CFG).config_key(CFG, ep)
-    assert key["gender_gate"] == {"version": tts.GATE_VERSION, "bands": [165.0, 200.0]}
+    from fukikae import pitch
+
+    assert key["gender_gate"] == {
+        "version": tts.GATE_VERSION,
+        "bands": [165.0, 200.0],
+        "pitch": pitch.VERSION,
+        "line_min_voiced_s": pitch.LINE_MIN_VOICED_S,
+    }
     assert ep.work / "05-characters" / "assignments.json" in TtsStage(CFG).inputs(ep)
+
+
+def test_a_pitch_algorithm_change_changes_the_stage_key(ep, monkeypatch):
+    """The line gate reads pitch tracks: a new estimator (pitch.VERSION) or voiced minimum
+    can move a line across a band, so either reruns tts."""
+    from fukikae import pitch
+
+    _two_cards(ep)
+    before = TtsStage(CFG).config_key(CFG, ep)
+    monkeypatch.setattr(pitch, "VERSION", pitch.VERSION + 1)
+    bumped = TtsStage(CFG).config_key(CFG, ep)
+    assert bumped["gender_gate"] != before["gender_gate"]
+    monkeypatch.setattr(pitch, "VERSION", pitch.VERSION - 1)
+    monkeypatch.setattr(tts, "LINE_MIN_VOICED_S", 0.5)
+    assert TtsStage(CFG).config_key(CFG, ep)["gender_gate"] != before["gender_gate"]
 
 
 # ---- Task 6 review: the render refusal --------------------------------------------------------
