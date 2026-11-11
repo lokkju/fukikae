@@ -246,14 +246,14 @@ def _real_params():
 
 
 @pytest.mark.parametrize("name", _real_params())
-def test_real_model_separates_speakers_on_fairytail_e12(name):
+def test_real_model_separates_speakers_on_fairytail_e12(name, fukikae_ws: Path):
     import importlib
 
     from fukikae.eval.identity.cli import _ground_truth
     from fukikae.eval.identity.segments import segments
     from fukikae.workspace import Workspace
 
-    root = Path("~/fukikae-ws/fairytail").expanduser()
+    root = fukikae_ws / "fairytail"
     if not (root / "fukikae.toml").is_file():
         pytest.skip("fairytail workspace not available")
     ws = Workspace(root)

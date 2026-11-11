@@ -7,6 +7,12 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def fukikae_ws() -> Path:
+    """The operator's real workspaces, for the media-marked tests: $FUKIKAE_WS, or ~/fukikae-ws."""
+    return Path(os.environ.get("FUKIKAE_WS", "~/fukikae-ws")).expanduser()
+
+
 @pytest.fixture(autouse=True)
 def _isolated_ledger(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
     """Every test writes ledger rows to a temp file, never the operator's results.jsonl."""
