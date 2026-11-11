@@ -1939,6 +1939,24 @@ def test_extras_cluster_gets_a_clone_from_its_own_turns(tmp_path: Path):
     reg.close()
 
 
+def test_extras_references_leave_out_named_lines(tmp_path: Path):
+    """Spec A2: an extras cluster's turn under a visible named line (any key: the subtitles
+    give it to someone) is no reference for the extra."""
+    from fukikae.cards.auto import extras_cards
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 3)
+    names = [(70.0, 76.0, "bob", False)]
+    _named_episode(tmp_path / "ws", NAMED_EP, TIER_TURNS, TIER_CLUSTERS, names=names)
+    ws = Workspace(tmp_path / "ws")
+    store = CardStore(ws.root)
+    cues = [_extra_cue("c0101", 60.0, 65.0, "S9"), _extra_cue("c0102", 70.0, 76.0, "S9")]
+    cards, _ = extras_cards(_extras_ep(ws, cues), cues, CFG, store, _clone_source())
+    origins = [(r.origin or {}).get("start") for r in store.get(cards["S9"]).voice.references]
+    assert origins == [60.0]
+    reg.close()
+
+
 def test_unknown_cue_is_cloned_from_its_own_span(tmp_path: Path):
     from fukikae.cards.auto import ExtraCard, extras_cards
 

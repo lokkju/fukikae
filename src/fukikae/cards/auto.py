@@ -1002,7 +1002,9 @@ def extras_cards(
     character (A2, D41: never a stock voice). An extras cluster's card is cloned from its own
     turns in ``assignments.json`` through ``select.tiered_references`` (its own majority
     register, the song mask and accepted song spans, theme songs and tagged singing left
-    out); a cluster with no turn there is cloned from its cues' own spans. Each cue with no
+    out, and in an episode whose names were used, turns under any visible named line, which
+    the subtitles give someone); a cluster with no turn there is cloned from its cues' own
+    spans. Each cue with no
     cluster (``unknown``) gets ``unknown~<cue id>`` and a card cloned from its own source span
     (``delivery.reference``), always thin. Cards are made for ``cloning``'s backend and put in
     the store; they get no registry row, and the same turns give the same card ids on every
@@ -1023,6 +1025,7 @@ def extras_cards(
         tiered_references,
     )
     from fukikae.models import Assignments, Tags, Transcript, Turn
+    from fukikae.names.inputs import names_path
     from fukikae.stages.mix import mix_settings
     from fukikae.workspace import Workspace
 
@@ -1036,7 +1039,7 @@ def extras_cards(
         getattr(cloning.backend, "model_revision", None), cloning.source_language,
         cfg.target_language, cfg.source_language, repr(songs),
         tuple((extras_label(c), tuple(c.delivery.reference), c.source_text) for c in spoken),
-        _stamp(*_candidate_files(work), *_exclusion_files(work)),
+        _stamp(*_candidate_files(work), *_exclusion_files(work), names_path(work)),
     )  # fmt: skip
     hit = _EXTRAS_MEMO.get(memo_key)
     if hit is not None and all(store.has(cid) for cid in hit[0].values()):
@@ -1049,7 +1052,11 @@ def extras_cards(
         transcript_path(work),
     )
     tags_path = work / "04b-tag" / "tags.json"
-    turns = list(read_json(asg_path, Assignments).turns or []) if asg_path.exists() else []
+    asg = read_json(asg_path, Assignments) if asg_path.exists() else None
+    turns = list(asg.turns or []) if asg is not None else []
+    # spec A2: speech under a visible named line (any key) is someone's, not an extra's
+    names, _ = checked_names(work, asg)
+    named: Spans = [(ln.start, ln.end) for ln in names.visible_lines() if ln.key] if names else []
     transcript = (
         read_json(tr_path, Transcript)
         if tr_path.exists()
@@ -1108,8 +1115,8 @@ def extras_cards(
             _remember(_REGISTER_MEMO, rkey, speaker_register(vocals, spans, bands, ws.root))
         tier, picks = tiered_references(
             pool, label, transcript, tags, vocals, register=_REGISTER_MEMO[rkey],
-            song_like=mask, song_spans=accepted, theme_spans=theme, bands=bands,
-            pitch_root=ws.root,
+            song_like=mask, song_spans=accepted, theme_spans=theme, foreign=named,
+            bands=bands, pitch_root=ws.root,
         )  # fmt: skip
         put(label, tier, picks)
         ec = made[label]
