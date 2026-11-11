@@ -1066,6 +1066,28 @@ class _Renderer:
         self.synths.clear()
 
 
+class _LineGate:
+    """The tts stage's line gate (A3, `fukikae.stages.tts.gender_gate`) over an episode's
+    cues, measured once and only when a cue's card takes emotion audio (as the stage does), so
+    an A/B render routes a gated line exactly as the stage's render of it."""
+
+    def __init__(self, work: Path, cues: Sequence[Any], root: Path) -> None:
+        self.work, self.cues, self.root = work, cues, root
+        self.gate: Any = None
+
+    def for_cue(self, cue: Any, checked: tuple[Any, Any]) -> dict[str, Any]:
+        """``line`` and ``voice`` for `prepare_cue`; nothing when the card takes no emotion
+        audio."""
+        from fukikae.stages import tts
+
+        card, cls = checked
+        if "emotion_audio" not in cls.capabilities_for(card.voice.source):
+            return {}
+        if self.gate is None:
+            self.gate = tts.gender_gate(self.work, self.cues, self.root)
+        return {"line": self.gate.line(cue.id), "voice": self.gate.voice(cue.id)}
+
+
 def pick_scene(
     cues: Sequence[Any],
     covered: set[int],
@@ -1166,6 +1188,7 @@ def gather_set(
     high = _high_wer(ledger, spec.ledger_runs)
     events = tag_events(ws.work_dir(e))
     vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
+    gate = _LineGate(ws.work_dir(e), doc.cues, ws.root)
 
     def who(cid: int) -> str:
         return f"character {cid}" + (f" ({names[cid]})" if cid in names else "")
@@ -1186,7 +1209,7 @@ def gather_set(
                 cid = ev._cid(c)
                 job = prepare_cue(
                     c, cards[cand.name][cid], ccfg, store, who=who(cid), checked=checked[cid],
-                    vocals=vocals, events=events,
+                    vocals=vocals, events=events, **gate.for_cue(c, checked[cid]),
                 )  # fmt: skip
                 r = renderer.render(cand, job, ccfg, ws, store, work=ws.work_dir(_ep))
                 made += r.renders_made
@@ -1265,7 +1288,21 @@ def gather_set(
     scenes: list[SceneMaterial] = []
     if spec.scene is not None:
         scenes.append(
-            _scene(spec, ws, cfg, cfgs, store, cards, covered, names, assigned, tmp, notes, log)
+            _scene(
+                spec,
+                ws,
+                cfg,
+                cfgs,
+                store,
+                cards,
+                covered,
+                names,
+                assigned,
+                tmp,
+                notes,
+                log,
+                gate=gate,
+            )
         )
     return out, scenes, notes
 
@@ -1283,6 +1320,8 @@ def _scene(
     tmp: Path,
     notes: list[str],
     log: Any,
+    *,
+    gate: _LineGate | None = None,
 ) -> SceneMaterial:
     """One window through tts, timefit and mix per candidate (the stages' own functions over
     the window's cues)."""
@@ -1336,6 +1375,7 @@ def _scene(
     )  # fmt: skip
     vocals = work / "01-separate" / "vocals.wav"
     events = tag_events(work)
+    gate = gate if gate is not None else _LineGate(work, doc.cues, ws.root)
     s = mix_settings(cfg)
     sdir = tmp / spec.name / "scene"
     sdir.mkdir(parents=True, exist_ok=True)
@@ -1380,12 +1420,10 @@ def _scene(
             for c in spoken:
                 card = card_for(c)
                 who = c.speaker
+                checked = check_card(store, card, who, cfg.target_language, candidate_engines(cand))
                 job = prepare_cue(
-                    c, card, ccfg, store, who=who,
-                    checked=check_card(
-                        store, card, who, cfg.target_language, candidate_engines(cand)
-                    ),
-                    vocals=vocals, events=events,
+                    c, card, ccfg, store, who=who, checked=checked, vocals=vocals, events=events,
+                    **gate.for_cue(c, checked),
                 )  # fmt: skip
                 jobs.append(job)
             jobs.sort(key=lambda j: (j.cls.name, j.cue.start))
