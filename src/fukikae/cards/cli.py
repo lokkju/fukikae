@@ -128,7 +128,9 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
     re-picks an automatic one; a curated or imported one stays until `voices clone` (with
     the clone floor's shortfall appended when the kept card is under it too). Then
     each automatic clone card under the clone floor (2 clips, 10 s; D32): re-picked by the
-    next tts run when a better pick exists, else flagged for review."""
+    next tts run when a better pick exists, else flagged for review. Then each clone card
+    with references the reference gates refuse (A1): an automatic one is re-picked by the
+    next tts run when a gate-passing pick exists; a curated, imported or locked one stays."""
     from fukikae.cards import auto
     from fukikae.cards.auto import AUTOMATIC_BY, repick_blocker, replace_refusal, stale_cards
 
@@ -169,6 +171,8 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
             )
         rest = [c.id for c in chars if c.id not in stale]  # a stale card's line says it all
         for line in auto.floor_lines(ws, reg, store, rest, language):
+            _echo(line)
+        for line in auto.impure_lines(ws, reg, store, [c.id for c in chars], language):
             _echo(line)
         for note in notes:
             _echo(note)

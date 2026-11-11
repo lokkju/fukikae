@@ -1291,6 +1291,73 @@ def test_a_locked_card_below_the_clone_floor_builds_no_clone_source(ep, monkeypa
     assert seen["cloning"] is None and seen["short"] == short
 
 
+def test_an_impure_auto_card_builds_the_clone_source(ep, monkeypatch):
+    """A1: character 1's automatic clone card has a reference the gates refuse: the clone
+    source is built and the impurity handed on, so ensure_assignments can re-pick it."""
+    from fukikae.cards.auto import Impurity
+
+    first = CardStore(ep.workspace_root).put(parse_card(_stock("am_adam")))
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.assign_card(1, "en", first, by="auto", locked=False)
+    _assign(ep, 2, _stock("af_heart"))
+    seen: dict = {}
+    impure = {
+        1: Impurity(
+            first,
+            (
+                {
+                    "episode": "E",
+                    "start": 1.0,
+                    "end": 5.0,
+                    "gate": "off_register",
+                    "gates": ["off_register"],
+                },
+            ),
+        )
+    }
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.below_floor", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.impure_cards", lambda *_, **__: impure)
+    monkeypatch.setattr(
+        "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
+    )
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
+                        lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    assert seen["cloning"] == "c" and seen["impure"] == impure
+
+
+def test_a_locked_impure_card_builds_no_clone_source(ep, monkeypatch):
+    from fukikae.cards.auto import Impurity
+
+    first, _ = _two_cards(ep)  # both locked
+    seen: dict = {}
+    impure = {
+        1: Impurity(
+            first,
+            (
+                {
+                    "episode": "E",
+                    "start": 1.0,
+                    "end": 5.0,
+                    "gate": "unvoiced",
+                    "gates": ["unvoiced"],
+                },
+            ),
+        )
+    }
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.below_floor", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.impure_cards", lambda *_, **__: impure)
+    monkeypatch.setattr(
+        "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
+    )
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
+                        lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
+    assert seen["cloning"] is None and seen["impure"] == impure
+
+
 def test_reports_each_cue_to_the_run_progress(ep):
     """#29: under `fukikae run` the stage counts its cues, N of N at the end, and the stage's
     time and count go into the history the next run's ETA reads."""

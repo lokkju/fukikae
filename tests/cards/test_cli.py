@@ -1111,3 +1111,34 @@ def test_list_appends_the_floor_to_a_kept_stale_cards_line(tmp_path: Path):
         "`fukikae voices clone` replaces it; below the clone floor (1 clip and 5.0 s, under "
         "the floor of 2 clips and 10 s)"
     )
+
+
+def test_voices_list_shows_impure_flag(tmp_path: Path, monkeypatch):
+    """A1: `voices list` names a clone card whose references the reference gates refuse and
+    what the next tts run does with it: an automatic one is re-picked, a curated one stays."""
+    from tests.cards.test_auto import GATE_HZ, GATE_TURNS, NAMED_EP, _auto_clone, _named_episode
+    from tests.cards.test_select import _voices
+
+    ws, natsu, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        clusters = [{"cluster": "S0~natsu", "character_id": natsu}]
+        work = _named_episode(ws.root, NAMED_EP, GATE_TURNS, clusters)
+        _voices(work / "01-separate" / "vocals.wav",
+                [(a, b, hz, n) for (a, b, _, n), hz in zip(GATE_TURNS, GATE_HZ, strict=True)],
+                seconds=120.0)  # fmt: skip
+        card = _auto_clone(reg, store, natsu, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 0, r.output
+    (line,) = [ln for ln in r.output.splitlines() if "fail the reference gates" in ln]
+    assert line.startswith(f"character {natsu} (Natsu)'s card {card} (auto)")
+    assert f"{NAMED_EP} 60.00-64.50 off-register" in line
+    assert line.endswith("the next tts run re-picks it (2 clips, 10.0 s)")
+    with Registry(ws.registry_path) as reg:
+        reg.assign_card(natsu, "en", card, by="assign", locked=False)
+    r = invoke("list", str(ws.root))
+    (line,) = [ln for ln in r.output.splitlines() if "fail the reference gates" in ln]
+    assert line.startswith(f"character {natsu} (Natsu)'s card {card} (assign)")
+    assert line.endswith(
+        "kept: listen in `fukikae studio`, or replace it with `fukikae voices clone`"
+    )

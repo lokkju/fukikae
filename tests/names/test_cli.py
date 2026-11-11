@@ -394,6 +394,25 @@ def test_show_lists_clone_cards_under_the_floor(tmp_path: Path, monkeypatch):
     assert seen["characters"]
 
 
+def test_show_lists_clone_cards_with_impure_references(tmp_path: Path, monkeypatch):
+    """A1: `names show` prints `impure_lines` for the episode's characters."""
+    from tests.cards.test_auto import NAMED_EP
+
+    root, reg, _ = _merge_ws(tmp_path)
+    reg.close()
+    seen: dict = {}
+
+    def lines(_ws, _reg, _store, characters, _language, **_):
+        seen["characters"] = sorted(characters)
+        return ["character 9's card x (auto) has references that fail the reference gates"]
+
+    monkeypatch.setattr("fukikae.cards.auto.impure_lines", lines)
+    r = runner.invoke(app, ["names", "show", str(root), NAMED_EP])
+    assert r.exit_code == 0, r.output
+    assert "character 9's card x (auto) has references that fail the reference gates" in r.output
+    assert seen["characters"]
+
+
 def test_show_appends_the_floor_to_a_kept_stale_cards_line(tmp_path: Path):
     from fukikae.cards.store import CardStore
     from tests.cards.test_auto import NAMED_EP, _auto_clone

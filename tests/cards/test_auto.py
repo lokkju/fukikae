@@ -1668,3 +1668,213 @@ def test_the_register_reads_the_pitch_bands_not_a_profile_override(
     auto.character_candidates(Workspace(ws.root), [NAMED_EP], 1)
     assert seen == [(165.0, 200.0)]
     reg.close()
+
+
+# -- Task 4: automatic cards with references the A1 gates refuse are re-picked ---------------
+
+
+def _ws_impure(tmp_path: Path, *, names: bool = False):
+    """`_ws_gated` in the acoustic tier (no names): Natsu speaks at 130 Hz, and the loud
+    240 Hz turn at 60-64.5 s is another voice in his cluster."""
+    reg, ids, ws = _ws_gated(tmp_path)
+    if not names:
+        work = ws.work_dir(NAMED_EP)
+        (work / "04c-names" / "names.json").unlink()
+        (work / "04c-names" / "turns.json").unlink()
+    return reg, ids, ws
+
+
+def test_impure_cards_measure_each_reference_on_its_origin(tmp_path: Path):
+    from fukikae.cards.auto import impure_cards
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
+    found = impure_cards(ws, reg, store, "en")
+    assert list(found) == [1] and found[1].card_id == old
+    (ref,) = found[1].refs
+    assert (ref["episode"], ref["start"], ref["end"], ref["gate"]) == (
+        NAMED_EP, 60.0, 64.5, "off_register"
+    )  # fmt: skip
+    assert ref["median"] == pytest.approx(240, rel=0.05) and ref["voiced_fraction"] > 0.5
+    assert found[1].gates == "off-register"
+    reg.close()
+
+
+def test_auto_card_with_an_off_register_reference_is_repicked(tmp_path: Path, vocals: Path):
+    from fukikae.cards.auto import PURITY_NOTE, impure_cards
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
+    flags: list[str] = []
+    (line,) = ensure_assignments(
+        reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning_ws(ws),
+        impure=impure_cards(ws, reg, store, "en"), flags=flags,
+    )  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old and cur.by == "auto" and not cur.locked
+    assert (cur.note or "").startswith(f"{PURITY_NOTE} (off-register")
+    assert line.startswith(f"character 1: {PURITY_NOTE}")
+    assert [h.card_id for h in reg.card_history(1, "en")] == [old, cur.card_id]  # CD1
+    origins = [r.origin for r in store.get(cur.card_id or "").voice.references]
+    assert not any(o and o["start"] == 60.0 for o in origins)
+    assert flags == []
+    # a second run is a no-op: the new card passes the gates it was picked by
+    assert impure_cards(ws, reg, store, "en") == {}
+    again = ensure_assignments(
+        reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning_ws(ws),
+        impure=impure_cards(ws, reg, store, "en"),
+    )  # fmt: skip
+    assert again == [] and len(reg.card_history(1, "en")) == 2
+    reg.close()
+
+
+@pytest.mark.parametrize("by", ["assign", "import:Pack", "auto-locked"])
+def test_assigned_imported_or_locked_impure_card_is_only_flagged(tmp_path, vocals, by):
+    from fukikae.cards.auto import impure_cards
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    locked = by == "auto-locked"
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)],
+                      by="auto" if locked else by, locked=locked)  # fmt: skip
+    impure = impure_cards(ws, reg, store, "en")
+    assert list(impure) == [1]  # judged, for the flag
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals,
+                               cloning=_cloning_ws(ws), impure=impure, flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
+    assert len(reg.card_history(1, "en")) == 1
+    (flag,) = flags
+    assert f"{NAMED_EP} 60.00-64.50 off-register" in flag
+    assert "fukikae studio" in flag and "voices clone" in flag
+    reg.close()
+
+
+def test_impure_card_without_a_passing_pick_is_kept_and_flagged(tmp_path: Path, vocals: Path):
+    """No gate-passing pick: the card stays (never a stock voice) and is flagged."""
+    from fukikae.cards.auto import impure_cards
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
+    flags: list[str] = []
+    lines = ensure_assignments(
+        reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning({}, vocals),
+        impure=impure_cards(ws, reg, store, "en"), flags=flags,
+    )  # fmt: skip
+    assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
+    (flag,) = flags
+    assert "no gate-passing reference pick exists" in flag and "voices clone" in flag
+    reg.close()
+
+
+def test_voices_clone_card_is_never_judged(tmp_path: Path):
+    from fukikae.cards.auto import impure_cards
+    from fukikae.cards.card import Card, Reference, Voice
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    clip = store.root / "clip.wav"
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    write_wav(clip, harmonic(240.0, 4.0))
+    ref = Reference(clip=store.add_sidecar(clip, "clip"), transcript="x", language="ja",
+                    origin={"source": "voices clone"})  # fmt: skip
+    card = Card(target_language="en", voice=Voice(backend="clonefake", model_revision="r",
+                source="clone", seed=1234, references=(ref,)))  # fmt: skip
+    reg.assign_card(1, "en", store.put(card), by="auto", locked=False)
+    assert impure_cards(ws, reg, store, "en") == {}
+    reg.close()
+
+
+def test_restock_impure_card_is_repicked(tmp_path: Path, vocals: Path):
+    """CD9: restock is automatic."""
+    from fukikae.cards.auto import PURITY_NOTE, impure_cards
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)],
+                      by="restock")  # fmt: skip
+    ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning_ws(ws),
+                       impure=impure_cards(ws, reg, store, "en"))  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old and (cur.note or "").startswith(PURITY_NOTE)
+    reg.close()
+
+
+def test_a_name_confirmed_reference_skips_the_register_gate_as_selection_does(tmp_path: Path):
+    """The 240 Hz turn is name-confirmed Natsu here: selection keeps it (names vouch for the
+    speaker), so a card made from it is not impure."""
+    from fukikae.cards.auto import impure_cards
+
+    reg, _, ws = _ws_impure(tmp_path, names=True)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
+    assert impure_cards(ws, reg, store, "en") == {}
+    reg.close()
+
+
+def test_stale_floor_and_impure_together_make_one_repick(tmp_path: Path, vocals: Path):
+    """The 60-64.5 s reference is noise (unvoiced) under a Wendy line (stale), and the card's
+    two clips are 9.5 s (under the floor): one re-pick naming all three reasons (D27, D32,
+    A1), and the next run changes nothing."""
+    from fukikae.cards.auto import (
+        FLOOR_NOTE,
+        PURITY_NOTE,
+        REPICK_NOTE,
+        below_floor,
+        impure_cards,
+        stale_cards,
+    )
+    from fukikae.workspace import Workspace
+    from tests.cards.test_select import _voices
+
+    reg, _ = _registry(tmp_path, 2)
+    reg.rename_character(2, "wendy")
+    clusters = [{"cluster": "S0~natsu", "character_id": 1, "name": "natsu", "source": "name"}]
+    names = [(a, b, "wendy" if a == 60.0 else "natsu", False) for a, b, _, _ in GATE_TURNS]
+    work = _named_episode(tmp_path / "ws", NAMED_EP, GATE_TURNS, clusters, names=names)
+    hz = [130.0, 130.0, None, 130.0]
+    _voices(work / "01-separate" / "vocals.wav",
+            [(a, b, h, n) for (a, b, _, n), h in zip(GATE_TURNS, hz, strict=True)],
+            seconds=120.0)  # fmt: skip
+    ws = Workspace(tmp_path / "ws")
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
+
+    def reasons():
+        return {
+            "stale": stale_cards(ws, reg, store, [1], "en"),
+            "short": below_floor(reg, store, [1], "en"),
+            "impure": impure_cards(ws, reg, store, "en"),
+        }
+
+    now = reasons()
+    assert all(list(v) == [1] for v in now.values()), now
+    assert now["impure"][1].gates == "unvoiced"
+    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals,
+                                 cloning=_cloning_ws(ws), **now)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old
+    note = cur.note or ""
+    assert note.startswith(REPICK_NOTE) and FLOOR_NOTE in note and PURITY_NOTE in note
+    assert len(reg.card_history(1, "en")) == 2
+    assert reasons() == {"stale": {}, "short": {}, "impure": {}}
+    assert ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals,
+                              cloning=_cloning_ws(ws), **reasons()) == []  # fmt: skip
+    reg.close()
+
+
+def test_impure_lines_say_what_the_next_tts_run_does(tmp_path: Path, monkeypatch):
+    from fukikae.cards.auto import impure_lines
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    (line,) = impure_lines(ws, reg, store, [1, 2], "en")
+    assert line.startswith(f"character 1's card {old} (auto) has references that fail the")
+    assert f"{NAMED_EP} 60.00-64.50 off-register" in line
+    assert line.endswith("the next tts run re-picks it (2 clips, 10.0 s)")
+    reg.close()

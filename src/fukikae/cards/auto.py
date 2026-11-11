@@ -45,6 +45,15 @@ judged) is re-picked like a stale one when the current rules give picks that bea
 locked, it is kept and flagged in the tts run's flags, ``fukikae voices list`` and ``fukikae
 names show`` (`floor_lines`), naming the shortfall and pointing at ``fukikae voices clone``.
 It never falls back to a stock voice or another character's card.
+
+Impure references (A1): `impure_cards` measures every clone card's references on their origin
+spans with the verdict reference selection gives (`select.measure_candidates`,
+`select.verdict`). An automatic card with a reference the gates refuse is re-picked through
+the same path as a stale one (a new card and a new ``auto`` row, noted `PURITY_NOTE`, the old
+one kept in history, CD1) when the current rules give picks; with none it is kept and
+flagged, never made stock. A curated, imported or locked card is flagged only, in the tts
+run's flags, ``fukikae voices list`` and ``fukikae names show`` (`impure_lines`). A card both
+stale, under the floor and impure gets one re-pick with every reason in its note.
 """
 
 from __future__ import annotations
@@ -79,7 +88,7 @@ if TYPE_CHECKING:
     from fukikae.config import Config
     from fukikae.models import Assignments, ClusterAssignment, DubCue, Tags, Transcript
     from fukikae.names.models import NamesResult
-    from fukikae.registry.store import Registry
+    from fukikae.registry.store import CardAssignment, Registry
     from fukikae.workspace import Workspace
 
 log = logging.getLogger(__name__)
@@ -106,6 +115,8 @@ __all__ = [
     "find_references",
     "floor_lines",
     "floor_suffix",
+    "impure_cards",
+    "impure_lines",
     "foreign_spans",
     "gender_thresholds",
     "key_owner",
@@ -124,6 +135,9 @@ STALE_OVERLAP = FOREIGN_MAX  # this share of a reference under someone else's na
 REPICK_NOTE = "re-picked: references not name-confirmed"
 FLOOR_NOTE = "re-picked: below the clone floor"
 FLOOR_FIX = "`fukikae voices clone` with a better clip replaces it"
+PURITY_NOTE = "re-picked: references fail the reference gates"
+PURITY_FIX = "listen in `fukikae studio`, or replace it with `fukikae voices clone`"
+GATE_WORDS = {"off_register": "off-register", "unvoiced": "unvoiced", "song_like": "song-like"}
 
 
 @dataclass(frozen=True)
@@ -222,6 +236,158 @@ def below_floor(
         if clips is not None and floor_shortfall(clips) is not None:
             out[cid] = Shortfall(a.card_id, clips)
     return out
+
+
+@dataclass(frozen=True)
+class Impurity:
+    """A clone card with references the A1 gates refuse, measured on their origin spans: its
+    id and each failing reference as ``{episode, start, end, gate, median, voiced_fraction}``
+    (``gate`` the first gate that refuses it, ``gates`` all of them)."""
+
+    card_id: str
+    refs: tuple[dict, ...]
+
+    @property
+    def gates(self) -> str:
+        """The gates refusing any reference, as a report phrase (``off-register, unvoiced``)."""
+        seen = {g for r in self.refs for g in r["gates"]}
+        return ", ".join(GATE_WORDS[g] for g in GATE_WORDS if g in seen)
+
+    @property
+    def phrase(self) -> str:
+        """Each failing reference: episode, span, gates and median."""
+        parts = []
+        for r in self.refs:
+            med = f", {r['median']:.0f} Hz" if r.get("median") else ""
+            words = ", ".join(GATE_WORDS[g] for g in r["gates"])
+            parts.append(f"{r['episode']} {r['start']:.2f}-{r['end']:.2f} {words}{med}")
+        return "; ".join(parts)
+
+
+def impure_cards(
+    ws: Workspace,
+    reg: Registry,
+    store: CardStore,
+    language: str,
+    characters: Iterable[int] | None = None,
+) -> dict[int, Impurity]:
+    """Character -> its ``language`` clone card's `Impurity`, for the characters (every one
+    by default) whose card has a reference failing A1 gate 1, 2 or 3 measured on its origin
+    span (the episode's vocals, ``origin = {episode, start, end}``), with the verdict
+    selection gives (`select.measure_candidates`, `select.verdict`): the speaker's own turns
+    inside the span, its register in that episode (skipped, as selection skips it, for a
+    reference inside the character's name-confirmed turns of a names-used episode), the song
+    mask. Gate 4 is about the set, which the floor judges. Cards of any ``chosen_by`` are
+    listed (the caller decides by `replace_refusal`: a curated, imported or locked card is
+    only flagged); a reference without an episode origin (``voices clone``'s ``{"source":
+    "voices clone"}``) or in an episode without artifacts is never judged."""
+    from fukikae.cards.card import CardError
+    from fukikae.cards.select import (
+        Register,
+        measure_candidates,
+        reference_gating,
+        song_share,
+        speaker_register,
+        verdict,
+    )
+    from fukikae.stages.mix import mix_settings
+
+    bands = (float(MALE_BELOW), float(FEMALE_ABOVE))
+    if characters is None:
+        characters = [c.id for c in reg.characters()]
+    loaded: dict[str, EpisodeArtifacts | None] = {}
+    owner: KeyOwner | None = None
+    songs = mix_settings(ws.config).songs
+    out: dict[int, Impurity] = {}
+    for cid in characters:
+        a = reg.card_for(cid, language)
+        if a is None or a.card_id is None or not store.has(a.card_id):
+            continue
+        try:
+            card = store.get(a.card_id)
+        except CardError:
+            continue
+        if card.voice.source != "clone":
+            continue
+        by_episode: dict[str, list[tuple[float, float]]] = {}
+        for ref in card.voice.references:
+            o = ref.origin or {}
+            e, start, end = o.get("episode"), o.get("start"), o.get("end")
+            if (
+                isinstance(e, str)
+                and isinstance(start, int | float)
+                and isinstance(end, int | float)
+            ):
+                by_episode.setdefault(e, []).append((float(start), float(end)))
+        failing: list[dict] = []
+        for e, spans in by_episode.items():
+            if e not in loaded:
+                loaded[e] = episode_artifacts(ws, e)
+            art = loaded[e]
+            if art is None or art.skipped is not None or not art.assignments.turns:
+                continue
+            turns = art.assignments.turns
+            own = {
+                c.cluster
+                for c in art.assignments.clusters
+                if c.character_id == cid and c.status not in ("extra", "review")
+            }
+            own_spans = [(round(t.start, 3), round(t.end, 3)) for t in turns if t.speaker in own]
+            confirmed_spans: list[tuple[float, float]] = []
+            if art.names is not None:
+                if owner is None:
+                    owner = key_owner(reg)
+                labels = confirmed_labels(art.assignments, cid, owner)
+                confirmed_spans = [
+                    (round(t.start, 3), round(t.end, 3)) for t in turns if t.speaker in labels
+                ]
+            work = ws.work_dir(e)
+            gkey = (str(work), repr(songs), _stamp(*_exclusion_files(work)))
+            if gkey not in _GATING_MEMO:
+                _remember(_GATING_MEMO, gkey, reference_gating(work, songs))
+            mask = _GATING_MEMO[gkey]
+            register: Register | None = None
+            if own_spans:
+                rspans = [(t.start, t.end) for t in turns if t.speaker in own]
+                rkey = (str(work), tuple(rspans), bands, _stamp(art.vocals))
+                if rkey not in _REGISTER_MEMO:
+                    _remember(
+                        _REGISTER_MEMO, rkey, speaker_register(art.vocals, rspans, bands, ws.root)
+                    )
+                register = _REGISTER_MEMO[rkey]
+            for start, end in spans:
+                vouched = (
+                    bool(confirmed_spans)
+                    and share_inside(start, end, confirmed_spans)
+                    >= share_inside(start, end, own_spans) - 1e-6
+                    > 0
+                )
+                pieces = confirmed_spans if vouched else own_spans
+                (m,) = measure_candidates(art.vocals, [(start, end)], pieces, ws.root)
+                reg_here = register
+                if vouched and register is not None:
+                    reg_here = Register("u", register.median)
+                share = None if mask is None else song_share(start, end, mask)
+                gates = verdict(
+                    m, register=reg_here or Register("u", None), song=share, bands=bands
+                )
+                if gates:
+                    failing.append({
+                        "episode": e, "start": start, "end": end, "gate": gates[0],
+                        "gates": list(gates),
+                        "median": None if m.median is None else round(m.median, 1),
+                        "voiced_fraction": m.voiced_fraction,
+                    })  # fmt: skip
+        if failing:
+            out[cid] = Impurity(a.card_id, tuple(failing))
+    return out
+
+
+def _impure_flag(reg: Registry, cid: int, card: str, imp: Impurity, why: str) -> str:
+    return (
+        f"character {_label(reg, cid)}: clone card {card} has references that fail the "
+        f"reference gates ({imp.phrase}); {why}: {PURITY_FIX}"
+    )
 
 
 def floor_suffix(short: Mapping[int, Shortfall] | None, cid: int) -> str:
@@ -363,6 +529,7 @@ def ensure_assignments(
     cloning: Cloning | None = None,
     stale: Mapping[int, Sequence[dict]] | None = None,
     short: Mapping[int, Shortfall] | None = None,
+    impure: Mapping[int, Impurity] | None = None,
     flags: list[str] | None = None,
 ) -> list[str]:
     """Give every character in ``character_spans`` without a ``cfg.target_language`` card
@@ -385,18 +552,35 @@ def ensure_assignments(
     unlocked one is re-picked the same way (noted `FLOOR_NOTE`) when ``cloning`` gives picks
     that beat it (`_floor_key`); otherwise, or when locked, it is kept and flagged, never
     replaced by a stock voice. A new clone card under the floor is made, from the best picks
-    there are, and flagged too."""
+    there are, and flagged too.
+
+    ``impure`` (`impure_cards`) lists clone cards with references the A1 gates refuse. An
+    automatic one is re-picked (noted `PURITY_NOTE` with the gates) when ``cloning`` gives
+    picks, which pass every gate by construction; with none it is kept and flagged, never
+    made stock. A curated, imported or locked one is flagged with the failing references,
+    pointing at the studio and ``fukikae voices clone``. A card that is stale, under the
+    floor and impure at once gets one re-pick whose note gives every reason."""
     language = cfg.target_language
     usable = cloning is not None and cloning.unavailable is None
     todo = []
     fallbacks: set[int] = set()
     repick: dict[int, str] = {}  # character -> its current card id
     floor: dict[int, Shortfall] = {}  # characters re-picked for the clone floor
+    purity: dict[int, Impurity] = {}  # characters re-picked for impure references
     lines: list[str] = []
     flagged = flags if flags is not None else []
     for cid, spans in character_spans.items():
         a = reg.card_for(cid, language)
         refs = (stale or {}).get(cid)
+        imp = (impure or {}).get(cid)
+        if imp is not None and a is not None and a.card_id != imp.card_id:
+            imp = None  # measured on another card
+        if imp is not None and a is not None and (refs or cid in (short or {})):
+            if a.chosen_by in AUTOMATIC_BY and replace_refusal(a, "auto") is None and usable:
+                purity[cid] = imp  # one re-pick with the stale or floor reason
+            else:
+                why = _keep_why(a, cloning)
+                flagged.append(_impure_flag(reg, cid, a.card_id or "", imp, why))
         if a is None or a.card_id is None:
             todo.append((cid, spans))
         elif usable and a.chosen_by == FALLBACK_BY and not a.locked:
@@ -450,6 +634,12 @@ def ensure_assignments(
                     f"`fukikae backends setup {name}`), when the next tts run re-picks it if "
                     "a better pick exists",
                 ))  # fmt: skip
+        elif imp is not None:
+            if a.chosen_by in AUTOMATIC_BY and replace_refusal(a, "auto") is None and usable:
+                todo.append((cid, spans))
+                purity[cid] = imp
+            else:
+                flagged.append(_impure_flag(reg, cid, a.card_id, imp, _keep_why(a, cloning)))
     if not todo:
         return lines
     backend = tts_backend(cfg)
@@ -463,7 +653,15 @@ def ensure_assignments(
         by = "auto"
         if cid in fallbacks and not (found is not None and found.picks):
             continue  # still too little speech: the stand-in stays until a clone can be made
-        if cid in floor and not _better(found, floor[cid]):
+        if cid in purity and cid not in repick and not (found is not None and found.picks):
+            imp = purity[cid]
+            why = "no gate-passing reference pick exists; kept, flagged for review"
+            flagged.append(_impure_flag(reg, cid, imp.card_id, imp, why))
+            if cid in floor:
+                sf = floor[cid]
+                flagged.append(_floor_flag(reg, cid, sf.card_id, sf.phrase))
+            continue  # never a stock voice
+        if cid in floor and cid not in purity and not _better(found, floor[cid]):
             sf = floor[cid]
             flagged.append(_floor_flag(reg, cid, sf.card_id, sf.phrase))
             continue  # the best picks there are: kept, flagged (never a stock voice)
@@ -500,12 +698,26 @@ def ensure_assignments(
                     "replaces this stand-in with a clone"
                 )
                 by = FALLBACK_BY
+        reasons: list[str] = []
         if cid in repick:
             if new == repick[cid]:
                 continue
-            note = f"{REPICK_NOTE} ({_where((stale or {})[cid])}); {note}"
-        elif cid in floor:
-            note = f"{FLOOR_NOTE} ({floor[cid].phrase}); {note}"
+            reasons.append(f"{REPICK_NOTE} ({_where((stale or {})[cid])})")
+        if cid in floor or (cid in repick and cid in (short or {})):
+            sf = floor.get(cid) or (short or {})[cid]
+            if new == sf.card_id:
+                continue
+            reasons.append(f"{FLOOR_NOTE} ({sf.phrase})")
+        if cid in purity:
+            if new == purity[cid].card_id:
+                flagged.append(_impure_flag(
+                    reg, cid, new, purity[cid],
+                    "the current rules pick it again; kept, flagged for review",
+                ))  # fmt: skip
+                continue
+            reasons.append(f"{PURITY_NOTE} ({purity[cid].gates})")
+        if reasons:
+            note = f"{'; '.join(reasons)}; {note}"
         try:
             reg.assign_card(cid, language, new, by=by, locked=False, note=note)
         except ProtectedAssignmentError as e:
@@ -517,6 +729,22 @@ def ensure_assignments(
         if below is not None:
             flagged.append(_floor_flag(reg, cid, new, below))
     return lines
+
+
+def _keep_why(a: CardAssignment, cloning: Cloning | None) -> str:
+    """Why an impure card stays: the operator's choice or a lock, or no clone to re-pick
+    with yet."""
+    refusal = replace_refusal(a, "auto")
+    if a.chosen_by not in AUTOMATIC_BY or refusal is not None:
+        state = f"{a.chosen_by}{', locked' if a.locked else ''}"
+        return f"kept ({state}{f': {refusal}' if refusal else ''})"
+    if cloning is None:
+        return "kept, because no [tts] clone_backend is set to re-pick it with"
+    name = cloning.backend.name
+    return (
+        f"kept until the clone backend {name} can run ({cloning.unavailable}; "
+        f"`fukikae backends setup {name}`), when the next tts run re-picks it"
+    )
 
 
 def _clone(
@@ -1309,4 +1537,45 @@ def floor_lines(
             out.append(f"{head}; the next tts run re-picks it ({better})")
         else:
             out.append(f"{head}; a better pick exists ({better}), kept while {blocker[0]}")
+    return out
+
+
+def impure_lines(
+    ws: Workspace, reg: Registry, store: CardStore, characters: Iterable[int], language: str
+) -> list[str]:
+    """One line per clone card with references the A1 gates refuse (`impure_cards`) for
+    `voices list` and `names show`: whether the next tts run re-picks it (automatic, a
+    gate-passing pick exists, cloning can run here) or it stays flagged."""
+    impure = impure_cards(ws, reg, store, language, characters)
+    if not impure:
+        return []
+    loaded: dict[str, EpisodeArtifacts | None] = {}
+    exclusions: dict[str, list[tuple[float, float]]] = {}
+    episodes = _all_episodes(ws)
+    blocker: list[str | None] = []
+    out: list[str] = []
+    for cid in sorted(impure):
+        imp = impure[cid]
+        a = reg.card_for(cid, language)
+        assert a is not None
+        head = (
+            f"character {_label(reg, cid)}'s card {imp.card_id} ({a.chosen_by}"
+            f"{', locked' if a.locked else ''}) has references that fail the reference gates "
+            f"({imp.phrase})"
+        )
+        if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
+            out.append(f"{head}; kept: {PURITY_FIX}")
+            continue
+        found = find_references(ws, episodes, cid, None, loaded, exclusions)
+        if not found.picks:
+            out.append(f"{head}; no gate-passing reference pick exists; flagged: {PURITY_FIX}")
+            continue
+        n = len(found.picks)
+        better = f"{n} clip{'' if n == 1 else 's'}, {sum(p.seconds for p in found.picks):.1f} s"
+        if not blocker:
+            blocker.append(repick_blocker(ws.config))
+        if blocker[0] is None:
+            out.append(f"{head}; the next tts run re-picks it ({better})")
+        else:
+            out.append(f"{head}; a gate-passing pick exists ({better}), kept while {blocker[0]}")
     return out

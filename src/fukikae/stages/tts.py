@@ -10,18 +10,19 @@ the history row's note.
 Before the stage's key is computed (``prepare``, called by the job runner) and again in ``run``,
 each character with a cue to speak and no card for the target language gets one
 (``cards.auto.ensure_assignments``, ``by = "auto"``, unlocked; an existing card is replaced only
-when stale, below): a clone card of ``[tts] clone_backend`` (IndexTTS2 in every profile, D24)
-from the character's reference turns in the workspace's episodes
-(``cards.auto.workspace_cloning``; name-confirmed turns first when subtitle names were used, and
-an automatic clone card whose references the names now contradict is re-picked,
-``cards.auto.stale_cards``, as is one under the clone floor of 2 clips and 10 s when a better
-pick exists, ``cards.auto.below_floor``; one with no better pick is kept and flagged in
-``run.json``), or, with under 6 s of clean speech or no ``clone_backend``, a
-gender-matched stock voice of the ``[tts]`` backend (the F0 estimate skips theme songs and
-tagged singing). Cues with no character (extras, and clusters the characters stage left for
-review) speak with a stock voice from the extras pools, one per label, fixed by first appearance
-in the episode. Every card is then checked (it exists, its backend can honor it at the model
-revision it names, its sidecars are present), so a broken card stops the stage, naming the
+when stale, below): a clone card of ``[tts] clone_backend`` (IndexTTS2 in every profile, D24) from
+the character's reference turns in the workspace's episodes (``cards.auto.workspace_cloning``;
+name-confirmed turns first when subtitle names were used, and an automatic clone card whose
+references the names now contradict is re-picked, ``cards.auto.stale_cards``, as is one under the
+clone floor of 2 clips and 10 s when a better pick exists, ``cards.auto.below_floor``, and one with
+references the A1 reference gates refuse when a gate-passing pick exists,
+``cards.auto.impure_cards``; one with no better pick is kept and flagged in ``run.json``, as is a
+curated, imported or locked card any of these finds), or, with under 6 s of clean speech or no
+``clone_backend``, a gender-matched stock voice of the ``[tts]`` backend (the F0 estimate skips
+theme songs and tagged singing). Cues with no character (extras, and clusters the characters stage
+left for review) speak with a stock voice from the extras pools, one per label, fixed by first
+appearance in the episode. Every card is then checked (it exists, its backend can honor it at the
+model revision it names, its sidecars are present), so a broken card stops the stage, naming the
 character, before any model loads.
 
 Renders are cached per cue in ``<workspace>/.fukikae/tts-cache/<key>.wav`` and hard-linked (or
@@ -111,6 +112,7 @@ from fukikae.cards.auto import (
     clone_backend,
     ensure_assignments,
     extras_voices,
+    impure_cards,
     repick_blocker,
     replace_refusal,
     stale_cards,
@@ -1357,7 +1359,16 @@ class TtsStage:
                 for cid in short
                 if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
             ]
-            work = bool(todo or stale or fallback or repickable)
+            # clone cards with references the A1 gates now refuse: re-picked when automatic
+            impure = impure_cards(
+                Workspace(ep.workspace_root), reg, store, cfg.target_language, speaking
+            )
+            repurify = [
+                cid
+                for cid in impure
+                if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
+            ]
+            work = bool(todo or stale or fallback or repickable or repurify)
             cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if work else None
             if work:  # the gender estimate never reads a theme song or tagged singing
                 exclude = _song_spans(ep, cfg)
@@ -1374,6 +1385,7 @@ class TtsStage:
                 cloning=cloning,
                 stale=stale,
                 short=short,
+                impure=impure,
                 flags=flags,
             )
             cards: dict[int, str] = {}

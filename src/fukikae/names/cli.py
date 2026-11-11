@@ -430,7 +430,8 @@ def _merge_suggestions(
 def _card_lines(ws: Workspace, reg: Registry, characters: list[int]) -> list[str]:
     """Stale or flagged clone cards of the episode's characters (`stale_cards`), with what
     replaces each (a kept one under the clone floor too says so, `floor_suffix`), then
-    automatic clone cards under the clone floor (`floor_lines`, D32)."""
+    automatic clone cards under the clone floor (`floor_lines`, D32), then clone cards with
+    references the reference gates refuse (`impure_lines`, A1)."""
     from fukikae.cards import auto
     from fukikae.cards.auto import AUTOMATIC_BY, repick_blocker, replace_refusal, stale_cards
     from fukikae.cards.store import CardStore
@@ -465,7 +466,8 @@ def _card_lines(ws: Workspace, reg: Registry, characters: list[int]) -> list[str
         )
     rest = [cid for cid in characters if cid not in stale]  # a stale card's line says it all
     floor = auto.floor_lines(ws, reg, store, rest, language)
-    return out + floor + notes
+    impure = auto.impure_lines(ws, reg, store, characters, language)
+    return out + floor + impure + notes
 
 
 def _unnamed_exemplars(ws: Workspace, reg: Registry, characters: list[int]) -> list[str]:
