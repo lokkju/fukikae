@@ -318,6 +318,39 @@ def test_stock_cues_and_tiers_are_counted(e):
     assert "thin" in {x.speaker: x for x in r.references}["character 1"].flags
 
 
+def test_a_thin_cards_clips_are_not_judged_and_never_impure(e):
+    """A2: a thin clone sets the reference gates aside, and the pipeline never calls it
+    impure; its clips aren't judged (and pass), and impure_cards leaves it out."""
+    from fukikae.eval.gender import measure
+
+    _gated_char(e, [(40.0, 43.0, 120)])
+    thin = e.clone([_voice(120, 2.0, 2)], tier="thin", origins=[(40.0, 42.0)])
+    e.say(20.0, 250, 2.0, seed=7)
+    e.line("c0001", 1, (20.0, 22.0), thin, _voice(250, 2.0, 11))
+    r = measure(e.write(), EP)
+    ref = {x.speaker: x for x in r.references}["character 1"]
+    assert [(v.judged, v.passed, v.gates) for v in ref.clips] == [(False, True, [])]
+    assert "impure" not in ref.flags and "thin" in ref.flags
+    assert r.metrics()["impure_cards"] == 0 and r.purity == {1: (1, 1)}
+
+
+def test_an_extras_cluster_without_turns_reads_its_register_from_all_its_cues(e):
+    """As extras_cards does: a cluster with no turn in assignments.json has its cues' spans
+    as its speech, so its register is the majority over all of them (9 s male against 3 s
+    female here), not the first cue's span."""
+    from fukikae.eval.gender import measure
+
+    e.character("S9", None, [], status="extra")
+    card = e.clone([_voice(250, 3.0, 1)], origins=[(44.0, 47.0)])
+    spans = [(44.0, 47.0, 250), (30.0, 33.0, 120), (34.0, 37.0, 120), (38.0, 41.0, 120)]
+    for i, (a, b, hz) in enumerate(spans):
+        e.say(a, hz, b - a, seed=20 + i)
+        e.line(f"c000{i + 1}", None, (a, b), card, _voice(hz, b - a, 30 + i), extra="S9")
+    r = measure(e.write(), EP)
+    ref = {x.speaker: x for x in r.references}["extra S9"]
+    assert [v.gates for v in ref.clips] == [["off_register"]]
+
+
 def test_tier_is_inferred_for_a_card_from_before_tiers(e):
     from fukikae.eval.gender import measure
 

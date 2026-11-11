@@ -19,8 +19,10 @@ render in ``07-tts/<cue>.wav`` and on each clone card's reference clips:
   none for a clip inside the character's name-confirmed turns), under
   ``pitch.REF_VOICED_MIN`` voiced, or song (song-like and sung, or inside the accepted song
   spans). A clip with no origin in this episode isn't judged and passes, as the pipeline
-  leaves it. Beside it, as a diagnostic only, the spec's distance measure on the clip file
-  itself: not song (inside the accepted song spans for ``pitch.REF_SONG_SHARE`` of its origin,
+  leaves it, and neither is any clip of a thin card (``[meta] reference_tier = "thin"``: the
+  thin tier sets the gates aside, A2), so a thin card is never counted in ``impure_cards``.
+  Beside it, as a diagnostic only, the spec's distance measure on the clip file itself: not
+  song (inside the accepted song spans for ``pitch.REF_SONG_SHARE`` of its origin,
   or sung by `pitch.is_sung`), at least ``pitch.REF_VOICED_MIN`` of its loud frames voiced,
   and its median within ``pitch.REF_PITCH_ST`` semitones of the speaker's majority-register
   median; plus the pooled references' class against the speaker's majority (``card≠source``);
@@ -484,7 +486,13 @@ def measure(
 ) -> GenderReport:
     """Score one dubbed episode of workspace ``ws`` (see the module docstring)."""
     from fukikae import hallucinations
-    from fukikae.cards.auto import character_spans, checked_names, confirmed_labels, reference_gates
+    from fukikae.cards.auto import (
+        _spoken,  # pyright: ignore[reportPrivateUsage]
+        character_spans,
+        checked_names,
+        confirmed_labels,
+        reference_gates,
+    )
     from fukikae.cards.select import reference_gating, speaker_register
     from fukikae.stages import tts
     from fukikae.stages.mix import mix_settings
@@ -599,6 +607,12 @@ def measure(
             ]
         elif c.extra:
             spans = [(float(t.start), float(t.end)) for t in turns if t.speaker == c.extra]
+            # a cluster with no turn here: its cues' own spans are its speech, as extras_cards
+            # reads them
+            spans = spans or [
+                tuple(x.delivery.reference) for x in cues
+                if x.character_id is None and x.extra == c.extra and _spoken(x)
+            ]  # fmt: skip
         else:
             spans = []
         spans = spans or [(float(c.delivery.reference[0]), float(c.delivery.reference[1]))]
@@ -627,6 +641,10 @@ def measure(
         if cid is not None and names is not None and asg is not None:
             labels = confirmed_labels(asg, cid, owner)
             confirmed = [(float(t.start), float(t.end)) for t in turns if t.speaker in labels]
+        # a thin clone sets the gates aside (A2), and the pipeline never judges its references
+        # (cards.auto.is_thin reads [meta] alone, so a card from before tiers is judged)
+        meta_tier = card.meta.get("reference_tier")
+        thin = meta_tier == "thin"
         clips: list[ClipVerdict] = []
         clip_tracks = []
         for ref in card.voice.references:
@@ -651,8 +669,10 @@ def measure(
             elif maj_hz is not None and _semitones(s.median, maj_hz) > pitch.REF_PITCH_ST:
                 why = "pitch"
             judged = (
-                o.get("episode") == work.name and "start" in o and "end" in o and vocals.exists()
-            )
+                not thin
+                and o.get("episode") == work.name and "start" in o and "end" in o
+                and vocals.exists()
+            )  # fmt: skip
             gates: list[str] = []
             if judged:
                 _m, refused = reference_gates(
@@ -669,7 +689,6 @@ def measure(
         pooled = _pooled(clip_tracks)
         card_class = pitch.classify(pooled, *BANDS).gender
         seconds = round(sum(c.seconds for c in clips), 3)
-        meta_tier = card.meta.get("reference_tier")
         tier: Tier
         if meta_tier in ("floor", "short", "thin"):
             tier = meta_tier
