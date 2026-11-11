@@ -65,7 +65,7 @@ def test_constants_match_the_spec():
     assert (pitch.SPEAKER_MIN_VOICED_S, pitch.LINE_MIN_VOICED_S) == (1.0, 0.4)
     assert pitch.CONFIDENCE_ST == 4.0
     assert (pitch.BIMODAL_MIN_S, pitch.BIMODAL_MIN_SHARE) == (5.0, 0.15)
-    assert pitch.VERSION == 2  # bumped with every estimator change (the cache key)
+    assert pitch.VERSION == 3  # bumped with every estimator change (the cache key)
 
 
 def test_harmonic_tone_reads_its_fundamental(tmp_path: Path):
@@ -168,6 +168,16 @@ def test_long_track_memory_stays_bounded(tmp_path: Path):
 def test_noise_is_unvoiced(tmp_path: Path):
     s = summarize(f0_track(write_noise(tmp_path, 2.0), [(0, 2)]))
     assert s.median is None and s.voiced_fraction < 0.1
+
+
+def test_low_rumble_is_unvoiced(tmp_path: Path):
+    # brown noise: its autocorrelation stays high at every short lag and never dips, which the
+    # window correction used to turn into a 271 Hz "voice" in 17% of frames
+    rng = np.random.default_rng(0)
+    x = np.cumsum(rng.standard_normal(30 * RATE))
+    x = 0.5 * (x - x.mean()) / np.abs(x - x.mean()).max()
+    s = summarize(f0_track(write_wav(tmp_path / "brown.wav", x), [(0, 30)]))
+    assert s.voiced_fraction < 0.06, s.voiced_fraction
 
 
 def test_track_records_each_frames_span_and_the_seconds_read(tmp_path: Path):

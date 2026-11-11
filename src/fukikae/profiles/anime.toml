@@ -50,7 +50,7 @@ clone_backend = "indextts2"   # D24: the operator's listening verdict (Task 11)
 
 [tts.gender]   # anime voices sit high: a wide unknown band, and unknowns alternate pools
 male_below = 165.0
-female_above = 300.0
+female_above = 300.0   # pending operator decision D44 (165/200 on the median, or keep this)
 
 [timefit]   # character-cards Task 7: rate (tts) and time-stretch share max_speedup; then borrowed silence
 max_speedup = 1.25

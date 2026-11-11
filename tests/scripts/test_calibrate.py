@@ -60,7 +60,35 @@ def test_table_counts_mains_in_the_other_class_and_unknown_seconds():
     assert t.unknown_share == pytest.approx(40 / 200)
     assert t.confusion["f"] == {"m": 60, "u": 40, "f": 0}
     assert {m["speaker"] for m in t.mains} == {"Natsu", "Lucy", "Happy", "Nobody"}
+    assert t.untruthed == ["Nobody"]
     assert not accept(t)
+
+
+def test_a_main_without_truth_fails_acceptance():
+    recs = [_char("Natsu", 100, 140), _char("Nobody", 50, 140), _line("Natsu", 140, 140)]
+    t = cal.table(recs, {"natsu": "m"}, (165.0, 200.0))
+    assert t.main_in_other_class == 0 and t.unknown_share == 0 and t.line_agreement == 1
+    assert t.untruthed == ["Nobody"]
+    assert not accept(t)
+    assert accept(cal.table(recs[:1] + recs[2:], {"natsu": "m"}, (165.0, 200.0)))
+
+
+def test_capped_takes_spans_in_time_order_up_to_the_cap():
+    assert cal.capped([(10, 20), (0, 5), (30, 50)], cap=20) == [(0, 5), (10, 20), (30, 35)]
+    assert cal.capped([(0, 5), (5, 5), (6, 9)], cap=100) == [(0, 5), (6, 9)]  # empty dropped
+    assert cal.capped([], cap=10) == []
+
+
+def test_sweep_lists_only_passing_bands_and_nearest_picks_the_closest():
+    truth = {"m1": "m", "f1": "f"}
+    recs = [_char("M1", 100, 150), _char("F1", 100, 230), _line("F1", 230, 230)]
+    passing = cal.sweep(recs, truth, step=10.0)
+    assert passing and all(accept(t) for _, _, t in passing)
+    # M1 at 150 Hz needs male_below over 150; F1 at 230 Hz needs female_above under 230
+    assert all(lo > 150 and hi < 230 and lo <= hi for lo, hi, _ in passing)
+    lo, hi, _ = cal.nearest(passing, (165.0, 200.0))
+    assert (lo, hi) == (160.0, 200.0)  # 165 is off the 10 Hz grid: 160 and 170 tie, the wider wins
+    assert cal.nearest([], (165.0, 200.0)) is None
 
 
 def test_line_agreement_only_where_both_are_known():

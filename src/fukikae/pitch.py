@@ -8,11 +8,12 @@ an autocorrelation per 40 ms Hann-windowed frame (20 ms hop) between ``F0_MIN`` 
 isn't penalized for the window's taper (without it, rich voices under about 120 Hz read an
 octave high). Only local maxima count, and the shortest lag whose peak is within ``PEAK_SHARE``
 (80%) of the best is taken, which keeps a subharmonic from halving F0. A frame is voiced when
-its best peak reaches ``VOICED_PEAK``; frames quieter than ``QUIET`` of the loudest decile of
-the whole track are never voiced. Unvoiced frames are NaN, and each frame records the input
-span it came from, so one track answers both a speaker's summary and each turn's. Frames are
-read and processed ``_BATCH`` at a time in two passes (loudness, then F0), so memory stays
-flat on a whole-episode span.
+its best peak reaches ``VOICED_PEAK`` and the autocorrelation dips to ``VALLEY_MAX`` (0) or
+below before that lag, which keeps low rumble from reading as a voice; frames quieter than
+``QUIET`` of the loudest decile of the whole track are never voiced. Unvoiced frames are NaN,
+and each frame records the input span it came from, so one track answers both a speaker's
+summary and each turn's. Frames are read and processed ``_BATCH`` at a time in two passes
+(loudness, then F0), so memory stays flat on a whole-episode span.
 
 ``classify`` bands a summary's median: ``m`` under ``male_below`` (``MALE_BELOW``, 165 Hz),
 ``f`` over ``female_above`` (``FEMALE_ABOVE``, 200 Hz), else ``u``, and ``u`` too under a
@@ -44,7 +45,7 @@ Gender = Literal["f", "m", "u"]
 
 # In the cache key: bump it with any change to what f0_track returns (frame sizes, range,
 # peak rule, voicing or loudness thresholds), or old tracks are served from the cache.
-VERSION = 2
+VERSION = 3
 
 F0_MIN = 60
 F0_MAX = 800
@@ -70,6 +71,12 @@ MIN_VOICED_FRAMES = 10
 # A peak within this share of the best (window-corrected) peak at a shorter lag wins, which
 # keeps a subharmonic from halving F0.
 PEAK_SHARE = 0.8
+# A period's peak counts only when the (window-corrected) autocorrelation dips to this or lower
+# somewhere between lag 0 and that peak: a voice anti-correlates with itself within one period
+# (real voiced frames on Fairy Tail and Sol Bianca dip to -0.32 or lower in 99% of frames), while
+# low rumble (brown noise) stays positive at every short lag and, without the check, read as
+# voiced at about 270 Hz in 17% of its frames.
+VALLEY_MAX = 0.0
 # Frames per batch (about 5 MB of float64 frames at 16 kHz), which bounds memory on a long track.
 _BATCH = 1024
 
@@ -175,6 +182,9 @@ def _batches(data: np.ndarray, rate: int, a: int, b: int):
         yield fr
 
 
+# A guard only: over the lags searched (to rate / F0_MIN, 266 at 16 kHz in a 640-sample frame)
+# the Hann window's autocorrelation stays above 0.3, so the correction's gain is at most about
+# 3.3 and this floor never binds. It keeps a longer search range from dividing by ~0.
 WINDOW_FLOOR = 1e-3
 
 
@@ -200,7 +210,10 @@ def _frame_f0(fr: np.ndarray, rate: int) -> np.ndarray:
     window = np.where(peak, window, -np.inf)
     best = window.max(axis=1)
     lag = lo + np.argmax(window >= PEAK_SHARE * best[:, None], axis=1)
-    return np.where(best >= VOICED_PEAK, rate / lag, np.nan)
+    # the lowest the autocorrelation goes between lag 1 and the chosen lag (the valley)
+    valley = np.minimum.accumulate(ac[:, 1 : hi + 1], axis=1)[np.arange(len(lag)), lag - 1]
+    voiced = (best >= VOICED_PEAK) & (valley <= VALLEY_MAX)
+    return np.where(voiced, rate / lag, np.nan)
 
 
 def f0_track(vocals: Path, spans: Sequence[tuple[float, float]]) -> F0Track:

@@ -273,13 +273,16 @@ class Table:
     lines_compared: int = 0
     line_unknown_share: float = 0.0  # share of line seconds A0 classes unknown
     line_truth_agreement: float | None = None  # A0 line class against the speaker's truth
+    untruthed: list[str] = field(default_factory=list)  # main characters with no truth entry
 
 
 def accept(t: Table) -> bool:
     """The plan's rule: no main character in the other class, at most 10% of main
-    characters' seconds unknown, and 90% line agreement with pYIN where both are known."""
+    characters' seconds unknown, and 90% line agreement with pYIN where both are known. A main
+    character without a truth entry fails it too: dropping one silently could hide a miss."""
     return (
-        t.main_in_other_class == 0
+        not t.untruthed
+        and t.main_in_other_class == 0
         and t.unknown_share <= UNKNOWN_MAX
         and t.line_agreement is not None
         and t.line_agreement >= LINE_AGREEMENT_MIN
@@ -307,6 +310,7 @@ def table(
             }
         )
         if want not in ("m", "f"):
+            t.untruthed.append(r["speaker"])
             continue
         t.confusion[want][got] += r["seconds"]
         main_s += r["seconds"]
@@ -413,6 +417,9 @@ def report(args: argparse.Namespace) -> None:
             row(*["---"] * 4)
             for c in ("m", "f"):
                 row(c, *(f"{t.confusion[c][k]:.0f}" for k in CLASSES))
+            if t.untruthed:
+                print(f"\n- main characters with no truth entry (verdict fails): "
+                      f"{', '.join(t.untruthed)}")  # fmt: skip
             print(f"\n- main characters in the other class: {t.main_in_other_class}")
             print(f"- main characters' seconds unknown: {_pct(t.unknown_share)}")
             truthful = _pct(t.line_truth_agreement)

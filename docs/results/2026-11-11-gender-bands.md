@@ -4,6 +4,13 @@ _Run 2026-11-11 on CPU, branch feat/identification-part-a, estimator `fukikae.pi
 
 **Verdict: no pair of bands passes the acceptance rule on all three sets, and 165/200 Hz fails on each of them.** The anime profile's `[tts.gender]` override is left in place for the operator's decision (the plan's Step 4 stop). The defaults in `fukikae.pitch` and `cards.select` are 165/200 Hz (D43), which is the only pair that puts no main character of BBT or Kaze in the other class.
 
+## Caveats
+
+- Natsu's truth is `m` by ear: a male voice actor, shouting through most of this arc (confirmed in the Task 2 review). The Fairy Tail failure is the limit of a median on shouted speech, not a truth error or an estimator error.
+- The low-voice finding that motivated the window correction came from Sol Bianca (SPEAKER_08 read 199.5 Hz against pYIN's 113), so Sol Bianca is not a clean held-out set for the estimator, though the bands were never tuned on it. Fairy Tail E14 stayed untouched by both the fix and the calibration; the reviewer measured 0.57 st mean error against pYIN there (11 clusters).
+- Per-character medians pool every ground-truth line of the character, shouted lines and lines that overlap another speaker included, so a character's median is the register of all their speech as subtitled, not of their calm speech.
+- The estimator here is VERSION 2. VERSION 3 (Task 3's first commit) adds a valley check that keeps low rumble unvoiced (brown noise: 16.7% voiced at about 271 Hz before, under 5% after); against pYIN it changes Fairy Tail E14 not at all (0.572 st) and Sol Bianca from 0.402 to 0.401 st, so these tables stand.
+
 ## Method
 
 `scripts/gender-calibration/calibrate.py measure` reads each episode's ground-truth subtitle lines (Fairy Tail: the en ASS Name field, E11 extracted from the release's English track, E12 and E13 the cached tracks the names arm used; BBT: the transcript-aligned named ASS in `~/fukikae-ws/subs/bbt/labels`; Kaze: the retimed colour captions in `~/fukikae-ws/subs/kaze-kaoru/aligned` with the workspace's colour map and aliases), and for Sol Bianca the ASR transcript's segments, which carry no names. Per line it runs A0 (`f0_track`) and pYIN (librosa, 60 to 1000 Hz, 2048-sample frames, 20 ms hop, through `uv run --with librosa`); per character it pools the voiced frames of all its lines over the set's episodes; per diarize cluster it reads at most 120 s of turns, as `cards.select.speaker_f0` does. `report` classes every median at the bands given (speaker minimum 1.0 s voiced, line minimum 0.4 s) and applies the plan's rule: no main character (30 s or more) in the other class, at most 10% of main characters' seconds unknown, and at least 90% per-line agreement with pYIN where both are known. `--sweep` tries every band on a 5 Hz grid from 120 to 320 Hz. Truth is `scripts/gender-calibration/truth.toml`, voice register as heard, filled from the names and the casts; entries marked `# check` are mine to confirm by ear. 真風 is the narrator and fortune teller played by 研ナオコ (cast lists), so `f`.
@@ -57,7 +64,7 @@ The shipped rule has the lowest tuning mean and keeps the five voices over 400 H
 | m | 704 | 65 | 328 |
 | f | 0 | 0 | 1125 |
 
-One main character in the other class (Natsu), 2.9% of main seconds unknown (Nebaru), line agreement with pYIN 99.6% (733 lines), 14.0% of line seconds unknown (in the band or under 0.4 s voiced). No band passes: Natsu's lines in this battle arc are mostly shouted (pYIN line medians: 58 of 121 over 250 Hz, 25 over 400), and his median sits above Erza's (204 to 213 Hz), so any band that makes him `m` makes her `m` too. pYIN agrees with A0 on him; this is the median's limit, not the estimator's.
+One main character in the other class (Natsu), 2.9% of main seconds unknown (Nebaru), line agreement with pYIN 99.6% (733 lines), 14.0% of line seconds unknown (in the band or under 0.4 s voiced). No band passes: Natsu's lines in this battle arc are mostly shouted (pYIN line medians: 58 of 121 over 250 Hz, 25 over 400), and his median sits above Erza's (204 to 213 Hz), so any band that makes him `m` makes her `m` too. pYIN agrees with A0 on him; this is the median's limit, not the estimator's, and his truth stays `m` (by ear).
 
 ### The Big Bang Theory S01E01-E02: FAIL (unknown share)
 
