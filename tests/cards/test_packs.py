@@ -1076,19 +1076,50 @@ def test_import_warns_on_a_fingerprint_threshold_below_one_half(tmp_path: Path):
     assert f"card {cid}" in r.output and "threshold 0.3" in r.output and "0.5" in r.output
 
 
-def test_pack_import_refuses_a_stock_card(tmp_path: Path):
-    """D41: a pack may not bring a stock voice into a workspace."""
-    from fukikae.cards.card import Card, Voice
+def _stock_card() -> Card:
+    return Card("en", Voice(backend="fake", model_revision="1.0", source="stock",
+                            voice="af_heart"))  # fmt: skip
+
+
+def test_export_leaves_out_a_stock_card(tmp_path: Path):
+    """D41: packs never carry a stock voice; export leaves the row out and says why."""
+    _, reg, store = workspace(tmp_path, "a")
+    reg.assign_card(character(reg, "A"), "en", store.put(designed()), by="assign", locked=True)
+    reg.assign_card(character(reg, "B"), "en", store.put(_stock_card()), by="assign",
+                    locked=True)  # fmt: skip
+    report = export_pack(reg, store, SERIES, tmp_path / "p", characters=None, languages=None,
+                         no_clips=False, title="t", author="")  # fmt: skip
+    assert report.written == 1
+    ((what, why),) = report.left_out
+    assert what.startswith("B en card") and "stock voice" in why and "D41" in why
+    with read_pack(tmp_path / "p") as pack:
+        assert [e.key.name for e in pack.cast] == ["A"]
+
+
+def test_pack_import_skips_a_stock_card(tmp_path: Path):
+    """D41: a stock card in a pack (an old one, or written by hand) is listed as skipped, and
+    the rest of the pack imports."""
+    import tomllib
+
+    import tomli_w
 
     _, reg_a, store_a = workspace(tmp_path, "a")
-    stock_voice = Card("en", Voice(backend="fake", model_revision="1.0", source="stock",
-                                   voice="af_heart"))  # fmt: skip
-    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(stock_voice), by="assign",
+    reg_a.assign_card(character(reg_a, "A"), "en", store_a.put(designed()), by="assign",
                       locked=True)  # fmt: skip
     export_pack(reg_a, store_a, SERIES, tmp_path / "p", characters=None, languages=None,
                 no_clips=False, title="t", author="")  # fmt: skip
+    stock = _stock_card()
+    (tmp_path / "p" / "cards" / f"{card_id(stock)}.toml").write_text(dump_card(stock))
+    cast = tomllib.loads((tmp_path / "p" / "cast.toml").read_text())["cast"]
+    cast.append({"name": "B", "target_language": "en", "card": card_id(stock)})
+    (tmp_path / "p" / "cast.toml").write_text(tomli_w.dumps({"cast": cast}))
     _, reg_b, store_b = workspace(tmp_path, "b")
-    character(reg_b, "A")
-    with read_pack(tmp_path / "p") as pack, pytest.raises(PackError, match=r"D41"):
-        apply_import(plan_import(pack, reg_b, replace=False), pack, reg_b, store_b)
-    assert not list(store_b.root.glob("*.toml"))
+    a, b = character(reg_b, "A"), character(reg_b, "B")
+    with read_pack(tmp_path / "p") as pack:
+        plan = plan_import(pack, reg_b, replace=False)
+        assert [m.character_id for m in plan.assign] == [a]
+        ((skip),) = plan.skipped
+        assert skip.character_id == b and "stock voice" in skip.reason
+        apply_import(plan, pack, reg_b, store_b)
+    assert reg_b.card_for(b, "en") is None
+    assert not store_b.has(card_id(stock))

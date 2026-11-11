@@ -447,7 +447,7 @@ def _fake_verify(calls: list[str]):
 
     def fake(_cfg, _store, card, record):
         assert record
-        calls.append(card.voice.voice or card.voice.backend)
+        calls.append(card.voice.voice or card.voice.description or card.voice.backend)
         fp = Fingerprint(embedder="wespeaker", vector="sha256:" + "0" * 64, threshold=0.85)
         new = dc_replace(card, voice=dc_replace(card.voice, fingerprint=fp))
         return VerifyResult("recorded", None, "fake"), new
@@ -455,10 +455,13 @@ def _fake_verify(calls: list[str]):
     return fake
 
 
-def _kokoro_card():
-    from fukikae.cards.stock import revision, stock_card
+def _kokoro_card(voice: str = "af_heart"):
+    """A card on a backend with a real class (kokoro), not stock: packs never carry stock."""
+    from fukikae.cards.card import Card, Voice
+    from fukikae.cards.stock import revision
 
-    return stock_card("kokoro", "af_heart", "en", revision("kokoro"))
+    return Card("en", Voice(backend="kokoro", model_revision=revision("kokoro"),
+                            source="design", description=voice))  # fmt: skip
 
 
 def test_export_records_missing_fingerprints(tmp_path: Path, monkeypatch):
@@ -616,9 +619,7 @@ def test_export_no_record_lists_without_rendering(tmp_path: Path, monkeypatch):
 def test_export_fingerprints_exactly_the_rows_it_exports(tmp_path: Path, monkeypatch):
     """Two characters sharing a name are left out of the pack, so neither is rendered."""
     ws, cid, store, _ = _assigned_kokoro(tmp_path)
-    from fukikae.cards.stock import revision, stock_card
-
-    other = store.put(stock_card("kokoro", "am_adam", "en", revision("kokoro")))
+    other = store.put(_kokoro_card("am_adam"))
     with Registry(ws.registry_path) as reg:
         _, twin = reg.create_actor_with_character(np.array([0.0, 1.0], dtype=np.float32))
         reg.rename_character(twin, "NATSU")
@@ -1184,3 +1185,14 @@ def test_voices_edit_refuses_a_stock_card(tmp_path: Path, monkeypatch):
     assert r.exit_code == 1 and "stock voices are retired (D41)" in r.output
     with Registry(ws.registry_path) as reg:
         assert _cur(reg, cid, "en").card_id == old
+
+
+def test_voices_lock_refuses_a_stock_card(tmp_path: Path):
+    """D41: locking would keep a stock voice on every run; unlocking one stays allowed."""
+    ws, cid, store = setup(tmp_path)
+    _stock_row(ws, store, cid)
+    r = invoke("lock", str(ws.root), "Natsu")
+    assert r.exit_code == 1 and "stock voices are retired (D41)" in r.output
+    with Registry(ws.registry_path) as reg:
+        assert not _cur(reg, cid, "en").locked
+    assert invoke("unlock", str(ws.root), "Natsu").exit_code == 0

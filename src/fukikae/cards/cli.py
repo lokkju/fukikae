@@ -498,15 +498,19 @@ def revert(
 
 
 def _lock(workspace: Path, character: str, lang: str | None, locked: bool) -> None:
-    with _session(workspace, lang) as (reg, _, language):
+    with _session(workspace, lang) as (reg, store, language):
         char = reg.character_by_ref(character)
+        cur = reg.card_for(char.id, language)
+        if locked and cur is not None and cur.card_id is not None:
+            _refuse_stock(store.get(cur.card_id), f"card {cur.card_id}")
         a = reg.lock_card(char.id, language, locked)
         _echo(f"{_label(char)} {language}: card {a.card_id} {_state(a)}")
 
 
 @voices_app.command("lock")
 def lock(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG) -> None:
-    """Lock a character's card: imports and automatic assignment leave it alone."""
+    """Lock a character's card: imports and automatic assignment leave it alone. A stock
+    card can't be locked (D41)."""
     _lock(workspace, character, lang, True)
 
 

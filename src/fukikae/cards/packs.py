@@ -299,6 +299,10 @@ def _check_pack_fields(series: SeriesInfo, author: str, notes: str) -> None:
             _external_id(series.ids[key], f"[series] {key}")
 
 
+# D41: stock voices are retired, and a pack never carries one.
+STOCK_LEFT_OUT = "a stock voice: packs never carry stock voices (D41)"
+
+
 def export_selection(
     reg: Registry,
     store: CardStore,
@@ -310,7 +314,7 @@ def export_selection(
     """The rows ``export_pack`` writes: (cast entries, every card they need by id, blends
     included, and what was left out with why). Unnamed characters, names that normalise to
     nothing, keys two characters share, unreadable cards, cards missing sidecars and, with
-    ``no_clips``, cards that need audio are left out."""
+    ``no_clips``, cards that need audio are left out, as are stock cards (D41)."""
     wanted = set(characters) if characters is not None else None
     left_out: list[tuple[str, str]] = []
     rows: list[tuple[CharacterKey, str, str]] = []
@@ -361,6 +365,9 @@ def export_selection(
                 (what, f"the card is for {card_lang!r}, not this assignment's language; import "
                        "would refuse it")
             )  # fmt: skip
+            continue
+        if mine[cid].voice.source == "stock":
+            left_out.append((what, STOCK_LEFT_OUT))
             continue
         if no_clips and _needs_clips(mine[cid], mine):
             left_out.append((what, "needs audio clips (a clone); --no-clips leaves it out"))
@@ -959,7 +966,8 @@ def series_check(pack: Pack, series: SeriesInfo) -> tuple[bool, str]:
 def plan_import(pack: Pack, reg: Registry, *, replace: bool) -> ImportPlan:
     """Match each cast entry to a character by external id, then by normalized name (never to
     a character whose own external id differs), and sort the matches into assignments,
-    skipped protected characters (unless ``replace``) and already-current cards."""
+    skipped protected characters (unless ``replace``) and stock cards (D41: never imported),
+    and already-current cards."""
     chars = reg.characters()
     by = f"import:{pack.meta.title}"
     assign: list[Match] = []
@@ -997,6 +1005,10 @@ def plan_import(pack: Pack, reg: Registry, *, replace: bool) -> ImportPlan:
             other = taken[(char.id, lang)]
             skipped.append(Skip(key, char.id, f"{lang}: character also matched by pack entry "
                                               f"{printable(other.name)!r}"))  # fmt: skip
+            continue
+        card = pack.cards.get(e.card)
+        if card is not None and card.voice.source == "stock":
+            skipped.append(Skip(key, char.id, f"{lang}: card {e.card} is {STOCK_LEFT_OUT}"))
             continue
         taken[(char.id, lang)] = key
         m = Match(key, char.id, lang, e.card, how)
