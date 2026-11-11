@@ -12,8 +12,8 @@
 
 ## Global Constraints
 
-- uv only, always `uv run --directory /home/lokkju/projects/fukikae ...`; never pip, never `cd <dir> && <cmd>`; absolute paths everywhere.
-- ffmpeg and ffprobe come from mise: run pipeline and media commands as `mise -C /home/lokkju/projects/fukikae exec -- <cmd>`; subprocesses take argument lists.
+- uv only, always `uv run --directory ~/projects/fukikae ...`; never pip, never `cd <dir> && <cmd>`; absolute paths everywhere.
+- ffmpeg and ffprobe come from mise: run pipeline and media commands as `mise -C ~/projects/fukikae exec -- <cmd>`; subprocesses take argument lists.
 - GPU work runs on nvidia-smi index 0 (`gpu_device = 0` in every workspace); index 1 is vLLM. One GPU model at a time: every stage and eval loads, uses and unloads before the next model loads, and the managed llama-server is stopped before the stage returns, error or not.
 - Source media is read-only and never committed. Renders, A/B folders, packs with clips, GGUF files and the user-level ledger stay out of git.
 - Never print, log or write the Hugging Face token or `api_key_env`'s value; errors name the variable, never its value.
@@ -40,7 +40,7 @@
 - **Stage directories.** `main` already uses `03-asr`, `04-diarize` and `05-characters`, so the spec's numbers shift by one after characters: `04b-tag/tags.json`, `06-translate/cues.<target>.json`, `07-tts/<cue-id>.wav` and `plan.json`, `08-timefit/<cue-id>.wav` and `report.json`, `09-mix/dub.<target>.wav` and `dub.<target>.ass`, `out/<episode>.fukikae.mkv`, all under the episode work dir. Stage names: `tag`, `translate`, `tts`, `timefit`, `mix`.
 - **Card id canonical form**: `json.dumps(card_dict, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` of the card without `[meta]` and `[voice.fingerprint]`. Sidecars are referenced by `sha256:<hex>` of their bytes, so their hashes are already inside the canonical form. Id = first 16 hex of sha256 of that string.
 - **Catchphrases** are `{ source = "...", target = "..." }`. The spec's example key `english` predates D17; a per-language card says `target`.
-- **Cloning candidates run out of process**: each in `/home/lokkju/projects/fukikae/.venvs/<extra>` (`UV_PROJECT_ENVIRONMENT`), started as `uv run --directory <checkout> --no-dev --extra <extra> python -m fukikae.backends.tts.worker <name>`, extras declared mutually conflicting with the main extras in `[tool.uv] conflicts` only where `uv lock` requires it. Kokoro runs in-process.
+- **Cloning candidates run out of process**: each in `~/projects/fukikae/.venvs/<extra>` (`UV_PROJECT_ENVIRONMENT`), started as `uv run --directory <checkout> --no-dev --extra <extra> python -m fukikae.backends.tts.worker <name>`, extras declared mutually conflicting with the main extras in `[tool.uv] conflicts` only where `uv lock` requires it. Kokoro runs in-process.
 - **Rate and stretch share one budget**: the combined speed-up from TTS rate control and time-stretch never exceeds `max_speedup`. A backend with the `duration` capability gets the slot length as a target in the TTS call and skips rate control.
 - **Time-stretch uses ffmpeg `atempo`** (in every ffmpeg build; rubberband is not assumed).
 - **`eval tts` language column is the pair**, `ja-en`, `de-en`, `es-en`, matching config's `pair` naming. Candidate comparisons are `split = "tune"` on Fairy Tail E11 to E13; the chosen backend gets one `holdout` row on E14 after the checkpoint.
@@ -188,21 +188,21 @@ def test_recording_fingerprint_keeps_id_and_overwrites(tmp_path): ...
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/cards -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/cards -v`
 Expected: FAIL, `ModuleNotFoundError: fukikae.cards`
 
-- [ ] **Step 3: Add `tomli-w` (`uv add --directory /home/lokkju/projects/fukikae tomli-w`), then implement `card.py`, `store.py` and the `Synthesizer` protocol** with the signatures above. Parse to plain dicts with `tomllib`, check keys against per-table allow-lists, build the dataclasses; keep `style` as a free-form dict but require string values except `catchphrases` (a list of `{source, target}` tables).
+- [ ] **Step 3: Add `tomli-w` (`uv add --directory ~/projects/fukikae tomli-w`), then implement `card.py`, `store.py` and the `Synthesizer` protocol** with the signatures above. Parse to plain dicts with `tomllib`, check keys against per-table allow-lists, build the dataclasses; keep `style` as a free-form dict but require string values except `catchphrases` (a list of `{source, target}` tables).
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/cards -v && uv run --directory /home/lokkju/projects/fukikae pyright src/fukikae/cards`
+Run: `uv run --directory ~/projects/fukikae pytest tests/cards -v && uv run --directory ~/projects/fukikae pyright src/fukikae/cards`
 Expected: PASS, 0 errors
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add pyproject.toml uv.lock src/fukikae/cards src/fukikae/backends/base.py tests/cards
-git -C /home/lokkju/projects/fukikae commit -m "feat(cards): content-addressed character cards with sidecar store"
+git -C ~/projects/fukikae add pyproject.toml uv.lock src/fukikae/cards src/fukikae/backends/base.py tests/cards
+git -C ~/projects/fukikae commit -m "feat(cards): content-addressed character cards with sidecar store"
 ```
 
 ---
@@ -261,21 +261,21 @@ def test_history_lists_numbered_rows(): ...
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/registry/test_store.py tests/cards/test_cli.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/registry/test_store.py tests/cards/test_cli.py -v`
 Expected: FAIL (no `card_history`, no `voices` command)
 
 - [ ] **Step 3: Implement the schema migration, the store methods and `cards/cli.py`**, registering `voices_app` in `src/fukikae/cli.py` beside `registry_app`. Fix every existing use of `Character.voice` (`registry/cli.py` `show`, `store.py` protection queries) in the same change.
 
 - [ ] **Step 4: Run the whole suite**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
+Run: `uv run --directory ~/projects/fukikae pytest -q`
 Expected: PASS (existing registry tests included)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add src/fukikae/registry src/fukikae/cards/cli.py src/fukikae/cli.py tests/registry tests/cards
-git -C /home/lokkju/projects/fukikae commit -m "feat(registry): per-language card assignments with history and voices CLI"
+git -C ~/projects/fukikae add src/fukikae/registry src/fukikae/cards/cli.py src/fukikae/cli.py tests/registry tests/cards
+git -C ~/projects/fukikae commit -m "feat(registry): per-language card assignments with history and voices CLI"
 ```
 
 ---
@@ -317,22 +317,22 @@ def test_sensevoice_on_fixture_clip(): ...   # real model on CPU; at least one e
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/backends/test_sensevoice.py tests/stages/test_tag.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/backends/test_sensevoice.py tests/stages/test_tag.py -v`
 Expected: FAIL (no module `fukikae.backends.tag`)
 
 - [ ] **Step 3: Implement the backend, models and stage.** `funasr` is imported only inside `load()`; pin the HF revision in the backend's default options.
 
 - [ ] **Step 4: Run tests, then one real run on CPU**
 
-Run: `uv sync --directory /home/lokkju/projects/fukikae --extra sensevoice && uv run --directory /home/lokkju/projects/fukikae pytest tests/backends/test_sensevoice.py tests/stages/test_tag.py -v`
-Then: `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae run /home/lokkju/fukikae-ws/fairytail S01E11 --to tag` with `[tag] enabled = true` in that workspace.
+Run: `uv sync --directory ~/projects/fukikae --extra sensevoice && uv run --directory ~/projects/fukikae pytest tests/backends/test_sensevoice.py tests/stages/test_tag.py -v`
+Then: `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae run ~/fukikae-ws/fairytail S01E11 --to tag` with `[tag] enabled = true` in that workspace.
 Expected: PASS; `04b-tag/tags.json` exists with emotion spans for most turns. Record emotion label counts and wall time in the execution ledger.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add pyproject.toml uv.lock src/fukikae/models.py src/fukikae/backends src/fukikae/stages/tag.py src/fukikae/profiles src/fukikae/cli.py tests
-git -C /home/lokkju/projects/fukikae commit -m "feat(tag): optional SenseVoice tag stage for events and per-turn emotion"
+git -C ~/projects/fukikae add pyproject.toml uv.lock src/fukikae/models.py src/fukikae/backends src/fukikae/stages/tag.py src/fukikae/profiles src/fukikae/cli.py tests
+git -C ~/projects/fukikae commit -m "feat(tag): optional SenseVoice tag stage for events and per-turn emotion"
 ```
 
 ---
@@ -398,22 +398,22 @@ def test_card_change_changes_translate_key(): ...   # assigning a new card for a
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/test_cues.py tests/test_translation.py tests/backends/test_llama_server.py tests/backends/test_openai_compat.py tests/stages/test_translate.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/test_cues.py tests/test_translation.py tests/backends/test_llama_server.py tests/backends/test_openai_compat.py tests/stages/test_translate.py -v`
 Expected: FAIL (modules missing)
 
 - [ ] **Step 3: Implement**, and pin `llama-server` through mise: try `"github:ggml-org/llama.cpp"` in `.mise/config.toml` with the release asset that has CUDA, else the Vulkan asset; `fukikae doctor` reports the binary and its `--version`. If neither asset runs on GPU 0, stop and report it (do not install system packages); the `binary` option takes any path.
 
 - [ ] **Step 4: Run tests, then a real ASR-path translation of Fairy Tail E11**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
-Then: `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae run /home/lokkju/fukikae-ws/fairytail S01E11 --to translate` with `[translate] source = "asr"` in that workspace.
+Run: `uv run --directory ~/projects/fukikae pytest -q`
+Then: `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae run ~/fukikae-ws/fairytail S01E11 --to translate` with `[translate] source = "asr"` in that workspace.
 Expected: PASS; `06-translate/cues.en.json` with every non-skipped cue translated or carrying `error`; `nvidia-smi --id=0` shows no llama-server afterwards. Record cue count, over-budget count after retry, errors and wall time in the execution ledger.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add .mise/config.toml pyproject.toml uv.lock src/fukikae tests
-git -C /home/lokkju/projects/fukikae commit -m "feat(translate): windowed LLM translation with style notes and a managed llama-server"
+git -C ~/projects/fukikae add .mise/config.toml pyproject.toml uv.lock src/fukikae tests
+git -C ~/projects/fukikae commit -m "feat(translate): windowed LLM translation with style notes and a managed llama-server"
 ```
 
 ---
@@ -459,22 +459,22 @@ def test_subs_condense_off_keeps_verbatim(): ...
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/test_subtitles.py tests/test_cues.py tests/stages/test_translate.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/test_subtitles.py tests/test_cues.py tests/stages/test_translate.py -v`
 Expected: FAIL
 
 - [ ] **Step 3: Implement** the move (a `git mv`-style move of the functions; `base.py` keeps its ground-truth-only code), the filter, the speaker assignment and the path choice.
 
 - [ ] **Step 4: Run tests, then the subtitle path on Fairy Tail E12**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
-Then: `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae run /home/lokkju/fukikae-ws/fairytail S01E12 --to translate` (`source = "auto"`).
+Run: `uv run --directory ~/projects/fukikae pytest -q`
+Then: `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae run ~/fukikae-ws/fairytail S01E12 --to translate` (`source = "auto"`).
 Expected: PASS; `path = "subs"`; record cues kept verbatim, condensed, filtered by rule, and unknown-speaker cues in the execution ledger.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add src/fukikae tests
-git -C /home/lokkju/projects/fukikae commit -m "feat(translate): subtitle-first path with SDH filter and condense mode"
+git -C ~/projects/fukikae add src/fukikae tests
+git -C ~/projects/fukikae commit -m "feat(translate): subtitle-first path with SDH filter and condense mode"
 ```
 
 ---
@@ -522,22 +522,22 @@ def test_kokoro_renders_a_stock_line(tmp_path): ...   # 24 kHz mono, 0.5 to 5 s 
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/cards/test_auto.py tests/stages/test_tts.py tests/backends/test_kokoro.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/cards/test_auto.py tests/stages/test_tts.py tests/backends/test_kokoro.py -v`
 Expected: FAIL
 
 - [ ] **Step 3: Implement** Kokoro, stock pools, `ensure_assignments`, `extras_voices` and the stage; `voices assign <character> stock:kokoro:af_heart` now works.
 
 - [ ] **Step 4: Run tests, then render Fairy Tail E11**
 
-Run: `uv sync --directory /home/lokkju/projects/fukikae --extra kokoro && uv run --directory /home/lokkju/projects/fukikae pytest -q`
-Then: `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae run /home/lokkju/fukikae-ws/fairytail S01E11 --to tts`
+Run: `uv sync --directory ~/projects/fukikae --extra kokoro && uv run --directory ~/projects/fukikae pytest -q`
+Then: `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae run ~/fukikae-ws/fairytail S01E11 --to tts`
 Expected: PASS; one wav per rendered cue; a second run renders nothing (`cached` true everywhere).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add pyproject.toml uv.lock src/fukikae tests
-git -C /home/lokkju/projects/fukikae commit -m "feat(tts): per-cue cached TTS stage with Kokoro stock voices"
+git -C ~/projects/fukikae add pyproject.toml uv.lock src/fukikae tests
+git -C ~/projects/fukikae commit -m "feat(tts): per-cue cached TTS stage with Kokoro stock voices"
 ```
 
 ---
@@ -587,22 +587,22 @@ def test_apply_fit_changes_duration(tmp_path): ...        # 2.0 s at stretch 1.2
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/test_timefit.py tests/test_mix.py tests/stages/test_timefit.py tests/stages/test_mix.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/test_timefit.py tests/test_mix.py tests/stages/test_timefit.py tests/stages/test_mix.py -v`
 Expected: FAIL
 
 - [ ] **Step 3: Implement** timefit, mix and the two stages; extend the run list.
 
 - [ ] **Step 4: Run tests under mise, then two whole episodes**
 
-Run: `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae pytest -q -m "not gpu and not media and not slow"` (ffmpeg tests included)
-Then: `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae run /home/lokkju/fukikae-ws/fairytail S01E11` (ASR path) and the same for `S01E12` (subtitle path).
+Run: `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae pytest -q -m "not gpu and not media and not slow"` (ffmpeg tests included)
+Then: `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae run ~/fukikae-ws/fairytail S01E11` (ASR path) and the same for `S01E12` (subtitle path).
 Expected: PASS; two `out/*.fukikae.mkv` files whose dub track is default and whose original audio and subtitles are present (`ffprobe`). Record cues over after fitting, median stretch, dub vs original loudness, and the output paths in the execution ledger.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add src/fukikae tests README.md
-git -C /home/lokkju/projects/fukikae commit -m "feat(mix): time fitting, dub mix and mux for a complete dubbed episode"
+git -C ~/projects/fukikae add src/fukikae tests README.md
+git -C ~/projects/fukikae commit -m "feat(mix): time fitting, dub mix and mux for a complete dubbed episode"
 ```
 
 ---
@@ -648,22 +648,22 @@ def test_report_shows_tts_column(): ...   # build_matrix over the row -> column 
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/eval/test_tts.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/eval/test_tts.py -v`
 Expected: FAIL
 
 - [ ] **Step 3: Implement `eval/tts.py` and the CLI command.**
 
 - [ ] **Step 4: Run tests, then the Kokoro baseline**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
-Then (after translate has run on each episode): `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae eval tts /home/lokkju/fukikae-ws/fairytail --episodes S01E11,S01E12,S01E13 --backend kokoro --set fairytail --tag baseline`, and in `bbt-de` and `bbt-es` with `--reference-workspace /home/lokkju/fukikae-ws/bbt-en --episodes S01E01,S01E02 --set bbt` when those workspaces exist.
+Run: `uv run --directory ~/projects/fukikae pytest -q`
+Then (after translate has run on each episode): `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae eval tts ~/fukikae-ws/fairytail --episodes S01E11,S01E12,S01E13 --backend kokoro --set fairytail --tag baseline`, and in `bbt-de` and `bbt-es` with `--reference-workspace ~/fukikae-ws/bbt-en --episodes S01E01,S01E02 --set bbt` when those workspaces exist.
 Expected: PASS; `fukikae eval report --stage tts` shows the baseline. Record the numbers in the execution ledger.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add src/fukikae/eval tests/eval
-git -C /home/lokkju/projects/fukikae commit -m "feat(eval): eval tts scores renders and writes results ledger rows"
+git -C ~/projects/fukikae add src/fukikae/eval tests/eval
+git -C ~/projects/fukikae commit -m "feat(eval): eval tts scores renders and writes results ledger rows"
 ```
 
 ---
@@ -714,22 +714,22 @@ def test_neutral_only_backend_is_reported(): ...
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/backends/test_tts_worker.py tests/cards/test_select.py tests/stages/test_tts.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/backends/test_tts_worker.py tests/cards/test_select.py tests/stages/test_tts.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: Implement the worker, client, selection and delivery; then each candidate's extra and `impl_*.py`**, one at a time, each with a pinned git commit or package version and an HF revision. Sync each venv with `UV_PROJECT_ENVIRONMENT=/home/lokkju/projects/fukikae/.venvs/<extra> uv sync --directory /home/lokkju/projects/fukikae --no-dev --extra <extra>`. A candidate that cannot be installed without system packages or a CUDA build outside uv is dropped with a ruling naming why; the checkpoint goes ahead with the rest.
+- [ ] **Step 3: Implement the worker, client, selection and delivery; then each candidate's extra and `impl_*.py`**, one at a time, each with a pinned git commit or package version and an HF revision. Sync each venv with `UV_PROJECT_ENVIRONMENT=~/projects/fukikae/.venvs/<extra> uv sync --directory ~/projects/fukikae --no-dev --extra <extra>`. A candidate that cannot be installed without system packages or a CUDA build outside uv is dropped with a ruling naming why; the checkpoint goes ahead with the rest.
 
 - [ ] **Step 4: Run tests, then score every candidate**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
-Then for each `B` in `indextts2 cosyvoice3 qwen3_tts`: `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae eval tts /home/lokkju/fukikae-ws/fairytail --episodes S01E11,S01E12,S01E13 --backend B --set fairytail --tag candidates`, and in `bbt-de`/`bbt-es` with `--reference-workspace /home/lokkju/fukikae-ws/bbt-en --set bbt` when they exist. One `gpu` smoke test per backend: `uv run --directory /home/lokkju/projects/fukikae pytest -m gpu tests/backends/test_tts_worker.py -k real`.
+Run: `uv run --directory ~/projects/fukikae pytest -q`
+Then for each `B` in `indextts2 cosyvoice3 qwen3_tts`: `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae eval tts ~/fukikae-ws/fairytail --episodes S01E11,S01E12,S01E13 --backend B --set fairytail --tag candidates`, and in `bbt-de`/`bbt-es` with `--reference-workspace ~/fukikae-ws/bbt-en --set bbt` when they exist. One `gpu` smoke test per backend: `uv run --directory ~/projects/fukikae pytest -m gpu tests/backends/test_tts_worker.py -k real`.
 Expected: PASS; one ledger row per backend and set. Record VRAM peak, seconds per cue, and each backend's row in the execution ledger.
 
 - [ ] **Step 5: Commit** (one commit per candidate backend after the shared plumbing)
 
 ```bash
-git -C /home/lokkju/projects/fukikae add .gitignore pyproject.toml uv.lock src/fukikae tests README.md
-git -C /home/lokkju/projects/fukikae commit -m "feat(tts): out-of-process cloning backends, reference selection and per-line delivery"
+git -C ~/projects/fukikae add .gitignore pyproject.toml uv.lock src/fukikae tests README.md
+git -C ~/projects/fukikae commit -m "feat(tts): out-of-process cloning backends, reference selection and per-line delivery"
 ```
 
 ---
@@ -778,22 +778,22 @@ def test_uninstalled_backend_is_unavailable_not_an_exception(): ...
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/cards/test_packs.py tests/cards/test_verify.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/cards/test_packs.py tests/cards/test_verify.py -v`
 Expected: FAIL
 
 - [ ] **Step 3: Implement** packs, verify and the CLI commands.
 
 - [ ] **Step 4: Run tests and a real round trip**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
-Then: export Fairy Tail's named characters' cards to `/home/lokkju/fukikae-ws/packs/fairytail-en.tar.zst`, import into a `cp -al` copy of the workspace with a fresh registry copy, `--dry-run` first.
+Run: `uv run --directory ~/projects/fukikae pytest -q`
+Then: export Fairy Tail's named characters' cards to `~/fukikae-ws/packs/fairytail-en.tar.zst`, import into a `cp -al` copy of the workspace with a fresh registry copy, `--dry-run` first.
 Expected: PASS; every named character matched; `voices verify --record` then `voices verify` reports `match` for a Kokoro card.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add pyproject.toml uv.lock src/fukikae/cards tests/cards
-git -C /home/lokkju/projects/fukikae commit -m "feat(cards): shareable voice packs and card fingerprint verification"
+git -C ~/projects/fukikae add pyproject.toml uv.lock src/fukikae/cards tests/cards
+git -C ~/projects/fukikae commit -m "feat(cards): shareable voice packs and card fingerprint verification"
 ```
 
 ---
@@ -816,7 +816,7 @@ passed = []      # every candidate whose ja->en clone you'd accept
 notes = ""
 ```
   Audio files are copied in (relative paths, so the folder works when moved); inline CSS, no external requests.
-- CLI: `fukikae eval tts-ab <ws> --backends kokoro,indextts2,cosyvoice3,qwen3_tts --episodes S01E11,S01E12,S01E13 -o /home/lokkju/fukikae-ws/ab/2026-11-xx`.
+- CLI: `fukikae eval tts-ab <ws> --backends kokoro,indextts2,cosyvoice3,qwen3_tts --episodes S01E11,S01E12,S01E13 -o ~/fukikae-ws/ab/2026-11-xx`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -834,22 +834,22 @@ def test_verdict_template_written(tmp_path): ...
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/eval/test_ab.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/eval/test_ab.py -v`
 Expected: FAIL
 
 - [ ] **Step 3: Implement `eval/ab.py` and the command.**
 
 - [ ] **Step 4: Run tests and build the real A/B folder**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
-Then: `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae eval tts-ab /home/lokkju/fukikae-ws/fairytail --backends kokoro,indextts2,cosyvoice3,qwen3_tts --episodes S01E11,S01E12,S01E13 -o /home/lokkju/fukikae-ws/ab/2026-11-xx` (drop any candidate Task 9 ruled out). If BBT is available, a second folder for `bbt-de` with the English original as an extra unlabeled player.
+Run: `uv run --directory ~/projects/fukikae pytest -q`
+Then: `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae eval tts-ab ~/fukikae-ws/fairytail --backends kokoro,indextts2,cosyvoice3,qwen3_tts --episodes S01E11,S01E12,S01E13 -o ~/fukikae-ws/ab/2026-11-xx` (drop any candidate Task 9 ruled out). If BBT is available, a second folder for `bbt-de` with the English original as an extra unlabeled player.
 Expected: PASS; the folder opens from disk.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add src/fukikae/eval tests/eval
-git -C /home/lokkju/projects/fukikae commit -m "feat(eval): blind A/B listening folder for TTS backends"
+git -C ~/projects/fukikae add src/fukikae/eval tests/eval
+git -C ~/projects/fukikae commit -m "feat(eval): blind A/B listening folder for TTS backends"
 ```
 
 - [ ] **Step 6: STOP.** Report to the controller: the A/B folder path, `numbers.html`, and the candidates' ledger rows. The controller puts the pick in the operator's decision queue. Do not start Task 12. When the operator answers, record the verdict as a ruling in the execution ledger (chosen backend or `stock`, the passed list, the numbers it was made beside), and copy `verdict.toml` and `key.json` into the execution ledger's appendix.
@@ -884,18 +884,18 @@ def test_voices_clone_assigns_locked(): ...
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/cards/test_auto.py tests/cards/test_cli.py -v`
+Run: `uv run --directory ~/projects/fukikae pytest tests/cards/test_auto.py tests/cards/test_cli.py -v`
 Expected: FAIL
 
 - [ ] **Step 3: Implement** the clone branch, `voices clone`, and the profile key.
 
 - [ ] **Step 4: Run tests, then the dubs and the held-out score**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
-Then, each a foreground run under `mise -C /home/lokkju/projects/fukikae exec --`:
-- `fukikae run /home/lokkju/fukikae-ws/fairytail S01E11` through `S01E14` (auto cards assigned on first need);
+Run: `uv run --directory ~/projects/fukikae pytest -q`
+Then, each a foreground run under `mise -C ~/projects/fukikae exec --`:
+- `fukikae run ~/fukikae-ws/fairytail S01E11` through `S01E14` (auto cards assigned on first need);
 - `fukikae run` on `bbt-de` and `bbt-es` S01E01 to S01E03, when present;
-- `fukikae eval tts /home/lokkju/fukikae-ws/fairytail --episodes S01E14 --split holdout --set fairytail --tag chosen`, once, no re-tuning after it;
+- `fukikae eval tts ~/fukikae-ws/fairytail --episodes S01E14 --split holdout --set fairytail --tag chosen`, once, no re-tuning after it;
 - `fukikae eval report --stage tts --format md --export docs/results/2026-11-xx-character-cards-tts.jsonl`.
 Write the results doc: the verdict and the numbers beside it, the held-out row, which characters fell back to stock and why, neutral-only cue counts, cues still over after fitting, and the output file list. If the verdict was `stock`, the doc says D12 is deferred and which numbers would reopen it.
 Expected: PASS; four Fairy Tail dubs (and six BBT dubs when present) under each episode's `out/`.
@@ -903,6 +903,6 @@ Expected: PASS; four Fairy Tail dubs (and six BBT dubs when present) under each 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add src/fukikae tests README.md CLAUDE.md docs/results
-git -C /home/lokkju/projects/fukikae commit -m "feat(cards): clone by default with the operator's chosen backend"
+git -C ~/projects/fukikae add src/fukikae tests README.md CLAUDE.md docs/results
+git -C ~/projects/fukikae commit -m "feat(cards): clone by default with the operator's chosen backend"
 ```

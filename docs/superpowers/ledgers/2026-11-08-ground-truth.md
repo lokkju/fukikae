@@ -264,7 +264,7 @@ docker volume create --driver local --opt type=nfs \
 docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-ums-ro:/ums:ro alpine:3.20 \
   sh -c 'ls /ums/downloads/torrents/incomplete/tv | grep -i kaze; C=/ums/downloads/torrents/complete/tv; ls -l "$C"/*Kaze*Week*03*/Kaze.Kaoru.EP011.*.mkv; du -k "$C"/*Kaze*Week*03*/Kaze.Kaoru.EP011.*.mkv'
 docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-ums-ro:/ums:ro \
-  -v /home/lokkju/fukikae-ws/media:/out alpine:3.20 \
+  -v ~/fukikae-ws/media:/out alpine:3.20 \
   sh -c 'set -e; f=$(ls /ums/downloads/torrents/complete/tv/*Kaze*/Kaze.Kaoru.EP011.*.mkv); cp "$f" "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"; chmod 0640 "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"'
 docker volume rm fukikae-ums-ro
 # 2. Live-action pick: diarize E11 at clustering 0.5 and run its characters stage

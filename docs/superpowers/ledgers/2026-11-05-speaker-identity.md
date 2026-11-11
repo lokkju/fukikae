@@ -1,6 +1,6 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-05-speaker-identity.md
 
-Repo: /home/lokkju/projects/fukikae, branch feat/speaker-identity (from main 12a7c0d; plan at d6a29fe, HEAD d5a75ad). Spec: docs/superpowers/specs/2026-11-05-speaker-identity-design.md (reachable).
+Repo: ~/projects/fukikae, branch feat/speaker-identity (from main 12a7c0d; plan at d6a29fe, HEAD d5a75ad). Spec: docs/superpowers/specs/2026-11-05-speaker-identity-design.md (reachable).
 Test sets in hand: Fairy Tail 100YQ E11-E14 (~/fukikae-ws/fairytail, run through characters), Grid S01E04-E05 (copied), Link Click E04-E06 (copied, English-dub SDH partial), The Cyberfarm S02E01-E04 (library only, Task 4 copies). Spanish/Russian dub sets pending operator grab (A7).
 
 ## Pre-flight scan

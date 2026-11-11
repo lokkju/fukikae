@@ -19,11 +19,11 @@
 
 ## Global Constraints
 
-- uv only, always `uv run --directory /home/lokkju/projects/fukikae ...`; never pip, never `cd <dir> && <cmd>`; absolute paths everywhere.
-- ffmpeg and ffprobe come from mise: wrap pipeline and extraction commands as `mise -C /home/lokkju/projects/fukikae exec -- <cmd>`; subprocesses take argument lists.
+- uv only, always `uv run --directory ~/projects/fukikae ...`; never pip, never `cd <dir> && <cmd>`; absolute paths everywhere.
+- ffmpeg and ffprobe come from mise: wrap pipeline and extraction commands as `mise -C ~/projects/fukikae exec -- <cmd>`; subprocesses take argument lists.
 - Source media is read-only and never committed. Transcripts, subtitle files, clip sets and the user-level ledger stay out of git; the only ledger content committed is Task 8's JSONL export beside the results doc.
 - Media from the TrueNAS Plex share arrives only through a read-only Docker NFS volume, removed after the copy, as the identity plan's Task 4 did (export `/mnt/mega/media/ums/media`):
-  `docker volume create --driver local --opt type=nfs --opt o=addr=truenas.storage.lodenheim.lokkju.com,ro,nfsvers=4 --opt device=:/mnt/mega/media/ums/media fukikae-plex-ro`, then `docker run --rm --user "$(id -u):$(id -g)" -v fukikae-plex-ro:/media:ro -v /home/lokkju/fukikae-ws/media:/out alpine:3.20 cp "<file under /media/TV>" "/out/<series>/"`, then `docker volume rm fukikae-plex-ro`. Copy only the episodes this plan names.
+  `docker volume create --driver local --opt type=nfs --opt o=addr=truenas.storage.lodenheim.lokkju.com,ro,nfsvers=4 --opt device=:/mnt/mega/media/ums/media fukikae-plex-ro`, then `docker run --rm --user "$(id -u):$(id -g)" -v fukikae-plex-ro:/media:ro -v ~/fukikae-ws/media:/out alpine:3.20 cp "<file under /media/TV>" "/out/<series>/"`, then `docker volume rm fukikae-plex-ro`. Copy only the episodes this plan names.
 - GPU work runs on nvidia-smi index 0 (`gpu_device = 0` in every workspace); index 1 is vLLM.
 - Disk: `/` had 26 GB free at plan time (2026-11-08). Run `df -h /` before copying each set and keep 8 GB free; run the pipeline with `--to diarize` (the harness needs only `01-separate/vocals_16k.wav` and `04-diarize`); `uv cache prune` freed 40 GB once. Default-profile copies of workspaces use `cp -al` (artifacts are written by atomic rename, so a rewrite breaks the link instead of changing the shared file).
 - Tests first, with RED evidence in the task report. Markers as in CLAUDE.md (`gpu`, `media`, `ffmpeg`, `slow`).
@@ -100,7 +100,7 @@ docs/results/2026-11-xx-live-action-ground-truth.md (+ .jsonl export)          #
 
 ## Media dependencies
 
-Tasks 1 to 6 need no library media: Task 2's real-file check uses the Alice in Borderland S01E01 subtitle already extracted at `/home/lokkju/.claude/jobs/d640b8ae/tmp/lib-probe/subs/Alice_in_Borderland__S01E01_t19_jpn.srt`, and Task 6 downloads its clip set from Hugging Face. Task 7 needs BBT S01E01 to E03 (the operator is grabbing it), Kaze, Kaoru's packs and captions (an agent is grabbing them) and Alice in Borderland S01E01 to E03 (in the library). Task 8 needs Task 7. Real-file checks for Tasks 3, 4 and 5 run inside Task 7, so code review never waits on media.
+Tasks 1 to 6 need no library media: Task 2's real-file check uses the Alice in Borderland S01E01 subtitle already extracted at `<scratch>/lib-probe/subs/Alice_in_Borderland__S01E01_t19_jpn.srt`, and Task 6 downloads its clip set from Hugging Face. Task 7 needs BBT S01E01 to E03 (the operator is grabbing it), Kaze, Kaoru's packs and captions (an agent is grabbing them) and Alice in Borderland S01E01 to E03 (in the library). Task 8 needs Task 7. Real-file checks for Tasks 3, 4 and 5 run inside Task 7, so code review never waits on media.
 
 ---
 
@@ -204,21 +204,21 @@ def test_identity_cli_appends_unless_no_ledger(tmp_path, monkeypatch): ...
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/eval/test_ledger.py tests/eval/test_report.py tests/test_config.py tests/eval/identity/test_cli.py -q`
+Run: `uv run --directory ~/projects/fukikae pytest tests/eval/test_ledger.py tests/eval/test_report.py tests/test_config.py tests/eval/identity/test_cli.py -q`
 Expected: FAIL with `ModuleNotFoundError: fukikae.eval.ledger` and missing `Config.series`.
 
 - [ ] **Step 3: Implement** `SeriesInfo` and `[series]` loading in `config.py`; `ledger.py` and `report.py` per the Interfaces block; `clean_count` in `metrics.py`; `identity_rows` and the new flags in `identity/cli.py` (append after printing, so a ledger error never hides a result; a ledger write failure prints `warning: ledger not written: ...` and exits 0); `eval asr` rows (`backend` the ASR backend, `model_identity("asr", cfg.resolve("asr", language))` when the resolved backend matches, metrics `cer`, `runtime_s` or absent when cached); the `report` command. Report row labels read `stage | set | split | backend model | opts:<hash[:8]> | tag`. README: one paragraph on the ledger path, `FUKIKAE_RESULTS`, and `eval report`.
 
 - [ ] **Step 4: Run the tests to verify they pass, then the full suite**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q && uv run --directory /home/lokkju/projects/fukikae ruff check && uv run --directory /home/lokkju/projects/fukikae ruff format --check && uv run --directory /home/lokkju/projects/fukikae pyright`
+Run: `uv run --directory ~/projects/fukikae pytest -q && uv run --directory ~/projects/fukikae ruff check && uv run --directory ~/projects/fukikae ruff format --check && uv run --directory ~/projects/fukikae pyright`
 Expected: all pass; no file under `~/.local/share/fukikae/` created by the run.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C /home/lokkju/projects/fukikae add -A src tests README.md
-git -C /home/lokkju/projects/fukikae commit -m "feat(eval): results ledger, [series] genre and eval report"
+git -C ~/projects/fukikae add -A src tests README.md
+git -C ~/projects/fukikae commit -m "feat(eval): results ledger, [series] genre and eval report"
 ```
 
 ### Task 2: Japanese SDH speaker prefixes
@@ -274,14 +274,14 @@ def test_existing_pair_rule_still_rejects_korean_and_chinese_pairs(): ...  # "(�
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/eval/test_groundtruth.py -q`
+Run: `uv run --directory ~/projects/fukikae pytest tests/eval/test_groundtruth.py -q`
 Expected: FAIL on the bidi, ruby, description and short-name tests; the override-block test may already pass (state which in the report).
 
 - [ ] **Step 3: Implement** the bidi stripping, `strip_ruby`, the Japanese rules and `ja_short_names` per the Interfaces block. Keep every existing test green (R5's Hangul clauses untouched).
 
 - [ ] **Step 4: Run the tests, the full suite, and the real file**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`, then count speakers in `/home/lokkju/.claude/jobs/d640b8ae/tmp/lib-probe/subs/Alice_in_Borderland__S01E01_t19_jpn.srt` with `read_ground_truth(path, "sdh", None)` through `uv run --directory /home/lokkju/projects/fukikae python -c ...`.
+Run: `uv run --directory ~/projects/fukikae pytest -q`, then count speakers in `<scratch>/lib-probe/subs/Alice_in_Borderland__S01E01_t19_jpn.srt` with `read_ground_truth(path, "sdh", None)` through `uv run --directory ~/projects/fukikae python -c ...`.
 Expected: tests pass; the real file yields カルベ, アリス, チョータ, シブキ, ミナミ, 始, チョータの母, カズ, エミ and 有栖良平 (or its alias target), and no 通知音, 合成音声, 男性, ３人, アリスたち or アリス･チョータ. Record the counts and the share of cues that carry a name in the task report.
 
 - [ ] **Step 5: Commit** `feat(eval): Japanese SDH speaker tags (bidi marks, ruby, descriptions)`
@@ -338,14 +338,14 @@ def test_cli_writes_retimed_file_and_refuses_bad_fit(tmp_path): ...  # CliRunner
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/eval/test_subalign.py -q`
+Run: `uv run --directory ~/projects/fukikae pytest tests/eval/test_subalign.py -q`
 Expected: FAIL with `ModuleNotFoundError: fukikae.eval.groundtruth.subalign`.
 
 - [ ] **Step 3: Implement** per the Interfaces block and the paragraph above.
 
 - [ ] **Step 4: Run the tests and the full suite**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
+Run: `uv run --directory ~/projects/fukikae pytest -q`
 Expected: PASS. (The real Kaze, Kaoru pair is checked in Task 7.)
 
 - [ ] **Step 5: Commit** `feat(eval): subalign retimes subtitles to a reference track or the speech`
@@ -405,14 +405,14 @@ def test_cli_pairs_files_by_episode_code(tmp_path): ...  # S01E01.html + S01E01.
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/eval/test_transcript.py -q`
+Run: `uv run --directory ~/projects/fukikae pytest tests/eval/test_transcript.py -q`
 Expected: FAIL with `ModuleNotFoundError: fukikae.eval.groundtruth.transcript`.
 
 - [ ] **Step 3: Implement** per the Interfaces block.
 
 - [ ] **Step 4: Run the tests and the full suite**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
+Run: `uv run --directory ~/projects/fukikae pytest -q`
 Expected: PASS. (The 17 real pages against the release's subtitles are checked in Task 7.)
 
 - [ ] **Step 5: Commit** `feat(eval): transcript-align names subtitle cues from untimed transcripts`
@@ -462,14 +462,14 @@ def test_existing_colour_behaviour_unchanged_without_map(): ...  # current VTT/E
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/eval/test_groundtruth.py -q -k colour`
+Run: `uv run --directory ~/projects/fukikae pytest tests/eval/test_groundtruth.py -q -k colour`
 Expected: FAIL on the map, anonymous and ruby tests.
 
 - [ ] **Step 3: Implement** per the Interfaces block, inside `colour.py` (the piece-building loop is shared by `read_colour` and `colour_counts`, not copied).
 
 - [ ] **Step 4: Run the tests and the full suite**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
+Run: `uv run --directory ~/projects/fukikae pytest -q`
 Expected: PASS. (The real ARIB captions are checked in Task 7; if their furigana events carry no ruby style, Task 7 extends the rule with the evidence.)
 
 - [ ] **Step 5: Commit** `feat(eval): series colour maps for broadcast colour captions`
@@ -512,26 +512,26 @@ def test_cli_writes_one_row_per_embedder(tmp_path, monkeypatch): ...
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest tests/eval/test_clipset.py -q`
+Run: `uv run --directory ~/projects/fukikae pytest tests/eval/test_clipset.py -q`
 Expected: FAIL with `ModuleNotFoundError: fukikae.eval.clipset`.
 
 - [ ] **Step 3: Implement** per the Interfaces block (`ResidentEmbedder` keeps one embedder loaded and switches between them; ffmpeg via `run_ffmpeg`).
 
 - [ ] **Step 4: Run the tests and the full suite**
 
-Run: `uv run --directory /home/lokkju/projects/fukikae pytest -q`
+Run: `uv run --directory ~/projects/fukikae pytest -q`
 Expected: PASS.
 
 - [ ] **Step 5: Commit** `feat(eval): eval embedders scores nearest-centroid accuracy on clip sets`
 
 - [ ] **Step 6: Download the clip set** (pinned revision; two sets only)
 
-Run: `uv run --directory /home/lokkju/projects/fukikae huggingface-cli download noncegeek/cantonese-drama-voice-fine-grained --repo-type dataset --revision 88fa3c11a57a4bb72703d49912ce266bdb17b63b --include "人民的名义/*" --include "神雕侠侣_1995版/*" --local-dir /home/lokkju/fukikae-ws/clips/cantonese-drama-voice`
+Run: `uv run --directory ~/projects/fukikae huggingface-cli download noncegeek/cantonese-drama-voice-fine-grained --repo-type dataset --revision 88fa3c11a57a4bb72703d49912ce266bdb17b63b --include "人民的名义/*" --include "神雕侠侣_1995版/*" --local-dir ~/fukikae-ws/clips/cantonese-drama-voice`
 Expected: 23 character folders under `人民的名义/` (2,410 clips) and `spk01` to `spk05` under `神雕侠侣_1995版/`. Record counts.
 
 - [ ] **Step 7: Run the embedders** (GPU index 0; `ecapa`, `wespeaker`, `eres2netv2`, `titanet`, `campplus`, the names `fukikae backends list` reports)
 
-Run: `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae eval embedders "/home/lokkju/fukikae-ws/clips/cantonese-drama-voice/人民的名义" --embedder ecapa --embedder wespeaker --embedder eres2netv2 --embedder titanet --embedder campplus --language zh --set renmin --tag t6`, then the same on `神雕侠侣_1995版` with `--language yue --set shendiao`.
+Run: `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae eval embedders "~/fukikae-ws/clips/cantonese-drama-voice/人民的名义" --embedder ecapa --embedder wespeaker --embedder eres2netv2 --embedder titanet --embedder campplus --language zh --set renmin --tag t6`, then the same on `神雕侠侣_1995版` with `--language yue --set shendiao`.
 Expected: 10 ledger rows; `fukikae eval report --stage embedder` shows both sets. Ruling in the execution ledger: if another embedder beats WeSpeaker by at least 5 points of `nc_overall` on both sets, record it as a proposal for the operator (R10 keeps WeSpeaker in this plan; switching would need `registry reembed`, R19). Commit nothing but the ledger note.
 
 ### Task 7: Live-action test sets and baselines [needs media: BBT, Kaze, Kaoru; Alice in Borderland is in the library]
@@ -544,9 +544,9 @@ Expected: 10 ledger rows; `fukikae eval report --stage embedder` shows both sets
 - Consumes: Tasks 1 to 5 (CLI commands and ledger), `fukikae run --to`, `fukikae registry resolve`, `eval identity --from-assignments`.
 - Produces for Task 8: five workspaces diarized on their tuning and held-out episodes, ground-truth paths that pass the alignment check, `labels-aliases.yaml` and (Kaze) `labels-colours.yaml` per workspace, and baseline ledger rows tagged `t7-baseline` for both profiles on tuning episodes only.
 
-- [ ] **Step 1: Copy media** with the read-only NFS volume (Global Constraints): BBT S01E01 to E03, Alice in Borderland S01E01 to E03, and Kaze, Kaoru's tuning and held-out episodes (named per the splits table, linked as `Kaze Kaoru - S01E<N>`). Confirm with `mise -C /home/lokkju/projects/fukikae exec -- ffprobe -v error -show_entries stream=index,codec_type,codec_name:stream_tags=language,title -of compact <file>` that BBT has eng, ger and spa audio plus an English text subtitle, and that each Alice episode has the Japanese SDH SubRip track. Record stream indices, Kaze broadcast numbers and `df -h /` in the execution ledger.
+- [ ] **Step 1: Copy media** with the read-only NFS volume (Global Constraints): BBT S01E01 to E03, Alice in Borderland S01E01 to E03, and Kaze, Kaoru's tuning and held-out episodes (named per the splits table, linked as `Kaze Kaoru - S01E<N>`). Confirm with `mise -C ~/projects/fukikae exec -- ffprobe -v error -show_entries stream=index,codec_type,codec_name:stream_tags=language,title -of compact <file>` that BBT has eng, ger and spa audio plus an English text subtitle, and that each Alice episode has the Japanese SDH SubRip track. Record stream indices, Kaze broadcast numbers and `df -h /` in the execution ledger.
 
-- [ ] **Step 2: Workspaces.** Each `fukikae.toml` sets `source`, `source_language`, `gpu_device = 0`, `profile = "live-action"` and `[series] title` and `genre = "live-action"`; `aib` and `kaze` copy the `[asr.lang.ja]` table from `~/fukikae-ws/fairytail/fukikae.toml`. The three BBT workspaces share one media folder. Run `mise -C /home/lokkju/projects/fukikae exec -- uv run --directory /home/lokkju/projects/fukikae fukikae run <ws> <episode> --to diarize` for every named episode, one at a time, checking `df -h /` between sets.
+- [ ] **Step 2: Workspaces.** Each `fukikae.toml` sets `source`, `source_language`, `gpu_device = 0`, `profile = "live-action"` and `[series] title` and `genre = "live-action"`; `aib` and `kaze` copy the `[asr.lang.ja]` table from `~/fukikae-ws/fairytail/fukikae.toml`. The three BBT workspaces share one media folder. Run `mise -C ~/projects/fukikae exec -- uv run --directory ~/projects/fukikae fukikae run <ws> <episode> --to diarize` for every named episode, one at a time, checking `df -h /` between sets.
 
 - [ ] **Step 3: BBT labels.** Fetch the 17 S01 pages to `~/fukikae-ws/subs/bbt/transcripts/S01E<NN>.html` (`curl -sL <url> -o <file>`; URLs from the index, minus the S02 page noted in Decisions). Extract the release's English text track per episode to `~/fukikae-ws/subs/bbt/release-en/S01E<NN>.srt` (`mise ... ffmpeg -i <mkv> -map 0:<idx> <out>`); if it is image-based, take an external English .srt and retime it with `eval subalign --speech ~/fukikae-ws/bbt-en --episode S01E<NN>` first. Run `fukikae eval transcript-align --transcripts .../transcripts --subtitles .../release-en --out ~/fukikae-ws/subs/bbt/labels --episodes S01E01,...,S01E17`. Expected: cue share at least 0.7 per episode; Sheldon, Leonard, Penny, Howard and Raj on every episode. A lower share is reported, not tuned away.
 
@@ -563,7 +563,7 @@ Expected: 10 ledger rows; `fukikae eval report --stage embedder` shows both sets
 
 ### Task 7c: Bazinga English sets and a check on the transcript aligner [operator ruling D18; data in ~/fukikae-ws/bazinga]
 
-Added to the plan between Task 7 and Task 8. Bazinga (`bazinga/bazinga`, gated, operator has access; pin revision 96db30fff0964b6fa1ae9e3c713a1e2f42081360) is 13 English series with full-episode 16 kHz mono PCM audio from Region 2 PAL DVDs and word-level annotations: `<episode> <speaker_id> <start> <end> <token> <confidence> [...]`. Speaker ids are gold and stable across a series (`leonard_hofstadter`); timings are silver forced alignment; confidence is quantised 0.99/0.95/0.1, and 0.1 words are evenly spaced fillers, not aligned (discussion #5). Pseudo-speakers: `all`, `multiple_persons`, anything containing `unknown`. No overlap labels. Verified on TBBT S01E01: annotations match the shipped audio (lag -0.01 s, drift 0.00002 s/s). The audio is PAL-fast: 4.27% short and about +0.71 semitone (21:59.6 against ~23 min for the pilot). Research notes: ~/.claude/jobs/d640b8ae/tmp/bazinga/.
+Added to the plan between Task 7 and Task 8. Bazinga (`bazinga/bazinga`, gated, operator has access; pin revision 96db30fff0964b6fa1ae9e3c713a1e2f42081360) is 13 English series with full-episode 16 kHz mono PCM audio from Region 2 PAL DVDs and word-level annotations: `<episode> <speaker_id> <start> <end> <token> <confidence> [...]`. Speaker ids are gold and stable across a series (`leonard_hofstadter`); timings are silver forced alignment; confidence is quantised 0.99/0.95/0.1, and 0.1 words are evenly spaced fillers, not aligned (discussion #5). Pseudo-speakers: `all`, `multiple_persons`, anything containing `unknown`. No overlap labels. Verified on TBBT S01E01: annotations match the shipped audio (lag -0.01 s, drift 0.00002 s/s). The audio is PAL-fast: 4.27% short and about +0.71 semitone (21:59.6 against ~23 min for the pilot). Research notes: <scratch>/bazinga/.
 
 #### Code
 

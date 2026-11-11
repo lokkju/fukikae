@@ -1,7 +1,7 @@
 <!-- SDD progress ledger for the foundation plan, preserved at merge (2026-11-05): rulings R1-R15 and every deferred minor. -->
 # SDD ledger — plan: docs/superpowers/plans/2026-11-04-foundation-and-registry.md
 
-Repo: /home/lokkju/projects/doppio, branch feat/foundation (from main 2d705b6). Spec: docs/superpowers/specs/2026-11-04-doppio-design.md (reachable).
+Repo: ~/projects/doppio, branch feat/foundation (from main 2d705b6). Spec: docs/superpowers/specs/2026-11-04-doppio-design.md (reachable).
 Test media: ~/doppio-ws/media/{Chimera (2021),Death Note}/Season 1/ (local copies; ums share unmounted on ml-01 since 2026-11-04).
 
 ## Pre-flight scan

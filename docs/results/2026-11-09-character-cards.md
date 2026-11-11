@@ -64,7 +64,7 @@ Stock stops being the default for characters with enough clean speech, so D12 re
 
 ## The full dubs with the new default
 
-The workspaces were scratch copies: `~/fukikae-scratch/t12/fairytail` (anime profile, `[series]` set) and `~/fukikae-scratch/t12/bbt-de` (live-action). The Fairy Tail copy's registry was ECAPA, so I ran `fukikae registry reembed` on it first (382 exemplars, 13 centroids). Each episode ran as a single `fukikae run` on GPU 0. The muxed files are hard-linked under `/home/lokkju/fukikae-scratch/t12/out/`:
+The workspaces were scratch copies: `~/fukikae-scratch/t12/fairytail` (anime profile, `[series]` set) and `~/fukikae-scratch/t12/bbt-de` (live-action). The Fairy Tail copy's registry was ECAPA, so I ran `fukikae registry reembed` on it first (382 exemplars, 13 centroids). Each episode ran as a single `fukikae run` on GPU 0. The muxed files are hard-linked under `~/fukikae-scratch/t12/out/`:
 
 | file | path | cues spoken | characters (clone) | extras cues (stock) | renders retried / suspect | stretched | over after fitting | wall time |
 |---|---|---|---|---|---|---|---|---|
