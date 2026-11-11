@@ -1092,7 +1092,7 @@ def test_remainder_may_match_a_character_names_created_this_episode(tmp_path):
 
 
 def test_without_names_assignments_match_the_pre_names_code_byte_for_byte(tmp_path):
-    """tests/fixtures/characters_golden.json is what debd501 (before names) wrote for the
+    """tests/fixtures/characters_golden.json is what 1442290 (before names) wrote for the
     scenario in characters_golden.py beside it."""
     import importlib.util
     import json

@@ -1,6 +1,6 @@
 # Identity profiles: sweeps, picks and held-out confirmation
 
-_Run 2026-11-07 on the GPU host (RTX 3090, index 0), branch feat/speaker-identity. Sweeps used the tuning episodes only (no `--holdout`). Each holdout was scored once, after the profiles were committed (`df7692b`); nothing was re-tuned on it. Recurring means 5 s of labeled speech per episode (Ruling R6)._
+_Run 2026-11-07 on the GPU host (RTX 3090, index 0), branch feat/speaker-identity. Sweeps used the tuning episodes only (no `--holdout`). Each holdout was scored once, after the profiles were committed (`08d8493`); nothing was re-tuned on it. Recurring means 5 s of labeled speech per episode (Ruling R6)._
 
 ## Sweeps
 

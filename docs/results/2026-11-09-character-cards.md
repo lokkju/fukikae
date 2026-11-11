@@ -196,7 +196,7 @@ I measured on scratch copies of the smoke workspace (`~/fukikae-scratch/group-tt
 
 | code | run 1 | run 2 | mean |
 |---|---|---|---|
-| main (5a9c2f0) | 3.25 s/line | 3.41 s/line | 3.33 s/line |
+| main (32230f7) | 3.25 s/line | 3.41 s/line | 3.33 s/line |
 | grouped | 3.27 s/line | 3.32 s/line | 3.29 s/line |
 
 All 40 wavs are byte-identical (sha256) across all four runs, and every cache key is the same. The 1% difference is inside the run-to-run spread (main's two runs differ by 5%). A fit over all 156 timed lines (time against rendered audio seconds and whether the speaker changed) puts a speaker change at 0.23 ± 0.05 s, against a 1.30 s fixed cost and 1.01 s per second of audio. For a whole E14 that is 106 fewer changes, about 24 s of roughly 18 minutes of rendering. The research estimate assumed the prompt conditioning was a large share of the 0.35 s "other" per line; on the 3090 it is about 0.2 s, and the per-line emotion pass (also w2v-BERT, over the cue's span) runs whatever the order.

@@ -4,7 +4,7 @@ Plan: `docs/superpowers/plans/2026-11-08-ground-truth.md`. Rulings GT1-GT12 are 
 
 ## Task 7: live-action test sets and baselines (BBT en/de/es, Alice in Borderland)
 
-Run 2026-11-08 at dcb4935 (code at 4591303 plus the alignment fix below). Kaze, Kaoru is split off to Task 7b (GT7): its three weekly packs were still arriving on the media share (about 10-16% allocated at 11:12 UTC).
+Run 2026-11-08 at 7502e31 (code at 5d76d3d plus the alignment fix below). Kaze, Kaoru is split off to Task 7b (GT7): its three weekly packs were still arriving on the media share (about 10-16% allocated at 11:12 UTC).
 
 ### Media (Step 1)
 
@@ -51,7 +51,7 @@ Run 2026-11-08 at dcb4935 (code at 4591303 plus the alignment fix below). Kaze, 
 
 ### Code fix from the real-file run
 
-- dcb4935 `fix(align): wav2vec2 alignment models for German and Spanish`. The de and es tracks stopped at the asr stage ("wav2vec2 has no alignment model for language 'de'"). I added `jonatasgrosman/wav2vec2-large-xlsr-53-german` and `-spanish`, plus a case-folded vocabulary lookup, since both vocabularies are lowercase. German ß has no token and is skipped. After the fix, bbt-de S01E01 has 3152 of 3165 words scored.
+- 7502e31 `fix(align): wav2vec2 alignment models for German and Spanish`. The de and es tracks stopped at the asr stage ("wav2vec2 has no alignment model for language 'de'"). I added `jonatasgrosman/wav2vec2-large-xlsr-53-german` and `-spanish`, plus a case-folded vocabulary lookup, since both vocabularies are lowercase. German ß has no token and is skipped. After the fix, bbt-de S01E01 has 3152 of 3165 words scored.
 
 ### Baselines on tuning episodes (Step 6, tag `t7-baseline`)
 
@@ -81,7 +81,7 @@ On BBT en, live-action and default give identical assignments. On the German and
 
 ## Task 7b: Kaze, Kaoru (tuning episodes and the green check; GT11)
 
-Run 2026-11-09 at b60013d, no code change. Per GT11, E11 (held-out) is not copied, diarized or scored here: week 3 was still downloading. It follows when week 3 completes.
+Run 2026-11-09 at 5cfb314, no code change. Per GT11, E11 (held-out) is not copied, diarized or scored here: week 3 was still downloading. It follows when week 3 completes.
 
 ### Media
 
@@ -157,7 +157,7 @@ Gate sums over bbt-en/de/es, grid, bazinga-tbbt-pal, bazinga-office-pal and kaze
 
 ## Task 7c: Bazinga English sets and the transcript-aligner check (D18)
 
-Run 2026-11-08 at b323629 (`feat(eval): bazinga-labels`). Data: `bazinga/bazinga` at revision 96db30ff, TBBT and The Office S01E01-E05 under `~/fukikae-ws/bazinga/data/`; nothing from it is in git.
+Run 2026-11-08 at 48d73fe (`feat(eval): bazinga-labels`). Data: `bazinga/bazinga` at revision 96db30ff, TBBT and The Office S01E01-E05 under `~/fukikae-ws/bazinga/data/`; nothing from it is in git.
 
 ### Labels
 
@@ -229,7 +229,7 @@ Run 2026-11-09. Sweep (Step 1) as recorded under Task 7b and in `.superpowers/sd
 
 ### Profile (Step 3)
 
-`6bb10c2 feat(profiles): live-action profile from four-language ground truth`: `src/fukikae/profiles/live-action.toml` (PROVISIONAL dropped), `tests/test_profiles.py` (the profile resolves to the pick for every language; the clustering threshold reaches `PyannoteDiarizer`; `[resolve]` gives joint 0.6 with cannot-link on), README's live-action bullet and a cache note (the new clustering value re-runs diarize in existing live-action workspaces). Committed before any held-out run.
+`5052d2c feat(profiles): live-action profile from four-language ground truth`: `src/fukikae/profiles/live-action.toml` (PROVISIONAL dropped), `tests/test_profiles.py` (the profile resolves to the pick for every language; the clustering threshold reaches `PyannoteDiarizer`; `[resolve]` gives joint 0.6 with cannot-link on), README's live-action bullet and a cache note (the new clustering value re-runs diarize in existing live-action workspaces). Committed before any held-out run.
 
 ### Held-out (Step 4), once, tags `t8-holdout`, `t8-holdout-pal`, `t8-holdout-film`
 
@@ -254,7 +254,7 @@ Workspaces `~/fukikae-ws/t8/ws/<set>-pick`: `cp -al` of the ct 0.5 copy with its
 
 ### Kaze E11
 
-Run 2026-11-10 at 0b0265a (main; the profile's identity tables unchanged since `6bb10c2`), once each, no re-tuning (GT15). Week 3 was complete on the share; EP011 copied through the read-only volume (cmp identical to the share), and the share's EP011 .srt is identical to the one the captions were retimed against. Re-running `eval subalign` on E11 reproduces `aligned/S01E11.ass` byte for byte: text mode, 144 anchors, 100% inliers, offset -0.55 s, scale 1.000033, rms 11 ms, max residual 19 ms. Step 2 ran extract through characters in 187 s. Onsets (step 3): the aligned captions lead by a median +0.41 s by pyannote (20 of 26 gap-led cues matched, IQR +0.13 to +0.58) and +0.38 s by energy VAD (22 matched, IQR +0.16 to +0.61); the raw .srt gives +0.42 / +0.37. That is about 0.1 s above E01-E03's 0.24-0.31 s on 20-odd cues, same sign; I read it as short of the stop condition and went on. Pick: 2 recurring (りん 43.0 s, 直美 8.6 s), 直美 at 1.00 on りん's tuning id 3, りん at 0.76 (4.4 s on new id 7), merge りん + 直美 on id 3 (73% りん, 19% 直美), 1 / 1 / 0.50, coverage 17%, fail. Default: the same merge, りん 0.73, 1 / 1 / 0.50, fail. The predicted merge (直美's nearest-centroid accuracy was 7% in tuning) showed as soon as she recurred. Rows exported to the main JSONL (172 to 176). The commands as scripted (`<nas>`, `<media-export>` and `<kaze-dir>` stand for the NAS, its media export and the show's folder on it):
+Run 2026-11-10 at 6e35c96 (main; the profile's identity tables unchanged since `5052d2c`), once each, no re-tuning (GT15). Week 3 was complete on the share; EP011 copied through the read-only volume (cmp identical to the share), and the share's EP011 .srt is identical to the one the captions were retimed against. Re-running `eval subalign` on E11 reproduces `aligned/S01E11.ass` byte for byte: text mode, 144 anchors, 100% inliers, offset -0.55 s, scale 1.000033, rms 11 ms, max residual 19 ms. Step 2 ran extract through characters in 187 s. Onsets (step 3): the aligned captions lead by a median +0.41 s by pyannote (20 of 26 gap-led cues matched, IQR +0.13 to +0.58) and +0.38 s by energy VAD (22 matched, IQR +0.16 to +0.61); the raw .srt gives +0.42 / +0.37. That is about 0.1 s above E01-E03's 0.24-0.31 s on 20-odd cues, same sign; I read it as short of the stop condition and went on. Pick: 2 recurring (りん 43.0 s, 直美 8.6 s), 直美 at 1.00 on りん's tuning id 3, りん at 0.76 (4.4 s on new id 7), merge りん + 直美 on id 3 (73% りん, 19% 直美), 1 / 1 / 0.50, coverage 17%, fail. Default: the same merge, りん 0.73, 1 / 1 / 0.50, fail. The predicted merge (直美's nearest-centroid accuracy was 7% in tuning) showed as soon as she recurred. Rows exported to the main JSONL (172 to 176). The commands as scripted (`<nas>`, `<media-export>` and `<kaze-dir>` stand for the NAS, its media export and the show's folder on it):
 
 ```bash
 # 1. Copy EP011 from the NAS media share (week 3 must be complete there)
@@ -294,7 +294,7 @@ mise -C . exec -- git commit -m "docs(results): Kaze, Kaoru E11 held-out verdict
 
 ### Reproducibility
 
-The drivers are committed under `scripts/ground-truth/` (`65df647`), with `~/fukikae-ws` replaced by `$FUKIKAE_WS` (default `~/fukikae-ws`) and the repository path found from each shell script's own location; ruff formatting only otherwise. The repository `tab.py` reproduces `tables-diar.md` byte for byte. sha256 of the workspace originals as run:
+The drivers are committed under `scripts/ground-truth/` (`df85705`), with `~/fukikae-ws` replaced by `$FUKIKAE_WS` (default `~/fukikae-ws`) and the repository path found from each shell script's own location; ruff formatting only otherwise. The repository `tab.py` reproduces `tables-diar.md` byte for byte. sha256 of the workspace originals as run:
 
 ```
 ffbbf367c5eb181eb72812e0a7d064976dcad63579993c5e80b7ebb62eba537e  t8/setup.py
