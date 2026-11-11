@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
+from fukikae import progress
 from fukikae.backends.embed._common import RATE, cut, free_gpu, read_wav16k
 from fukikae.models import Tags, TagSpan, Turn
 
@@ -145,16 +146,20 @@ class SenseVoiceTagger:
 
         windows: list[tuple[float, float, str | None]] = []
         start = 0.0
+        progress.start(duration, "s audio", phase=f"{self.name} events")
         while start < duration:
             end = min(start + WINDOW_S, duration)
             _, event = parse_rich_tags(self._decode(cut(wav, start, end)))
             windows.append((round(start, 6), round(end, 6), event))
+            progress.set_done(end)
             if end >= duration:
                 break
             start += HOP_S
 
         emotions: list[TagSpan] = []
+        progress.start(len(turns), "turns", phase=f"{self.name} emotions")
         for turn in sorted(turns, key=lambda t: (t.start, t.end)):
+            progress.advance()
             for a, b in split_turn(turn):
                 if b - a < MIN_TURN_S:
                     continue

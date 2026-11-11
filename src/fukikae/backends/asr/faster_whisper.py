@@ -13,6 +13,7 @@ from typing import Any, ClassVar, Literal
 
 import numpy as np
 
+from fukikae import progress
 from fukikae.models import Segment, Transcript
 
 
@@ -134,8 +135,10 @@ class FasterWhisperTranscriber:
 
     def transcribe(self, audio: Path, language: str | None) -> Transcript:
         model = self._require()
+        samples = _read_wav16k(audio)
+        progress.start(len(samples) / 16000, "s audio", phase="transcribe")
         segments, info = model.transcribe(
-            _read_wav16k(audio),
+            samples,
             language=language,
             vad_filter=self.vad_filter,
             # faster-whisper applies the hallucination guard only with word timing; the
@@ -143,11 +146,12 @@ class FasterWhisperTranscriber:
             word_timestamps="hallucination_silence_threshold" in self.decoding,
             **self.decoding,
         )
-        out = [
-            Segment(start=float(s.start), end=float(s.end), text=s.text.strip())
-            for s in segments
-            if s.text.strip()
-        ]
+        out: list[Segment] = []
+        for s in segments:  # decoded lazily, one segment at a time
+            progress.set_done(float(s.end))
+            if s.text.strip():
+                out.append(Segment(start=float(s.start), end=float(s.end), text=s.text.strip()))
+        progress.finish()
         return Transcript(
             language=language or str(info.language),
             backend=self.name,

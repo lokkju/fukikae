@@ -1289,3 +1289,30 @@ def test_a_locked_card_below_the_clone_floor_builds_no_clone_source(ep, monkeypa
                         lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
     TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root), ep.work / "01-separate" / "v")
     assert seen["cloning"] is None and seen["short"] == short
+
+
+def test_reports_each_cue_to_the_run_progress(ep):
+    """#29: under `fukikae run` the stage counts its cues, N of N at the end, and the stage's
+    time and count go into the history the next run's ETA reads."""
+    import io
+    import json
+
+    from fukikae import job, progress
+
+    _two_cards(ep)
+    seen: list[tuple[float, float | None, str]] = []
+    real = progress.Reporter.advance
+
+    def spy(self, n):
+        real(self, n)
+        slot = self.slots["head"]
+        seen.append((slot.done, slot.total, slot.unit))
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(progress.Reporter, "advance", spy)
+        with progress.run(ep.workspace_root, [ep.id], stream=io.StringIO(), tty=False):
+            assert job.run_stages(ep, CFG, [TtsStage(CFG)]) == ["tts"]
+    assert seen[-1] == (6, 6, "cues") and len(seen) == 6
+    history = json.loads((ep.workspace_root / ".fukikae" / "stage-history.json").read_text())
+    assert history["tts"][-1]["total"] == 6 and history["tts"][-1]["episode"] == ep.id
+    assert progress.read_status(ep.workspace_root)["state"] == "finished"  # type: ignore[index]

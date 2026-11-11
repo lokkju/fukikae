@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from fukikae import runctx
+from fukikae import progress, runctx
 from fukikae.artifacts import read_json, write_json
 from fukikae.backends.base import Tagger
 from fukikae.backends.identity import identity_key
@@ -182,6 +182,7 @@ class TagStage:
                     cfg.gpu_device, backend.vram_mb, runctx.vram_timeout_s, query=free_mb,
                     sleep=_sleep,
                 )  # fmt: skip
+            progress.start(None, phase=bc.backend)
             try:
                 backend.load()
                 return cast(Tagger, backend).tag(audio, turns)

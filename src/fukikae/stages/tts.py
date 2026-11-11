@@ -96,7 +96,7 @@ from typing import Any, Protocol, cast
 
 import numpy as np
 
-from fukikae import runctx
+from fukikae import progress, runctx
 from fukikae.artifacts import atomic_path, read_json, write_json
 from fukikae.backends import loader
 from fukikae.backends.base import Synthesizer
@@ -1206,6 +1206,7 @@ class TtsStage:
         rates = SpeechRates()
         rendered = 0
         fresh: set[str] = set()
+        progress.start(sum(len(v) for v in jobs.values()), "cues")
         for backend in sorted(jobs):
             cls = jobs[backend][0].cls
             lazy = LazySynth(backend_config(cfg, backend), synth_device(cfg, cls), cfg)
@@ -1218,6 +1219,7 @@ class TtsStage:
                     if calls:
                         fresh.add(job.cue.id)
                     self._link(cache / f"{key}.wav", out_dir / f"{job.cue.id}.wav")
+                    progress.advance()
                     done[job.cue.id] = TtsPlanCue(
                         cue_id=job.cue.id,
                         character_id=job.cue.character_id,
