@@ -19,8 +19,10 @@ greedy picks (`pick_references`). SenseVoice's labels carry no score and demote 
 and low-confidence turns rank by SNR alone. Whenever a chosen reference is scored
 non-neutral, ``reference_report`` says "references may carry emotion: <labels>", and
 ``clone_card`` records the labels in ``[meta] reference_emotions`` (outside the card id),
-which ``fukikae voices show`` prints. Under ``min_total`` (6 s) there is no clone; between it
-and the floor the best picks are still a clone, which ``cards.auto`` flags for review.
+which ``fukikae voices show`` prints. Under ``min_total`` there are no picks
+(`tiered_references` asks down to ``CLONE_MIN_S``, 3 s, and below that takes the thin tier);
+between it and the floor the best picks are still a clone, which ``cards.auto`` flags for
+review.
 A turn whose transcript is far sparser than the speaker's usual text rate and sparse in
 absolute terms (``SPARSE_*``: one word over five seconds) is mostly someone else, effort
 sounds or silence, and is no reference either. Turns overlapping ``exclude``

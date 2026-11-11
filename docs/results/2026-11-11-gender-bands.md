@@ -10,6 +10,7 @@ _Run 2026-11-11 on CPU, branch feat/identification-part-a, estimator `fukikae.pi
 - The low-voice finding that motivated the window correction came from Sol Bianca (SPEAKER_08 read 199.5 Hz against pYIN's 113), so Sol Bianca is not a clean held-out set for the estimator, though the bands were never tuned on it. Fairy Tail E14 stayed untouched by both the fix and the calibration; the reviewer measured 0.57 st mean error against pYIN there (11 clusters).
 - Per-character medians pool every ground-truth line of the character, shouted lines and lines that overlap another speaker included, so a character's median is the register of all their speech as subtitled, not of their calm speech.
 - The estimator here is VERSION 2. VERSION 3 (Task 3's first commit) adds a valley check that keeps low rumble unvoiced (brown noise: 16.7% voiced at about 271 Hz before, under 5% after); against pYIN it changes Fairy Tail E14 not at all (0.572 st) and Sol Bianca from 0.402 to 0.401 st, so these tables stand.
+- VERSION 4 (the Task 3 review fixes, 7c64a44) adds per-candidate loudness groups and the loud-frame voiced share; without groups, as every measurement here reads it, a track is unchanged. I didn't rerun the calibration; instead I compared VERSION 3's `f0_track` (from 1885f93) with VERSION 4's on Fairy Tail E12's vocals (60 s, three turns of 3.5 to 30 s, and 1290 s whole): every frame identical, 64,499 frames on the long span. The tables stand at VERSION 4 too.
 
 ## Method
 
