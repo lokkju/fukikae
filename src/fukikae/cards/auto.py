@@ -569,8 +569,9 @@ def clone_backend(cfg: Config) -> str | None:
 
 
 MEDIAN_WARNING = (
-    "[tts.gender] now reads the median F0, not the 20th percentile; "
-    "check male_below and female_above"
+    "[tts.gender] now reads the median F0, not the 20th percentile; check male_below and "
+    "female_above (only eval tts's stock baselines read them: the tts stage's gates and "
+    "reference registers use fukikae.pitch's 165 and 200 Hz)"
 )
 _MEDIAN_WARNED: set[tuple[tuple[str, object], ...]] = set()
 
@@ -578,9 +579,11 @@ _MEDIAN_WARNED: set[tuple[tuple[str, object], ...]] = set()
 def gender_thresholds(cfg: Config) -> tuple[float, float]:
     """(male_below, female_above) in Hz from ``[tts] gender``, the workspace's over the
     profile's, else ``fukikae.pitch``'s ``MALE_BELOW`` and ``FEMALE_ABOVE`` (165 and 200 Hz,
-    calibrated on the median); F0 between them is an unknown gender. A workspace (not a
-    profile) that sets either key was tuned on the old 20th-percentile estimate, which gets a
-    warning once per run."""
+    calibrated on the median); F0 between them is an unknown gender. Only ``eval tts``'s stock
+    baselines read them (the gender of the stock voice a character is compared against); the
+    tts stage's line gate and the reference registers use ``fukikae.pitch``'s bands. A
+    workspace (not a profile) that sets either key was tuned on the old 20th-percentile
+    estimate, which gets a warning once per run."""
     from fukikae.config import ConfigError
 
     g: dict = {}

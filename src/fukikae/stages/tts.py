@@ -96,8 +96,9 @@ is per backend (that table's ``device``, else the backend's ``default_device``, 
 the cloning workers cuda, else the legacy ``[tts] device``), so one run can mix an operator's
 kept CPU stock card and GPU clones; it is never an option and stays out of every key, since the
 device doesn't change which voice a card is. ``[tts.gender]`` (``male_below``, ``female_above``
-in Hz) sets the bands of the automatic gender estimate on the median F0; the default is
-``fukikae.pitch``'s 165 and 200 Hz in every profile."""
+in Hz, on the median F0) is read only by ``eval tts``'s stock baselines (the gender of the stock
+voice a character is compared against); this stage picks no stock voice (D41), and its line
+gate and the reference registers use ``fukikae.pitch``'s 165 and 200 Hz whatever it says."""
 
 from __future__ import annotations
 
