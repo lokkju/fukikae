@@ -329,8 +329,11 @@ def impure_cards(
     selection gives (`select.measure_candidates`, `select.verdict`): the speaker's own turns
     inside the span, its register in that episode (skipped, as selection skips it, for a
     reference inside the character's name-confirmed turns of a names-used episode), the song
-    mask and the song detector's accepted spans. Gate 4 is about the set, which the floor
-    judges. Cards of any ``chosen_by`` are listed (the caller decides by `replace_refusal`:
+    mask and the song detector's accepted spans. The accepted-span part of gate 3 only ever
+    refuses a card made before it: reference selection already leaves those spans out of
+    every new pick (they are theme exclusions, ``select.reference_exclusions``), so it is here
+    that it reads. Gate 4 is about the set, which the floor judges. Cards of any
+    ``chosen_by`` are listed (the caller decides by `replace_refusal`:
     a curated, imported or locked card is only flagged); a reference without an episode
     origin (``voices clone``'s ``{"source": "voices clone"}``) or in an episode without
     artifacts is never judged."""

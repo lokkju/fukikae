@@ -2327,3 +2327,37 @@ def test_span_issues_name_silence_music_and_unvoiced_spans(tmp_path: Path):
     spans = [(0.0, 3.0), (3.0, 6.0), (6.0, 9.0), (9.0, 12.0)]
     assert span_issues(path, spans, mask, []) == [None, "silence", "unvoiced", "music"]
     assert span_issues(path, spans[3:], None, [(8.0, 12.0)]) == ["music"]
+
+
+def test_the_song_span_gate_re_picks_an_existing_card(tmp_path: Path, vocals: Path, monkeypatch):
+    """Review fix 5: the accepted-song-span gate reads on cards made before it (selection
+    already leaves the detector's spans out of every new pick, as theme exclusions): an
+    automatic card with a reference inside one is impure and re-picked outside it."""
+    from fukikae.cards import auto, select
+    from fukikae.cards.auto import PURITY_NOTE, impure_cards
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 30.0, 35.0)])
+    for memo in (auto._GATING_MEMO, auto._SONG_SPANS_MEMO, auto._EXCLUSIONS_MEMO,
+                 auto._CANDIDATES_MEMO):  # fmt: skip
+        memo.clear()
+    song = [(-1.0, 6.0)]
+    monkeypatch.setattr(select, "song_spans", lambda _work, _settings=None: song)
+    monkeypatch.setattr(select, "reference_exclusions", lambda *_a, **_k: list(song))
+    impure = impure_cards(ws, reg, store, "en")
+    assert impure[1].gates == "song-like"
+    ensure_assignments(reg, store, CFG, {1: [(0.0, 95.0)]}, vocals, cloning=_cloning_ws(ws),
+                       impure=impure)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old
+    assert (cur.note or "").startswith(f"{PURITY_NOTE} (song-like)")
+    starts = sorted(
+        (r.origin or {})["start"] for r in store.get(cur.card_id or "").voice.references
+    )
+    assert 0.0 not in starts and starts
+    assert impure_cards(ws, reg, store, "en") == {}
+    for memo in (auto._GATING_MEMO, auto._SONG_SPANS_MEMO, auto._EXCLUSIONS_MEMO,
+                 auto._CANDIDATES_MEMO):  # fmt: skip
+        memo.clear()
+    reg.close()
