@@ -29,6 +29,31 @@ Two deliberate departures from the foundation spec (ruling CD11): the tag stage'
 
 To listen, open `out/<episode>.fukikae.mkv` in any player (mpv switches audio with `#` and subtitles with `j`), or play `09-mix/dub.<target>.wav` against `00-extract/audio.wav`.
 
+## Watching a run
+
+Every stage `fukikae run` runs logs a start line, with the stage's usual duration on earlier runs when there is one, and a finish line with its time. The long stages count their work: tts its cues, translate its cues, ASR the seconds of audio decoded (faster-whisper) or its chunks (Qwen3-ASR), the tag backends their windows and turns. Separation, diarization, embedding and the mix are single calls, so they show only their elapsed time and the ETA from earlier runs. On a terminal the counts are a single line at the bottom of stderr; in a log (no TTY) each stage writes a line at most every 30 s:
+
+```
+2026-11-11 09:31:12,410 [INFO] tts S01E12: started (about 14 min on earlier runs)
+2026-11-11 09:31:43,385 [INFO] tts S01E12: 9/325 cues, 3.4 s/cue, 31 s elapsed, ETA 18 min
+```
+
+A job waiting for the GPU lock says who holds it, at once and every minute: `waiting for GPU 0, held by pid 81234 (tts indextts2) for 4 min 10 s`.
+
+From another shell, `fukikae status <workspace>` reads `.fukikae/status.json`, which the run rewrites (atomically) every couple of seconds and at each stage boundary:
+
+```
+run b6920f53c6ca, pid 2480371, started 2026-11-11 09:17:38 (32 min ago)
+episodes: S01E11 tail, S01E12 head
+head: tts S01E12: 120/325 cues, 3.4 s/cue, 6 min 53 s elapsed, ETA 12 min
+tail: mix S01E11: 41 s elapsed, ETA 1 min 10 s (earlier runs)
+GPU 0 (head): held by this run (tts indextts2)
+last log: tts: 3 cards checked
+updated 2 s ago
+```
+
+`head` is the thread that runs the GPU stages and `tail` the one running the previous episode's timefit and mix in a multi-episode run (D26). `--json` prints the file itself, with `live` added. When the run's pid is gone the command says so: `no run in progress (last run died at 2026-11-11 09:52:04; episodes: S01E12 head)`. ETAs before a stage's first count come from `.fukikae/stage-history.json` (the last 20 runs of each stage: duration, and count where the stage counts), or failing that from the durations in the episodes' manifests.
+
 ## Subtitle speaker names
 
 Crunchyroll-style ASS tracks name the speaker on every line, and diarization merges similar voices (young and female anime voices most of all), so when the names are usable they decide who said what (D27). The names stage (`04c-names/`, above) splits each diarize cluster into one sub-cluster per name before the characters stage, and the rest of the pipeline reads those sub-clusters wherever it read a cluster.
