@@ -258,11 +258,12 @@ def test_character_spans_leave_out_extras_and_review():
     assert character_spans(asg) == {1: [(0.0, 1.0), (2.0, 3.0)]}
 
 
-def test_gender_reads_the_20th_percentile_so_shouting_does_not_lift_it(tmp_path: Path):
-    """A male voice shouting most of the time: the median reads female, the low end doesn't."""
+def test_gender_reads_the_median_not_the_low_end(tmp_path: Path):
+    """7 s at 300 Hz and 3 s at 125 Hz: the median reads the larger part (A0); the old 20th
+    percentile read the low end and called it male."""
     x = np.concatenate([harmonic(300, 7), harmonic(125, 3)])
-    path = write_wav(tmp_path / "shout.wav", x)
-    assert estimate_gender(path, [(0.0, 10.0)]) == "m"
+    path = write_wav(tmp_path / "mixed.wav", x)
+    assert estimate_gender(path, [(0.0, 10.0)]) == "f"
 
 
 def test_gender_thresholds_come_from_config(vocals: Path):

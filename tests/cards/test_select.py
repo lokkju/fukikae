@@ -562,3 +562,19 @@ def test_overlapping_turns_of_the_speaker_never_make_overlapping_references(tmp_
     turns = [Turn(start=0, end=8, speaker="A"), Turn(start=6, end=13, speaker="A")]
     vocals = _vocals(tmp_path / "v2.wav", [(0, 13, 0.01)])
     assert [(p.start, p.end) for p in _refs(turns, vocals)] == [(0.0, 8.0)]
+
+
+def test_speaker_f0_returns_the_median_now(tmp_path):
+    """3 s at 130 Hz and 7 s at 260 Hz: the median reads 260 (the old 20th percentile read 130)."""
+    from fukikae.cards.select import speaker_f0
+
+    t3, t7 = np.arange(3 * RATE) / RATE, np.arange(7 * RATE) / RATE
+    x = np.concatenate(
+        [sum(np.sin(2 * np.pi * 130 * k * t3) / k for k in range(1, 6)),
+         sum(np.sin(2 * np.pi * 260 * k * t7) / k for k in range(1, 6))]
+    )  # fmt: skip
+    wav_260 = tmp_path / "v.wav"
+    wavfile.write(wav_260, RATE, (0.2 * x * 32767).astype("<i2"))
+    f0, seconds = speaker_f0(wav_260, [(0, 10)])
+    assert f0 is not None and abs(f0 - 260) < 8
+    assert seconds == 10.0

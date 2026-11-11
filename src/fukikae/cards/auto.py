@@ -459,7 +459,7 @@ def ensure_assignments(
             check_stock_voice(backend, voice)
             new = store.put(stock_card(backend, voice, language, rev))
             estimate = (
-                f"gender estimate {gender}, F0 {f0:.0f} Hz (20th percentile) over {seconds:.1f} s"
+                f"gender estimate {gender}, F0 {f0:.0f} Hz (median) over {seconds:.1f} s"
                 if f0 is not None
                 else f"gender estimate u, too little voiced speech in {seconds:.1f} s"
             )
