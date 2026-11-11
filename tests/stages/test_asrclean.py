@@ -104,6 +104,23 @@ def test_dropped_segments_are_listed_with_reasons(tmp_path, stage):
     assert row["start"] == pytest.approx(11.0) and row["end"] == pytest.approx(OVER_SILENCE.end)
 
 
+def test_only_the_runs_over_no_speech_are_dropped(tmp_path, stage):
+    """A stock-phrase segment whose words sit in two runs, one over speech and one over
+    silence 12 s later, loses only the silent run (Sol Bianca's 「お疲れ様でした」 layout)."""
+    words = _words(1.0, STOCK[:3]) + _words(14.0, STOCK[3:])
+    split = Segment(start=0.5, end=words[-1].end, text=STOCK, words=words)
+    ep = _episode(tmp_path, [SPEECH, split])
+    stage.run(ep, Config())
+    cleaned, dropped = stage.outputs(ep)
+    kept = read_json(cleaned, Transcript)
+    assert [s.text for s in kept.segments] == ["燃えてきたぞ", STOCK[:3]]
+    assert kept.segments[1].start == pytest.approx(1.0)
+    assert [w.text for w in kept.segments[1].words or []] == list(STOCK[:3])
+    (row,) = json.loads(dropped.read_text())
+    assert row["text"] == STOCK[3:] and row["reason"] == "stock phrase over no speech"
+    assert row["start"] == pytest.approx(14.0)
+
+
 def test_inputs_outputs_and_key(tmp_path, stage):
     from fukikae import hallucinations, songs
 

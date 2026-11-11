@@ -2,9 +2,11 @@
 
 Reads ``03-asr/transcript.json`` and the separation stems, writes ``03b-asrclean/transcript.json``
 (the transcript without the dropped segments) and ``03b-asrclean/dropped.json``
-(``[{start, end, text, reason}]``). The rule is `fukikae.hallucinations`: a segment goes when
-its text is a stock outro phrase for the transcript's language and its span is a theme song,
-music or no speech by the song detector (`fukikae.songs`, with ``[mix.songs]``).
+(``[{start, end, text, reason}]``). The rule is `fukikae.hallucinations.clean_segment`: a
+segment whose text is a stock outro phrase loses each of its word runs that lies over a theme
+song, music or no speech by the song detector (`fukikae.songs`, with ``[mix.songs]``), and goes
+whole when every run does. Phrases match the transcript's own language only (its
+``language``, else ``source_language``), never another language's list.
 
 A stage of its own, CPU only, so that changing the filter never changes the asr key and reruns
 Whisper or Qwen3-ASR. When nothing is dropped the output is a byte copy of the input, so the
@@ -77,19 +79,18 @@ class AsrCleanStage:
             active = songs.active_frames(vocals, s.active_db)
             keep = []
             for seg in transcript.segments:
-                reason = hallucinations.drop_reason(seg, language, spans, song_like, active)
-                if reason is None:
-                    keep.append(seg)
-                    continue
-                start, end = hallucinations.segment_span(seg)
-                dropped.append(
-                    {"start": round(start, 3), "end": round(end, 3), "text": seg.text,
-                     "reason": reason}
-                )  # fmt: skip
-                log.info(
-                    "asrclean %s: dropped %.1f-%.1f s %r: %s",
-                    ep.id, start, end, seg.text, reason,
-                )  # fmt: skip
+                kept, drops = hallucinations.clean_segment(seg, language, spans, song_like, active)
+                if kept is not None:
+                    keep.append(kept)
+                for d in drops:
+                    dropped.append(
+                        {"start": round(d.start, 3), "end": round(d.end, 3), "text": d.text,
+                         "reason": d.reason}
+                    )  # fmt: skip
+                    log.info(
+                        "asrclean %s: dropped %.1f-%.1f s %r: %s",
+                        ep.id, d.start, d.end, d.text, d.reason,
+                    )  # fmt: skip
         if dropped:
             write_json(out, transcript.model_copy(update={"segments": keep}))
         else:

@@ -5,12 +5,15 @@ from fukikae.hallucinations import (
     HALLUCINATION_ACTIVE_MAX,
     HALLUCINATION_MUSIC_SHARE,
     HALLUCINATION_PHRASES,
+    RUN_GAP_S,
+    clean_segment,
     drop_reason,
     fold,
     is_stock_phrase,
     phrase_table_digest,
     rule_constants,
     segment_span,
+    word_runs,
 )
 from fukikae.models import Segment, Word
 from fukikae.songs import SongSpan
@@ -144,3 +147,81 @@ def test_every_listed_phrase_matches_itself(lang):
     for p in HALLUCINATION_PHRASES[lang]:
         assert is_stock_phrase(p, lang)
         assert is_stock_phrase(f"{p} {p}", lang)
+
+
+# Sol Bianca S00E01's 「お疲れ様でした」: one segment over 3517-3774 s whose words sit in two
+# runs, お疲 at 3564-3570 s and れ様でした at 3677-3684 s, the second inside the theme song
+# (3658-3740 s).
+SB_WORDS = [
+    (3564.4337, "お"), (3569.6741, "疲"), (3677.2224, "れ"), (3678.5425, "様"),
+    (3678.8026, "で"), (3678.9426, "し"), (3684.4430, "た"),
+]  # fmt: skip
+SB_THEME = [SongSpan(3658.0, 3740.0, "detector")]
+
+
+def _sb_seg() -> Segment:
+    words = [Word(start=t, end=t + 0.02, text=ch) for t, ch in SB_WORDS]
+    return Segment(start=3517.0, end=3774.4, text="お疲れ様でした", words=words)
+
+
+def _long(seconds: int = 3800) -> tuple[np.ndarray, np.ndarray]:
+    """No second song-like and the vocals on everywhere: only the theme span is evidence."""
+    return np.zeros(seconds, dtype=bool), np.ones(seconds * 10, dtype=bool)
+
+
+def test_word_runs_split_at_gaps():
+    runs = word_runs(_sb_seg().words or [])
+    assert ["".join(w.text for w in r) for r in runs] == ["お疲", "れ様でした"]
+    assert RUN_GAP_S > 5.5  # the run's own words sit up to 5.5 s apart
+
+
+def test_only_the_run_inside_the_theme_is_dropped():
+    song_like, active = _long()
+    kept, dropped = clean_segment(_sb_seg(), "ja", SB_THEME, song_like, active)
+    assert kept is not None and kept.text == "お疲"
+    assert [w.text for w in kept.words or []] == ["お", "疲"]
+    assert kept.start == pytest.approx(3564.4337) and kept.end == pytest.approx(3569.6941)
+    (d,) = dropped
+    assert d.text == "れ様でした" and d.reason == "stock phrase over a theme song"
+    assert (d.start, d.end) == (pytest.approx(3677.2224), pytest.approx(3684.463))
+
+
+def test_a_segment_whose_every_run_passes_goes_whole():
+    song_like, active = _long()
+    theme = [SongSpan(3500.0, 3740.0, "detector")]
+    kept, dropped = clean_segment(_sb_seg(), "ja", theme, song_like, active)
+    assert kept is None
+    (d,) = dropped
+    assert d.text == "お疲れ様でした" and (d.start, d.end) == segment_span(_sb_seg())
+
+
+def test_a_segment_with_no_run_passing_is_kept_as_is():
+    song_like, active = _long()
+    seg = _sb_seg()
+    assert clean_segment(seg, "ja", [], song_like, active) == (seg, [])
+
+
+def test_other_text_is_never_split():
+    song_like, active = _long()
+    seg = _sb_seg().model_copy(update={"text": "燃えてきたぞ"})
+    assert clean_segment(seg, "ja", SB_THEME, song_like, active) == (seg, [])
+
+
+def test_a_segment_without_words_is_judged_whole():
+    seg = _seg(10, 30)
+    spans = [SongSpan(0.0, 60.0, "detector")]
+    kept, dropped = clean_segment(seg, "ja", spans, _quiet_mask(), _active(0.9))
+    assert kept is None and [d.text for d in dropped] == [STOCK]
+
+
+def test_kept_words_join_with_spaces_in_a_spaced_language():
+    words = [
+        Word(start=t, end=t + 0.2, text=w)
+        for t, w in [(1.0, " thanks"), (1.3, " for"), (1.6, " watching"),
+                     (40.0, " thanks"), (40.3, " for"), (40.6, " watching")]
+    ]  # fmt: skip
+    seg = Segment(start=0.0, end=41.0, text="thanks for watching thanks for watching", words=words)
+    kept, dropped = clean_segment(seg, "en", [SongSpan(35.0, 50.0, "detector")],
+                                  _quiet_mask(), _active(0.9))  # fmt: skip
+    assert kept is not None and kept.text == "thanks for watching"
+    assert dropped[0].text == "thanks for watching"
