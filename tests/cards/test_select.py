@@ -228,7 +228,12 @@ def test_clone_card_records_reference_emotions_outside_the_id(tmp_path):
         CloneSynth, [RefPick(p.start, p.end, p.transcript, p.snr_db) for p in picks], store,
         vocals, "ja", "en", "S01E11",
     )  # fmt: skip
-    assert card_id(plain) == card_id(card) and "reference_emotions" not in plain.meta
+    assert card_id(plain) == card_id(card) and plain.meta["reference_emotions"] == []
+    # written empty, so a re-put of the same id over the emotional one (CardStore.put merges
+    # [meta]) doesn't keep a stale label
+    store.put(card)
+    store.put(plain)
+    assert store.get(card_id(card)).meta["reference_emotions"] == []
 
 
 def test_turns_inside_songs_are_not_references(tmp_path):

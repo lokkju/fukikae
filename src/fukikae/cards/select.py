@@ -1148,7 +1148,9 @@ def clone_card(
                 )
             )
     labels = sorted({p.emotion for p in picks if p.emotion})
-    meta: dict[str, Any] = {"reference_emotions": labels} if labels else {}
+    # always written, empty too: a re-put of the same id merges [meta] (CardStore.put), so a
+    # key left out would keep a stale value
+    meta: dict[str, Any] = {"reference_emotions": labels}
     if tier is None:
         seconds = sum(p.seconds for p in picks)
         tier = "floor" if meets_floor(picks) else "short" if seconds >= CLONE_MIN_S else "thin"

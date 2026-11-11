@@ -126,14 +126,15 @@ class CardStore:
     def put(self, card: Card) -> str:
         """Write the card under its id. Idempotent. When the store already holds this id, the
         stored fingerprint and ``[meta]`` (both outside the id) are kept unless ``card``
-        carries its own fingerprint, which then replaces the stored one (recording); stored
-        ``[meta]`` is kept whenever ``card`` has none. A re-put of the same voice therefore
+        carries its own fingerprint, which then replaces the stored one (recording); the
+        stored ``[meta]`` is updated with ``card``'s, so a key only the store holds (written
+        by the operator or the studio) survives a re-put. A re-put of the same voice therefore
         never drops a recorded fingerprint (CD22, CD26)."""
         cid = compute_card_id(card)
         stored = self._stored(cid)
         if stored is not None:
             fingerprint = card.voice.fingerprint or stored.voice.fingerprint
-            meta = card.meta or stored.meta
+            meta = {**stored.meta, **card.meta}
             card = replace(card, meta=meta, voice=replace(card.voice, fingerprint=fingerprint))
         text = dump_card(card)
         parse_card(text)  # a card built in code gets the same checks as one read from disk
