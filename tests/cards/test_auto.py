@@ -2327,3 +2327,39 @@ def test_voices_list_lines_name_stock_cards(tmp_path: Path, monkeypatch):
         "(D41): kept; accept a clone in `fukikae studio` or use `fukikae voices clone`",
     ]
     reg.close()
+
+
+def test_floor_suffix_names_a_thin_shortfall_as_a_thin_clone():
+    from fukikae.cards.auto import Shortfall, floor_suffix
+
+    thin = {1: Shortfall("c", (1.5, 0.5), thin=True)}
+    assert floor_suffix(thin, 1) == "; a thin-reference clone (2.0 s from 2 turns)"
+    short = {1: Shortfall("c", (5.0,))}
+    assert floor_suffix(short, 1).startswith("; below the clone floor (1 clip and 5.0 s")
+    assert floor_suffix(None, 1) == ""
+
+
+def test_a_stale_repick_under_the_floor_that_picks_the_same_card_flags_once(
+    tmp_path: Path, vocals: Path
+):
+    """One flag per card: an automatic card both stale and under the floor whose re-pick is
+    the card it has gets one line with both reasons, not two."""
+    from fukikae.cards.auto import below_floor
+
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    cloning = _cloning({a: [(0.0, 4.2, None)]}, vocals)
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, cloning=cloning)
+    card = reg.card_for(a, "en")
+    assert card is not None and card.card_id is not None
+    stale = {a: [{"episode": "S01E12", "start": 0.0, "end": 4.2, "names": ["wendy"]}]}
+    flags: list[str] = []
+    lines = ensure_assignments(
+        reg, store, CFG, {a: [(0.0, 6.0)]}, cloning=cloning, stale=stale,
+        short=below_floor(reg, store, [a], "en"), flags=flags,
+    )  # fmt: skip
+    assert lines == [] and reg.card_for(a, "en").card_id == card.card_id  # type: ignore[union-attr]
+    (flag,) = [f for f in flags if f"card {card.card_id}" in f]
+    assert "subtitles now name otherwise" in flag and "pick it again" in flag
+    assert "below the clone floor (1 clip and 4.2 s" in flag
+    reg.close()

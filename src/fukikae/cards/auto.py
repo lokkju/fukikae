@@ -459,9 +459,20 @@ def _impure_flag(reg: Registry, cid: int, card: str, imp: Impurity, why: str) ->
 
 def floor_suffix(short: Mapping[int, Shortfall] | None, cid: int) -> str:
     """What a kept stale card's line appends when the card is under the clone floor too (its
-    floor line is not printed separately); empty otherwise."""
+    floor line is not printed separately), a thin-reference clone named as one; empty
+    otherwise."""
     sf = (short or {}).get(cid)
-    return f"; below the clone floor ({sf.phrase})" if sf is not None else ""
+    if sf is None:
+        return ""
+    return _shortfall_suffix(None if sf.thin else sf.phrase, sf.phrase if sf.thin else None)
+
+
+def _shortfall_suffix(below: str | None, thin: str | None) -> str:
+    """``; below the clone floor (<below>)`` or ``; a thin-reference clone (<seconds> s from
+    <n> turns)`` (``thin``: a `thin_phrase`), or empty with neither."""
+    if thin is not None:
+        return f"; a thin-reference clone ({thin.removeprefix(f'{THIN_NOTE}: ')})"
+    return f"; below the clone floor ({below})" if below is not None else ""
 
 
 def _thin_flag(
@@ -806,18 +817,19 @@ def ensure_assignments(
         again = "the current rules pick it again; kept, flagged for review"
         held = reg.card_for(cid, language)
         if (cid in repick or cid in floor or cid in purity) and held and new == held.card_id:
-            # the re-pick is the card it has: nothing changes, and every flag stays
+            # the re-pick is the card it has: nothing changes, and every flag stays, a stale
+            # card's shortfall on its own line (one line per card)
             if cid in repick:
                 flagged.append(
                     f"character {_label(reg, cid)}: card {new} is cloned from turns the "
                     f"subtitles now name otherwise ({_where((stale or {})[cid])}); {again}: "
-                    "`fukikae voices clone` replaces it"
+                    f"`fukikae voices clone` replaces it{_shortfall_suffix(below, thin)}"
                 )
             if cid in purity:
                 flagged.append(_impure_flag(reg, cid, new, purity[cid], again))
-            if thin is not None:
+            if cid not in repick and thin is not None:
                 flagged.append(_thin_flag(reg, cid, new, thin, own=found))
-            elif below is not None:
+            elif cid not in repick and below is not None:
                 flagged.append(_floor_flag(reg, cid, new, below, again))
             continue
         reasons: list[str] = [STOCK_NOTE] if cid in restock else []
