@@ -1058,7 +1058,7 @@ def copy_cards(pack: Pack, store: CardStore, ids: list[str]) -> CopyReport:
         if stock:
             raise PackError(
                 f"card {', '.join(stock)} in the pack is a stock voice; stock voices are "
-                "retired (D41): `fukikae voices clone` or `fukikae studio` makes a clone"
+                "retired (D41): `fukikae voices clone` makes a clone"
             )
         for cid in sorted(wanted):
             card = pack.cards[cid]

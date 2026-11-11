@@ -1629,7 +1629,7 @@ def test_assigned_imported_or_locked_impure_card_is_only_flagged(tmp_path, by):
     assert len(reg.card_history(1, "en")) == 1
     (flag,) = flags
     assert f"{NAMED_EP} 60.00-64.50 off-register" in flag
-    assert "fukikae studio" in flag and "voices clone" in flag
+    assert "studio" not in flag and "voices clone" in flag  # no command Part A lacks
     reg.close()
 
 
@@ -1832,7 +1832,7 @@ def test_thin_card_is_flagged_in_thin_lines(tmp_path: Path):
     assert f"{THIN_NOTE}: 2.5 s from 2 turns" in line
     want = (
         f"character 2: card {cur.card_id} is a thin-reference clone (2.5 s from 2 turns); "
-        "listen in `fukikae studio`, or `fukikae voices clone` with a better clip"
+        "`fukikae voices clone` with a better clip replaces it"
     )
     assert flags == [want]
     assert thin_lines(reg, store, [1, 2], "en") == [want]
@@ -2050,8 +2050,8 @@ def test_impure_lines_treat_thin_picks_as_no_pick(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("fukikae.cards.auto.find_references", lambda *_a, **_k: thin)
     monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
     (line,) = impure_lines(ws, reg, store, [1], "en")
-    assert line.endswith("no gate-passing reference pick exists; flagged: listen in "
-                         "`fukikae studio`, or replace it with `fukikae voices clone`")  # fmt: skip
+    assert line.endswith("no gate-passing reference pick exists; flagged: replace it with "
+                         "`fukikae voices clone`")  # fmt: skip
     reg.close()
 
 
@@ -2318,7 +2318,7 @@ def test_a_curated_imported_or_locked_stock_card_is_kept_and_flagged(tmp_path, b
     state = f"{by}{', locked' if locked else ''}"
     assert flags == [
         f"character 3 speaks with a stock card ({state}); stock voices are retired (D41): "
-        "accept a clone in `fukikae studio` or use `fukikae voices clone`"
+        "`fukikae voices clone` makes a clone"
     ]
     reg.close()
 
@@ -2372,7 +2372,7 @@ def test_voices_list_lines_name_stock_cards(tmp_path: Path, monkeypatch):
         f"character 1's card {auto_stock} (auto) is a stock card; stock voices are retired "
         "(D41): the next tts run re-picks it as a clone",
         f"character 3's card {mine} (assign, locked) is a stock card; stock voices are retired "
-        "(D41): kept; accept a clone in `fukikae studio` or use `fukikae voices clone`",
+        "(D41): kept; `fukikae voices clone` makes a clone",
     ]
     reg.close()
 

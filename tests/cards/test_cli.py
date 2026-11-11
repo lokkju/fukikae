@@ -1049,13 +1049,11 @@ def test_voices_list_shows_impure_flag(tmp_path: Path, monkeypatch):
     r = invoke("list", str(ws.root))
     (line,) = [ln for ln in r.output.splitlines() if "fail the reference gates" in ln]
     assert line.startswith(f"character {natsu} (Natsu)'s card {card} (assign)")
-    assert line.endswith(
-        "kept: listen in `fukikae studio`, or replace it with `fukikae voices clone`"
-    )
+    assert line.endswith("kept: replace it with `fukikae voices clone`")
 
 
 def test_voices_list_shows_the_thin_flag(tmp_path: Path):
-    """A2: `voices list` names a thin-reference clone and points at the studio; it is not
+    """A2: `voices list` names a thin-reference clone and points at `voices clone`; it is not
     listed again as below the clone floor."""
     import dataclasses
 
@@ -1069,7 +1067,7 @@ def test_voices_list_shows_the_thin_flag(tmp_path: Path):
     assert r.exit_code == 0, r.output
     assert (
         f"character {natsu} (Natsu): card {card} is a thin-reference clone (2.5 s from 2 "
-        "turns); listen in `fukikae studio`, or `fukikae voices clone` with a better clip"
+        "turns); `fukikae voices clone` with a better clip replaces it"
     ) in r.output.splitlines()
     assert "below the clone floor" not in r.output
 
@@ -1085,8 +1083,8 @@ def test_names_show_card_lines_include_the_thin_flag(tmp_path: Path):
         card = _auto_clone(reg, store, natsu, [(NAMED_EP, 0.0, 2.0)])
         store.put(dataclasses.replace(store.get(card), meta={"reference_tier": "thin"}))
         lines = _card_lines(ws, reg, [natsu])
-    assert any(ln.endswith("is a thin-reference clone (2.0 s from 1 turn); listen in "
-                           "`fukikae studio`, or `fukikae voices clone` with a better clip")
+    assert any(ln.endswith("is a thin-reference clone (2.0 s from 1 turn); `fukikae voices "
+                           "clone` with a better clip replaces it")
                for ln in lines)  # fmt: skip
 
 

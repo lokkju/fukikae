@@ -154,7 +154,7 @@ FALLBACK_BY = "auto-fallback"
 # and the short tier only replaces what used to be a stock voice.
 PRE_FLOOR_S = 6.0
 THIN_NOTE = "thin reference"
-THIN_FIX = "listen in `fukikae studio`, or `fukikae voices clone` with a better clip"
+THIN_FIX = "`fukikae voices clone` with a better clip replaces it"
 # a character with no turn of its own anywhere: cloned from its own cues' source spans
 OWN_LINES_NOTE = "cloned from its own lines' source spans (no turn of its own in any episode)"
 OWN_LINES_FLAG = "of its own lines' source spans: no turn of its own in any episode"
@@ -163,12 +163,9 @@ REPICK_NOTE = "re-picked: references not name-confirmed"
 FLOOR_NOTE = "re-picked: below the clone floor"
 FLOOR_FIX = "`fukikae voices clone` with a better clip replaces it"
 PURITY_NOTE = "re-picked: references fail the reference gates"
-PURITY_FIX = "listen in `fukikae studio`, or replace it with `fukikae voices clone`"
+PURITY_FIX = "replace it with `fukikae voices clone`"
 STOCK_NOTE = "re-picked: stock voices are retired (D41)"
-STOCK_FIX = (
-    "stock voices are retired (D41): accept a clone in `fukikae studio` or use "
-    "`fukikae voices clone`"
-)
+STOCK_FIX = "stock voices are retired (D41): `fukikae voices clone` makes a clone"
 GATE_WORDS = {"off_register": "off-register", "unvoiced": "unvoiced", "song_like": "song-like"}
 
 
@@ -507,7 +504,7 @@ def _thin_flag(
     *,
     own: CharacterRefs | None = None,
 ) -> str:
-    """The flag for a thin-reference clone (A2): listen to it in the studio. With ``own``
+    """The flag for a thin-reference clone (A2): `THIN_FIX`. With ``own``
     picks from the character's own lines (``from_cues``), says so, and names each episode
     skipped for assignments older than its names, with the rerun that brings its turns back."""
     seconds = phrase.removeprefix(f"{THIN_NOTE}: ")
@@ -679,14 +676,14 @@ def ensure_assignments(
     automatic one is re-picked (noted `PURITY_NOTE` with the gates) when ``cloning`` gives
     picks, which pass every gate by construction; with none it is kept and flagged, never
     made stock. A curated, imported or locked one is flagged with the failing references,
-    pointing at the studio and ``fukikae voices clone``. A card that is stale, under the
+    pointing at ``fukikae voices clone``. A card that is stale, under the
     floor and impure at once gets one re-pick whose note gives every reason.
 
     ``stock`` (`stock_cards`) lists the characters that speak with a stock card. An automatic
     one (``auto``, ``auto-fallback`` or ``restock``, unlocked) is re-picked as a clone, noted
     `STOCK_NOTE`, whatever tier its picks reach; with no speech of its own to clone from it
     is kept and flagged. A curated, imported or locked one is kept (CD2, CD3, CD9) and flagged
-    on every run, pointing at the studio and ``fukikae voices clone``."""
+    on every run, pointing at ``fukikae voices clone``."""
     language = cfg.target_language
     usable = cloning is not None and cloning.unavailable is None
     todo = []
@@ -2146,7 +2143,7 @@ def floor_lines(
 
 def thin_lines(reg: Registry, store: CardStore, ids: Iterable[int], language: str) -> list[str]:
     """One line per character whose ``language`` card is a thin-reference clone (A2), for
-    ``voices list`` and ``names show``: listen to it in the studio."""
+    ``voices list`` and ``names show``, pointing at ``fukikae voices clone``."""
     from fukikae.cards.card import CardError
 
     out: list[str] = []
@@ -2310,9 +2307,7 @@ def card_status_lines(
             f"{', locked' if a.locked else ''}) is a stock card; stock voices are retired (D41)"
         )
         if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
-            out.append(
-                f"{head}: kept; accept a clone in `fukikae studio` or use `fukikae voices clone`"
-            )
+            out.append(f"{head}: kept; `fukikae voices clone` makes a clone")
         elif (why := block()) is None:
             out.append(f"{head}: the next tts run re-picks it as a clone")
         else:

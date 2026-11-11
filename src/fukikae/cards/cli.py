@@ -252,9 +252,7 @@ def assign(
 
 
 CLIP_SECONDS = (3.0, 30.0)
-STOCK_RETIRED = (
-    "stock voices are retired (D41); `fukikae voices clone` or `fukikae studio` makes a clone"
-)
+STOCK_RETIRED = "stock voices are retired (D41); `fukikae voices clone` makes a clone"
 
 
 def _refuse_stock(card: Card, what: str) -> None:
