@@ -97,7 +97,7 @@ if TYPE_CHECKING:
 
     from fukikae.backends.base import Synthesizer
     from fukikae.cards.card import Card
-    from fukikae.cards.select import RefPick, Register, Tier
+    from fukikae.cards.select import Gate, Measured, RefPick, Register, Tier
     from fukikae.config import Config
     from fukikae.models import Assignments, ClusterAssignment, DubCue, Tags, Transcript
     from fukikae.names.models import NamesResult
@@ -323,6 +323,48 @@ class Impurity:
         return "; ".join(parts)
 
 
+def reference_gates(
+    vocals: Path,
+    span: tuple[float, float],
+    *,
+    own_spans: Sequence[tuple[float, float]],
+    confirmed_spans: Sequence[tuple[float, float]] = (),
+    register: Register | None,
+    song_like: np.ndarray | None,
+    song_spans: Sequence[tuple[float, float]],
+    bands: tuple[float, float] = (float(MALE_BELOW), float(FEMALE_ABOVE)),
+    pitch_root: Path | None = None,
+) -> tuple[Measured, tuple[Gate, ...]]:
+    """One card reference's A1 verdict on its origin ``span`` of the episode's ``vocals``, as
+    selection gives it (`select.measure_candidates`, `select.verdict`): measured on the
+    speaker's own turns inside it (``own_spans``; ``confirmed_spans`` instead when the span
+    lies inside the character's name-confirmed turns, which then gate no pitch), against
+    ``register`` (the speaker's in that episode: the cross-class rule, and no pitch gate for
+    a near-even bimodal one), with ``song_like`` (the per-second mask) and ``song_spans``
+    (the detector's accepted spans) for gate 3. The rule `impure_cards` applies, and
+    ``eval gender``'s reference purity."""
+    from fukikae.cards.select import Register, measure_candidates, song_share, verdict
+
+    start, end = span
+    vouched = (
+        bool(confirmed_spans)
+        and share_inside(start, end, confirmed_spans)
+        >= share_inside(start, end, own_spans) - 1e-6
+        > 0
+    )
+    pieces = confirmed_spans if vouched else own_spans
+    (m,) = measure_candidates(vocals, [(start, end)], pieces, pitch_root)
+    reg_here = register
+    if vouched and register is not None:
+        reg_here = Register("u", register.median)
+    share = None if song_like is None else song_share(start, end, song_like)
+    gates = verdict(
+        m, register=reg_here or Register("u", None), song=share, bands=bands,
+        in_song=share_inside(start, end, song_spans) if song_spans else None,
+    )  # fmt: skip
+    return m, gates
+
+
 def impure_cards(
     ws: Workspace,
     reg: Registry,
@@ -345,15 +387,7 @@ def impure_cards(
     origin (``voices clone``'s ``{"source": "voices clone"}``) or in an episode without
     artifacts is never judged."""
     from fukikae.cards.card import CardError
-    from fukikae.cards.select import (
-        Register,
-        measure_candidates,
-        reference_gating,
-        song_share,
-        song_spans,
-        speaker_register,
-        verdict,
-    )
+    from fukikae.cards.select import reference_gating, song_spans, speaker_register
     from fukikae.stages.mix import mix_settings
 
     bands = (float(MALE_BELOW), float(FEMALE_ABOVE))
@@ -423,21 +457,10 @@ def impure_cards(
                     )
                 register = _REGISTER_MEMO[rkey]
             for start, end in spans:
-                vouched = (
-                    bool(confirmed_spans)
-                    and share_inside(start, end, confirmed_spans)
-                    >= share_inside(start, end, own_spans) - 1e-6
-                    > 0
-                )
-                pieces = confirmed_spans if vouched else own_spans
-                (m,) = measure_candidates(art.vocals, [(start, end)], pieces, ws.root)
-                reg_here = register
-                if vouched and register is not None:
-                    reg_here = Register("u", register.median)
-                share = None if mask is None else song_share(start, end, mask)
-                gates = verdict(
-                    m, register=reg_here or Register("u", None), song=share, bands=bands,
-                    in_song=share_inside(start, end, accepted) if accepted else None,
+                m, gates = reference_gates(
+                    art.vocals, (start, end), own_spans=own_spans,
+                    confirmed_spans=confirmed_spans, register=register, song_like=mask,
+                    song_spans=accepted, bands=bands, pitch_root=ws.root,
                 )  # fmt: skip
                 if gates:
                     failing.append({
