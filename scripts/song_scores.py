@@ -4,7 +4,8 @@ Run: uv run --directory <checkout> python scripts/song_scores.py <episode work d
 (each dir holds 01-separate/background.wav, vocals.wav and vocals_16k.wav).
 
 For each episode it prints the head and tail candidates (energy score, voicing share,
-accepted or why not), then two anime negatives run through the same window logic:
+accepted or why not; ``tail2``, ``tail3``, ... are the repeated tail passes), the merged spans
+the mix keeps, then two anime negatives run through the same window logic:
 - ``cold open``: the best window before the accepted opening, when there is room for one;
 - ``middle``: the best window between ``head_s`` and the last ``tail_s`` seconds (what the
   detector would do if the position limit didn't keep it out).
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from fukikae.songs import SongSettings, find_candidates, frame_features, voiced_share
+from fukikae.songs import SongSettings, _gap, _spans, find_candidates, frame_features, voiced_share
 
 
 def _best(
@@ -57,6 +58,8 @@ def main(dirs: list[str]) -> int:
             voiced = "-" if c.voiced is None else f"{c.voiced:.2f}"
             print(f"{name} {c.region}: {c.start:.0f}-{c.end:.0f} s score {c.score:.2f} "
                   f"voiced {voiced} {c.reason}")  # fmt: skip
+        spans = ", ".join(f"{sp.start:.0f}-{sp.end:.0f}" for sp in _spans(cands, _gap(s)))
+        print(f"{name} spans: {spans or 'none'}")
         good = ((act >= s.active_share) & (bg >= vo - s.music_margin_db)).astype(np.float64)
         dur = len(good)
         head = next((c for c in cands if c.region == "head" and c.accepted), None)
