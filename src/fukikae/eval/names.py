@@ -63,6 +63,8 @@ from typing import TYPE_CHECKING, Any
 
 import typer
 
+from fukikae.transcripts import transcript_path
+
 if TYPE_CHECKING:
     from fukikae.config import Config
     from fukikae.eval.groundtruth.base import GroundTruthLine
@@ -270,7 +272,7 @@ def attributed_cues(
     from fukikae.stages.translate import DEFAULT_MAX_SPEED, TranslateStage, speech_cps
     from fukikae.subtitles import RULES, read_cues
 
-    tr = e.work / "03-asr" / "transcript.json"
+    tr = transcript_path(e.work)
     tg = e.work / "04b-tag" / "tags.json"
     transcript = read_json(tr, Transcript) if tr.exists() else None
     tags = read_json(tg, Tags) if tg.exists() else None

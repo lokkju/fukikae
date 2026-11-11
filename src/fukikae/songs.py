@@ -144,6 +144,13 @@ def _frame_db(path: Path) -> np.ndarray:
     return out
 
 
+def active_frames(vocals: Path, active_db: float = SongSettings.active_db) -> np.ndarray:
+    """Per ``FRAME_S`` frame of ``vocals``, whether the voice is on (above ``active_db``): the
+    frames `frame_features` counts into its per-second share, for the asrclean stage's
+    no-speech test."""
+    return _frame_db(vocals) > active_db
+
+
 def frame_features(
     background: Path, vocals: Path, active_db: float = SongSettings.active_db
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

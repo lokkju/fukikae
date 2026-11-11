@@ -90,6 +90,7 @@ from fukikae.cards.select import (
 from fukikae.cards.store import CardStore
 from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW
 from fukikae.registry.store import AUTOMATIC_BY, ProtectedAssignmentError, replace_refusal
+from fukikae.transcripts import transcript_path
 
 if TYPE_CHECKING:
     import numpy as np
@@ -1022,7 +1023,7 @@ def extras_cards(
     vocals = work / "01-separate" / "vocals.wav"
     asg_path, tr_path = (
         work / "05-characters" / "assignments.json",
-        work / "03-asr" / "transcript.json",
+        transcript_path(work),
     )
     tags_path = work / "04b-tag" / "tags.json"
     turns = list(read_json(asg_path, Assignments).turns or []) if asg_path.exists() else []
@@ -1239,7 +1240,7 @@ def episode_artifacts(ws: Workspace, episode: str) -> EpisodeArtifacts | None:
 
     work = ws.work_dir(episode)
     asg_path = work / "05-characters" / "assignments.json"
-    tr_path = work / "03-asr" / "transcript.json"
+    tr_path = transcript_path(work)
     vocals = work / "01-separate" / "vocals.wav"
     if not (asg_path.exists() and tr_path.exists() and vocals.exists()):
         return None
@@ -1597,7 +1598,7 @@ def _stamp(*paths: Path) -> tuple[tuple[str, int, int], ...]:
 def _candidate_files(work: Path) -> tuple[Path, ...]:
     return (
         work / "05-characters" / "assignments.json",
-        work / "03-asr" / "transcript.json",
+        transcript_path(work),
         work / "04b-tag" / "tags.json",
         work / "01-separate" / "vocals.wav",
     )
@@ -1943,7 +1944,7 @@ def cue_references(
     ]  # fmt: skip
     if not turns or not vocals.exists():
         return []
-    tr_path, tags_path = work / "03-asr" / "transcript.json", work / "04b-tag" / "tags.json"
+    tr_path, tags_path = transcript_path(work), work / "04b-tag" / "tags.json"
     transcript = (
         read_json(tr_path, Transcript)
         if tr_path.exists()

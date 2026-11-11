@@ -198,6 +198,7 @@ def configure_logging() -> None:
 def pipeline_stages(cfg: "Config") -> "list[Stage]":
     """The stages `fukikae run` goes through, in order; `tag` only when `[tag] enabled`."""
     from fukikae.stages.asr import AsrStage
+    from fukikae.stages.asrclean import AsrCleanStage
     from fukikae.stages.characters import CharactersStage
     from fukikae.stages.diarize import DiarizeStage
     from fukikae.stages.extract import ExtractStage
@@ -215,6 +216,7 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
         SeparateStage(),
         LanguageStage(),
         AsrStage(),
+        AsrCleanStage(),
         DiarizeStage(),
         NamesStage(cfg),
         CharactersStage(),

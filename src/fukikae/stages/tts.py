@@ -168,6 +168,7 @@ from fukikae.pitch import (
     turn_classes,
 )
 from fukikae.registry.store import Registry
+from fukikae.transcripts import transcript_path
 from fukikae.workspace import Episode, Workspace
 
 log = logging.getLogger(__name__)
@@ -1694,7 +1695,7 @@ class TtsStage:
         cls = cast(type[Synthesizer], loader.backend_class("tts", name))
         if "clone" not in getattr(cls, "sources", ()):
             raise ConfigError(f"[tts] clone_backend {name!r} makes no clone voices")
-        tr = ep.work / "03-asr" / "transcript.json"
+        tr = transcript_path(ep)
         language = cfg.source_language or ""
         if tr.exists():
             from fukikae.models import Transcript

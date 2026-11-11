@@ -114,6 +114,7 @@ from fukikae.eval.stock import ScratchStore, pick_stock
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript, Turn, Word
+from fukikae.transcripts import transcript_path
 from fukikae.workspace import Workspace
 
 EMBEDDER = BackendConfig("wespeaker", {})
@@ -1249,7 +1250,7 @@ def _evaluate(
     ref_vocals: dict[str, Path] = {}
     if ref_ws is not None:
         for e in sorted({r.episode for r in renders}):
-            tpath = ref_ws.work_dir(e) / "03-asr" / "transcript.json"
+            tpath = transcript_path(ref_ws.work_dir(e))
             vocals = ref_ws.work_dir(e) / "01-separate" / "vocals_16k.wav"
             if not tpath.exists() or not vocals.exists():
                 notes.append(f"{e}: the reference workspace has no transcript or vocals")

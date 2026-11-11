@@ -39,6 +39,7 @@ from fukikae.eval.speakers import label_key
 from fukikae.models import Diarization, Transcript, Turn, Word
 from fukikae.names.inputs import identity_inputs
 from fukikae.stages.diarize import clean_spans
+from fukikae.transcripts import transcript_path
 from fukikae.workspace import Workspace
 
 Kind = Literal["diarization", "subtitles", "asr"]
@@ -295,7 +296,7 @@ def segments(
     unknown = set(opts) - {"window", "split", "max_gap"}
     if unknown:
         raise ValueError(f"unknown asr segmentation option(s): {', '.join(sorted(unknown))}")
-    tpath = w.work_dir(episode) / "03-asr" / "transcript.json"
+    tpath = transcript_path(w.work_dir(episode))
     if not tpath.is_file():
         raise FileNotFoundError(f"{episode}: no transcript at {tpath}")
     transcript = read_json(tpath, Transcript)

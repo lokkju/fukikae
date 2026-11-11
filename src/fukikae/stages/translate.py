@@ -1,6 +1,7 @@
 """Translate stage: dub cues with a speakable target-language line each.
 
-Reads ``03-asr/transcript.json``, ``05-characters/assignments.json`` (with its ``turns``),
+Reads the transcript (``03b-asrclean/transcript.json``, `fukikae.transcripts`),
+``05-characters/assignments.json`` (with its ``turns``),
 ``04c-names/names.json`` on the subtitle path when it exists (not an input: what it gives the
 cues is ``cue_names`` in the key), ``04b-tag/tags.json`` when the tag stage is on,
 ``<workspace>/glossary.toml`` when present (its ``[terms]`` table maps source terms to
@@ -76,6 +77,7 @@ from fukikae.names.models import NamesResult
 from fukikae.registry.store import Registry
 from fukikae.stages.language import LanguageResult
 from fukikae.subtitles import RULES, read_cues
+from fukikae.transcripts import transcript_path
 from fukikae.translation import (
     PromptTooLargeError,
     Rendering,
@@ -162,7 +164,7 @@ class TranslateStage:
             return read_json(path, LanguageResult).language
         if cfg.source_language:
             return cfg.source_language
-        transcript = ep.work / "03-asr" / "transcript.json"
+        transcript = transcript_path(ep)
         if transcript.exists():
             return read_json(transcript, Transcript).language
         raise ConfigError("translate: the source language is unknown; run the language stage")
@@ -379,7 +381,7 @@ class TranslateStage:
 
     def inputs(self, ep: Episode) -> list[Path]:
         paths = [
-            ep.work / "03-asr" / "transcript.json",
+            transcript_path(ep),
             ep.work / "05-characters" / "assignments.json",
         ]
         subtitles = self._subtitle_input(ep)
@@ -477,12 +479,10 @@ class TranslateStage:
         target = cfg.target_language
         sub_file, sub_track = self._subtitles(ep, cfg, settings["source"])
         subs = sub_file is not None or sub_track is not None
-        transcript_path = ep.work / "03-asr" / "transcript.json"
+        tr_path = transcript_path(ep)
         assignments_path = ep.work / "05-characters" / "assignments.json"
         # The subtitle path uses the transcript only to break ties between two speakers.
-        transcript = (
-            read_json(transcript_path, Transcript) if not subs or transcript_path.exists() else None
-        )
+        transcript = read_json(tr_path, Transcript) if not subs or tr_path.exists() else None
         assignments = read_json(assignments_path, Assignments)
         if assignments.turns is None:
             raise ConfigError(
