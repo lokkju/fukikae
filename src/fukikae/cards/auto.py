@@ -2190,11 +2190,19 @@ def card_status_lines(
     cards (D41: an automatic one is re-picked as a clone by the next tts run, a curated,
     imported or locked one is kept). A card with one reason gets that reason's line; one with
     several gets a line naming each and what the next tts run does, as its single re-pick
-    would. ``notes`` receives the episodes `stale_cards` skipped."""
+    would. A character with no lines in any episode (`silent_characters`) is never re-picked,
+    so its flagged card gets one line saying so instead. ``notes`` receives the episodes
+    `stale_cards` skipped."""
     chars = sorted(set(characters))
     stale = stale_cards(ws, reg, store, chars, language, notes=notes)
     short = below_floor(reg, store, chars, language)
     impure = impure_cards(ws, reg, store, language, chars)
+    silent = silent_characters(ws, chars, language)
+    silent_lines = _silent_lines(reg, store, language, silent, stale, short, impure)
+    chars = [cid for cid in chars if cid not in silent]
+    stale = {cid: v for cid, v in stale.items() if cid not in silent}
+    short = {cid: v for cid, v in short.items() if cid not in silent}
+    impure = {cid: v for cid, v in impure.items() if cid not in silent}
     multi = {cid for cid in impure if cid in stale or cid in short}
     blocker: list[str | None] = []
 
@@ -2210,7 +2218,7 @@ def card_status_lines(
     ]
     rest = [cid for cid in chars if cid not in stale and cid not in multi]
     out += floor_lines(ws, reg, store, rest, language)
-    out += thin_lines(reg, store, rest, language)
+    out += thin_lines(reg, store, sorted({*rest, *silent}), language)  # no re-pick claimed
     out += impure_lines(
         ws, reg, store, [cid for cid in chars if cid not in multi], language, impure=impure
     )
@@ -2267,6 +2275,68 @@ def card_status_lines(
             out.append(f"{head}: the next tts run re-picks it as a clone")
         else:
             out.append(f"{head}: kept while {why}, then the next tts run re-picks it as a clone")
+    return out + silent_lines
+
+
+def silent_characters(ws: Workspace, characters: Iterable[int], language: str) -> set[int]:
+    """The ``characters`` with no line in any episode: in no episode's
+    ``06-translate/cues.<language>.json``, and in no assignments of an episode without one
+    (whose cues may still give them lines). The tts stage voices cues only, so it never
+    re-picks such a character's card (Sol Bianca's char 11 once asrclean dropped its lines).
+    With no episode holding either file, nobody is judged silent."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments, DubCues
+
+    speaking: set[int] = set()
+    evidence = False
+    for e in _all_episodes(ws):
+        work = ws.work_dir(e)
+        cues = work / "06-translate" / f"cues.{language}.json"
+        asg = work / "05-characters" / "assignments.json"
+        if cues.exists():
+            speaking |= {c.character_id for c in read_json(cues, DubCues).cues
+                         if c.character_id is not None}  # fmt: skip
+        elif asg.exists():
+            speaking |= {a.character_id for a in read_json(asg, Assignments).clusters
+                         if a.character_id is not None}  # fmt: skip
+        evidence = evidence or cues.exists() or asg.exists()
+    return set(characters) - speaking if evidence else set()
+
+
+def _silent_lines(
+    reg: Registry,
+    store: CardStore,
+    language: str,
+    silent: Iterable[int],
+    stale: Mapping[int, Sequence[dict]],
+    short: Mapping[int, Shortfall],
+    impure: Mapping[int, Impurity],
+) -> list[str]:
+    """One line per silent character whose card is flagged: what is wrong with it, and that
+    no tts run re-picks it (a thin clone alone has `thin_lines`' line, which claims no
+    re-pick)."""
+    silent = sorted(silent)
+    stock = stock_cards(reg, store, silent, language)
+    out: list[str] = []
+    for cid in silent:
+        a = reg.card_for(cid, language)
+        if a is None or a.card_id is None:
+            continue
+        reasons: list[str] = []
+        if cid in stock:
+            reasons.append("is a stock card")
+        if stale.get(cid):
+            reasons.append(f"was cloned from turns {_now_named(stale[cid])}")
+        if (sf := short.get(cid)) is not None and not sf.thin:
+            reasons.append("is below the clone floor")
+        if cid in impure:
+            reasons.append(f"has references that fail the reference gates ({impure[cid].phrase})")
+        if reasons:
+            out.append(
+                f"character {_label(reg, cid)}'s card {a.card_id} ({a.chosen_by}"
+                f"{', locked' if a.locked else ''}) {'; '.join(reasons)}; the character has no "
+                "lines in any episode, so no tts run re-picks it"
+            )
     return out
 
 

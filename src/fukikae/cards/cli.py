@@ -128,7 +128,8 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
     the subtitle names now give someone else (D29 #4), under the clone floor (2 clips, 10 s;
     D32) or a thin-reference clone (A2), references the reference gates refuse (A1); each
     says whether the next tts run re-picks an automatic card or the card stays (a curated,
-    imported or locked one stays until `voices clone`)."""
+    imported or locked one stays until `voices clone`; a character with no lines in any
+    episode is never re-picked, and its line says so)."""
     from fukikae.cards import auto
 
     with _session(workspace, lang) as (reg, store, language):

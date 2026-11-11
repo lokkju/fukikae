@@ -2329,6 +2329,37 @@ def test_voices_list_lines_name_stock_cards(tmp_path: Path, monkeypatch):
     reg.close()
 
 
+def test_a_character_with_no_lines_is_never_said_to_be_re_picked(tmp_path: Path, monkeypatch):
+    """Sol Bianca's char 11 after asrclean: its only lines were dropped, so no tts run will
+    re-pick its card; the line says it has no lines instead."""
+    from fukikae.artifacts import write_json
+    from fukikae.cards.auto import card_status_lines
+    from fukikae.models import Delivery, DubCue, DubCues
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    silent = _stock_card(store, "af_heart")
+    speaking = _stock_card(store, "am_adam")
+    reg.assign_card(1, "en", silent, by="auto", locked=False)
+    reg.assign_card(3, "en", speaking, by="auto", locked=False)
+    work = ws.work_dir(NAMED_EP)
+    (work / "06-translate").mkdir(parents=True, exist_ok=True)
+    write_json(work / "06-translate" / "cues.en.json", DubCues(
+        episode=NAMED_EP, source_language="ja", target_language="en", path="asr",
+        cues=[DubCue(id="c0001", start=0.0, end=1.0, character_id=3, extra=None, speaker="x",
+                     source_text="s", text="t", budget=10, delivery=Delivery(reference=(0, 1)))],
+    ))  # fmt: skip
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    lines = card_status_lines(ws, reg, store, [1, 2, 3], "en")
+    assert lines == [
+        f"character 3's card {speaking} (auto) is a stock card; stock voices are retired "
+        "(D41): the next tts run re-picks it as a clone",
+        f"character 1's card {silent} (auto) is a stock card; the character has no lines in "
+        "any episode, so no tts run re-picks it",
+    ]
+    reg.close()
+
+
 def test_floor_suffix_names_a_thin_shortfall_as_a_thin_clone():
     from fukikae.cards.auto import Shortfall, floor_suffix
 
