@@ -3,8 +3,11 @@
 # fukikae starts it as a JSON-lines worker (fukikae.backends.tts.remote) with the venv at
 # <checkout>/.venvs/qwen3tts. The qwen-tts wheel is pinned by version here and by sha256 in the
 # lock; the worker checks the installed version again at every load (impl_qwen3_tts).
-# gradio is overridden away: qwen-tts lists it for its web demo (qwen_tts.cli.demo), which
-# the worker never imports, and it would pull a web stack into an offline worker.
+# gradio is excluded: qwen-tts lists it for its web demo (qwen_tts.cli.demo), which the
+# worker never imports, and it would pull a web stack into an offline worker. exclude-dependencies
+# drops it from resolution entirely; the earlier `gradio; sys_platform == 'never'` override kept
+# it out of the venv but still locked gradio and its tree (Pillow, pandas, fastapi ...), which
+# Dependabot then kept bumping.
 [project]
 name = "fukikae-worker-qwen3tts"
 version = "0"
@@ -18,7 +21,7 @@ dependencies = [
 
 [tool.uv]
 package = false
-override-dependencies = ["gradio; sys_platform == 'never'"]
+exclude-dependencies = ["gradio"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
