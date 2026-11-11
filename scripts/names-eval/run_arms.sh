@@ -6,8 +6,8 @@
 #
 # TAG (default t11) suffixes the ledger tags (t11-names-<language>-<arm>) and names the output
 # directory (out for t11, out-<TAG> otherwise); LANGS (default "ja en") picks the sets;
-# SKIP_TTS=1 skips the listening check. The t11b re-measure (the remainder rule, b8afe4c, and
-# the eval follow-ups, 9ad5be5) ran as `TAG=t11b SKIP_TTS=1 run_arms.sh <repo>` with the
+# SKIP_TTS=1 skips the listening check. The t11b re-measure (the remainder rule, 053952c, and
+# the eval follow-ups, 05e21bf) ran as `TAG=t11b SKIP_TTS=1 run_arms.sh <repo>` with the
 # Task 11 ja-names arm moved aside to ja-names-t11 first (it holds the listening pack's tts).
 #
 # ja arms copy ~/fukikae-scratch/t12/fairytail (full manifests: nothing before `names` reruns).

@@ -1,5 +1,5 @@
 """A names-less characters scenario whose assignments and registry the pre-names code
-(debd501) wrote to `characters_golden.json` (regenerate only with that commit's code): the
+(1442290) wrote to `characters_golden.json` (regenerate only with that commit's code): the
 stage must reproduce them byte for byte without names (Review Focus 4). Each step records the
 assignments (``<step>``) and a dump of the registry after it (``<step>/registry``); the last
 steps run with a locked actor and an operator-named character. Uses only API (and registry

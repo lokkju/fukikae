@@ -17,11 +17,11 @@ The workspace copy's separate, asr and diarize keys were stale against today's c
 
 | Run | Cues | Translated | Errors | Over budget after retry | Hit rate | Wall time (translate stage) |
 |---|---|---|---|---|---|---|
-| 1 (b1238c5) | 536 | 536 | 0 | 161 | 70.0% | 482 s |
-| 2 (818bfc1) | 393 | 393 | 0 | 23 | 94.1% | 315 s |
-| 3 (967d815, fix round 1) | 393 | 393 | 0 | 22 | 94.4% | 310 s |
+| 1 (656137f) | 536 | 536 | 0 | 161 | 70.0% | 482 s |
+| 2 (8ff1f0c) | 393 | 393 | 0 | 23 | 94.1% | 315 s |
+| 3 (d0048d2, fix round 1) | 393 | 393 | 0 | 22 | 94.4% | 310 s |
 
-Run 1 showed 105 cues of at most two characters: Qwen3's aligner stamps each character with about 20 ms, and a diarization turn boundary falling inside a word cut off one character as its own cue ("ロ" | "ックと..."). The same 20 ms stamps made every slot end too early, so budgets were short. 818bfc1 folds such fragments into the neighbour of the same ASR segment and lets a point-stamped word sound until the next word, at most 0.3 s. Run 2's 23 overruns are a median of 3 characters over (13 of them 3 or fewer), the largest 12.
+Run 1 showed 105 cues of at most two characters: Qwen3's aligner stamps each character with about 20 ms, and a diarization turn boundary falling inside a word cut off one character as its own cue ("ロ" | "ックと..."). The same 20 ms stamps made every slot end too early, so budgets were short. 8ff1f0c folds such fragments into the neighbour of the same ASR segment and lets a point-stamped word sound until the next word, at most 0.3 s. Run 2's 23 overruns are a median of 3 characters over (13 of them 3 or fewer), the largest 12.
 
 - 34 cues carried a delivery direction, which is all 34 cues with a non-neutral emotion tag.
 - No cue was skipped as song: SenseVoice found no `singing` span on this episode's vocals (events: bgm, crying, laughter only), so the opening theme's lyrics were translated as dialogue.
@@ -118,7 +118,7 @@ The premix's own range (10.0, 10.2) passes to the final unchanged; it differs fr
 
 ## Task 8: `eval tts` Kokoro baseline (2026-11-09)
 
-Commits 6009538 and eba6683. Kokoro stock cards, 8 cues per character, seed 0, renders at the card's own rate (no rate fit, no stretch), trimmed as the tts stage trims. Similarity is WeSpeaker cosine against the character's three longest clean original turns (stock cards have no references), so these are floors on the scale a clone will be judged on. WER is faster-whisper large-v3 (no VAD) on the render against the cue text, pooled over words.
+Commits 57a5781 and 40ccf10. Kokoro stock cards, 8 cues per character, seed 0, renders at the card's own rate (no rate fit, no stretch), trimmed as the tts stage trims. Similarity is WeSpeaker cosine against the character's three longest clean original turns (stock cards have no references), so these are floors on the scale a clone will be judged on. WER is faster-whisper large-v3 (no VAD) on the render against the cue text, pooled over words.
 
 | set | pair | cues | chars | sim | WER | fit | fit within 1.25 | stretch p50 / p90 | cps median | emotion agreement |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -130,7 +130,7 @@ BBT against the original English track (bbt-en, same timeline): render / origina
 Per-card speech rate (CD8), cps median: Kokoro voices 12.2 (af_nicole) to 20.4 (am_puck) across the three sets; the CD8 global 15.5 holds as a median, the spread is real.
 BBT de: only 3 characters on the copy (the leads merge on the German dub, as the live-action profile notes); diarize and characters re-ran on the copy under the current profile before tag, translate and tts; translate left 146 of 334 cues over budget, which is why fit is 0.29.
 
-### Task 8 fix round 1 (e29a7bb): rerun with coverage, WER floor and minimum slot
+### Task 8 fix round 1 (d31eb13): rerun with coverage, WER floor and minimum slot
 
 Ruling CD12 is implemented: `prepare_cue` and `render_cue` in `stages/tts.py` are the one render path; TtsStage and `eval tts` both call them, and a test pins identical audio under the same key.
 Emotion agreement now counts only cues labelled on both sides and becomes a headline only at 50% or more coverage on both sides. Similarity is reported per reference source. Cues with a slot under 1.0 s are left out and counted. BBT matching is within 0.1 s.
@@ -144,11 +144,11 @@ WER floor: the same ASR (faster-whisper large-v3, no VAD) on natural English spe
 
 BBT against the English original: duration ratio 1.28, emotion agreement 0.56 (18 cues; coverage 0.92 / 0.83), similarity to the original actor 0.089, 0 unmatched cues.
 Kokoro takes no delivery; its renders are neutral (E12 65%, BBT 60% of labelled renders), so agreement tracks the neutral share of the source labels.
-The rows from 6009538 and eba6683 stay in the append-only ledger under their older options hashes; the e29a7bb rows supersede them.
+The rows from 57a5781 and 40ccf10 stay in the append-only ledger under their older options hashes; the d31eb13 rows supersede them.
 
 ## Task 9a: worker plumbing, reference selection (CD5) and IndexTTS2 (2026-11-09)
 
-Commits d068ea7, 4e335a8, b2df55f, 53ff885, 0cf20e5, 924bfda, 32d39ea.
+Commits efad132, c35c502, bced08d, 5baa3bd, 7d55697, eb496a3, 818c3fc.
 
 Calls for review:
 - Worker environments are separate uv projects (`workers/<extra>/`, own Python and lock, venv in `.venvs/<extra>`), not extras of fukikae's lock: `indextts` declares `requires-python = ">=3.10,<3.12"` and pins torch 2.8, transformers 4.52.1 and numpy 2.2.6, which fukikae (>= 3.12) cannot resolve. The worker runs the venv's interpreter directly with `PYTHONPATH=<checkout>/src`; `worker.py` and `impl_*.py` import only the standard library and the model's packages.
@@ -171,11 +171,11 @@ eval tts on copies at ~/fukikae-scratch/t9a (8 cues per character, seed 0, minim
 
 E12 IndexTTS2 has two rows over the same renders (a stray second run): WER 0.080 and 0.556. The difference is faster-whisper (no VAD) looping on one render, character 5's c0232, where "That's not it." came out as a laugh ("Mwahahahaha"), the source line's laughter carried by the emotion reference. Every E12 character's references carry a scored emotion (CD5 notes on all nine): emotion2vec labels most E12 turns non-neutral at >= 0.5, so the demotion rarely leaves enough neutral speech. E11 character 1 still hallucinated one line (c0025, "You didn't know?" three times) before the song fix; that cue was a translated lyric.
 Similarity against the clone's own reference spans is generous by construction for IndexTTS2; the listening checkpoint decides.
-The first E11 IndexTTS2 row (sim 0.488, WER 0.171) predates 0cf20e5 and is superseded.
+The first E11 IndexTTS2 row (sim 0.488, WER 0.171) predates 7d55697 and is superseded.
 
 ### Task 9a fix round 1 (rulings CD14 to CD18)
 
-Commits 65edcc5 to cd1f5b6. eval tts re-run on the t7 copies (~/fukikae-scratch/t7, which still say `[tts] device = "cpu"`: IndexTTS2 ran on GPU 0 through its own default, CD14), with the deterministic ASR (CD16) and held-out similarity (CD17). Held-out exemplars exist for 3 characters per episode (2, 3, 5 on E11; 1, 2, 4 on E12): single-episode runs leave few eligible turns once the picks and the sampled cues' delivery spans are out. The ceiling is those clips against the reference clips.
+Commits 6f92937 to ac4e61c. eval tts re-run on the t7 copies (~/fukikae-scratch/t7, which still say `[tts] device = "cpu"`: IndexTTS2 ran on GPU 0 through its own default, CD14), with the deterministic ASR (CD16) and held-out similarity (CD17). Held-out exemplars exist for 3 characters per episode (2, 3, 5 on E11; 1, 2, 4 on E12): single-episode runs leave few eligible turns once the picks and the sampled cues' delivery spans are out. The ceiling is those clips against the reference clips.
 
 | set | backend | cues | sim held-out (headline for clones) | ceiling | sim references | WER / median / floor | fit | stretch p90 | cps | retried / suspect | WER > 0.5 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -210,7 +210,7 @@ Resources: worker venv 5.4 GB, model 5.1 GB (HF cache on /nvme), about 3.8 GB of
 
 ### Task 9c: Qwen3-TTS beside Kokoro, IndexTTS2 and CosyVoice 3
 
-Qwen3-TTS 1.7B Base (`Qwen/Qwen3-TTS-12Hz-1.7B-Base` at fd4b2543, `qwen-tts` 0.1.1 by version and lock hash), bf16 on GPU 0, `[tts.qwen3_tts] mode = "auto"`, which was `icl` (the clips' transcripts and speech codes) for every card here. eval tts on the same copies and settings as Task 9b (8 cues per character, seed 0, deterministic ASR, held-out similarity with the ceiling); the clone cards' reference spans are identical to IndexTTS2's and CosyVoice 3's on all three sets, checked card by card. The rows were rendered at e68e1f3, when the render guard still used a provisional 15.0 cps; the declared 13.2 came after (d847f9b). A second render with the same seed is byte-identical (gpu test).
+Qwen3-TTS 1.7B Base (`Qwen/Qwen3-TTS-12Hz-1.7B-Base` at fd4b2543, `qwen-tts` 0.1.1 by version and lock hash), bf16 on GPU 0, `[tts.qwen3_tts] mode = "auto"`, which was `icl` (the clips' transcripts and speech codes) for every card here. eval tts on the same copies and settings as Task 9b (8 cues per character, seed 0, deterministic ASR, held-out similarity with the ceiling); the clone cards' reference spans are identical to IndexTTS2's and CosyVoice 3's on all three sets, checked card by card. The rows were rendered at 2915695, when the render guard still used a provisional 15.0 cps; the declared 13.2 came after (794375a). A second render with the same seed is byte-identical (gpu test).
 
 | set | backend | cues | sim held-out | ceiling | sim refs | WER / median / floor | fit | stretch p90 | cps | emotion agr. | retried / suspect | WER > 0.5 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
