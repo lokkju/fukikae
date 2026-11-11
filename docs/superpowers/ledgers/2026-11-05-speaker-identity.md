@@ -1,7 +1,7 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-05-speaker-identity.md
 
 Repo: ~/projects/fukikae, branch feat/speaker-identity (from main 12a7c0d; plan at d6a29fe, HEAD d5a75ad). Spec: docs/superpowers/specs/2026-11-05-speaker-identity-design.md (reachable).
-Test sets in hand: Fairy Tail 100YQ E11-E14 (~/fukikae-ws/fairytail, run through characters), Grid S01E04-E05 (copied), Link Click E04-E06 (copied, English-dub SDH partial), The Cyberfarm S02E01-E04 (library only, Task 4 copies). Spanish/Russian dub sets pending operator grab (A7).
+Test sets in hand: Fairy Tail 100YQ E11-E14 (~/fukikae-ws/fairytail, run through characters), Grid S01E04-E05 (copied), Link Click E04-E06 (copied, English-dub SDH partial), The Cyberfarm S02E01-E04 (library only, Task 4 copies). Spanish/Russian dub sets pending operator fetch (A7).
 
 ## Pre-flight scan
 
@@ -98,7 +98,7 @@ D10 ruling (operator, 2026-11-07): allow the pinned git dependency. Controller a
 ## RESUME STATE (2026-11-07, before compaction)
 - Branch feat/speaker-identity at a504ed6. Tasks 1-7 complete and reviewed (see lines above). Task 8 running (dialogue separation on DBS-TIGER-DnR vs Demucs; implementer af5fc7693182efa23). Task 9 next: per-genre threshold sweep, profiles (Ruling R3: profile tables name backend), one held-out confirmation per profile (Fairy Tail E14; grid E05; fairytail-en E14), results doc.
 - Current best (R10 amended): WeSpeaker embedder; anime = joint with episode_cannot_link on at 0.6/0.7 via `fukikae registry resolve` (R12/R13); live action = centroid 0.6, joint-off 0.6 a candidate. Best anime tune numbers: ja 0.56 / 5 clean / 1 merge (JUVIA+LUCY); en-dub 0.80 / 7 clean / 1 merge. Grid thin (2 recurring).
-- Open with the operator: D9 (live-action ground truth: recommend labeling Chimera video clips at ~/fukikae-ws/chimera/labels-video), A7 (Sonarr grab of ToonsHub multi-audio DAN DA DAN S01E01-E03 and Mob Psycho 100 S03E04-E05 / SPY x FAMILY S01E01-E02).
+- Open with the operator: D9 (live-action ground truth: recommend labeling Chimera video clips at ~/fukikae-ws/chimera/labels-video), A7 (fetch the multi-audio Crunchyroll DAN DA DAN S01E01-E03 and Mob Psycho 100 S03E04-E05 / SPY x FAMILY S01E01-E02).
 - Workspaces: ~/fukikae-ws/{fairytail,fairytail-en,grid,cyberfarm(dropped),linkclick-en(dropped),chimera}; harness outputs ~/fukikae-ws/{baselines,embedders,segmatch}; disk ~37 GB free (watch; `uv cache prune` freed 40 GB once).
 - Process: dispatch implementers with the task brief + implementer-common.md + global-constraints.md; review with task-reviewer-prompt.md; fix rounds resume the implementer; tell agents not to start background watchers (Tasks 5-6 stalled on them).
 Task 8: implementer DONE_WITH_CONCERNS (778e708, 92975eb). Dialogue (DBS-TIGER-DnR) vs Demucs, WeSpeaker, tune pairs: ja joint 4/0.44/1 vs 5/0.56/1; en joint 4/0.50/1 vs 7/0.80/1; grid not comparable (a character fell under 5 s). NC rises everywhere (ja 70->72, en 71->76, grid 96->100) yet end-to-end clean counts drop.

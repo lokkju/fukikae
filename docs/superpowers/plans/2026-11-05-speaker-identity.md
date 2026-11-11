@@ -109,7 +109,7 @@ docs/results/                    # one results note per comparison
 
 **Files:** Create `docs/results/2026-11-xx-identity-testsets.md`; workspaces outside the repo.
 
-- [ ] **Step 1:** For each set the copy agent verified (Fairy Tail ja and en-dub; The Cyberfarm S02E01-E04 ru; Grid pair ko if found; DAN DA DAN es-ES and es-419; Link Click zh; the Russian-dub ToonsHub series ru), create `~/fukikae-ws/<set>/fukikae.toml` with `source`, `source_language`, `extract.audio_track`/`audio_title` where needed, ASR language default, `gpu_device = 0`, and a `labels-aliases.yaml` from the auto-label `--report` suggestions you accept (note each).
+- [ ] **Step 1:** For each set the copy agent verified (Fairy Tail ja and en-dub; The Cyberfarm S02E01-E04 ru; Grid pair ko if found; DAN DA DAN es-ES and es-419; Link Click zh; the Russian-dub series ru), create `~/fukikae-ws/<set>/fukikae.toml` with `source`, `source_language`, `extract.audio_track`/`audio_title` where needed, ASR language default, `gpu_device = 0`, and a `labels-aliases.yaml` from the auto-label `--report` suggestions you accept (note each).
 - [ ] **Step 2:** Run `fukikae run <ws> <ep> --to diarize` for every episode (background; one GPU job at a time).
 - [ ] **Step 3:** `fukikae eval auto-label <ws> --source <kind> --report` per set; record per-set coverage, alignment and recurring-character counts in the test-sets doc; a set with no recurring characters or alignment < 0.6 is dropped and noted.
 - [ ] **Step 4:** Commit the doc `docs: identity test sets`.

@@ -1,7 +1,7 @@
 # Ground-truth plan: execution ledger
 
 Plan: docs/superpowers/plans/2026-11-08-ground-truth.md (c75fcc5). Branch feat/ground-truth from main c75fcc5.
-Operator scope: D9, D14, D16 (2026-11-08). Media: BBT S01 grabbed by the operator; Kaze, Kaoru weeks 1-3 still arriving (not in the library; copy from the share's incoming folder); Alice in Borderland in the library.
+Operator scope: D9, D14, D16 (2026-11-08). Media: BBT S01 added by the operator; Kaze, Kaoru weeks 1-3 still arriving (not in the library; copy from the share's incoming folder); Alice in Borderland in the library.
 Controller rulings: Kaze splits tune E01-E03, hold out E11; colour map may use held-out named lines (ground truth, not tuning).
 
 Task 1: dispatched (BASE c75fcc5, opus)
@@ -23,7 +23,7 @@ Task 4: dispatched (sonnet, HEAD f90f8d9)
 Task 1: fix round 1 committed (7418d0b); 548 pass. GT1, GT2, \n-only split, concurrent-append test, -uno, series in report key.
 Process note: concurrent implementers in one checkout collide: pre-commit stashes other agents' unstaged edits during each commit (Task 1's files vanished briefly twice, restored from ~/.cache/pre-commit/patch*). From now on one implementer commits at a time; reviewers (read-only) may run alongside. Tasks 3 and 4 already running concurrently: warned.
 Task 1: scoped re-review dispatched (sonnet).
-Task 3: implementer DONE_WITH_CONCERNS (9408c83); 565 pass. Kaze E01/E02/E03/E11 broadcast .ass -> MagicStar .srt: scale ~1.00003, offset -0.52..-0.55 s, all anchors inliers, rms 7-13 ms. Commit swept in ~49 lines of Task 4's uncommitted cli.py block (transcript-align fails at 9408c83 until Task 4 commits its module); Task 4 told. MagicStar .srt doubles each caption (short cue then repeat); first onset used.
+Task 3: implementer DONE_WITH_CONCERNS (9408c83); 565 pass. Kaze E01/E02/E03/E11 broadcast .ass -> web .srt: scale ~1.00003, offset -0.52..-0.55 s, all anchors inliers, rms 7-13 ms. Commit swept in ~49 lines of Task 4's uncommitted cli.py block (transcript-align fails at 9408c83 until Task 4 commits its module); Task 4 told. The web .srt doubles each caption (short cue then repeat); first onset used.
 Task 3: review dispatched (sonnet).
 Task 1: fix round 1/5 (8 addressed, 0 open; commits 60b1fad..7418d0b)
 Task 1: complete (commits c75fcc5..7418d0b, review clean; newer-schema rows are skipped with a line-numbered warning)
@@ -108,7 +108,7 @@ Ruling GT14: at ct0.5 the tie between centroid and joint cannot-link on (17/1/0.
 Task 8: fix round 1 sent (doc fixes).
 Task 8: fix round 1 committed (9d2d907, docs only). Task 8: complete except Kaze E11 (follow-up commands in doc and ledger).
 Kaze week 3 looks stalled (EP011 63% -> 64% over several hours; weeks 2-3 still in incomplete/).
-Ruling GT15: merge feat/ground-truth to main now with Kaze E11 held-out recorded as pending (the doc and ledger hold the exact unattended commands); score it once later as a small follow-up commit on main with the committed profile. — The plan's deliverables are done; one stalled torrent shouldn't hold them. — If wrong: nothing changes in the profile.
+Ruling GT15: merge feat/ground-truth to main now with Kaze E11 held-out recorded as pending (the doc and ledger hold the exact unattended commands); score it once later as a small follow-up commit on main with the committed profile. — The plan's deliverables are done; one stalled download shouldn't hold them. — If wrong: nothing changes in the profile.
 Final whole-branch review: dispatched (opus) over main..feat/ground-truth.
 Final review (opus): merge after fixes (docs + script copies). No Critical. Important (deferred to after Kaze E11, FOLLOW-UP): identity ledger rows don't record the resolved diarize backend/options/identity, so runs differing only in [diarize] share an options_hash. Minors: HF revision from refs/main makes a fresh cache re-diarize once (document); clip-set cache uses model_identity join not identity_key; registry adapt --gt colour ignores the colour map (latent); empty-map test inconsistency; embedders doc self-contradiction (l.225 vs 227); README/CLAUDE.md point only at 11-07 results; README ledger paragraph omits eval embedders; Kaze follow-up step 2 is a comment, no re-export/update steps; agree.py and vadcheck.py (behind 98.17%) live outside the repo.
 Final fix wave: sent to the Task 8 implementer.
