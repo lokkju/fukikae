@@ -337,12 +337,17 @@ def _cloning(refs: dict, vocals: Path):
     from tests.cards.test_select import CloneSynth
 
     def find(cid: int) -> CharacterRefs:
+        """The tiers (A2): floor at 2 clips and 10 s, short from 3 s, else thin."""
+        from fukikae.cards.select import CLONE_MIN_S, meets_floor
+
         spans = refs.get(cid, [])
         picks = [RefPick(a, b, "セリフ", 30.0, emo) for a, b, emo in spans]
         seconds = sum(b - a for a, b, _ in spans)
-        if seconds < 6.0:
-            return CharacterRefs(seconds=seconds)
-        return CharacterRefs(seconds=seconds, picks=picks, episode="S01E12", vocals=vocals)
+        if not spans:
+            return CharacterRefs(seconds=0.0)
+        tier = "floor" if meets_floor(picks) else "short" if seconds >= CLONE_MIN_S else "thin"
+        return CharacterRefs(seconds=seconds, picks=picks, episode="S01E12", vocals=vocals,
+                             tier=tier)  # fmt: skip
 
     return Cloning(backend=CloneSynth, source_language="ja", references=find)
 
@@ -367,16 +372,20 @@ def test_clone_backend_set_builds_clone_card(tmp_path: Path, vocals: Path):
     reg.close()
 
 
-def test_short_speech_falls_back_to_stock_with_report_line(tmp_path: Path, vocals: Path):
+def test_short_speech_gets_a_clone_below_the_floor(tmp_path: Path, vocals: Path):
+    """A2 (D41): 4.2 s of speech is the short tier, a clone flagged below the floor; the
+    under-6 s stock voice is gone while a clone can be made."""
     reg, (a,) = _registry(tmp_path, 1)
     store = CardStore(tmp_path / "ws")
     cloning = _cloning({a: [(0.0, 4.2, None)]}, vocals)
-    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=cloning)
+    flags: list[str] = []
+    (line,) = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=cloning,
+                                 flags=flags)  # fmt: skip
     cur = reg.card_for(a, "en")
     assert cur is not None and cur.card_id is not None
-    card = store.get(cur.card_id)
-    assert card.voice.source == "stock" and card.voice.voice == POOL["m"][0]
-    assert f"character {a}: 4.2 s of clean speech, under 6 s; stock voice {POOL['m'][0]}" in line
+    assert store.get(cur.card_id).voice.source == "clone"
+    assert "below the clone floor (1 clip and 4.2 s" in line and "stock" not in line
+    assert len(flags) == 1 and "below the clone floor" in flags[0]
     reg.close()
 
 
@@ -494,8 +503,8 @@ def test_workspace_cloning_reads_the_episode_artifacts(tmp_path: Path, monkeypat
     one = cloning.references(1)
     assert one.picks is not None and one.episode == "S01E12" and one.seconds == 15.0
     assert one.vocals == work / "01-separate" / "vocals.wav" and one.language == "ja"
-    two = cloning.references(2)
-    assert two.picks is None and two.seconds == 4.0
+    two = cloning.references(2)  # 4 s: the short tier, a clone below the floor (A2)
+    assert two.picks is not None and two.tier == "short" and two.seconds == 4.0
     assert workspace_cloning(root, CFG, "S01E12") is None
 
 
@@ -626,14 +635,19 @@ def test_unusable_backend_fallback_is_marked_and_upgraded_once_usable(tmp_path: 
     reg.close()
 
 
-def test_under_6_s_stock_is_plain_auto_and_stays(tmp_path: Path, vocals: Path):
+def test_a_character_with_no_speech_anywhere_gets_no_stock_card(tmp_path: Path, vocals: Path):
+    """D41: with a usable clone backend, a character the reference search finds no turn for
+    is named in the flags and gets no card at all, never a stock voice."""
     reg, (a,) = _registry(tmp_path, 1)
     store = CardStore(tmp_path / "ws")
-    short = _cloning({a: [(0.0, 4.2, None)]}, vocals)
-    ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=short)
-    assert reg.card_for(a, "en").by == "auto"  # type: ignore[union-attr]
-    more = _cloning({a: [(0.0, 4.0, None), (6.0, 10.0, None)]}, vocals)
-    assert ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, vocals, cloning=more) == []
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {a: []}, vocals, cloning=_cloning({}, vocals),
+                               flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(a, "en") is None
+    assert flags == [
+        f"character {a}: no speech of its own was found to clone a voice from, so it has no "
+        "card; `fukikae voices clone` makes one"
+    ]
     reg.close()
 
 
@@ -930,23 +944,22 @@ def test_restock_card_with_stale_references_is_repicked(tmp_path: Path, vocals: 
     reg.close()
 
 
-def test_a_stale_card_without_confirmed_picks_gets_a_stock_voice(tmp_path: Path, vocals: Path):
-    """Character 3 has no name-confirmed turns and no acoustic-only episode, so the re-pick
-    falls back the way a new card does: a stock voice, no longer the voice of the speech the
-    names gave Wendy. The stock card has no references, so the next run leaves it."""
-    from fukikae.cards.auto import REPICK_NOTE, stale_cards
+def test_a_stale_card_without_any_speech_of_its_own_is_kept_and_flagged(
+    tmp_path: Path, vocals: Path
+):
+    """Character 3 holds no cluster in any episode, so there is nothing of its own to re-pick
+    from: D41 keeps its card and flags it (the stock voice it used to get is gone)."""
+    from fukikae.cards.auto import stale_cards
 
     reg, _, ws = _ws_named(tmp_path)
     store = CardStore(ws.root)
     old = _auto_clone(reg, store, 3, [(NAMED_EP, 30.0, 35.0)])
     stale = stale_cards(ws, reg, store, [3], "en")
-    (line,) = ensure_assignments(reg, store, CFG, {3: [(30.0, 35.0)]}, vocals,
-                                 cloning=_cloning_ws(ws), stale=stale)  # fmt: skip
-    cur = reg.card_for(3, "en")
-    assert cur is not None and cur.card_id != old and cur.by == "auto"
-    assert store.get(cur.card_id or "").voice.source == "stock"
-    assert REPICK_NOTE in line and "wendy" in line
-    assert stale_cards(ws, reg, store, [3], "en") == {}
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {3: [(30.0, 35.0)]}, vocals,
+                               cloning=_cloning_ws(ws), stale=stale, flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(3, "en").card_id == old  # type: ignore[union-attr]
+    assert any(f"card {old} is kept, flagged: no speech of its own" in f for f in flags)
     reg.close()
 
 
@@ -1899,3 +1912,244 @@ def test_impure_lines_say_what_the_next_tts_run_does(tmp_path: Path, monkeypatch
     assert f"{NAMED_EP} 60.00-64.50 off-register" in line
     assert line.endswith("the next tts run re-picks it (2 clips, 10.0 s)")
     reg.close()
+
+
+# -- A2: a clone for every speaker (D41: never a stock voice) --------------------------------
+
+# no names: character 1 speaks 4 s (short), character 2 2.5 s in two short turns (thin),
+# character 3 three 5 s turns (floor); S9 is an extras cluster with two turns
+TIER_TURNS = [
+    (0.0, 4.0, "S1", 0.01),
+    (10.0, 11.5, "S2", 0.01),
+    (14.0, 15.0, "S2", 0.01),
+    (20.0, 25.0, "S3", 0.01),
+    (30.0, 35.0, "S3", 0.01),
+    (40.0, 45.0, "S3", 0.01),
+    (60.0, 65.0, "S9", 0.01),
+    (70.0, 76.0, "S9", 0.01),
+]
+TIER_CLUSTERS = [
+    {"cluster": "S1", "character_id": 1},
+    {"cluster": "S2", "character_id": 2},
+    {"cluster": "S3", "character_id": 3},
+    {"cluster": "S9", "character_id": None, "status": "extra"},
+]
+
+
+def _ws_tiers(tmp_path: Path):
+    from fukikae.workspace import Workspace
+
+    reg, ids = _registry(tmp_path, 3)
+    _named_episode(tmp_path / "ws", NAMED_EP, TIER_TURNS, TIER_CLUSTERS)
+    return reg, ids, Workspace(tmp_path / "ws")
+
+
+def test_find_references_gives_every_speaker_a_tier(tmp_path: Path):
+    from fukikae.cards.auto import find_references
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    got = {cid: find_references(ws, [NAMED_EP], cid) for cid in (1, 2, 3)}
+    assert {cid: r.tier for cid, r in got.items()} == {1: "short", 2: "thin", 3: "floor"}
+    assert [(p.start, p.end) for p in got[2].picks or []] == [(10.0, 11.5), (14.0, 15.0)]
+    reg.close()
+
+
+def test_character_under_six_seconds_gets_a_clone_not_stock(tmp_path: Path, vocals: Path):
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    flags: list[str] = []
+    lines = ensure_assignments(
+        reg, store, CFG, {1: [(0.0, 4.0)], 2: [(10.0, 11.5), (14.0, 15.0)]}, vocals,
+        cloning=_cloning_ws(ws), flags=flags,
+    )  # fmt: skip
+    assert len(lines) == 2
+    for cid in (1, 2):
+        card = store.get(reg.card_for(cid, "en").card_id or "")  # type: ignore[union-attr]
+        assert card.voice.source == "clone"
+    assert not any("stock" in line for line in lines)
+    reg.close()
+
+
+def test_thin_card_is_flagged_in_thin_lines(tmp_path: Path, vocals: Path):
+    from fukikae.cards.auto import THIN_NOTE, below_floor, impure_cards, thin_lines
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    flags: list[str] = []
+    (line,) = ensure_assignments(reg, store, CFG, {2: [(10.0, 11.5), (14.0, 15.0)]}, vocals,
+                                 cloning=_cloning_ws(ws), flags=flags)  # fmt: skip
+    cur = reg.card_for(2, "en")
+    assert cur is not None and cur.card_id is not None
+    card = store.get(cur.card_id)
+    assert card.meta.get("reference_tier") == "thin"
+    assert f"{THIN_NOTE}: 2.5 s from 2 turns" in line
+    want = (
+        f"character 2: card {cur.card_id} is a thin-reference clone (2.5 s from 2 turns); "
+        "listen in `fukikae studio`, or `fukikae voices clone` with a better clip"
+    )
+    assert flags == [want]
+    assert thin_lines(reg, store, [1, 2], "en") == [want]
+    # a thin clone is under the floor whatever its clips, and never judged by the gates
+    assert below_floor(reg, store, [2], "en")[2].thin
+    assert impure_cards(ws, reg, store, "en") == {}
+    # the next run finds the same thin picks: nothing changes, the flag stays
+    flags = []
+    again = ensure_assignments(reg, store, CFG, {2: [(10.0, 11.5), (14.0, 15.0)]}, vocals,
+                               cloning=_cloning_ws(ws), short=below_floor(reg, store, [2], "en"),
+                               flags=flags)  # fmt: skip
+    assert again == [] and flags == [want]
+    reg.close()
+
+
+def test_floor_lines_leave_thin_cards_to_thin_lines(tmp_path: Path, vocals: Path):
+    from fukikae.cards.auto import floor_lines
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    ensure_assignments(reg, store, CFG, {2: [(10.0, 11.5), (14.0, 15.0)]}, vocals,
+                       cloning=_cloning_ws(ws))  # fmt: skip
+    assert floor_lines(ws, reg, store, [2], "en") == []
+    reg.close()
+
+
+def test_a_thin_card_is_repicked_when_a_gated_pick_exists(tmp_path: Path, vocals: Path):
+    """Character 1's card is a thin clone (made before its 4 s turn was there to pick): the
+    short tier beats any thin card, so the next run re-picks it."""
+    import dataclasses
+
+    from fukikae.cards.auto import FLOOR_NOTE, below_floor
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    old_id = _auto_clone(reg, store, 1, [(NAMED_EP, 1.0, 2.0)])
+    thin = dataclasses.replace(store.get(old_id), meta={"reference_tier": "thin"})
+    store.put(thin)  # the same id, now marked thin
+    short = below_floor(reg, store, [1], "en")
+    assert short[1].thin
+    (line,) = ensure_assignments(reg, store, CFG, {1: [(0.0, 4.0)]}, vocals,
+                                 cloning=_cloning_ws(ws), short=short)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old_id
+    assert line.startswith(f"character 1: {FLOOR_NOTE} (thin reference: 1.0 s from 1 turn)")
+    reg.close()
+
+
+def test_no_stock_card_is_ever_created_by_auto(tmp_path: Path, vocals: Path):
+    """D41: with a usable clone backend, every character with any speech gets a clone, from
+    nothing at all up to the floor; no path through ensure_assignments makes a stock card."""
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    spans = {1: [(0.0, 4.0)], 2: [(10.0, 11.5), (14.0, 15.0)], 3: [(20.0, 25.0)]}
+    ensure_assignments(reg, store, CFG, spans, vocals, cloning=_cloning_ws(ws))
+    sources = {
+        store.get(p.stem).voice.source for p in (ws.root / ".fukikae" / "cards").glob("*.toml")
+    }
+    assert sources == {"clone"}
+    reg.close()
+
+
+def _extras_ep(ws, cues):
+    from fukikae.artifacts import write_json
+    from fukikae.models import DubCues
+    from fukikae.workspace import Episode
+
+    work = ws.work_dir(NAMED_EP)
+    (work / "06-translate").mkdir(parents=True, exist_ok=True)
+    write_json(
+        work / "06-translate" / "cues.en.json",
+        DubCues(episode=NAMED_EP, source_language="ja", target_language="en", path="asr",
+                cues=cues),
+    )  # fmt: skip
+    return Episode(source=ws.root / "x.mkv", id=NAMED_EP, work=work, workspace_root=ws.root)
+
+
+def _extra_cue(cid: str, start: float, end: float, extra: str | None, text: str | None = "hi"):
+    return DubCue(
+        id=cid, start=start, end=end, character_id=None, extra=extra,
+        speaker=f"extra:{extra}", source_text="セリフ", text=text, budget=20,
+        delivery=Delivery(reference=(start, end)),
+    )  # fmt: skip
+
+
+def _clone_source():
+    from fukikae.cards.auto import CharacterRefs, Cloning
+    from tests.cards.test_select import CloneSynth
+
+    return Cloning(CloneSynth, "ja", lambda _cid: CharacterRefs(seconds=0.0))
+
+
+def test_extras_cluster_gets_a_clone_from_its_own_turns(tmp_path: Path):
+    from fukikae.cards.auto import ExtraCard, extras_cards
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    cues = [_extra_cue("c0101", 60.0, 65.0, "S9"), _extra_cue("c0102", 70.0, 76.0, "S9")]
+    ep = _extras_ep(ws, cues)
+    made: dict[str, ExtraCard] = {}
+    cards, flags = extras_cards(ep, cues, CFG, store, _clone_source(), cards=made)
+    assert set(cards) == {"S9"}
+    card = store.get(cards["S9"])
+    assert card.voice.source == "clone" and card.voice.backend == "clonefake"
+    origins = [(r.origin or {}).get("start") for r in card.voice.references]
+    assert sorted(origins) == [60.0, 70.0]  # type: ignore[type-var]
+    assert made["S9"].tier == "floor" and flags == []
+    assert reg.card_for(1, "en") is None  # no registry row
+    reg.close()
+
+
+def test_unknown_cue_is_cloned_from_its_own_span(tmp_path: Path):
+    from fukikae.cards.auto import ExtraCard, extras_cards
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    cues = [
+        _extra_cue("c0101", 20.0, 22.0, "unknown"),
+        _extra_cue("c0102", 30.0, 31.5, None),
+        _extra_cue("c0103", 40.0, 41.0, "unknown", text=None),  # not spoken: no card
+    ]
+    ep = _extras_ep(ws, cues)
+    made: dict[str, ExtraCard] = {}
+    cards, flags = extras_cards(ep, cues, CFG, store, _clone_source(), cards=made)
+    assert set(cards) == {"unknown~c0101", "unknown~c0102"}
+    (ref,) = store.get(cards["unknown~c0101"]).voice.references
+    assert ref.origin == {"episode": NAMED_EP, "start": 20.0, "end": 22.0}
+    assert made["unknown~c0102"].tier == "thin"
+    assert flags == [f"{NAMED_EP}: 2 unknown lines cloned from themselves (no cluster: each "
+                     "line's own source span is its voice)"]  # fmt: skip
+    reg.close()
+
+
+def test_extras_cluster_without_turns_is_cloned_from_its_cues(tmp_path: Path):
+    from fukikae.cards.auto import ExtraCard, extras_cards
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    cues = [_extra_cue("c0101", 30.0, 32.0, "S7")]
+    made: dict[str, ExtraCard] = {}
+    cards, flags = extras_cards(_extras_ep(ws, cues), cues, CFG, store, _clone_source(),
+                                cards=made)  # fmt: skip
+    (ref,) = store.get(cards["S7"]).voice.references
+    assert (ref.origin or {})["start"] == 30.0 and made["S7"].tier == "thin"
+    assert len(flags) == 1 and flags[0].startswith(f"extra S7: card {cards['S7']} is a thin")
+    reg.close()
+
+
+def test_extras_cards_are_stable_across_runs(tmp_path: Path):
+    from fukikae.cards.auto import extras_cards
+
+    reg, _, ws = _ws_tiers(tmp_path)
+    store = CardStore(ws.root)
+    cues = [_extra_cue("c0101", 60.0, 65.0, "S9"), _extra_cue("c0102", 20.0, 22.0, None)]
+    ep = _extras_ep(ws, cues)
+    first, _ = extras_cards(ep, cues, CFG, store, _clone_source())
+    changed = [cues[0].model_copy(update={"text": "another translation"}), cues[1]]
+    assert extras_cards(ep, changed, CFG, store, _clone_source())[0] == first
+    reg.close()
+
+
+def test_extras_label_keys_cluster_less_lines_by_cue():
+    from fukikae.cards.auto import extras_label
+
+    assert extras_label(_extra_cue("c0007", 1.0, 2.0, "S9")) == "S9"
+    assert extras_label(_extra_cue("c0007", 1.0, 2.0, "unknown")) == "unknown~c0007"
+    assert extras_label(_extra_cue("c0008", 1.0, 2.0, None)) == "unknown~c0008"

@@ -825,6 +825,11 @@ class FakeClone(FakeSynth):
         return seconds
 
 
+# every profile's [tts] clone_backend: the stage clones extras with it (A2), so the fake
+# loader answers it with the cloning fake
+CLASSES[("tts", "indextts2")] = CLASSES[("tts", "fakeclone")] = FakeClone
+
+
 def _long_turns(root: Path, *, lucy_seconds: float = 4.0) -> None:
     """Natsu gets two clean 4 s turns (8 s, a clone); Lucy two of ``lucy_seconds``."""
     work = Workspace(root).work_dir("S01E11")

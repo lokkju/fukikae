@@ -172,6 +172,8 @@ def list_(workspace: Path = _WS, lang: str | None = _LANG) -> None:
         rest = [c.id for c in chars if c.id not in stale]  # a stale card's line says it all
         for line in auto.floor_lines(ws, reg, store, rest, language):
             _echo(line)
+        for line in auto.thin_lines(reg, store, rest, language):
+            _echo(line)
         for line in auto.impure_lines(ws, reg, store, [c.id for c in chars], language):
             _echo(line)
         for note in notes:

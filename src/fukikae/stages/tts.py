@@ -17,12 +17,16 @@ references the names now contradict is re-picked, ``cards.auto.stale_cards``, as
 clone floor of 2 clips and 10 s when a better pick exists, ``cards.auto.below_floor``, and one with
 references the A1 reference gates refuse when a gate-passing pick exists,
 ``cards.auto.impure_cards``; one with no better pick is kept and flagged in ``run.json``, as is a
-curated, imported or locked card any of these finds), or, with under 6 s of clean speech or no
-``clone_backend``, a gender-matched stock voice of the ``[tts]`` backend (the F0 estimate skips
-theme songs and tagged singing). Cues with no character (extras, and clusters the characters stage
-left for review) speak with a stock voice from the extras pools, one per label, fixed by first
-appearance in the episode. Every card is then checked (it exists, its backend can honor it at the
-model revision it names, its sidecars are present), so a broken card stops the stage, naming the
+curated, imported or locked card any of these finds). Every speaker with speech gets a clone (A2,
+D41): below 3 s of gate-passing speech it is cloned from its longest turns and flagged as a thin
+reference. Cues with no character (extras, and clusters the characters stage left for review)
+speak with an episode-local clone of their cluster's own turns, and each cue with no cluster at
+all with a clone of its own source span (``cards.auto.extras_cards``); the label to card map is
+in the stage key, and each label's tier in ``run.json``. Without ``clone_backend``, automatic
+cards are a gender-matched stock voice of the ``[tts]`` backend and extras use the extras pools,
+and while it can't run here a new character gets a stock stand-in, until Task 6 retires all
+three. Every card is then checked (it exists, its backend can honor it at the model revision it
+names, its sidecars are present), so a broken card stops the stage, naming the
 character, before any model loads.
 
 Renders are cached per cue in ``<workspace>/.fukikae/tts-cache/<key>.wav`` and hard-linked (or
@@ -107,10 +111,15 @@ from fukikae.backends.tts import worker
 from fukikae.backends.tts.remote import WorkerSynthesizer
 from fukikae.cards.auto import (
     FALLBACK_BY,
+    CharacterRefs,
+    Cloning,
+    ExtraCard,
     below_floor,
     character_spans,
     clone_backend,
     ensure_assignments,
+    extras_cards,
+    extras_label,
     extras_voices,
     impure_cards,
     repick_blocker,
@@ -1128,7 +1137,7 @@ class TtsStage:
             "max_speedup": max_speedup(cfg),
             **pause_key(cfg),
             "cards": {str(k): v for k, v in sorted(cards.items())},
-            "extras": extras_voices(cues, cfg) if cues else {},
+            "extras": self._extras_key(ep, cues, cfg, store),
             "version": RENDER_VERSION,
         }
 
@@ -1152,7 +1161,11 @@ class TtsStage:
             log.warning("tts: %s", line)
         report = self._prepared + report
         self._prepared = []
-        extra_cards = self._extra_cards(cues, cfg, store, default_bc.backend)
+        extras: dict[str, ExtraCard] = {}
+        extra_cards, extra_flags = self._extra_cards(ep, cues, cfg, store, extras)
+        for line in extra_flags:
+            log.warning("tts: %s", line)
+        flags = [*flags, *extra_flags]
 
         def who(c: DubCue) -> str:
             if c.character_id is not None:
@@ -1171,7 +1184,7 @@ class TtsStage:
                         f"{who(c)} has no {target!r} card; assign one with `fukikae voices assign`"
                     )
             else:
-                card = extra_cards[c.extra or "unknown"]
+                card = extra_cards[extras_label(c)]
             card_of[c.id] = card
             users.setdefault(card, who(c))
 
@@ -1285,6 +1298,15 @@ class TtsStage:
                 flags=flags,
                 rate_estimated=rates.estimated,
                 rate_refits=rates.refits,
+                extras={
+                    label: {
+                        "card": e.card_id,
+                        "tier": e.tier,
+                        "seconds": e.seconds,
+                        "clips": len(e.clips),
+                    }
+                    for label, e in sorted(extras.items())
+                },  # fmt: skip
             ),
         )
         log.info(
@@ -1404,18 +1426,68 @@ class TtsStage:
         return cards, names, report, flags
 
     @staticmethod
-    def _extra_cards(
-        cues: list[DubCue], cfg: Config, store: CardStore, backend: str
+    def _extras_cloning(ep: Episode, cfg: Config) -> Cloning | None:
+        """The clone backend extras cards are made for (A2), or None without ``[tts]
+        clone_backend``. Making a card reads only the backend's name and model revision, so
+        no environment or device check runs here."""
+        name = clone_backend(cfg)
+        if name is None:
+            return None
+        cls = cast(type[Synthesizer], loader.backend_class("tts", name))
+        if "clone" not in getattr(cls, "sources", ()):
+            raise ConfigError(f"[tts] clone_backend {name!r} makes no clone voices")
+        tr = ep.work / "03-asr" / "transcript.json"
+        language = cfg.source_language or ""
+        if tr.exists():
+            from fukikae.models import Transcript
+
+            language = read_json(tr, Transcript).language or language
+        return Cloning(cls, language, lambda _cid: CharacterRefs(seconds=0.0))
+
+    def _extras_key(
+        self, ep: Episode, cues: list[DubCue], cfg: Config, store: CardStore
     ) -> dict[str, str]:
+        """The stage key's ``extras``: each extras label's clone card id (A2; card ids are
+        content hashes, so the key is stable while the turns are), or, without a clone
+        backend, the stock voices it held before."""
+        if not any(c.character_id is None for c in cues):
+            return {}
+        if self._extras_cloning(ep, cfg) is None:
+            return extras_voices(cues, cfg)
+        return self._extra_cards(ep, cues, cfg, store)[0]
+
+    def _extra_cards(
+        self,
+        ep: Episode,
+        cues: list[DubCue],
+        cfg: Config,
+        store: CardStore,
+        made: dict[str, ExtraCard] | None = None,
+    ) -> tuple[dict[str, str], list[str]]:
+        """(extras label -> card id, flags) for the cues with no character: an episode-local
+        clone of each extras cluster's own speech, and of each cluster-less line's own span
+        (``cards.auto.extras_cards``, A2), keyed by ``cards.auto.extras_label``; without a
+        clone backend, the stock extras voices (until Task 6)."""
+        if not any(c.character_id is None and self._skipped(c) is None for c in cues):
+            return {}, []
+        cloning = self._extras_cloning(ep, cfg)
+        if cloning is not None:
+            return extras_cards(ep, cues, cfg, store, cloning, cards=made)
         voices = extras_voices(cues, cfg)
         if not voices:
-            return {}
+            return {}, []
+        backend = stage_settings(cfg)[0].backend
         rev = revision(backend)
-        out: dict[str, str] = {}
+        by_voice: dict[str, str] = {}
         for label, voice in voices.items():
             check_stock_voice(backend, voice)
-            out[label] = store.put(stock_card(backend, voice, cfg.target_language, rev))
-        return out
+            by_voice[label] = store.put(stock_card(backend, voice, cfg.target_language, rev))
+        out = {
+            extras_label(c): by_voice[c.extra or "unknown"]
+            for c in cues
+            if c.character_id is None and (c.extra or "unknown") in by_voice
+        }
+        return out, []
 
     def _render(
         self,

@@ -1314,7 +1314,11 @@ def _scene(
     inside = [c for c in ordered if c.start >= w0 and c.end <= w1]
     spoken = [c for c in inside if TtsStage._skipped(c) is None]
     default_backend = stage_settings(cfg)[0].backend
-    extra_cards = TtsStage._extra_cards(doc.cues, cfg, store, default_backend)
+    from fukikae.cards.auto import extras_label
+    from fukikae.workspace import Episode
+
+    here = Episode(source=work, id=e, work=work, workspace_root=ws.root)
+    extra_cards = TtsStage(cfg)._extra_cards(here, doc.cues, cfg, store)[0]
     chars = sorted({c.character_id for c in spoken if c.character_id is not None})
     stock = ev._stock_cards(
         ws, cfg, store, default_backend, [(e, c) for c in spoken if c.character_id is not None],
@@ -1359,7 +1363,7 @@ def _scene(
 
             def card_for(c: Any, mine: Mapping[int, str] = mine) -> str:
                 if c.character_id is None:
-                    return extra_cards[c.extra or "unknown"]
+                    return extra_cards[extras_label(c)]
                 return mine.get(c.character_id) or stock[c.character_id]
 
             jobs = []

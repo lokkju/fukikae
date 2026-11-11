@@ -1004,3 +1004,88 @@ def test_the_floor_search_prefers_neutral_clips_to_a_new_scene():
     picks = pick_references(ranked)
     assert picks is not None and all(p.emotion is None for p in picks)
     assert [p.start for p in picks] == [20, 300, 600]  # one per scene; the old key took 900
+
+
+# -- A2: reference tiers (floor, short, thin; D41: never a stock voice) ----------------------
+
+
+def _overlaps(p, span: tuple[float, float]) -> bool:
+    return p.start < span[1] and span[0] < p.end
+
+
+def test_floor_tier_when_the_floor_is_reached(tmp_path):
+    from fukikae.cards.select import FLOOR_S, tiered_references
+
+    spans = [(100 + 80 * i, 106 + 80 * i, 240.0, 0.01) for i in range(3)]
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    tier, picks = tiered_references(turns, "A", tr, None, vocals, register=("f", 240.0))
+    assert tier == "floor" and len(picks) >= 2 and sum(p.seconds for p in picks) >= FLOOR_S
+
+
+def test_short_tier_between_three_seconds_and_the_floor(tmp_path):
+    """4 s of clean, gate-passing speech: a clone from it, below the floor (no more 6 s
+    minimum, which only chose between a clone and a stock voice)."""
+    from fukikae.cards.select import CLONE_MIN_S, meets_floor, tiered_references
+
+    turns, tr, vocals = _gate_case(tmp_path, [(100, 104, 240.0, 0.01)])
+    tier, picks = tiered_references(turns, "A", tr, None, vocals, register=("f", 240.0))
+    assert tier == "short" and sum(p.seconds for p in picks) >= CLONE_MIN_S
+    assert not meets_floor(picks)
+
+
+def test_thin_tier_sets_the_gates_aside_but_not_songs_or_foreign_names(tmp_path):
+    """2.1 s of speech in three short turns: an off-register one, one inside a theme song
+    and one under another character's subtitle name. The thin tier takes the off-register
+    turn (the gates are set aside) and never the song or the foreign one."""
+    from fukikae.cards.select import tiered_references
+
+    spans = [(10, 11.2, 120.0, 0.01), (30, 31.5, 240.0, 0.01), (50, 50.9, 240.0, 0.01)]
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    theme, foreign = (29.0, 40.0), (50.0, 51.0)
+    tier, picks = tiered_references(
+        turns, "A", tr, None, vocals, register=("f", 240.0), theme_spans=[theme],
+        foreign=[foreign],
+    )  # fmt: skip
+    assert tier == "thin"
+    assert not any(_overlaps(p, theme) or _overlaps(p, foreign) for p in picks)
+    assert [p.start for p in picks] == [10.0]
+
+
+def test_thin_tier_never_returns_nothing_for_a_speaker_with_turns(tmp_path):
+    """Every turn inside a song: the speaker's own turns are used regardless."""
+    from fukikae.cards.select import tiered_references
+
+    turns, tr, vocals = _gate_case(tmp_path, [(30, 31.5, 240.0, 0.01), (33, 34, 240.0, 0.01)])
+    tier, picks = tiered_references(
+        turns, "A", tr, None, vocals, register=("f", 240.0), theme_spans=[(0.0, 100.0)]
+    )
+    assert tier == "thin" and [(p.start, p.end) for p in picks] == [(30.0, 31.5), (33.0, 34.0)]
+
+
+def test_thin_tier_stops_at_fifteen_seconds(tmp_path):
+    """All off-register, so no gated pick: the longest turns first, whole, up to 15 s; a turn
+    that doesn't fit is passed over for a shorter one that does."""
+    from fukikae.cards.select import THIN_MAX_S, tiered_references
+
+    spans = [(10, 18, 120.0, 0.01), (100, 107, 120.0, 0.01), (200, 206, 120.0, 0.01)]
+    spans += [(300, 301, 120.0, 0.01)]
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    tier, picks = tiered_references(turns, "A", tr, None, vocals, register=("f", 240.0))
+    assert tier == "thin" and THIN_MAX_S == 15.0
+    assert [(p.start, p.end) for p in picks] == [(10.0, 18.0), (100.0, 107.0)]
+
+
+def test_thin_tier_cuts_one_long_turn_to_fifteen_seconds(tmp_path):
+    from fukikae.cards.select import tiered_references
+
+    turns, tr, vocals = _gate_case(tmp_path, [(10, 30, 120.0, 0.01)])
+    tier, picks = tiered_references(turns, "A", tr, None, vocals, register=("f", 240.0))
+    assert tier == "thin" and [(p.start, p.end) for p in picks] == [(10.0, 25.0)]
+
+
+def test_thin_picks_carry_their_transcript(tmp_path):
+    from fukikae.cards.select import tiered_references
+
+    turns, tr, vocals = _gate_case(tmp_path, [(10, 12, 240.0, 0.01)])
+    _, (pick,) = tiered_references(turns, "A", tr, None, vocals, register=("f", 240.0))
+    assert pick.transcript == "line at 10"

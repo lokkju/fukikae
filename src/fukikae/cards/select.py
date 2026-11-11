@@ -54,6 +54,17 @@ the refusals for ``reference_report``. The fourth gate is about the set: ``pick_
 takes at most one clip per scene (starts within ``SCENE_GAP_S``, 60 s, of a taken pick)
 until the floor needs more, so one long scene (an opening narration) can't fill every
 slot; ``scene_gap=None`` turns it off (narrators).
+
+Reference tiers (A2, D41: fukikae never renders a stock voice). `tiered_references` is the one
+entry point for any speaker, a character or an extras cluster: ``floor`` when the gated picks
+reach the D32 floor (2 clips, 10 s); ``short`` when they reach ``CLONE_MIN_S`` (3 s, after
+D32's fragment join) but not the floor; else ``thin``: the speaker's longest turns, whole,
+up to ``THIN_MAX_S`` (15 s, IndexTTS2's prompt limit; a single longer turn is cut to it),
+with the A1 gates and the length, SNR and sparse-text checks set aside. Two exclusions still
+hold in the thin tier, because breaking either clones a voice that is not the speaker's: a
+turn overlapping a theme song span and a turn with `FOREIGN_MAX` or more of it under speech
+the subtitle names give someone else. When they leave nothing, the speaker's own turns are
+used regardless, so a speaker with any turn always gets picks.
 """
 
 from __future__ import annotations
@@ -877,6 +888,123 @@ def select_references(
     )
 
 
+# -- A2: reference tiers ----------------------------------------------------------------------
+
+Tier = Literal["floor", "short", "thin"]
+# Under this many seconds of gated picks a clone is made from the speaker's longest turns
+# (the thin tier) and flagged harder (open decision 3: the top of D41's 2 to 3 s range).
+CLONE_MIN_S = 3.0
+# The most reference speech the thin tier takes: IndexTTS2's prompt limit.
+THIN_MAX_S = 15.0
+
+
+def span_reference(
+    vocals: Path, transcript: Transcript, start: float, end: float, text: str = ""
+) -> RefPick:
+    """One span as a reference pick, no checks: its ASR text (``text`` when it has none) and
+    its SNR. A cluster-less line's own clone (A2) is made of one."""
+    from scipy.io import wavfile
+
+    rate, data = wavfile.read(vocals, mmap=True)
+    snr = round(snr_db(_samples(data, int(rate), start, end), int(rate)), 2)
+    return RefPick(start, end, turn_text(transcript, start, end) or text, snr)
+
+
+def thin_references(
+    turns: list[Turn],
+    speaker: str | Collection[str],
+    transcript: Transcript,
+    vocals: Path,
+    *,
+    theme_spans: Sequence[tuple[float, float]] = (),
+    foreign: Sequence[tuple[float, float]] = (),
+    fallback: bool = True,
+) -> list[RefPick]:
+    """The thin tier's picks: the speaker's turns, longest first, whole, while they fit in
+    ``THIN_MAX_S`` (a turn that doesn't fit is passed over for a shorter one; a first turn
+    longer than the limit is cut to it), leaving out turns overlapping ``theme_spans`` and
+    turns with `FOREIGN_MAX` or more under ``foreign``; when that leaves nothing, from all of
+    the speaker's turns (with ``fallback``; else nothing). Empty only for a speaker with no
+    turn, or with ``fallback`` off. Gates, lengths, SNR order and
+    text checks are set aside; the picks carry their ASR text (possibly empty) and SNR."""
+    from scipy.io import wavfile
+
+    mine = {speaker} if isinstance(speaker, str) else set(speaker)
+    own = sorted(
+        {
+            (round(t.start, 3), round(t.end, 3))
+            for t in turns
+            if t.speaker in mine and t.end > t.start
+        }
+    )
+
+    def allowed(a: float, b: float) -> bool:
+        if any(x < b and a < y for x, y in theme_spans):
+            return False
+        return not (foreign and share_inside(a, b, foreign) >= FOREIGN_MAX)
+
+    pool = [sp for sp in own if allowed(*sp)] or (own if fallback else [])
+    pool.sort(key=lambda sp: (-(sp[1] - sp[0]), sp[0]))
+    chosen: list[tuple[float, float]] = []
+    used = 0.0
+    for a, b in pool:
+        if not chosen and b - a > THIN_MAX_S:
+            chosen.append((a, round(a + THIN_MAX_S, 3)))
+            break
+        if used + (b - a) <= THIN_MAX_S + 1e-9:
+            chosen.append((a, b))
+            used += b - a
+    if not chosen:
+        return []
+    rate, data = wavfile.read(vocals, mmap=True)
+    rate = int(rate)
+    return [
+        RefPick(
+            a, b, turn_text(transcript, a, b), round(snr_db(_samples(data, rate, a, b), rate), 2)
+        )
+        for a, b in chosen
+    ]
+
+
+def tiered_references(
+    turns: list[Turn],
+    speaker: str | Collection[str],
+    transcript: Transcript,
+    tags: Tags | None,
+    vocals: Path,
+    *,
+    register: RegisterLike | None = None,
+    song_like: np.ndarray | None = None,
+    song_spans: Sequence[tuple[float, float]] | None = None,
+    theme_spans: Sequence[tuple[float, float]] = (),
+    exclude: Sequence[tuple[float, float]] | None = None,
+    foreign: Sequence[tuple[float, float]] = (),
+    scene_gap: float | None = SCENE_GAP_S,
+    bands: Bands = (MALE_BELOW, FEMALE_ABOVE),
+    pitch_root: Path | None = None,
+    gated: list[Gated] | None = None,
+) -> tuple[Tier, list[RefPick]]:
+    """The speaker's tier and reference picks (see the module notes): `eligible_references`
+    with the A1 gates (``exclude``, by default ``theme_spans``; ``foreign``; ``register``,
+    ``song_like``, ``song_spans``) and `pick_references` down to `CLONE_MIN_S` give the
+    ``floor`` or ``short`` tier; under it, `thin_references` (``theme_spans`` and ``foreign``
+    still excluded). Never an empty pick list for a speaker with any turn. ``gated``
+    receives the gated eligible turns' `Gated`, as `eligible_references` gives it."""
+    ranked = eligible_references(
+        turns, speaker, transcript, tags, vocals,
+        exclude=theme_spans if exclude is None else exclude, foreign=foreign,
+        register=register, song_like=song_like, song_spans=song_spans, bands=bands,
+        pitch_root=pitch_root, gated=gated,
+    )  # fmt: skip
+    picks = pick_references(ranked, min_total=CLONE_MIN_S, scene_gap=scene_gap)
+    if picks:
+        return ("floor" if meets_floor(picks) else "short"), picks
+    thin = thin_references(
+        turns, speaker, transcript, vocals, theme_spans=theme_spans, foreign=foreign
+    )
+    return "thin", thin
+
+
 def reference_exclusions(
     work: Path, tags: Tags | None, settings: Any = None
 ) -> list[tuple[float, float]]:
@@ -968,10 +1096,13 @@ def clone_card(
     source_language: str,
     target_language: str,
     episode: str,
+    tier: Tier | None = None,
 ) -> Card:
     """A clone card of ``backend`` from the picks: each cut to a 24 kHz mono wav sidecar,
     with its transcript and ``origin = {episode, start, end}``; ``seed = 1234``, the default
-    ``emotion_strength`` (0.8), the backend's ``model_revision``. Not put in the store."""
+    ``emotion_strength`` (0.8), the backend's ``model_revision``. A ``thin`` tier is recorded
+    in ``[meta] reference_tier`` (outside the card id), which the thin flags read. Not put in
+    the store."""
     from fukikae.cards.card import Card, Reference, Voice
 
     refs: list[Reference] = []
@@ -987,6 +1118,9 @@ def clone_card(
                 )
             )
     labels = sorted({p.emotion for p in picks if p.emotion})
+    meta: dict[str, Any] = {"reference_emotions": labels} if labels else {}
+    if tier == "thin":
+        meta["reference_tier"] = "thin"
     return Card(
         target_language=target_language,
         voice=Voice(
@@ -996,5 +1130,5 @@ def clone_card(
             seed=CLONE_SEED,
             references=tuple(refs),
         ),
-        meta={"reference_emotions": labels} if labels else {},
+        meta=meta,
     )

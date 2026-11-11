@@ -213,6 +213,8 @@ class TtsRun(BaseModel):
     # D26: cues rendered first at an estimated rate, and those of them rendered once more.
     rate_estimated: int = 0
     rate_refits: int = 0
+    # A2: each extras label's episode-local clone card: {card, tier, seconds, clips}
+    extras: dict[str, dict[str, Any]] = {}
 
 
 class FitReportCue(BaseModel):

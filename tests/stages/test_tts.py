@@ -120,7 +120,14 @@ class FakeSynth2(FakeSynth):
     name: ClassVar[str] = "fake2"
 
 
-CLASSES = {"fake": FakeSynth, "fake2": FakeSynth2}
+class FakeClone(FakeSynth):
+    """A clone backend: takes the seed clone cards carry (A2's extras clones)."""
+
+    name: ClassVar[str] = "fakeclone"
+    voice_keys: ClassVar = frozenset({"rate", "seed"})
+
+
+CLASSES = {"fake": FakeSynth, "fake2": FakeSynth2, "fakeclone": FakeClone}
 
 
 @pytest.fixture(autouse=True)
@@ -1413,3 +1420,73 @@ def test_progress_counts_only_cues_that_need_a_render(ep, caplog):
     assert any(m.endswith(": 6 cues cached") for m in caplog.messages)
     history = json.loads((ep.workspace_root / ".fukikae" / "stage-history.json").read_text())
     assert len(history["tts"]) == 1 and history["tts"][0]["total"] == 6
+
+
+# -- A2: extras and cluster-less lines speak in clones of their own speech (D41) -------------
+
+CLONE_CFG = Config(raw={"tts": {"backend": "fake", "clone_backend": "fakeclone"}})
+
+
+def _with_extras_turns(ep: Episode) -> None:
+    """S5 gets two turns of its own in assignments.json (an extras cluster); S9 (a review
+    cluster) has none, so its card comes from its cues' own spans."""
+    path = ep.work / "05-characters" / "assignments.json"
+    asg = read_json(path, Assignments)
+    asg.clusters.append(ClusterAssignment(
+        cluster="S5", actor_id=None, character_id=None, score=None, clean_seconds=8,
+        status="extra",
+    ))  # fmt: skip
+    asg.turns = [*(asg.turns or []), Turn(start=12.0, end=14.0, speaker="S5"),
+                 Turn(start=21.0, end=23.0, speaker="S5")]  # fmt: skip
+    write_json(path, asg)
+
+
+def test_stage_key_extras_map_holds_clone_card_ids(ep):
+    _two_cards(ep)
+    _with_extras_turns(ep)
+    stage = TtsStage(CLONE_CFG)
+    key = stage.config_key(CLONE_CFG, ep)
+    store = CardStore(ep.workspace_root)
+    assert set(key["extras"]) == {"S5", "S9"}
+    for card in key["extras"].values():
+        assert store.get(card).voice.source == "clone"
+    assert stage.config_key(CLONE_CFG, ep)["extras"] == key["extras"]  # content-hashed: stable
+
+
+def test_extras_render_with_the_clone_backend(ep):
+    _two_cards(ep)
+    _with_extras_turns(ep)
+    TtsStage(CLONE_CFG).run(ep, CLONE_CFG)
+    by_id = {c.cue_id: c for c in _plan(ep).cues}
+    store = CardStore(ep.workspace_root)
+    assert by_id["c0004"].card_id == by_id["c0007"].card_id
+    assert by_id["c0008"].card_id not in (None, by_id["c0004"].card_id)
+    for cue in ("c0004", "c0007", "c0008"):
+        assert store.get(by_id[cue].card_id or "").voice.source == "clone"
+    run = _run(ep)
+    assert set(run.extras) == {"S5", "S9"} and run.extras["S9"]["tier"] == "thin"
+    assert any(f.startswith("extra S9: card ") and "thin-reference clone" in f for f in run.flags)
+
+
+def test_each_unknown_line_speaks_in_its_own_clone(ep):
+    _two_cards(ep)
+    cues = [*CUES, _cue(9, None, "who one", extra="unknown"), _cue(10, None, "who two")]
+    _write_cues(ep, cues)
+    TtsStage(CLONE_CFG).run(ep, CLONE_CFG)
+    by_id = {c.cue_id: c for c in _plan(ep).cues}
+    store = CardStore(ep.workspace_root)
+    one, two = by_id["c0009"].card_id or "", by_id["c0010"].card_id or ""
+    assert one != two
+    (ref,) = store.get(one).voice.references
+    assert ref.origin == {"episode": "e1", "start": 27.0, "end": 29.0}
+    run = _run(ep)
+    assert {"unknown~c0009", "unknown~c0010"} <= set(run.extras)
+    assert any("2 unknown lines cloned from themselves" in f for f in run.flags)
+
+
+def test_without_a_clone_backend_extras_keep_the_key_they_had(ep):
+    """Until Task 6 retires stock voices, a workspace with no clone backend keys and renders
+    its extras as before (their key is byte-identical)."""
+    _two_cards(ep)
+    key = TtsStage(CFG).config_key(CFG, ep)
+    assert key["extras"] == {"S5": "xf_one", "S9": "xm_one"}

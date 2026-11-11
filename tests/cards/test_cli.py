@@ -1142,3 +1142,39 @@ def test_voices_list_shows_impure_flag(tmp_path: Path, monkeypatch):
     assert line.endswith(
         "kept: listen in `fukikae studio`, or replace it with `fukikae voices clone`"
     )
+
+
+def test_voices_list_shows_the_thin_flag(tmp_path: Path):
+    """A2: `voices list` names a thin-reference clone and points at the studio; it is not
+    listed again as below the clone floor."""
+    import dataclasses
+
+    from tests.cards.test_auto import NAMED_EP, _auto_clone
+
+    ws, natsu, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        card = _auto_clone(reg, store, natsu, [(NAMED_EP, 0.0, 1.5), (NAMED_EP, 3.0, 4.0)])
+    store.put(dataclasses.replace(store.get(card), meta={"reference_tier": "thin"}))
+    r = invoke("list", str(ws.root))
+    assert r.exit_code == 0, r.output
+    assert (
+        f"character {natsu} (Natsu): card {card} is a thin-reference clone (2.5 s from 2 "
+        "turns); listen in `fukikae studio`, or `fukikae voices clone` with a better clip"
+    ) in r.output.splitlines()
+    assert "below the clone floor" not in r.output
+
+
+def test_names_show_card_lines_include_the_thin_flag(tmp_path: Path):
+    import dataclasses
+
+    from fukikae.names.cli import _card_lines
+    from tests.cards.test_auto import NAMED_EP, _auto_clone
+
+    ws, natsu, store = setup(tmp_path)
+    with Registry(ws.registry_path) as reg:
+        card = _auto_clone(reg, store, natsu, [(NAMED_EP, 0.0, 2.0)])
+        store.put(dataclasses.replace(store.get(card), meta={"reference_tier": "thin"}))
+        lines = _card_lines(ws, reg, [natsu])
+    assert any(ln.endswith("is a thin-reference clone (2.0 s from 1 turn); listen in "
+                           "`fukikae studio`, or `fukikae voices clone` with a better clip")
+               for ln in lines)  # fmt: skip
