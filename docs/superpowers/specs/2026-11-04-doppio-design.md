@@ -14,7 +14,7 @@ The cross-episode character identity is the reason this exists rather than just 
 
 1. A CLI that runs the whole pipeline on one episode, or on a season directory, unattended.
 2. Every model stage is a pluggable backend chosen in config, and the choice can differ per language: the STT model for Japanese can differ from the one for Spanish, the translator can differ per source/target pair, and the TTS backend and voice are chosen per character.
-3. Translation defaults to a lightweight model, not a frontier API. Any OpenAI-compatible endpoint works, so the homelab LLM gateway, a local vLLM or llama.cpp server, or a hosted API are all one backend with different settings. The gateway today serves only the resident 27B, so the default (my call) is a `managed` mode: fukikae starts a llama.cpp server with a small GGUF translation model on its own card for the translate stage and stops it afterwards, like any other stage's model. Pointing `base_url` at the gateway or anywhere else skips that and needs no infra change.
+3. Translation defaults to a lightweight model, not a frontier API. Any OpenAI-compatible endpoint works, so a self-hosted LLM gateway, a local vLLM or llama.cpp server, or a hosted API are all one backend with different settings. The gateway today serves only the resident 27B, so the default (my call) is a `managed` mode: fukikae starts a llama.cpp server with a small GGUF translation model on its own card for the translate stage and stops it afterwards, like any other stage's model. Pointing `base_url` at the gateway or anywhere else skips that and needs no infra change.
 4. A season-level character registry that survives across episodes and resolves new diarization clusters to existing characters.
 5. A subtitle-first path that uses human English subtitles, when the release has them, instead of ASR plus machine translation.
 6. Every stage is resumable and idempotent, with its artifacts on disk, so a hand-corrected artifact can be fed back in and only downstream stages re-run.
@@ -43,7 +43,7 @@ The cross-episode character identity is the reason this exists rather than just 
 - pyannote's gated models need a Hugging Face token with the model terms accepted.
 - ffmpeg and ffprobe are required external binaries, not assumed on the host (the GPU host has neither); the repo pins them through mise, and `fukikae doctor` checks for them.
 - Test material: Chimera (2021) S01E01-E02, Korean audio with Korean and English srt tracks, is the first pair; Death Note S01E01-E02, Japanese with an English ASS fansub, is the second. Copied once from the NAS media share (no longer mounted on the GPU host since 2026-11-04) into `~/fukikae-ws/media/<Show>/Season 1/` on the GPU host, owner-only permissions. fukikae treats that directory as read-only source, the same as it would a media share.
-- The GitHub repo, when it exists, comes from the infra Pulumi `repos` config, not `gh repo create`. Until then the project is a local git repo.
+- The GitHub repo, when it exists, comes from the operator's infrastructure-as-code config, not `gh repo create`. Until then the project is a local git repo.
 
 ## Architecture
 

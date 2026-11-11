@@ -79,7 +79,8 @@ uv run --directory "$REPO" fukikae eval report "${T[@]}" \
 [ "${SKIP_TTS:-}" = 1 ] && exit 0
 
 # Listening check (D29 #9): the ja names arm through tts on GPU 0. The worker environment is
-# the main checkout's (.venvs/indextts2; workers/ is the same on this branch).
-FUKIKAE_WORKER_CHECKOUT=~/projects/fukikae F run "$D/ja-names" S01E12 S01E13 S01E14 --to tts
+# the main checkout's (.venvs/indextts2; workers/ is the same on this branch), named by
+# FUKIKAE_WORKER_CHECKOUT (default: <repo>).
+FUKIKAE_WORKER_CHECKOUT="${FUKIKAE_WORKER_CHECKOUT:-$REPO}" F run "$D/ja-names" S01E12 S01E13 S01E14 --to tts
 uv run --directory "$REPO" python "$REPO/scripts/names-eval/listening_pack.py" \
   ~/fukikae-scratch/t12/fairytail "$D/ja-names" ~/fukikae-review/names-natsu NATSU "YOUNG MAKAROV"

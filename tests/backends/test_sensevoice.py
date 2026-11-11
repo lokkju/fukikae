@@ -58,12 +58,10 @@ def test_defaults_are_the_gpu_with_a_pinned_revision():
 
 @pytest.mark.slow
 @pytest.mark.media
-def test_sensevoice_on_fixture_clip(tmp_path: Path):
+def test_sensevoice_on_fixture_clip(tmp_path: Path, fukikae_ws: Path):
     import wave
 
-    clip = Path(
-        "~/fukikae-ws/fairytail/.fukikae/episodes/S01E11/01-separate/vocals_16k.wav"
-    )
+    clip = fukikae_ws / "fairytail/.fukikae/episodes/S01E11/01-separate/vocals_16k.wav"
     if not clip.is_file():
         pytest.skip("no Fairy Tail E11 vocals on this machine")
     with wave.open(str(clip)) as w:
