@@ -256,7 +256,8 @@ def gender_cmd(
     before: Path = typer.Option(
         None,
         "--before",
-        help="An earlier 07-tts/plan.json: report the cues it voiced with a stock card apart.",
+        help="An earlier episode's 07-tts/plan.json (beside its 06-translate): report the cues "
+        "it voiced with a stock card apart, matched by source text and start.",
     ),
     json_out: Path = typer.Option(None, "--json", help="Write the report as JSON here."),
     md_out: Path = typer.Option(None, "--md", help="Write the report as Markdown here."),

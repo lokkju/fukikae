@@ -3,7 +3,9 @@
 A matrix row is one configuration on one test set and split: (stage, series, test set,
 split, backend, model, options hash, tag). Two series that share a test-set name stay apart,
 and their labels then name the series (``set [series]``). A column is ``language/genre``. A
-cell is the headline metric (or ``--metric``) of the latest row with that key in that column.
+cell is the headline metric (or ``--metric``) of the latest row with that key in that column;
+an identity cell adds its clean and merge counts, a gender cell its mismatched and known
+cues (``0.07 25/369``).
 """
 
 from __future__ import annotations
@@ -104,6 +106,10 @@ def _cell(r: LedgerRow, metric: str | None) -> str:
         clean, merges = r.metrics.get("clean"), r.metrics.get("merges")
         if clean is not None and merges is not None:
             text += f" c{clean} m{merges}"
+    if r.stage == "gender" and name == "mismatch_rate" and text != MISSING:
+        mismatched, known = r.metrics.get("mismatched_strict"), r.metrics.get("known")
+        if mismatched is not None and known is not None:
+            text += f" {mismatched}/{known}"
     return text
 
 

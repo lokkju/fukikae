@@ -122,6 +122,15 @@ def test_identity_cell_shows_clean_and_merges():
     assert m.rows[0][1] == ["0.56 c5 m1"]
 
 
+def test_gender_cell_shows_mismatched_over_known():
+    m = build_matrix([row(stage="gender", metrics={
+        "mismatch_rate": 0.0678, "mismatched_strict": 25, "known": 369,
+    })])  # fmt: skip
+    assert m.rows[0][1] == ["0.07 25/369"]
+    m = build_matrix([row(stage="gender", metrics={"mismatch_rate": 0.0678})])
+    assert m.rows[0][1] == ["0.07"]  # an older row without the counts
+
+
 def test_render_text_aligns_columns():
     m = Matrix(["de/live-action", "en/live-action"], [("identity | bbt", ["0.40", "0.60"])])
     lines = render(m).splitlines()

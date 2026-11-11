@@ -11,25 +11,38 @@ render in ``07-tts/<cue>.wav`` and on each clone card's reference clips:
   their own clones, so the render is what counts); the stock voices' nominal gender against
   the source line is reported beside it (``stock_voice_disagree``, the diagnostic's extras
   measure, which only a workspace from before D41 has anything for);
-- reference purity per clone card: a clip passes when it is not song (inside the episode's
-  accepted song spans for at least ``pitch.REF_SONG_SHARE`` of its origin, or sung by
-  `pitch.is_sung`), at least ``pitch.REF_VOICED_MIN`` of its loud frames are voiced, and its
-  median is within ``pitch.REF_PITCH_ST`` semitones of the speaker's majority-register median;
-  plus the pooled references' class against the speaker's majority (``card≠source``);
+- reference purity per clone card by the pipeline's own gate rule (controller ruling, Task
+  11): each clip's origin span in this episode gets the verdict `cards.auto.reference_gates`
+  gives, as the tts stage's purity check does: refused when its class crosses the speaker's
+  register (the other band, or between the bands under a register a full 4 st inside its
+  band; no pitch gate for a near-even bimodal register, under ``pitch.BIMODAL_GATE_RATIO``;
+  none for a clip inside the character's name-confirmed turns), under
+  ``pitch.REF_VOICED_MIN`` voiced, or song (song-like and sung, or inside the accepted song
+  spans). A clip with no origin in this episode isn't judged and passes, as the pipeline
+  leaves it. Beside it, as a diagnostic only, the spec's distance measure on the clip file
+  itself: not song (inside the accepted song spans for ``pitch.REF_SONG_SHARE`` of its origin,
+  or sung by `pitch.is_sung`), at least ``pitch.REF_VOICED_MIN`` of its loud frames voiced,
+  and its median within ``pitch.REF_PITCH_ST`` semitones of the speaker's majority-register
+  median; plus the pooled references' class against the speaker's majority (``card≠source``);
 - each speaker's reference tier and seconds (``[meta] reference_tier``, or inferred from the
   clip lengths by the tier rules for a card written before tiers existed);
 - gated lines (``gender_gate`` in the plan), and lines whose ``emotion_audio`` was passed
   against a source line in the other band from its speaker's established gender (the tts
   stage's own `gender_gate` inputs; must be 0 after A3);
 - stock-voiced cues (must be 0 under D41), cues inside song spans, cues whose source text is a
-  stock ASR hallucination, and the asrclean stage's dropped segments;
+  stock phrase (`hallucinations.is_stock_phrase`, whatever the audio under it), and the
+  asrclean stage's dropped stretches (whole segments and word runs, counted apart);
 - with ``similarity``, the WeSpeaker cosine (on the CPU) of each render against its own source
   line, for clone and stock cues and, given a ``before`` plan, for the cues that plan voiced
-  with a stock card.
+  with a stock card and this one doesn't. A ``before`` cue is matched to a cue here by its
+  source text and a start within ``BEFORE_START_TOL_S``, never by cue id (cue ids are
+  renumbered when asrclean drops a segment).
 
-Read-only on the workspace except for the pitch cache, which goes under ``cache_root`` (the
-workspace's own by default, as the pipeline's). R1: this module imports pipeline code; the
-pipeline never imports it.
+Read-only on the workspace: the pitch cache and the similarity's 16 kHz scratch (the renders
+and, without ``vocals_16k.wav``, the vocals, resampled for the embedder) go under
+``cache_root`` (the workspace's own by default, as the pipeline's), and the registry, when a
+lock-kept assignment needs it, is read from a temporary copy. R1: this module imports
+pipeline code; the pipeline never imports it.
 """
 
 from __future__ import annotations
@@ -57,6 +70,8 @@ BANDS = (pitch.MALE_BELOW, pitch.FEMALE_ABOVE)
 WORST = 20
 WHOLE = (0.0, 1e7)  # a span covering any render or clip file (pitch clips it to the file)
 STOCK = "stock"
+# A --before cue matches a cue here with the same source text starting within this.
+BEFORE_START_TOL_S = 0.25
 
 
 class Embedder(Protocol):
@@ -143,10 +158,13 @@ class WhoRow:
 class ClipVerdict:
     clip: str
     seconds: float
-    median: float | None
-    loud_voiced_fraction: float
-    passed: bool
-    why: str | None  # "song", "voicing" or "pitch" when refused
+    median: float | None  # the clip file's
+    loud_voiced_fraction: float  # the clip file's
+    passed: bool  # by the pipeline's gate rule (the headline)
+    gates: list[str]  # the gates refusing its origin span (off_register, unvoiced, song_like)
+    judged: bool  # its origin is in this episode, so the gate rule read it
+    passed_4st: bool  # by the 4-semitone distance measure (diagnostic)
+    why: str | None  # "song", "voicing" or "pitch" when the distance measure refuses it
 
 
 @dataclass
@@ -166,6 +184,10 @@ class ReferenceRow:
     def passing(self) -> int:
         return sum(c.passed for c in self.clips)
 
+    @property
+    def passing_4st(self) -> int:
+        return sum(c.passed_4st for c in self.clips)
+
 
 @dataclass
 class GenderReport:
@@ -181,17 +203,20 @@ class GenderReport:
     extras_known: int
     extras_disagree: int
     stock_voice_disagree: tuple[int, int]  # (disagreeing, known source) on stock-voiced cues
-    purity: dict[int, tuple[int, int]]  # character -> (passing references, total)
+    purity: dict[int, tuple[int, int]]  # character -> (passing references, total): gate rule
+    purity_4st: dict[int, tuple[int, int]]  # the same by the 4-semitone measure (diagnostic)
     references: list[ReferenceRow]
     tiers: dict[str, tuple[Tier, float]]
     gated_lines: int
     wrong_gender_prompts: int
     wrong_gender_cues: list[str]
-    dropped_hallucinations: int | None  # None: no asrclean output
-    hallucination_cues: int
+    dropped_segments: int | None  # whole segments asrclean dropped; None: no asrclean output
+    dropped_runs: int | None  # word runs it dropped from segments that keep other runs
+    stock_phrase_cues: int  # cues whose source text is a stock phrase, whatever is under it
     song_cues: int
     stock_cues: int
-    former_stock: list[str]  # cue ids a --before plan voiced with a stock card
+    former_stock: list[str]  # cue ids a --before plan voiced with a stock card, not stock now
+    before: bool  # a --before plan was given
     similarity: dict[str, Any] | None
     worst: list[CueRow]
     rows: list[CueRow]
@@ -212,18 +237,22 @@ class GenderReport:
             "stock_voice_known": self.stock_voice_disagree[1],
             "purity_passing": sum(p for p, _ in self.purity.values()),
             "purity_total": sum(t for _, t in self.purity.values()),
+            "purity_4st_passing": sum(p for p, _ in self.purity_4st.values()),
+            "purity_4st_total": sum(t for _, t in self.purity_4st.values()),
             "impure_cards": sum("impure" in r.flags for r in self.references),
             "short_speakers": sum(t == "short" for t, _ in self.tiers.values()),
             "thin_speakers": sum(t == "thin" for t, _ in self.tiers.values()),
             "gated_lines": self.gated_lines,
             "wrong_gender_prompts": self.wrong_gender_prompts,
-            "hallucination_cues": self.hallucination_cues,
+            "stock_phrase_cues": self.stock_phrase_cues,
             "song_cues": self.song_cues,
             "stock_cues": self.stock_cues,
             "former_stock_cues": len(self.former_stock),
         }
-        if self.dropped_hallucinations is not None:
-            out["dropped_hallucinations"] = self.dropped_hallucinations
+        if self.dropped_segments is not None:
+            out["dropped_segments"] = self.dropped_segments
+        if self.dropped_runs is not None:
+            out["dropped_runs"] = self.dropped_runs
         for k, v in (self.similarity or {}).items():
             if isinstance(v, dict) and v.get("mean") is not None:
                 out[f"similarity_{k}"] = round(float(v["mean"]), 4)
@@ -300,16 +329,50 @@ def _song_spans(work: Path, cfg: Any) -> list[tuple[float, float]]:
         return []
 
 
-def _before_stock(before: Path, store: CardStore) -> list[str]:
-    """Cue ids the ``before`` plan voiced with a stock card: by that plan's own workspace card
-    store when the plan sits in a workspace (``<ws>/.fukikae/episodes/<ep>/07-tts``), else by
-    this workspace's, else by its backend (``kokoro``)."""
+def _before_cues(before: Path) -> list[DubCue]:
+    """The cues of the ``before`` plan's own episode: ``06-translate/cues.<language>.json``
+    beside its ``07-tts``."""
+    tr = before.resolve().parent.parent / "06-translate"
+    found = sorted(tr.glob("cues.*.json")) if tr.is_dir() else []
+    if not found:
+        raise FileNotFoundError(
+            f"{before}: no cues.<language>.json in {tr}; --before needs the plan inside its "
+            "episode (07-tts/plan.json beside 06-translate)"
+        )
+    return list(read_json(found[0], DubCues).cues)
+
+
+def match_before(cues: Sequence[DubCue], before: Sequence[DubCue],
+                 tol: float = BEFORE_START_TOL_S) -> dict[str, str]:  # fmt: skip
+    """Cue id here -> the ``before`` cue id with the same source text whose start is nearest
+    and within ``tol`` seconds; each ``before`` cue matches at most once."""
+    by_text: dict[str, list[DubCue]] = defaultdict(list)
+    for b in before:
+        by_text[b.source_text].append(b)
+    taken: set[str] = set()
+    out: dict[str, str] = {}
+    for c in sorted(cues, key=lambda c: c.start):
+        near = [
+            b for b in by_text.get(c.source_text, [])
+            if b.id not in taken and abs(b.start - c.start) <= tol
+        ]  # fmt: skip
+        if near:
+            b = min(near, key=lambda b: abs(b.start - c.start))
+            taken.add(b.id)
+            out[c.id] = b.id
+    return out
+
+
+def _before_stock(before: Path, store: CardStore) -> set[str]:
+    """Cue ids of the ``before`` plan voiced with a stock card: by that plan's own workspace
+    card store when the plan sits in a workspace (``<ws>/.fukikae/episodes/<ep>/07-tts``),
+    else by this workspace's, else by its backend (``kokoro``)."""
     plan = read_json(before, TtsPlan)
     stores = [store]
     parents = before.resolve().parents
     if len(parents) > 4 and (parents[3] / "cards").is_dir():
         stores.insert(0, CardStore(parents[4]))
-    out = []
+    out = set()
     for p in plan.cues:
         if p.card_id is None or p.skipped:
             continue
@@ -321,8 +384,37 @@ def _before_stock(before: Path, store: CardStore) -> list[str]:
             except (CardError, OSError):
                 continue
         if source == STOCK or (source is None and p.backend == "kokoro"):
-            out.append(p.cue_id)
+            out.add(p.cue_id)
     return out
+
+
+def _gate_owner(root: Path, scratch: Path) -> Callable[[str], int | None]:
+    """`cards.auto.key_owner` over a copy of the workspace's registry made under ``scratch``
+    on first use (the registry opens read-write, so the workspace's own is never opened)."""
+    import shutil
+    import tempfile
+
+    from fukikae.cards.auto import key_owner
+    from fukikae.registry.store import Registry
+    from fukikae.workspace import Workspace
+
+    path = Workspace(root).registry_path
+    cache: dict[str, int | None] = {}
+
+    def owner(key: str) -> int | None:
+        if key not in cache:
+            if not path.exists():
+                cache[key] = None
+            else:
+                scratch.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(dir=scratch) as tmp:
+                    for f in path.parent.glob(path.name + "*"):
+                        shutil.copy2(f, Path(tmp) / f.name)
+                    with Registry(Path(tmp) / path.name) as reg:
+                        cache[key] = key_owner(reg)(key)
+        return cache[key]
+
+    return owner
 
 
 def _similarity(
@@ -334,8 +426,9 @@ def _similarity(
     embedder: Embedder,
     scratch: Path,
 ) -> dict[str, Any]:
-    """The embedder reads 16 kHz mono: the separate stage's ``vocals_16k.wav`` when present,
-    and 16 kHz copies of the renders under ``scratch`` (the workspace is never written)."""
+    """The embedder reads 16 kHz mono: the separate stage's ``vocals_16k.wav`` when present
+    (else a 16 kHz copy under ``scratch``), and 16 kHz copies of the renders under ``scratch``
+    (under the pitch cache root; the workspace is never written)."""
     from fukikae.eval.tts import to_16k
 
     scratch.mkdir(parents=True, exist_ok=True)
@@ -387,12 +480,14 @@ def measure(
     cache_root: Path | None = None,
     min_voiced_s: float = pitch.LINE_MIN_VOICED_S,
     embedder: Embedder | None = None,
-    embedder_factory: Callable[[], Embedder] = wespeaker_cpu,
+    embedder_factory: Callable[[], Embedder] | None = None,
 ) -> GenderReport:
     """Score one dubbed episode of workspace ``ws`` (see the module docstring)."""
     from fukikae import hallucinations
-    from fukikae.cards.auto import character_spans
+    from fukikae.cards.auto import character_spans, checked_names, confirmed_labels, reference_gates
+    from fukikae.cards.select import reference_gating, speaker_register
     from fukikae.stages import tts
+    from fukikae.stages.mix import mix_settings
     from fukikae.workspace import Workspace
 
     root = Path(ws)
@@ -482,6 +577,12 @@ def measure(
     # -- references, tiers -----------------------------------------------------------------
     songs = _song_spans(work, cfg)
     char_spans = character_spans(asg) if asg is not None else {}
+    try:
+        song_mask = reference_gating(work, mix_settings(cfg).songs)
+    except Exception:  # noqa: BLE001 - a measurement aid, as _song_spans
+        song_mask = None
+    names, _why = checked_names(work, asg) if asg is not None else (None, None)
+    owner = _gate_owner(root, pitch.cache_dir(cache) / "registry")
     turns = list(asg.turns or []) if asg is not None else []
     speakers: dict[str, tuple[str, list[tuple[float, float]]]] = {}
     for c in cues:
@@ -506,6 +607,8 @@ def measure(
     references: list[ReferenceRow] = []
     tiers: dict[str, tuple[Tier, float]] = {}
     purity: dict[int, tuple[int, int]] = {}
+    purity_4st: dict[int, tuple[int, int]] = {}
+    bands = (float(BANDS[0]), float(BANDS[1]))
     for label, (card_id, spans) in speakers.items():
         card = card_of(card_id)
         assert card is not None
@@ -516,6 +619,14 @@ def measure(
         else:
             majority, msum, mixed = "u", None, False
         maj_hz = msum.median if msum is not None else None
+        # the pipeline's gate inputs: the speaker's turns, register and confirmed turns
+        cid = int(label.split()[1]) if label.startswith("character ") else None
+        own = char_spans.get(cid, []) if cid is not None else spans
+        register = speaker_register(vocals, own, bands, cache) if own and vocals.exists() else None
+        confirmed: list[tuple[float, float]] = []
+        if cid is not None and names is not None and asg is not None:
+            labels = confirmed_labels(asg, cid, owner)
+            confirmed = [(float(t.start), float(t.end)) for t in turns if t.speaker in labels]
         clips: list[ClipVerdict] = []
         clip_tracks = []
         for ref in card.voice.references:
@@ -539,10 +650,22 @@ def measure(
                 why = "voicing"
             elif maj_hz is not None and _semitones(s.median, maj_hz) > pitch.REF_PITCH_ST:
                 why = "pitch"
-            loud = round(s.loud_voiced_fraction, 3)
-            clips.append(
-                ClipVerdict(ref.clip, round(t.seconds, 3), s.median, loud, why is None, why)
+            judged = (
+                o.get("episode") == work.name and "start" in o and "end" in o and vocals.exists()
             )
+            gates: list[str] = []
+            if judged:
+                _m, refused = reference_gates(
+                    vocals, (float(o["start"]), float(o["end"])), own_spans=own,
+                    confirmed_spans=confirmed, register=register, song_like=song_mask,
+                    song_spans=songs, bands=bands, pitch_root=cache,
+                )  # fmt: skip
+                gates = list(refused)
+            loud = round(s.loud_voiced_fraction, 3)
+            clips.append(ClipVerdict(
+                ref.clip, round(t.seconds, 3), s.median, loud, not gates, gates, judged,
+                why is None, why,
+            ))  # fmt: skip
         pooled = _pooled(clip_tracks)
         card_class = pitch.classify(pooled, *BANDS).gender
         seconds = round(sum(c.seconds for c in clips), 3)
@@ -567,22 +690,33 @@ def measure(
                            pooled.median, clips, flags)  # fmt: skip
         references.append(row)
         tiers[label] = (tier, seconds)
-        if label.startswith("character "):
-            purity[int(label.split()[1])] = (row.passing, len(clips))
+        if cid is not None:
+            purity[cid] = (row.passing, len(clips))
+            purity_4st[cid] = (row.passing_4st, len(clips))
 
     # -- songs, hallucinations, stock ------------------------------------------------------
     song_cues = sum(any(a <= (c.start + c.end) / 2 <= b for a, b in songs) for c in cues)
     language = doc.source_language or cfg.source_language or ""
-    halluc = sum(hallucinations.is_stock_phrase(c.source_text, language) for c in cues)
+    stock_phrase = sum(hallucinations.is_stock_phrase(c.source_text, language) for c in cues)
     dropped_path = work / "03b-asrclean" / "dropped.json"
-    dropped = (
-        len(json.loads(dropped_path.read_text(encoding="utf-8"))) if dropped_path.exists() else None
-    )
-    former = _before_stock(Path(before), store) if before is not None else []
+    dropped_segments = dropped_runs = None
+    if dropped_path.exists():
+        rows_d = json.loads(dropped_path.read_text(encoding="utf-8"))
+        dropped_runs = sum(d.get("kind") == "run" for d in rows_d)
+        dropped_segments = len(rows_d) - dropped_runs
+    former: list[str] = []
+    if before is not None:
+        stock_before = _before_stock(Path(before), store)
+        matched = match_before(cues, _before_cues(Path(before)))
+        now_stock = {r.cue_id for r in rows if r.card_source == STOCK}
+        former = [
+            c.id for c in cues
+            if matched.get(c.id) in stock_before and c.id not in now_stock
+        ]  # fmt: skip
 
     sim = None
     if similarity:
-        emb = embedder if embedder is not None else embedder_factory()
+        emb = embedder if embedder is not None else (embedder_factory or wespeaker_cpu)()
         scratch = pitch.cache_dir(cache) / f"16k-{work.name}"
         sim = _similarity(vocals, rows, by_id, renders, former, emb, scratch)
 
@@ -599,11 +733,12 @@ def measure(
         extras_known=sum(r.known for r in extras),
         extras_disagree=sum(r.mismatched for r in extras),
         stock_voice_disagree=(len(stock_dis), len(stock_known)), purity=purity,
-        references=references, tiers=tiers,
+        purity_4st=purity_4st, references=references, tiers=tiers,
         gated_lines=sum(r.gated for r in rows), wrong_gender_prompts=len(wrong),
-        wrong_gender_cues=wrong, dropped_hallucinations=dropped, hallucination_cues=halluc,
-        song_cues=song_cues, stock_cues=len(stock_rows), former_stock=former, similarity=sim,
-        worst=worst, rows=rows, notes=notes,
+        wrong_gender_cues=wrong, dropped_segments=dropped_segments, dropped_runs=dropped_runs,
+        stock_phrase_cues=stock_phrase, song_cues=song_cues, stock_cues=len(stock_rows),
+        former_stock=former, before=before is not None, similarity=sim, worst=worst, rows=rows,
+        notes=notes,
     )  # fmt: skip
 
 
@@ -624,22 +759,30 @@ def _clock(t: float) -> str:
 
 def format_report(r: GenderReport) -> str:
     """The report as Markdown."""
+    gate_p = sum(p for p, _ in r.purity.values())
+    gate_t = sum(t for _, t in r.purity.values())
+    st_p = sum(p for p, _ in r.purity_4st.values())
+    if r.dropped_segments is None:
+        dropped = "-"
+    else:
+        dropped = f"{r.dropped_segments} whole segments, {r.dropped_runs} word runs"
     out = [
         f"# eval gender: {r.episode}",
         "",
-        f"cue gender mismatch: strict {r.mismatched_strict} of {r.known} known "
+        f"cue gender mismatch: strict {r.mismatched_strict}/{r.known} known "
         f"({_pct(r.mismatched_strict, r.known)}); single {CUT_HZ:.0f} Hz cut "
-        f"{r.mismatched_cut} of {r.known_cut} ({_pct(r.mismatched_cut, r.known_cut)}); "
+        f"{r.mismatched_cut}/{r.known_cut} ({_pct(r.mismatched_cut, r.known_cut)}); "
         f"{r.cues} cues, lines under {r.min_voiced_s:g} s voiced are u",
+        f"character references passing the pipeline's gates: {gate_p}/{gate_t}; "
+        f"within {pitch.REF_PITCH_ST:g} st of the majority (diagnostic): {st_p}/{gate_t}",
         f"extras: render disagrees with the source on {r.extras_disagree} of {r.extras_known}; "
         f"stock voice's gender against the source {r.stock_voice_disagree[0]} of "
         f"{r.stock_voice_disagree[1]}",
         f"stock-voiced cues: {r.stock_cues}",
         f"gated lines: {r.gated_lines}; emotion audio passed against a wrong-gender line: "
         f"{r.wrong_gender_prompts}",
-        f"cues in song spans: {r.song_cues}; stock-phrase (hallucination) cues: "
-        f"{r.hallucination_cues}; asrclean dropped: "
-        f"{'-' if r.dropped_hallucinations is None else r.dropped_hallucinations}",
+        f"cues in song spans: {r.song_cues}; cues whose source text is a stock phrase: "
+        f"{r.stock_phrase_cues}; asrclean dropped: {dropped}",
         "",
         "| who | cues | known | mismatched | rate | src m, render f | src f, render m | "
         f"{CUT_HZ:.0f} Hz cut |",
@@ -653,14 +796,17 @@ def format_report(r: GenderReport) -> str:
         f"| **all** | {r.cues} | {r.known} | **{r.mismatched_strict}** | "
         f"{_pct(r.mismatched_strict, r.known)} | | | {r.mismatched_cut}/{r.known_cut} |",
         "",
-        "| speaker | card | tier | s | refs passing | ref medians (Hz) | card g | majority | "
+        "| speaker | card | tier | s | refs passing (gates) | refused by | "
+        f"within {pitch.REF_PITCH_ST:g} st (diagnostic) | ref medians (Hz) | card g | majority | "
         "majority Hz | flags |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for x in r.references:
-        meds = ", ".join(_hz(c.median) + ("" if c.passed else f" ({c.why})") for c in x.clips)
+        refused = "; ".join(f"{_hz(c.median)} Hz: {', '.join(c.gates)}" for c in x.clips if c.gates)
+        meds = ", ".join(_hz(c.median) + ("" if c.passed_4st else f" ({c.why})") for c in x.clips)
         out.append(f"| {x.speaker} | {x.card_id[:8]} | {x.tier} | {x.seconds:.1f} | "
-                   f"{x.passing}/{len(x.clips)} | {meds} | {x.card_class} | {x.majority} | "
+                   f"{x.passing}/{len(x.clips)} | {refused or '-'} | "
+                   f"{x.passing_4st}/{len(x.clips)} | {meds} | {x.card_class} | {x.majority} | "
                    f"{_hz(x.majority_hz)} | {' '.join(x.flags)} |")  # fmt: skip
     if r.worst:
         out += ["", "| cue | time | who | voice | src Hz | render Hz | text |",
@@ -695,7 +841,7 @@ def options(r: GenderReport) -> dict[str, Any]:
         "min_voiced_s": r.min_voiced_s,
         "pitch_version": pitch.VERSION,
         "similarity": r.similarity is not None,
-        "before": bool(r.former_stock) or None,
+        "before": r.before or None,
     }
 
 
@@ -707,8 +853,11 @@ def report_json(r: GenderReport) -> dict[str, Any]:
         "options": options(r),
         "metrics": r.metrics(),
         "per_speaker": [asdict(w) | {"rate": w.rate} for w in r.per_speaker],
-        "references": [asdict(x) | {"passing": x.passing} for x in r.references],
+        "references": [
+            asdict(x) | {"passing": x.passing, "passing_4st": x.passing_4st} for x in r.references
+        ],
         "purity": {str(k): list(v) for k, v in r.purity.items()},
+        "purity_4st": {str(k): list(v) for k, v in r.purity_4st.items()},
         "tiers": {k: list(v) for k, v in r.tiers.items()},
         "wrong_gender_cues": r.wrong_gender_cues,
         "former_stock": r.former_stock,
@@ -741,6 +890,7 @@ def gender_rows(r: GenderReport, *, cfg: Any, test_set: str, split: str,
             detail={
                 "per_speaker": {w.speaker: [w.mismatched, w.known] for w in r.per_speaker},
                 "purity": {str(k): list(v) for k, v in r.purity.items()},
+                "purity_4st": {str(k): list(v) for k, v in r.purity_4st.items()},
                 "tiers": {k: list(v) for k, v in r.tiers.items()},
                 "flags": {x.speaker: x.flags for x in r.references if x.flags},
                 "wrong_gender_cues": r.wrong_gender_cues,
