@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING
 from fukikae.cards.select import (
     FLOOR_CLIPS,
     FOREIGN_MAX,
+    Gated,
     floor_shortfall,
     gender_of,
     meets_floor,
@@ -137,6 +138,7 @@ class CharacterRefs:
     language: str | None = None  # the picks' episode's transcript language
     confirmed: bool = False  # the picks are name-confirmed turns of a names-used episode
     names_used: bool = False  # some episode searched used subtitle names
+    gated: Gated | None = None  # what the A1 gates refused in the picks' episode and tier
 
 
 @dataclass(frozen=True)
@@ -535,7 +537,7 @@ def _clone(
         f"{episode} ({clips}; {seconds:.1f} s of {found.seconds:.1f} s eligible); "
         "auto and unlocked"
     )
-    for warning in reference_report(picks):  # ruling CD5
+    for warning in reference_report(picks, found.gated):  # rulings CD5 and A1
         note += f"; {warning}"
     if found.names_used and not found.confirmed:
         note += "; references are not name-confirmed"
@@ -776,10 +778,25 @@ def character_candidates(
     owner: KeyOwner | None = None,
     *,
     acoustic: bool = False,
+    gated: dict[str, Gated] | None = None,
 ) -> dict[str, list[RefPick]]:
     """Per episode, the character's eligible reference turns (``eligible_references``, songs
     and singing excluded), ranked. ``exclusions`` caches each episode's excluded spans and
     ``loaded`` its artifacts, so a caller asking for many characters reads each file once.
+
+    The A1 gates run on every episode's candidates. The register gate runs only in the
+    acoustic tier (no names, or ``acoustic``): a name-confirmed turn is the character's by its
+    subtitle name, and a wide-ranging character's confirmed speech has a majority register
+    that refuses its calmer turns (Fairy Tail E13: Erza's 143 to 179 Hz alto against a
+    shouted 261 Hz register left her no reference at all). There the register is the
+    character's majority register over the turns searched in that episode
+    (``select.speaker_register``, on ``fukikae.pitch``'s bands, not
+    `gender_thresholds`: a profile band tuned on the old estimator, such as the anime
+    profile's 300 Hz pending D44, would keep only the turns above it and push the register
+    up by 2 to 4 semitones on Sol Bianca). The voicing gate runs in both tiers, gate 3 reads
+    the song detector's per-second mask and voicing (``select.reference_gating``), and the
+    pitch tracks go through the workspace's pitch cache. ``gated`` receives each episode's
+    `Gated` counts.
 
     In an episode whose names were used (``owner`` answers keys, the workspace's registry by
     default), the candidates are the character's name-confirmed turns (`confirmed_labels`),
@@ -787,9 +804,15 @@ def character_candidates(
     span of the names stage's inner-voice and multi lines, nor a turn with `STALE_OVERLAP` of
     it under someone else's names (`foreign_spans`). A names-used episode whose assignments
     are older than its names (``skipped``) offers nothing."""
-    from fukikae.cards.select import eligible_references, reference_exclusions
+    from fukikae.cards.select import (
+        eligible_references,
+        reference_exclusions,
+        reference_gating,
+        speaker_register,
+    )
     from fukikae.stages.mix import mix_settings
 
+    bands = (float(MALE_BELOW), float(FEMALE_ABOVE))
     cache = exclusions if exclusions is not None else {}
     arts = loaded if loaded is not None else {}
     out: dict[str, list[RefPick]] = {}
@@ -805,9 +828,11 @@ def character_candidates(
             if c.character_id == cid and c.status not in ("extra", "review")
         }
         foreign: Spans = []
+        confirmed = False
         if a.names is not None:
             if owner is None:
                 owner = _workspace_owner(ws)
+            confirmed = not acoustic
             speakers = own if acoustic else confirmed_labels(a.assignments, cid, owner)
             foreign = foreign_spans(a.assignments, a.names, cid, owner)
         else:
@@ -824,16 +849,34 @@ def character_candidates(
         exclude = cache[e]
         if a.names is not None:
             exclude = [*exclude, *((float(x), float(y)) for x, y in a.names.excluded)]
+        songs = mix_settings(ws.config).songs
+        gkey = (str(work), repr(songs), _stamp(*_exclusion_files(work)))
+        if gkey not in _GATING_MEMO:
+            _remember(_GATING_MEMO, gkey, reference_gating(work, songs))
+        song_like, voicing = _GATING_MEMO[gkey]
+        spans = [(t.start, t.end) for t in a.assignments.turns if t.speaker in speakers]
+        rkey = (str(work), tuple(spans), bands, _stamp(a.vocals))
+        if rkey not in _REGISTER_MEMO:
+            _remember(_REGISTER_MEMO, rkey, speaker_register(a.vocals, spans, bands, ws.root))
+        register = _REGISTER_MEMO[rkey]
+        if confirmed:
+            register = ("u", register[1])  # names vouch for the speaker: no register gate
         key = (
-            str(work), tuple(sorted(speakers)), tuple(exclude), tuple(foreign),
-            _stamp(*_candidate_files(work)),
+            str(work), tuple(sorted(speakers)), tuple(exclude), tuple(foreign), register,
+            gkey, _stamp(*_candidate_files(work)),
         )  # fmt: skip
         if key not in _CANDIDATES_MEMO:
-            _remember(_CANDIDATES_MEMO, key, eligible_references(
+            counts: list[Gated] = []
+            picks = eligible_references(
                 a.assignments.turns, speakers, a.transcript, a.tags, a.vocals, exclude=exclude,
-                foreign=foreign,
-            ))  # fmt: skip
-        out[e] = list(_CANDIDATES_MEMO[key])
+                foreign=foreign, register=register, song_like=song_like, voicing=voicing,
+                voiced_share=songs.voiced_share, pitch_root=ws.root, gated=counts,
+            )  # fmt: skip
+            _remember(_CANDIDATES_MEMO, key, (picks, counts[0] if counts else Gated()))
+        picks, found = _CANDIDATES_MEMO[key]
+        out[e] = list(picks)
+        if gated is not None:
+            gated[e] = found
     return out
 
 
@@ -842,12 +885,15 @@ def character_candidates(
 # registry's part already resolved into speakers and foreign spans) and the files' mtimes
 # and sizes, so every tts run of the batch and every character asks the files once (D32
 # review: a flagged character with no better pick is looked up again on each run).
-_CANDIDATES_MEMO: dict[tuple, list[RefPick]] = {}
+_CANDIDATES_MEMO: dict[tuple, tuple[list[RefPick], Gated]] = {}
 _EXCLUSIONS_MEMO: dict[tuple, list[tuple[float, float]]] = {}
+# each episode's gate 3 evidence (song mask, voicing) and each speaker's register (A1)
+_GATING_MEMO: dict[tuple, tuple] = {}
+_REGISTER_MEMO: dict[tuple, tuple] = {}
 _MEMO_MAX = 4096
 
 
-def _remember(memo: dict, key: tuple, value: list) -> None:
+def _remember(memo: dict, key: tuple, value: object) -> None:
     if len(memo) >= _MEMO_MAX:
         memo.clear()
     memo[key] = value
@@ -1185,18 +1231,21 @@ def find_references(
     ``exclusions`` cache what each episode's files give, across characters."""
     loaded = loaded if loaded is not None else {}
     exclusions = exclusions if exclusions is not None else {}
-    candidates = character_candidates(ws, episodes, cid, exclusions, loaded)
+    gated: dict[str, Gated] = {}
+    candidates = character_candidates(ws, episodes, cid, exclusions, loaded, gated=gated)
     named = {e for e, a in loaded.items() if a is not None and a.names is not None}
     tiers = [candidates]
+    acoustic_gated: dict[str, Gated] = {}
     best = character_references(ws, episodes, cid, candidates=candidates, named=named, acoustic={})
     if best is None:  # the acoustic tier is read only when confirmed turns give no picks
         acoustic = {
             **{e: c for e, c in candidates.items() if e not in named},
             **character_candidates(
                 ws, [e for e in episodes if e in named], cid, exclusions, loaded,
-                acoustic=True,
+                acoustic=True, gated=acoustic_gated,
             ),
         }  # fmt: skip
+        acoustic_gated = {e: g for e, g in gated.items() if e not in named} | acoustic_gated
         tiers.append(acoustic)
         best = character_references(
             ws, episodes, cid, candidates={}, named=named, acoustic=acoustic
@@ -1213,8 +1262,9 @@ def find_references(
     language = (arts.transcript.language if arts else None) or fallback
     vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
     return CharacterRefs(
-        round(seconds, 3), picks, e, vocals, language, confirmed, names_used=bool(named)
-    )
+        round(seconds, 3), picks, e, vocals, language, confirmed, names_used=bool(named),
+        gated=(gated if confirmed else acoustic_gated).get(e),
+    )  # fmt: skip
 
 
 def floor_lines(

@@ -183,6 +183,23 @@ def voiced_share(
     return float((ac[:, lo:hi].max(axis=1) >= strength).mean())
 
 
+def song_like_mask(
+    bg_db: np.ndarray, vo_db: np.ndarray, active: np.ndarray, s: SongSettings
+) -> np.ndarray:
+    """Per second, whether it is song-like: the voice on (``active_share`` of its 100 ms
+    frames) and the bed within ``music_margin_db`` of the voice. The windows of
+    `find_candidates` are scored on this; the A1 reference gate reads it per turn."""
+    return (active >= s.active_share) & (bg_db >= vo_db - s.music_margin_db)
+
+
+def song_like_seconds(
+    background: Path, vocals: Path, settings: SongSettings | None = None
+) -> np.ndarray:
+    """`song_like_mask` over the whole episode, from the separation stems."""
+    s = settings or SongSettings()
+    return song_like_mask(*frame_features(background, vocals, s.active_db), s)
+
+
 def find_candidates(
     bg_db: np.ndarray,
     vo_db: np.ndarray,
@@ -193,7 +210,7 @@ def find_candidates(
     """The best window of the head and of the tail region, scored; ``voiced(start, end)``
     measures the voicing share of a window that passes on energy (no voicing check when
     None)."""
-    good = ((active >= s.active_share) & (bg_db >= vo_db - s.music_margin_db)).astype(np.float64)
+    good = song_like_mask(bg_db, vo_db, active, s).astype(np.float64)
     dur, w = len(good), s.window_s
     if dur < w:
         return []

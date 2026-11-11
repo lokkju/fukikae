@@ -143,3 +143,30 @@ def test_voiced_share_tells_pitched_from_noisy(tmp_path):
     assert voiced_share(p, 0.0, 4.0) > 0.9
     assert voiced_share(p, 4.0, 8.0) < 0.1
     assert voiced_share(p, 8.0, 12.0) == 0.0  # silence: nothing active
+
+
+def test_song_like_mask_is_what_find_candidates_scores():
+    from fukikae.songs import song_like_mask
+
+    bg, vo, act = _episode([(70, 160)])
+    s = SongSettings()
+    mask = song_like_mask(bg, vo, act, s)
+    assert mask.dtype == bool and len(mask) == DUR
+    assert mask[70:160].all() and not mask[:70].any() and not mask[160:].any()
+    head = next(c for c in find_candidates(bg, vo, act, s) if c.region == "head")
+    i = int(head.start) + 1  # the accepted span is padded by pad_s (1 s)
+    assert head.score == pytest.approx(round(float(mask[i : i + s.window_s].mean()), 3))
+
+
+def test_song_like_seconds_reads_the_stems(tmp_path):
+    from fukikae.songs import song_like_mask, song_like_seconds
+
+    rate = 8000
+    t = np.arange(4 * rate) / rate
+    bg = 0.1 * np.sin(2 * np.pi * 200 * t)
+    vo = np.where(t < 2, 0.1 * np.sin(2 * np.pi * 300 * t), 0.0)
+    _wav(tmp_path / "bg.wav", bg, rate)
+    _wav(tmp_path / "vo.wav", vo, rate)
+    got = song_like_seconds(tmp_path / "bg.wav", tmp_path / "vo.wav")
+    want = song_like_mask(*frame_features(tmp_path / "bg.wav", tmp_path / "vo.wav"), SongSettings())
+    assert list(got) == list(want) == [True, True, False, False]

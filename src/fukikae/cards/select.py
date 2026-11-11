@@ -26,6 +26,21 @@ sounds or silence, and is no reference either. Turns overlapping ``exclude``
 (``reference_exclusions``: the theme songs the mix stage's detector finds on the stems, and
 the tag stage's singing spans) are never references:
 separated song vocals are clean and loud, so they would otherwise rank first.
+
+Reference gates (A1, identification workflow). After those checks, ``eligible_references``
+can drop candidates by three gates; they filter only, and the survivors keep the CD5 order.
+With ``register`` (the speaker's majority register in the episode, `speaker_register`), a
+candidate whose median F0 is more than ``REF_PITCH_ST`` (4 semitones) from the register's
+median is ``off_register`` (no pitch gate when the register is ``u``), and one under
+``REF_VOICED_MIN`` (half) voiced frames is ``unvoiced``. With ``song_like`` (the song
+detector's per-second mask, ``songs.song_like_seconds``), a candidate with ``REF_SONG_SHARE``
+(half) or more of its seconds song-like and a voicing share (``voicing``, the detector's
+``songs.voiced_share``) of at least ``voiced_share`` is ``song_like``: an insert song in no
+theme span. Each candidate's verdict (`RefVerdict`) can be collected, and `Gated` counts the
+refusals for ``reference_report``. The fourth gate is about the set: ``pick_references``
+takes at most one clip per scene (starts within ``SCENE_GAP_S``, 60 s, of a taken pick) until
+the floor needs more, so one long scene (an opening narration) can't fill every slot;
+``scene_gap=None`` turns it off (narrators).
 """
 
 from __future__ import annotations
@@ -41,7 +56,15 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW, pcm_float
+from fukikae.pitch import (
+    FEMALE_ABOVE,
+    MALE_BELOW,
+    REF_PITCH_ST,
+    REF_SONG_SHARE,
+    REF_VOICED_MIN,
+    Gender,
+    pcm_float,
+)
 
 if TYPE_CHECKING:
     from fukikae.backends.base import Synthesizer
@@ -120,6 +143,11 @@ class RefPick:
     transcript: str
     snr_db: float
     emotion: str | None = None  # the label when a scored source calls the turn non-neutral
+    # measured by the A1 gates (None when they didn't run): median F0 in Hz, the share of
+    # voiced frames, and the share of the turn's seconds the song detector calls song-like
+    median: float | None = None
+    voiced_fraction: float | None = None
+    song_share: float | None = None
 
     @property
     def seconds(self) -> float:
@@ -289,6 +317,152 @@ def _split(
     return best[0][1]
 
 
+# -- A1: reference gates ----------------------------------------------------------------------
+
+# Gate 4: picks whose starts are this close count as one scene (`pick_references`).
+SCENE_GAP_S = 60.0
+# The song detector's voicing threshold (``SongSettings.voiced_share``), the default for gate 3.
+SONG_VOICED_SHARE = 0.7
+
+Gate = Literal["off_register", "unvoiced", "song_like"]
+GATES: tuple[Gate, ...] = ("off_register", "unvoiced", "song_like")
+type Register = tuple[Gender, float | None]
+
+
+@dataclass(frozen=True)
+class RefVerdict:
+    """One candidate's verdict: the candidate (with what the gates measured), the gates that
+    refuse it (empty when it passes) and its position in the ungated CD5 ranking."""
+
+    pick: RefPick
+    gates: tuple[Gate, ...]
+    rank: int
+
+    @property
+    def passed(self) -> bool:
+        return not self.gates
+
+
+@dataclass(frozen=True)
+class Gated:
+    """How many candidates each gate refused (a candidate refused by several counts under
+    each), and ``top``: how many refused candidates would have ranked in the first three."""
+
+    off_register: int = 0
+    unvoiced: int = 0
+    song_like: int = 0
+    top: int = 0
+
+    def phrase(self) -> str:
+        parts = [
+            f"{n} {label}"
+            for n, label in (
+                (self.off_register, "off-register"),
+                (self.unvoiced, "unvoiced"),
+                (self.song_like, "song-like"),
+            )
+            if n
+        ]
+        return ", ".join(parts)
+
+
+def speaker_register(
+    vocals: Path,
+    spans: Sequence[tuple[float, float]],
+    bands: tuple[float, float] = (MALE_BELOW, FEMALE_ABOVE),
+    root: Path | None = None,
+) -> Register:
+    """The speaker's register in these turns (`fukikae.pitch.majority_register`: the
+    majority class by seconds, each turn classed on its own median) and the median of that
+    class's turns only, so a mixed cluster gets its larger part's register. ``u`` (no class,
+    or a tie) gates no pitch. ``root`` reads through the workspace's pitch cache."""
+    from fukikae.pitch import cached_track, f0_track, majority_register
+
+    spans = list(spans)
+    track = cached_track(root, vocals, spans) if root is not None else f0_track(vocals, spans)
+    gender, summary = majority_register(track, bands)
+    return gender, summary.median
+
+
+def song_share(start: float, end: float, song_like: np.ndarray) -> float:
+    """The share of ``start``-``end`` inside the seconds ``song_like`` marks (second ``i``
+    covers ``i`` to ``i + 1``; past the mask is not song-like)."""
+    if end <= start:
+        return 0.0
+    covered = 0.0
+    for i in range(max(0, int(start)), min(len(song_like), math.ceil(end))):
+        if song_like[i]:
+            covered += max(0.0, min(end, i + 1) - max(start, i))
+    return covered / (end - start)
+
+
+def gate_candidates(
+    ranked: Sequence[RefPick],
+    vocals: Path,
+    *,
+    register: Register | None = None,
+    song_like: np.ndarray | None = None,
+    voicing: Callable[[float, float], float] | None = None,
+    voiced_share: float = SONG_VOICED_SHARE,
+    pitch_root: Path | None = None,
+) -> list[RefVerdict]:
+    """Each of ``ranked``'s verdicts, in order: gates 1 and 2 when ``register`` is given (the
+    candidates' F0 read in one track), gate 3 when ``song_like`` is given (``voicing`` is
+    asked only of a turn the mask calls song-like, and without it the mask alone decides)."""
+    from fukikae.pitch import cached_track, f0_track, summarize
+
+    medians: list[float | None] = [None] * len(ranked)
+    voiced: list[float | None] = [None] * len(ranked)
+    if register is not None and ranked:
+        spans = [(p.start, p.end) for p in ranked]
+        track = (
+            cached_track(pitch_root, vocals, spans)
+            if pitch_root is not None
+            else f0_track(vocals, spans)
+        )
+        for i in range(len(ranked)):
+            summary = summarize(track, i)
+            medians[i], voiced[i] = summary.median, round(summary.voiced_fraction, 3)
+    out: list[RefVerdict] = []
+    for i, p in enumerate(ranked):
+        gates: list[Gate] = []
+        med, frac = medians[i], voiced[i]
+        if register is not None:
+            gender, centre = register
+            off = centre and med and abs(12 * math.log2(med / centre)) > REF_PITCH_ST
+            if gender != "u" and off:
+                gates.append("off_register")
+            if frac is not None and frac < REF_VOICED_MIN:
+                gates.append("unvoiced")
+        share = None
+        if song_like is not None:
+            share = round(song_share(p.start, p.end, song_like), 3)
+            sung = share >= REF_SONG_SHARE and (
+                voicing is None or voicing(p.start, p.end) >= voiced_share
+            )
+            if sung:
+                gates.append("song_like")
+        pick = RefPick(
+            p.start, p.end, p.transcript, p.snr_db, p.emotion,
+            None if med is None else round(med, 1), frac, share,
+        )  # fmt: skip
+        for gate in gates:
+            log.debug("%.2f-%.2f: gated as a reference (%s)", p.start, p.end, gate)
+        out.append(RefVerdict(pick, tuple(gates), i))
+    return out
+
+
+def count_gated(verdicts: Sequence[RefVerdict]) -> Gated:
+    """`Gated` of these verdicts; ``top`` counts refused ones ranked in the first three."""
+    refused = [v for v in verdicts if not v.passed]
+    return Gated(
+        off_register=sum("off_register" in v.gates for v in refused),
+        unvoiced=sum("unvoiced" in v.gates for v in refused),
+        song_like=sum("song_like" in v.gates for v in refused),
+        top=sum(v.rank < 3 for v in refused),
+    )
+
+
 def eligible_references(
     turns: list[Turn],
     speaker: str | Collection[str],
@@ -300,11 +474,24 @@ def eligible_references(
     exclude: Sequence[tuple[float, float]] = (),
     foreign: Sequence[tuple[float, float]] = (),
     join_gap: float = JOIN_GAP_S,
+    register: Register | None = None,
+    song_like: np.ndarray | None = None,
+    voicing: Callable[[float, float], float] | None = None,
+    voiced_share: float = SONG_VOICED_SHARE,
+    pitch_root: Path | None = None,
+    gated: list[Gated] | None = None,
+    verdicts: list[RefVerdict] | None = None,
 ) -> list[RefPick]:
     """Every turn of the speaker that could be a reference (no overlap with another speaker,
     within ``each``, outside ``exclude``, under `FOREIGN_MAX` of it in ``foreign``, with an
     ASR transcript), in ``rank_key`` order. ``select_references`` picks from this list; eval
     tts draws held-out exemplars from it (ruling CD17).
+
+    Then the A1 gates (`gate_candidates`) when ``register`` or ``song_like`` is given: the
+    refused candidates are dropped, the survivors keep their order and carry what the gates
+    measured. ``gated`` receives one `Gated` and ``verdicts`` every candidate's `RefVerdict`
+    (out-parameters, so existing callers are unchanged). A joined candidate a gate refuses is
+    dropped whole, not split again.
 
     Before the length check, the speaker's clean turns (overlapping no other speaker, outside
     ``exclude`` and ``foreign``) at most ``join_gap`` apart (`JOIN_GAP_S`) are joined, when no
@@ -361,7 +548,20 @@ def eligible_references(
     eligible: list[RefPick] = []
     for run in _chains(good, blockers, join_gap):
         eligible += _split(run, pick, each[1])
-    return sorted(eligible, key=rank_key)
+    eligible.sort(key=rank_key)
+    if register is None and song_like is None:
+        if verdicts is not None:
+            verdicts += [RefVerdict(p, (), i) for i, p in enumerate(eligible)]
+        return eligible
+    judged = gate_candidates(
+        eligible, vocals, register=register, song_like=song_like, voicing=voicing,
+        voiced_share=voiced_share, pitch_root=pitch_root,
+    )  # fmt: skip
+    if gated is not None:
+        gated.append(count_gated(judged))
+    if verdicts is not None:
+        verdicts += judged
+    return [v.pick for v in judged if v.passed]
 
 
 def reaches_floor(
@@ -403,32 +603,55 @@ def pick_references(
     total: tuple[float, float] = (FLOOR_S, 20.0),
     min_total: float = 6.0,
     floor_clips: int = FLOOR_CLIPS,
+    scene_gap: float | None = SCENE_GAP_S,
 ) -> list[RefPick] | None:
     """The greedy CD5 fill over ``ranked`` (``eligible_references``' order): up to ``count``
     clips and ``total[1]`` seconds, scored non-neutral turns only to make up the floor
     (``floor_clips`` clips and ``total[0]`` seconds, D32 #2, judged at a tenth as
     `reaches_floor` does); None under ``min_total``.
 
+    One scene (A1 gate 4): a turn starting within ``scene_gap`` seconds of a taken pick is
+    passed over while the fill can still reach the floor without it; only when it falls short
+    are those turns taken, in rank order, until the floor is reached. ``None`` turns the gate
+    off (narrators). The picks come back in rank order.
+
     When the clip cap stops the fill short of the floor, the combinations of ``floor_clips``
     to ``count`` of the `SEARCH_POOL` best-ranked turns within ``total[1]`` that reach it are
-    searched (`_floor_combination`). Under the floor the best picks there are are still
-    returned (`meets_floor` tells)."""
+    searched (`_floor_combination`), one clip per scene preferred. Under the floor the best
+    picks there are are still returned (`meets_floor` tells)."""
+    order = {id(p): i for i, p in enumerate(ranked)}
     picks: list[RefPick] = []
     used = 0.0
-    capped = False
-    for p in ranked:
-        if len(picks) >= count:
-            capped = True
+
+    def floor() -> bool:
+        return reaches_floor([q.seconds for q in picks], total[0], floor_clips)
+
+    def same_scene(p: RefPick) -> bool:
+        return scene_gap is not None and any(abs(p.start - q.start) < scene_gap for q in picks)
+
+    # passes: neutral turns of new scenes (all of them, as CD5 fills), then, each only while
+    # the floor isn't reached, neutral turns of a used scene, scored non-neutral turns of new
+    # scenes, and scored non-neutral turns of a used scene
+    passes = [(False, False), (False, True), (True, False), (True, True)]
+    for emotional, repeat in passes:
+        if (emotional or repeat) and floor():
             break
-        if p.emotion is not None and reaches_floor(
-            [q.seconds for q in picks], total[0], floor_clips
-        ):
-            break  # scored non-neutral turns only make up a shortfall
-        if used + p.seconds <= total[1]:
-            picks.append(p)
-            used += p.seconds
-    if capped and not reaches_floor([q.seconds for q in picks], total[0], floor_clips):
-        found = _floor_combination(ranked, picks, count, total, floor_clips)
+        for p in ranked:
+            if (p.emotion is not None) != emotional or any(p is q for q in picks):
+                continue
+            if len(picks) >= count:
+                break
+            if (emotional or repeat) and floor():
+                break
+            if not repeat and same_scene(p):
+                continue
+            if used + p.seconds <= total[1]:
+                picks.append(p)
+                used += p.seconds
+    picks.sort(key=lambda p: order[id(p)])
+    capped = len(picks) >= count and len(ranked) > len(picks)
+    if capped and not floor():
+        found = _floor_combination(ranked, picks, count, total, floor_clips, scene_gap)
         if found is not None:
             picks = found
             used = sum(p.seconds for p in picks)
@@ -441,28 +664,40 @@ def _floor_combination(
     count: int,
     total: tuple[float, float],
     floor_clips: int,
+    scene_gap: float | None = None,
 ) -> list[RefPick] | None:
     """The best combination of ``floor_clips`` to ``count`` of the `SEARCH_POOL` best-ranked
     turns within ``total[1]`` seconds that reaches the floor, in rank order; None when none
-    does. Best is dropping the fewest of the greedy fill's neutral picks (none, when any
-    combination keeps them all: the floor wins only when it must), then the highest-ranked
-    clips (rank positions compared in order)."""
+    does. Best is the fewest pairs in one scene (starts within ``scene_gap``; A1 gate 4, so a
+    second clip of a scene is taken only when the floor needs it), then dropping the fewest
+    of the greedy fill's neutral picks (none, when any combination keeps them all: the floor
+    wins only when it must), then the highest-ranked clips (rank positions compared in
+    order)."""
     pool = list(ranked[:SEARCH_POOL])
     secs = [p.seconds for p in pool]
     longest = sorted(secs, reverse=True)[:count]
     if not reaches_floor(longest, total[0], floor_clips):
         return None  # no combination can reach it
     neutral = {i for i, p in enumerate(pool) if p.emotion is None and p in greedy}
-    best: tuple[int, tuple[int, ...]] | None = None
+    starts = [p.start for p in pool]
+
+    def repeats(combo: tuple[int, ...]) -> int:
+        if scene_gap is None:
+            return 0
+        return sum(
+            abs(starts[i] - starts[j]) < scene_gap for i, j in itertools.combinations(combo, 2)
+        )
+
+    best: tuple[int, int, tuple[int, ...]] | None = None
     for k in range(floor_clips, count + 1):
         for combo in itertools.combinations(range(len(pool)), k):
             seconds = sum(secs[i] for i in combo)
             if seconds > total[1] or round(seconds, 1) < total[0]:
                 continue
-            key = (len(neutral.difference(combo)), combo)
+            key = (repeats(combo), len(neutral.difference(combo)), combo)
             if best is None or key < best:
                 best = key
-    return None if best is None else [pool[i] for i in best[1]]
+    return None if best is None else [pool[i] for i in best[2]]
 
 
 def select_references(
@@ -477,6 +712,7 @@ def select_references(
     each: tuple[float, float] = (3.0, 12.0),
     min_total: float = 6.0,
     exclude: Sequence[tuple[float, float]] = (),
+    scene_gap: float | None = SCENE_GAP_S,
 ) -> list[RefPick] | None:
     """Reference clips for the speaker (one diarize label, or several of one character), in
     the order taken; None when they add up to less than ``min_total`` seconds. ``total[0]``
@@ -485,7 +721,9 @@ def select_references(
     ranked = eligible_references(
         turns, speaker, transcript, tags, vocals, each=each, exclude=exclude
     )
-    return pick_references(ranked, count=count, total=total, min_total=min_total)
+    return pick_references(
+        ranked, count=count, total=total, min_total=min_total, scene_gap=scene_gap
+    )
 
 
 def reference_exclusions(
@@ -514,10 +752,35 @@ def reference_exclusions(
     return out
 
 
-def reference_report(picks: list[RefPick]) -> list[str]:
-    """The CD5 warning for chosen references a scored source calls non-neutral, if any."""
+def reference_gating(
+    work: Path, settings: Any = None
+) -> tuple[np.ndarray | None, Callable[[float, float], float] | None]:
+    """Gate 3's evidence for an episode work dir: the song detector's per-second song-like
+    mask over the whole episode (``songs.song_like_seconds`` with ``settings``, a
+    ``SongSettings``) and its per-turn voicing share on ``vocals_16k.wav``. (None, None)
+    without the background or vocals stem; no voicing (the mask alone decides) without the
+    16 kHz vocals."""
+    from fukikae import songs
+
+    s = settings or songs.SongSettings()
+    sep = work / "01-separate"
+    background, vocals, v16 = sep / "background.wav", sep / "vocals.wav", sep / "vocals_16k.wav"
+    if not (background.exists() and vocals.exists()):
+        return None, None
+    mask = songs.song_like_seconds(background, vocals, s)
+    if not v16.exists():
+        return mask, None
+    return mask, lambda a, b: songs.voiced_share(v16, a, b, s.voiced_strength)
+
+
+def reference_report(picks: list[RefPick], gated: Gated | None = None) -> list[str]:
+    """The CD5 warning for chosen references a scored source calls non-neutral, if any, and
+    the A1 line when a gate refused a candidate that would have ranked in the first three."""
     labels = sorted({p.emotion for p in picks if p.emotion})
-    return [f"references may carry emotion: {', '.join(labels)}"] if labels else []
+    out = [f"references may carry emotion: {', '.join(labels)}"] if labels else []
+    if gated is not None and gated.top > 0:
+        out.append(f"gated: {gated.phrase()}")
+    return out
 
 
 def cut_clip(vocals: Path, start: float, end: float, dest: Path, rate: int = CLIP_RATE) -> Path:

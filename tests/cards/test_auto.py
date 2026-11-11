@@ -771,7 +771,7 @@ def test_without_names_reference_selection_is_unchanged(tmp_path: Path):
     `eligible_references` over its labels gives (the selection before names existed)."""
     from fukikae.artifacts import read_json
     from fukikae.cards.auto import character_candidates, character_references
-    from fukikae.cards.select import eligible_references, pick_references
+    from fukikae.cards.select import eligible_references, pick_references, speaker_register
     from fukikae.models import Transcript
     from fukikae.workspace import Workspace
 
@@ -780,8 +780,10 @@ def test_without_names_reference_selection_is_unchanged(tmp_path: Path):
     ws = Workspace(tmp_path / "ws")
     turns = [Turn(start=a, end=b, speaker=s) for a, b, s, _ in NATSU_TURNS]
     tr = read_json(work / "03-asr" / "transcript.json", Transcript)
-    want = eligible_references(turns, {"S0~natsu", "S0"}, tr, None,
-                               work / "01-separate" / "vocals.wav", exclude=[])  # fmt: skip
+    vocals = work / "01-separate" / "vocals.wav"
+    register = speaker_register(vocals, [(t.start, t.end) for t in turns], (165.0, 200.0))
+    want = eligible_references(turns, {"S0~natsu", "S0"}, tr, None, vocals, exclude=[],
+                               register=register)  # fmt: skip
     assert character_candidates(ws, [NAMED_EP], 1)[NAMED_EP] == want
     picks = pick_references(want)
     assert picks is not None and character_references(ws, [NAMED_EP], 1) == (
@@ -1568,3 +1570,101 @@ def test_reference_candidates_are_read_once_per_process_until_a_file_changes(
     os.utime(tr, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
     find_references(ws, [FLOOR_EP], 1, "ja")
     assert calls == {"eligible": 2, "exclusions": 1}
+
+
+# -- A1: reference gates in the candidates ------------------------------------------------------
+
+# Natsu's name-confirmed turns at 130 Hz, one loud confirmed turn at 240 Hz (someone else's
+# shout the names gave him).
+GATE_TURNS = [
+    (0.0, 5.0, "S0~natsu", 0.02), (30.0, 35.0, "S0~natsu", 0.02),
+    (60.0, 65.0, "S0~natsu", 0.0005), (90.0, 95.0, "S0~natsu", 0.02),
+]  # fmt: skip
+GATE_HZ = [130.0, 130.0, 240.0, 130.0]
+
+
+def _ws_gated(tmp_path: Path):
+    from fukikae.workspace import Workspace
+    from tests.cards.test_select import _voices
+
+    reg, ids = _registry(tmp_path, 2)
+    clusters = [{"cluster": "S0~natsu", "character_id": 1, "name": "natsu", "source": "name"}]
+    names = [(a, b, "natsu", False) for a, b, _, _ in GATE_TURNS]
+    work = _named_episode(tmp_path / "ws", NAMED_EP, GATE_TURNS, clusters, names=names)
+    _voices(
+        work / "01-separate" / "vocals.wav",
+        [(a, b, hz, n) for (a, b, _, n), hz in zip(GATE_TURNS, GATE_HZ, strict=True)],
+        seconds=120.0,
+    )
+    return reg, ids, Workspace(tmp_path / "ws")
+
+
+def test_name_confirmed_candidates_skip_the_register_gate(tmp_path: Path):
+    """Names vouch for who speaks, so the name-confirmed tier keeps an off-register turn
+    (Erza's calm alto against her shouted register, FT E13); the voicing, song and scene
+    gates still run there."""
+    from fukikae.cards.auto import character_candidates
+    from fukikae.cards.select import Gated
+
+    reg, _, ws = _ws_gated(tmp_path)
+    gated: dict[str, Gated] = {}
+    got = character_candidates(ws, [NAMED_EP], 1, gated=gated)[NAMED_EP]
+    assert sorted(p.start for p in got) == [0.0, 30.0, 60.0, 90.0]
+    assert all(p.voiced_fraction is not None for p in got)  # gate 2 measured them
+    assert gated[NAMED_EP] == Gated()
+    assert any((ws.root / ".fukikae" / "pitch-cache").glob("*.npz"))
+    reg.close()
+
+
+def test_acoustic_candidates_are_gated_by_the_register(tmp_path: Path):
+    """The acoustic tier (no names, or the character's remainders) is where a cluster mixes
+    voices: there the 240 Hz turn among 130 Hz speech is gated."""
+    from fukikae.cards.auto import character_candidates
+    from fukikae.cards.select import Gated
+
+    reg, _, ws = _ws_gated(tmp_path)
+    gated: dict[str, Gated] = {}
+    got = character_candidates(ws, [NAMED_EP], 1, acoustic=True, gated=gated)[NAMED_EP]
+    assert sorted(p.start for p in got) == [0.0, 30.0, 90.0]
+    assert gated[NAMED_EP] == Gated(off_register=1, unvoiced=0, song_like=0, top=1)
+    reg.close()
+
+
+def test_the_clone_note_names_gated_top_candidates(tmp_path: Path):
+    from fukikae.cards.auto import find_references
+
+    reg, _, ws = _ws_gated(tmp_path)
+    from fukikae.cards.select import reference_report
+
+    names = ws.work_dir(NAMED_EP) / "04c-names" / "names.json"
+    names.unlink()  # no names: the acoustic tier, where the register gate runs
+    (names.parent / "turns.json").unlink()
+    found = find_references(ws, [NAMED_EP], 1, "ja")
+    assert found.picks is not None and not any(p.start == 60.0 for p in found.picks)
+    assert found.gated is not None and found.gated.top == 1
+    assert "gated: 1 off-register" in reference_report(found.picks, found.gated)
+    reg.close()
+
+
+def test_the_register_reads_the_pitch_bands_not_a_profile_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A workspace band of 300 Hz (the anime profile's, tuned on the old estimator) must not
+    make the register the median of only the turns above 300 Hz."""
+    from fukikae.cards import auto, select
+    from fukikae.workspace import Workspace
+
+    reg, _, ws = _ws_gated(tmp_path)
+    gender = "[tts.gender]\nmale_below = 165.0\nfemale_above = 300.0\n"
+    (ws.root / "fukikae.toml").write_text(gender)
+    seen: list[tuple[float, float]] = []
+    real = select.speaker_register
+
+    def spy(vocals, spans, bands=(165.0, 200.0), root=None):
+        seen.append(bands)
+        return real(vocals, spans, bands, root)
+
+    monkeypatch.setattr(select, "speaker_register", spy)
+    auto.character_candidates(Workspace(ws.root), [NAMED_EP], 1)
+    assert seen == [(165.0, 200.0)]
+    reg.close()
