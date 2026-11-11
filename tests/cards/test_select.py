@@ -659,20 +659,44 @@ def test_mixed_cluster_uses_its_majority_register(tmp_path):
     assert picks and all(p.start >= 100 for p in picks)
 
 
-def test_bimodal_cluster_gates_no_pitch_and_needs_a_split(tmp_path):
-    """Character 10's shape: two male turns (12 s, 29%) and five female: two voices, so the
-    register gate is skipped and the speaker is flagged as needing a split."""
-    from fukikae.cards.select import SPLIT_NOTE, Gated, eligible_references, speaker_register
+def test_dominant_bimodal_cluster_keeps_the_gate_and_needs_a_split(tmp_path):
+    """Controller ruling (a), character 7's shape: two male turns (12 s) against eight female
+    (48 s), 4:1: bimodal, so flagged as needing a split, but the majority has at least twice
+    the minority's seconds, so the cross-class gate refuses the male candidates."""
+    from fukikae.cards.select import (
+        SPLIT_GATED_NOTE,
+        Gated,
+        eligible_references,
+        speaker_register,
+    )
 
     spans = [(10, 16, 120.0, 0.0005), (30, 36, 125.0, 0.0005)]
-    spans += [(100 + 20 * i, 106 + 20 * i, 240.0, 0.01) for i in range(5)]
+    spans += [(100 + 20 * i, 106 + 20 * i, 240.0, 0.01) for i in range(8)]
     turns, tr, vocals = _gate_case(tmp_path, spans)
     register = speaker_register(vocals, [(t.start, t.end) for t in turns], (165.0, 200.0))
-    assert register.gender == "f" and register.bimodal
+    assert register.gender == "f" and register.bimodal and not register.even
     gated: list[Gated] = []
     picks = eligible_references(turns, "A", tr, None, vocals, register=register, gated=gated)
-    assert {10, 30} <= {p.start for p in picks}
-    assert gated[0].split and gated[0].off_register == 0
+    assert picks and not {10, 30} & {p.start for p in picks}
+    assert gated[0].split and not gated[0].even and gated[0].off_register == 2
+    assert SPLIT_GATED_NOTE in reference_report(picks, gated[0])
+
+
+def test_near_even_bimodal_cluster_gates_no_pitch_and_needs_a_split(tmp_path):
+    """FT E14 Nebaru's shape: four male turns (20 s) against three female (21 s), 1.05:1:
+    two voices of about equal weight, so the register gate is skipped and the speaker is
+    flagged as needing a split."""
+    from fukikae.cards.select import SPLIT_NOTE, Gated, eligible_references, speaker_register
+
+    spans = [(10 + 20 * i, 15 + 20 * i, 120.0, 0.0005) for i in range(4)]
+    spans += [(200 + 20 * i, 207 + 20 * i, 240.0, 0.01) for i in range(3)]
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    register = speaker_register(vocals, [(t.start, t.end) for t in turns], (165.0, 200.0))
+    assert register.gender == "f" and register.bimodal and register.even
+    gated: list[Gated] = []
+    picks = eligible_references(turns, "A", tr, None, vocals, register=register, gated=gated)
+    assert {10, 30, 50, 70} & {p.start for p in picks}
+    assert gated[0].split and gated[0].even and gated[0].off_register == 0
     assert SPLIT_NOTE in reference_report(picks, gated[0])
 
 
@@ -728,6 +752,48 @@ def test_song_like_candidate_is_gated_outside_theme_spans(tmp_path):
     by = {v.pick.start: v for v in verdicts}
     assert by[300].gates == ("song_like",) and by[300].pick.sung
     assert by[400].pick.song_share == 1.0 and not by[400].pick.sung
+
+
+def test_candidate_mostly_inside_an_accepted_song_span_is_song_like(tmp_path):
+    """Controller ruling (b): a candidate half or more inside a song span the song detector
+    accepted is refused by gate 3, sung or not (the detector already judged the span sung);
+    one under half inside is judged by the mask and sung-ness alone."""
+    from fukikae.cards.select import RefVerdict, eligible_references
+
+    turns = [Turn(start=s, end=s + 8, speaker="A") for s in (100, 300, 400)]
+    vocals = _clips(
+        tmp_path / "v.wav",
+        [(100, speech(400, 8, seed=1)), (300, speech(400, 8, seed=3)),
+         (400, speech(400, 8, seed=2))],
+    )  # fmt: skip
+    verdicts: list[RefVerdict] = []
+    picks = eligible_references(
+        turns, "A", _transcript(turns), None, vocals, song_spans=[(296.0, 304.0), (405.0, 420.0)],
+        verdicts=verdicts,
+    )  # fmt: skip
+    by = {v.pick.start: v for v in verdicts}
+    assert by[300].gates == ("song_like",) and not by[300].pick.sung  # 4 of 8 s inside
+    assert by[400].gates == ()  # 3 of 8 s inside
+    assert sorted(p.start for p in picks) == [100, 400]
+
+
+def test_song_span_gate_reads_the_detectors_accepted_spans(tmp_path, monkeypatch):
+    """``select.song_spans``: the theme detector's accepted spans, and nothing without the
+    stems (the singing tags are no part of it)."""
+    from fukikae import songs
+    from fukikae.cards import select
+
+    work = tmp_path
+    sep = work / "01-separate"
+    sep.mkdir()
+    for name in ("background.wav", "vocals.wav", "vocals_16k.wav"):
+        (sep / name).write_bytes(b"")
+    monkeypatch.setattr(
+        songs, "detect_theme_songs",
+        lambda *_a, **_k: ([songs.SongSpan(65.0, 147.0, "detector", 0.9)], []),
+    )  # fmt: skip
+    assert select.song_spans(work) == [(65.0, 147.0)]
+    assert select.song_spans(tmp_path / "none") == []
 
 
 def test_verdicts_name_every_gate_per_turn(tmp_path):

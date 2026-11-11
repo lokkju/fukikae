@@ -1701,6 +1701,27 @@ def test_impure_cards_measure_each_reference_on_its_origin(tmp_path: Path):
     reg.close()
 
 
+def test_impure_cards_refuse_a_reference_inside_an_accepted_song_span(tmp_path: Path, monkeypatch):
+    """Controller ruling (b): a card's reference lying half or more inside a song span the
+    song detector accepted fails gate 3 (the exclusions keep new picks out of theme songs;
+    an old card's references are judged here)."""
+    from fukikae.cards import select
+    from fukikae.cards.auto import _GATING_MEMO, _SONG_SPANS_MEMO, impure_cards
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0)])
+    _GATING_MEMO.clear()
+    _SONG_SPANS_MEMO.clear()
+    monkeypatch.setattr(select, "song_spans", lambda _work, _settings=None: [(-1.0, 3.0)])
+    found = impure_cards(ws, reg, store, "en")
+    assert list(found) == [1] and found[1].card_id == old
+    (ref,) = found[1].refs
+    assert (ref["start"], ref["gate"]) == (0.0, "song_like")
+    _SONG_SPANS_MEMO.clear()
+    reg.close()
+
+
 def test_auto_card_with_an_off_register_reference_is_repicked(tmp_path: Path, vocals: Path):
     from fukikae.cards.auto import PURITY_NOTE, impure_cards
 

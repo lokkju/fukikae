@@ -17,6 +17,7 @@ from fukikae.pitch import (
     bimodal,
     cached_track,
     classify,
+    even_bimodal,
     f0_track,
     majority_register,
     summarize,
@@ -260,6 +261,18 @@ def test_bimodal_needs_seconds_and_share():
     assert bimodal({"m": 19, "u": 34, "f": 70}) and not bimodal({"m": 6, "u": 47, "f": 177})
     assert not bimodal({"m": 4, "u": 0, "f": 10})  # share but under 5 s
     assert not bimodal({"m": 0, "u": 30, "f": 0})
+
+
+def test_even_bimodal_when_the_majority_has_under_twice_the_minority():
+    """Controller ruling (a): a bimodal cluster whose majority class has 2x the minority's
+    seconds or more keeps the cross-class gate; a near-even one (FT E14 Nebaru, 25.5/26.9 s)
+    skips it. A cluster that is not bimodal is never even."""
+    assert even_bimodal({"m": 25.5, "u": 3, "f": 26.9})
+    assert not even_bimodal({"m": 12, "u": 0, "f": 48})  # 4:1 (SB char 7)
+    assert not even_bimodal({"m": 12, "u": 0, "f": 29})  # 2.4:1 (SB char 10)
+    assert not even_bimodal({"m": 10, "u": 0, "f": 20})  # exactly 2x gates
+    assert even_bimodal({"m": 10.1, "u": 0, "f": 20})
+    assert not even_bimodal({"m": 4, "u": 0, "f": 4.2})  # not bimodal: under 5 s
 
 
 def test_cached_track_is_reused_and_keyed_by_spans(tmp_path: Path, monkeypatch):

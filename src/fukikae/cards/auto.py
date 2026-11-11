@@ -277,16 +277,18 @@ def impure_cards(
     selection gives (`select.measure_candidates`, `select.verdict`): the speaker's own turns
     inside the span, its register in that episode (skipped, as selection skips it, for a
     reference inside the character's name-confirmed turns of a names-used episode), the song
-    mask. Gate 4 is about the set, which the floor judges. Cards of any ``chosen_by`` are
-    listed (the caller decides by `replace_refusal`: a curated, imported or locked card is
-    only flagged); a reference without an episode origin (``voices clone``'s ``{"source":
-    "voices clone"}``) or in an episode without artifacts is never judged."""
+    mask and the song detector's accepted spans. Gate 4 is about the set, which the floor
+    judges. Cards of any ``chosen_by`` are listed (the caller decides by `replace_refusal`:
+    a curated, imported or locked card is only flagged); a reference without an episode
+    origin (``voices clone``'s ``{"source": "voices clone"}``) or in an episode without
+    artifacts is never judged."""
     from fukikae.cards.card import CardError
     from fukikae.cards.select import (
         Register,
         measure_candidates,
         reference_gating,
         song_share,
+        song_spans,
         speaker_register,
         verdict,
     )
@@ -346,6 +348,9 @@ def impure_cards(
             if gkey not in _GATING_MEMO:
                 _remember(_GATING_MEMO, gkey, reference_gating(work, songs))
             mask = _GATING_MEMO[gkey]
+            if gkey not in _SONG_SPANS_MEMO:
+                _remember(_SONG_SPANS_MEMO, gkey, song_spans(work, songs))
+            accepted = _SONG_SPANS_MEMO[gkey]
             register: Register | None = None
             if own_spans:
                 rspans = [(t.start, t.end) for t in turns if t.speaker in own]
@@ -369,8 +374,9 @@ def impure_cards(
                     reg_here = Register("u", register.median)
                 share = None if mask is None else song_share(start, end, mask)
                 gates = verdict(
-                    m, register=reg_here or Register("u", None), song=share, bands=bands
-                )
+                    m, register=reg_here or Register("u", None), song=share, bands=bands,
+                    in_song=share_inside(start, end, accepted) if accepted else None,
+                )  # fmt: skip
                 if gates:
                     failing.append({
                         "episode": e, "start": start, "end": end, "gate": gates[0],
@@ -1024,9 +1030,10 @@ def character_candidates(
     `gender_thresholds`: a profile band tuned on the old estimator, such as the anime
     profile's 300 Hz pending D44, would keep only the turns above it and push the register
     up by 2 to 4 semitones on Sol Bianca). The voicing gate runs in both tiers, gate 3 reads
-    the song detector's per-second mask (``select.reference_gating``) and each candidate's
-    sung-ness, and the pitch tracks go through the workspace's pitch cache. ``gated``
-    receives each episode's `Gated` counts (``split`` when the register is bimodal).
+    the song detector's per-second mask (``select.reference_gating``) with each candidate's
+    sung-ness, and its accepted song spans (``select.song_spans``), and the pitch tracks go
+    through the workspace's pitch cache. ``gated`` receives each episode's `Gated` counts
+    (``split`` when the register is bimodal, ``even`` when no register gate ran for it).
 
     In an episode whose names were used (``owner`` answers keys, the workspace's registry by
     default), the candidates are the character's name-confirmed turns (`confirmed_labels`),
@@ -1039,6 +1046,7 @@ def character_candidates(
         eligible_references,
         reference_exclusions,
         reference_gating,
+        song_spans,
         speaker_register,
     )
     from fukikae.stages.mix import mix_settings
@@ -1085,6 +1093,9 @@ def character_candidates(
         if gkey not in _GATING_MEMO:
             _remember(_GATING_MEMO, gkey, reference_gating(work, songs))
         song_like = _GATING_MEMO[gkey]
+        if gkey not in _SONG_SPANS_MEMO:
+            _remember(_SONG_SPANS_MEMO, gkey, song_spans(work, songs))
+        accepted = _SONG_SPANS_MEMO[gkey]
         spans = [(t.start, t.end) for t in a.assignments.turns if t.speaker in speakers]
         rkey = (str(work), tuple(spans), bands, _stamp(a.vocals))
         if rkey not in _REGISTER_MEMO:
@@ -1101,7 +1112,7 @@ def character_candidates(
             picks = eligible_references(
                 a.assignments.turns, speakers, a.transcript, a.tags, a.vocals, exclude=exclude,
                 foreign=foreign, register=register, song_like=song_like, bands=bands,
-                pitch_root=ws.root, gated=counts,
+                pitch_root=ws.root, gated=counts, song_spans=accepted,
             )  # fmt: skip
             _remember(_CANDIDATES_MEMO, key, (picks, counts[0] if counts else Gated()))
         picks, found = _CANDIDATES_MEMO[key]
@@ -1120,6 +1131,7 @@ _CANDIDATES_MEMO: dict[tuple, tuple[list[RefPick], Gated]] = {}
 _EXCLUSIONS_MEMO: dict[tuple, list[tuple[float, float]]] = {}
 # each episode's gate 3 evidence (the song mask) and each speaker's register (A1)
 _GATING_MEMO: dict[tuple, np.ndarray | None] = {}
+_SONG_SPANS_MEMO: dict[tuple, list[tuple[float, float]]] = {}
 _REGISTER_MEMO: dict[tuple, Register] = {}
 _MEMO_MAX = 4096
 

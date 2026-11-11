@@ -79,6 +79,11 @@ SUNG_JITTER_ST = 0.4
 SUNG_RUN_S = 0.2
 BIMODAL_MIN_S = 5.0
 BIMODAL_MIN_SHARE = 0.15
+# A bimodal cluster whose majority class has at least this many times the minority's seconds
+# still has a register the reference gate can read (controller ruling (a): Sol Bianca's char 7
+# at 4:1 and char 10 at 2.4:1 are one voice with a stray other); under it the two voices are
+# near even (Fairy Tail E14's Nebaru cluster, 25.5 against 26.9 s) and no register gate runs.
+BIMODAL_GATE_RATIO = 2.0
 
 FRAME_S = 0.040
 HOP_S = 0.020
@@ -416,6 +421,14 @@ def bimodal(seconds: Mapping[str, float]) -> bool:
     m, f = float(seconds.get("m", 0.0)), float(seconds.get("f", 0.0))
     minor, classified = min(m, f), m + f
     return classified > 0 and minor >= BIMODAL_MIN_S and minor / classified >= BIMODAL_MIN_SHARE
+
+
+def even_bimodal(seconds: Mapping[str, float]) -> bool:
+    """Whether the turns are `bimodal` with the major of ``m`` and ``f`` under
+    ``BIMODAL_GATE_RATIO`` times the minor's seconds: two voices of comparable weight, where
+    no majority register speaks for the cluster."""
+    m, f = float(seconds.get("m", 0.0)), float(seconds.get("f", 0.0))
+    return bimodal(seconds) and max(m, f) < BIMODAL_GATE_RATIO * min(m, f)
 
 
 # -- cache ------------------------------------------------------------------------------------
