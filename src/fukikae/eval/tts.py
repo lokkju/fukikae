@@ -12,16 +12,16 @@ in the name means a swapped card or changed text renders again instead of reusin
 Metrics, per character and overall:
 
 - ``speaker_similarity``: WeSpeaker cosine between each render and the normalized mean of the
-  character's references: the clips ``cards.select.select_references`` picks from the sampled
-  episodes (``similarity_source = "references"``), the same spans a clone card of this run is
-  cut from, for every backend, so stock and clone renders are on one scale (the plan's
-  decision). A character with too little clean speech for that is compared with the clips of
-  its card when it has some (``"card"``), else with its three longest diarize turns no other
-  speaker overlaps (``"original"``). Across languages the original voice is another actor in another
-  language, so stock numbers are low by construction; they are a floor, not a verdict.
-  Each source has its own metric (``speaker_similarity_references``, ``_card``, ``_original``);
-  ``speaker_similarity``, the report's headline, exists only when every sampled character
-  shares one source, so the two kinds are never pooled.
+  character's references: the clips ``cards.auto.character_references`` picks from the sampled
+  episodes at ``cards.auto.PRE_FLOOR_S`` (``similarity_source = "references"``), the same spans
+  a clone card of this run is cut from, for every backend, so stock and clone renders are on one
+  scale (the plan's decision). A character with too little clean speech for that is compared
+  with the clips of its card when it has some (``"card"``), else with its three longest diarize
+  turns no other speaker overlaps (``"original"``). Across languages the original voice is
+  another actor in another language, so stock numbers are low by construction; they are a floor,
+  not a verdict. Each source has its own metric (``speaker_similarity_references``, ``_card``,
+  ``_original``); ``speaker_similarity``, the report's headline, exists only when every sampled
+  character shares one source, so the two kinds are never pooled.
 - ``speaker_similarity_heldout`` (ruling CD17): the same against held-out exemplars, up to 3
   eligible turns (``heldout_exemplars``) of the sampled episodes that are neither reference
   picks nor overlapping any sampled cue's delivery reference (a clone hears that span as its

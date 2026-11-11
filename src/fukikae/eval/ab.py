@@ -6,7 +6,8 @@ A spec (TOML) names one or more sets, each a workspace, an episode and the candi
 ``qwen3_tts:xvector``). For each set:
 
 1. The cues ``eval tts`` samples (``sample_cues``, 8 per character, seed 0) are rendered for
-   every candidate with the cards ``eval tts`` builds (clone cards from ``select_references``,
+   every candidate with the cards ``eval tts`` builds (clone cards from
+   ``cards.auto.character_references`` at ``PRE_FLOOR_S``,
    stock cards for a stock backend), through the tts stage's own path, including the rate fit
    (``render_for_slot``, ruling CD12). Renders already in ``.fukikae/tts-cache`` are reused;
    anything missing is rendered on the workspace's GPU under ``gpu_lock`` (ruling CD15).

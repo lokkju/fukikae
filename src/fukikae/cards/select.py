@@ -1,5 +1,6 @@
-"""Choosing a character's voice from the original audio: a gender estimate for the stock pools
-(the median F0 from ``fukikae.pitch``), and reference clips for clone cards.
+"""Choosing a character's voice from the original audio: reference clips for clone cards, and
+a gender estimate (``speaker_f0`` and ``gender_of``: the median F0 from ``fukikae.pitch``) that
+only ``eval tts``'s stock baselines read.
 
 Reference selection (``select_references``, ruling CD5): a character's turns that overlap no
 other speaker's turn, last 3 to 12 s and have an ASR transcript are ranked by signal-to-noise
@@ -139,17 +140,6 @@ def gender_of(
 
     summary = F0Summary(f0, f0, f0, f0, voiced_s=0.0, seconds=0.0, voiced_fraction=0.0)
     return classify(summary, male_below, female_above, min_voiced_s=0.0).gender
-
-
-def estimate_gender(
-    vocals: Path,
-    spans: list[tuple[float, float]],
-    male_below: float = MALE_BELOW,
-    female_above: float = FEMALE_ABOVE,
-) -> Literal["f", "m", "u"]:
-    """``m`` under ``male_below`` (165 Hz) median F0, ``f`` over ``female_above`` (200 Hz),
-    else (or with too little voiced speech) ``u``."""
-    return gender_of(speaker_f0(vocals, spans)[0], male_below, female_above)
 
 
 # -- reference selection (ruling CD5) -------------------------------------------------------
@@ -883,7 +873,10 @@ def select_references(
     scene_gap: float | None = SCENE_GAP_S,
 ) -> list[RefPick] | None:
     """Reference clips for the speaker (one diarize label, or several of one character), in
-    the order taken; None when they add up to less than ``min_total`` seconds. ``total[0]``
+    the order taken; None when they add up to less than ``min_total`` seconds. The CD5 rules
+    over one episode's turns with no A1 gate, kept for the tests that pin those rules; the
+    tts stage and ``eval tts`` pick through ``cards.auto`` (`tiered_references`,
+    ``character_references``). ``total[0]``
     is the preferred minimum (the spec's 10 to 20 s), the floor's seconds with 2 clips (D32);
     the greedy fill stops at ``total[1]``."""
     ranked = eligible_references(

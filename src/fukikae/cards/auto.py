@@ -108,7 +108,6 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "AUTOMATIC_BY",
-    "FALLBACK_BY",
     "FLOOR_NOTE",
     "REPICK_NOTE",
     "STOCK_NOTE",

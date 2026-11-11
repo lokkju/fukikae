@@ -9,7 +9,7 @@ import pytest
 from fukikae.cards import auto, stock
 from fukikae.cards.auto import character_spans, ensure_assignments
 from fukikae.cards.card import CardError, card_id, parse_card
-from fukikae.cards.select import estimate_gender
+from fukikae.cards.select import gender_of, speaker_f0
 from fukikae.cards.stock import stock_card
 from fukikae.cards.store import CardStore
 from fukikae.config import Config
@@ -59,6 +59,11 @@ def test_parse_stock_ref():
     for bad in ("stock:kokoro", "stock::af_heart", "kokoro:af_heart", "stock:kokoro:"):
         with pytest.raises(CardError):
             stock.parse_stock_ref(bad)
+
+
+def estimate_gender(vocals: Path, spans, **bands) -> str:
+    """The median-F0 gender eval tts reads for its stock baselines."""
+    return gender_of(speaker_f0(vocals, spans)[0], **bands)
 
 
 def test_estimate_gender_on_synthetic_tones(vocals: Path):
