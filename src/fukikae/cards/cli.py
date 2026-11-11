@@ -225,6 +225,7 @@ def assign(
                 ref = store.put(e.card)
                 _echo(f"card {e.card_id} was stored under the old id rules; it is card {ref} now")
                 card = store.get(ref)
+            _refuse_stock(card, f"card {ref}")
             if card.target_language != language:
                 raise _fail(
                     f"card {ref} is for target language {card.target_language!r}, not "
@@ -253,6 +254,13 @@ CLIP_SECONDS = (3.0, 30.0)
 STOCK_RETIRED = (
     "stock voices are retired (D41); `fukikae voices clone` or `fukikae studio` makes a clone"
 )
+
+
+def _refuse_stock(card: Card, what: str) -> None:
+    """Stop with `STOCK_RETIRED` when ``card`` is a stock voice: no operator path assigns
+    one (D41)."""
+    if card.voice.source == "stock":
+        raise _fail(f"{what} is a stock voice; nothing changed. {STOCK_RETIRED}")
 
 
 def _check_clone_card(store: CardStore, card_id: str, who: str, language: str) -> None:
@@ -484,6 +492,7 @@ def revert(
                     f"card {a.card_id} is not in the card store ({store.root}); nothing was "
                     "reverted. Restore the card file or pick another history row with --to"
                 )
+            _refuse_stock(store.get(a.card_id), f"card {a.card_id}")  # rolls the revert back
         _echo(f"{_label(char)} {language}: card {a.card_id} (history row {a.n})")
 
 
@@ -544,6 +553,7 @@ def edit(workspace: Path = _WS, character: str = _CHAR, lang: str | None = _LANG
             new = parse_card(text)
         except CardError as e:
             raise _fail(f"the edited card is invalid, nothing changed: {e}") from e
+        _refuse_stock(new, "the edited card")
         if new.target_language != language:
             raise _fail(
                 f"the edited card is for target language {new.target_language!r}, not "
@@ -604,6 +614,7 @@ def derive(
                 f"({existing.by}, {_state(existing)}); pass --replace to replace it"
             )
         old = store.get(cur.card_id)
+        _refuse_stock(old, f"card {cur.card_id}")
         style = None
         if old.style:
             style = dict(old.style)
