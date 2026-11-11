@@ -4,13 +4,13 @@ Plan: `docs/superpowers/plans/2026-11-08-ground-truth.md`. Rulings GT1-GT12 are 
 
 ## Task 7: live-action test sets and baselines (BBT en/de/es, Alice in Borderland)
 
-Run 2026-11-08 at dcb4935 (code at 4591303 plus the alignment fix below). Kaze, Kaoru is split off to Task 7b (GT7): its three MagicStar packs were still downloading (about 10-16% allocated at 11:12 UTC, under `downloads/torrents/incomplete/tv/` on the parent export `/mnt/mega/media/ums`).
+Run 2026-11-08 at dcb4935 (code at 4591303 plus the alignment fix below). Kaze, Kaoru is split off to Task 7b (GT7): its three weekly packs were still arriving on the media share (about 10-16% allocated at 11:12 UTC).
 
 ### Media (Step 1)
 
 `df -h /`: 136 GB free before the copy, 129 GB after; 118 GB free at the end of the task.
 
-| Set | Files (library, read-only volume on `/mnt/mega/media/ums/media`) | Streams |
+| Set | Files (library, read-only volume on the NAS media share) | Streams |
 |---|---|---|
 | BBT S01E01-E03 | `The Big Bang Theory - S01E0N - <title> Bluray-1080p.mkv` (1378 s, 1269 s, 1326 s) | 0 hevc; audio 1 eng, 2 ger, 3 spa (aac); subtitles 4 eng, 5 fre, 6 ger, 7 spa, 8 spa, all `dvd_subtitle` (image) |
 | Alice in Borderland S01E01-E03 | `Alice in Borderland (2020) - S01E0N - Episode N WEBDL-720p.mkv` (2912 s, 3040 s, 2549 s) | audio 1 eng, 2 jpn (eac3); subtitle 19 jpn "Japanese" (SDH, SubRip) and 20 jpn "Forced" on all three; no E04 substitute needed |
@@ -42,7 +42,7 @@ Run 2026-11-08 at dcb4935 (code at 4591303 plus the alignment fix below). Kaze, 
 
 ### Kaze, Kaoru: the steps that need no audio (done ahead of Task 7b)
 
-- I ran subalign by text, ARIB .ass against the MagicStar .srt, on all 15 episodes into `~/fukikae-ws/subs/kaze-kaoru/aligned/S01E<NN>.ass`. Every episode has 100% inliers. The offset is -0.50 to -0.55 s, the scale 0.999986 to 1.000060, the rms 7-13 ms and the max residual 17-30 ms. E01 has 151 anchors and E11 has 144.
+- I ran subalign by text, ARIB .ass against the web release's .srt, on all 15 episodes into `~/fukikae-ws/subs/kaze-kaoru/aligned/S01E<NN>.ass`. Every episode has 100% inliers. The offset is -0.50 to -0.55 s, the scale 0.999986 to 1.000060, the rms 7-13 ms and the max residual 17-30 ms. E01 has 151 anchors and E11 has 144.
 - `eval colour-map` over E01-E15 writes `~/fukikae-ws/kaze/labels-colours.yaml`: cyan -> 直美, green -> 真風, yellow -> りん. There are no conflicts. Green is tagged （真風） only from E05 on, and white stays unmapped.
 - Labels with GT4 over E01-E15: りん 691, 直美 354, 真風 83, 美津 29, 吉江 25, 安 17, 信右衛門 13, 捨松 13, 環 13, 虎太郎 12, 卯三郎 12, 文 11, and minor characters. Per episode: E01 109 lines (真風 29, all narration), E02 63, E03 78, E11 97.
 - 155 furigana events (`\fscy50`) are flagged `ruby` and skipped. Kaze goes through `read_cues` and `read_colour` only, never through `ass_names`' own parser, which is reached only with `--gt ass`.
@@ -85,13 +85,13 @@ Run 2026-11-09 at b60013d, no code change. Per GT11, E11 (held-out) is not copie
 
 ### Media
 
-Week 1 (`[MagicStar] Kaze Kaoru Week 01 [WEBDL] [1080p] [NHKP] [JPN_SUB]`) was under `downloads/torrents/complete/tv/` on the parent export `/mnt/mega/media/ums`, and nothing of week 1 was left under `incomplete/`. All five .mkv files were fully allocated (`du -k` x 1024 at or above the apparent size: EP001 560,720,896 against 560,242,625 bytes, and likewise for EP002-EP005). I copied EP001, EP002, EP003 and EP005 through the read-only volume `fukikae-ums-ro` and removed it afterwards. The files are mode 0710 for uid 3000, group `users`, so the copy container needed `--group-add 100`. The copies are `Kaze Kaoru - S01E01.mkv`, `S01E02`, `S01E03` and `S01E05`, and their sizes match the source. Broadcast number = episode number (EP001 = S01E01). Each is 899.3 s with one audio stream, index 1, AAC, tagged `jpn` ("日本語 [オリジナル]"), so no `audio_track` override. `df -h /`: 100 GB free before the copy, 98 GB after.
+Week 1 (`Kaze Kaoru Week 01`, 1080p web, Japanese subtitles) was complete on the media share. All five .mkv files were fully allocated (`du -k` x 1024 at or above the apparent size: EP001 560,720,896 against 560,242,625 bytes, and likewise for EP002-EP005). I copied EP001, EP002, EP003 and EP005 through the read-only volume `fukikae-media-ro` and removed it afterwards. The files are mode 0710 for uid 3000, group `users`, so the copy container needed `--group-add 100`. The copies are `Kaze Kaoru - S01E01.mkv`, `S01E02`, `S01E03` and `S01E05`, and their sizes match the source. Broadcast number = episode number (EP001 = S01E01). Each is 899.3 s with one audio stream, index 1, AAC, tagged `jpn` ("日本語 [オリジナル]"), so no `audio_track` override. `df -h /`: 100 GB free before the copy, 98 GB after.
 
 E01-E03 ran `--to diarize` (2 min 38 s for E01, extract through diarize). E05 ran `--to separate` only, for the green check, and was never diarized or scored.
 
 ### Doubled captions and timing against speech
 
-- The MagicStar .srt doesn't repeat a caption; it splits one. Each caption is cut at the next x.530 s boundary and continues with the same text (`00:00:08,023 --> 00:00:08,530` and `00:00:08,530 --> 00:00:12,863`, both "そうだねえ　あの２人の話をしようか。"). The first onset is the caption's onset and the union of the two pieces is its display span.
+- The web release's .srt doesn't repeat a caption; it splits one. Each caption is cut at the next x.530 s boundary and continues with the same text (`00:00:08,023 --> 00:00:08,530` and `00:00:08,530 --> 00:00:12,863`, both "そうだねえ　あの２人の話をしようか。"). The first onset is the caption's onset and the union of the two pieces is its display span.
 - `eval subalign --speech` refuses both the .srt and the aligned .ass on E01: share 59% < 60%, at scale 1.001001 (the 1001/1000 candidate) and offset -0.86 s. That fit is noise. At scale 1.0 the share is 0.588 across offsets -0.6 to -0.2 s and 0.587 at 0, so the speech-share objective can't place these captions to better than about half a second, and 1001/1000 wins by 0.0007.
 - So I measured onsets directly. For cues that follow at least 1 s without a caption, with the split pieces joined, I took the lag from cue onset to the nearest rising edge of speech within 1.5 s. Speech came from two detectors: pyannote's turns, and an energy VAD on `vocals_16k.wav`. The .srt and the aligned .ass lead speech by a median of:
 
@@ -254,25 +254,25 @@ Workspaces `~/fukikae-ws/t8/ws/<set>-pick`: `cp -al` of the ct 0.5 copy with its
 
 ### Kaze E11
 
-Run 2026-11-10 at 0b0265a (main; the profile's identity tables unchanged since `6bb10c2`), once each, no re-tuning (GT15). Week 3 was complete with nothing under incomplete/; EP011 copied through the read-only volume (cmp identical to the share), and the share's EP011 .srt is identical to the one the captions were retimed against. Re-running `eval subalign` on E11 reproduces `aligned/S01E11.ass` byte for byte: text mode, 144 anchors, 100% inliers, offset -0.55 s, scale 1.000033, rms 11 ms, max residual 19 ms. Step 2 ran extract through characters in 187 s. Onsets (step 3): the aligned captions lead by a median +0.41 s by pyannote (20 of 26 gap-led cues matched, IQR +0.13 to +0.58) and +0.38 s by energy VAD (22 matched, IQR +0.16 to +0.61); the raw .srt gives +0.42 / +0.37. That is about 0.1 s above E01-E03's 0.24-0.31 s on 20-odd cues, same sign; I read it as short of the stop condition and went on. Pick: 2 recurring (りん 43.0 s, 直美 8.6 s), 直美 at 1.00 on りん's tuning id 3, りん at 0.76 (4.4 s on new id 7), merge りん + 直美 on id 3 (73% りん, 19% 直美), 1 / 1 / 0.50, coverage 17%, fail. Default: the same merge, りん 0.73, 1 / 1 / 0.50, fail. The predicted merge (直美's nearest-centroid accuracy was 7% in tuning) showed as soon as she recurred. Rows exported to the main JSONL (172 to 176). The commands as scripted:
+Run 2026-11-10 at 0b0265a (main; the profile's identity tables unchanged since `6bb10c2`), once each, no re-tuning (GT15). Week 3 was complete on the share; EP011 copied through the read-only volume (cmp identical to the share), and the share's EP011 .srt is identical to the one the captions were retimed against. Re-running `eval subalign` on E11 reproduces `aligned/S01E11.ass` byte for byte: text mode, 144 anchors, 100% inliers, offset -0.55 s, scale 1.000033, rms 11 ms, max residual 19 ms. Step 2 ran extract through characters in 187 s. Onsets (step 3): the aligned captions lead by a median +0.41 s by pyannote (20 of 26 gap-led cues matched, IQR +0.13 to +0.58) and +0.38 s by energy VAD (22 matched, IQR +0.16 to +0.61); the raw .srt gives +0.42 / +0.37. That is about 0.1 s above E01-E03's 0.24-0.31 s on 20-odd cues, same sign; I read it as short of the stop condition and went on. Pick: 2 recurring (りん 43.0 s, 直美 8.6 s), 直美 at 1.00 on りん's tuning id 3, りん at 0.76 (4.4 s on new id 7), merge りん + 直美 on id 3 (73% りん, 19% 直美), 1 / 1 / 0.50, coverage 17%, fail. Default: the same merge, りん 0.73, 1 / 1 / 0.50, fail. The predicted merge (直美's nearest-centroid accuracy was 7% in tuning) showed as soon as she recurred. Rows exported to the main JSONL (172 to 176). The commands as scripted (`<nas>`, `<media-export>` and `<kaze-dir>` stand for the NAS, its media export and the show's folder on it):
 
 ```bash
-# 1. Copy EP011 (week 3 must be under complete/tv/, nothing of it under incomplete/)
+# 1. Copy EP011 from the NAS media share (week 3 must be complete there)
 docker volume create --driver local --opt type=nfs \
-  --opt o=addr=truenas.storage.lodenheim.lokkju.com,ro,nfsvers=4 \
-  --opt device=:/mnt/mega/media/ums fukikae-ums-ro
-docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-ums-ro:/ums:ro alpine:3.20 \
-  sh -c 'ls /ums/downloads/torrents/incomplete/tv | grep -i kaze; C=/ums/downloads/torrents/complete/tv; ls -l "$C"/*Kaze*Week*03*/Kaze.Kaoru.EP011.*.mkv; du -k "$C"/*Kaze*Week*03*/Kaze.Kaoru.EP011.*.mkv'
-docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-ums-ro:/ums:ro \
-  -v /home/lokkju/fukikae-ws/media:/out alpine:3.20 \
-  sh -c 'set -e; f=$(ls /ums/downloads/torrents/complete/tv/*Kaze*/Kaze.Kaoru.EP011.*.mkv); cp "$f" "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"; chmod 0640 "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"'
-docker volume rm fukikae-ums-ro
+  --opt o=addr=<nas>,ro,nfsvers=4 \
+  --opt device=:<media-export> fukikae-media-ro
+docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-media-ro:/share:ro alpine:3.20 \
+  sh -c 'C=/share/<kaze-dir>; ls -l "$C"/*Week*03*/Kaze.Kaoru.EP011.*.mkv; du -k "$C"/*Week*03*/Kaze.Kaoru.EP011.*.mkv'
+docker run --rm --user "$(id -u):$(id -g)" --group-add 100 -v fukikae-media-ro:/share:ro \
+  -v ~/fukikae-ws/media:/out alpine:3.20 \
+  sh -c 'set -e; f=$(ls /share/<kaze-dir>/*Week*03*/Kaze.Kaoru.EP011.*.mkv); cp "$f" "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"; chmod 0640 "/out/Kaze Kaoru/Kaze Kaoru - S01E11.mkv"'
+docker volume rm fukikae-media-ro
 # 2. Live-action pick: diarize E11 at clustering 0.5 and run its characters stage
 KAZE_EPS=S01E11 scripts/ground-truth/holdout_run.sh kaze-pick
 # 3. Caption onsets against speech on E11 (Task 7b measured a +0.24 to +0.31 s lead; record the
 #    medians, and stop if the captions are late or lead by much more than 0.3 s)
 mise -C . exec -- uv run python scripts/ground-truth/kaze_onset.py ~/fukikae-ws/t8/ws/kaze-pick S01E11 \
-  aligned/S01E11.ass Kaze.Kaoru.EP011.1080p.NHKP.WEB-DL.AAC2.0.H.264-MagicStar.srt
+  aligned/S01E11.ass Kaze.Kaoru.EP011.web.srt
 # 4. Score the pick once
 scripts/ground-truth/holdout_score.sh ~/fukikae-ws/t8/ws/kaze-pick
 # 5. Default profile (diarizes E11 at 0.6, then characters against Task 7b's registry), scored once

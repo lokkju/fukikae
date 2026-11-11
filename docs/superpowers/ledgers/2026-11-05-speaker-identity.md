@@ -1,7 +1,7 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-11-05-speaker-identity.md
 
-Repo: /home/lokkju/projects/fukikae, branch feat/speaker-identity (from main 12a7c0d; plan at d6a29fe, HEAD d5a75ad). Spec: docs/superpowers/specs/2026-11-05-speaker-identity-design.md (reachable).
-Test sets in hand: Fairy Tail 100YQ E11-E14 (~/fukikae-ws/fairytail, run through characters), Grid S01E04-E05 (copied), Link Click E04-E06 (copied, English-dub SDH partial), The Cyberfarm S02E01-E04 (library only, Task 4 copies). Spanish/Russian dub sets pending operator grab (A7).
+Repo: ~/projects/fukikae, branch feat/speaker-identity (from main 12a7c0d; plan at d6a29fe, HEAD d5a75ad). Spec: docs/superpowers/specs/2026-11-05-speaker-identity-design.md (reachable).
+Test sets in hand: Fairy Tail 100YQ E11-E14 (~/fukikae-ws/fairytail, run through characters), Grid S01E04-E05 (copied), Link Click E04-E06 (copied, English-dub SDH partial), The Cyberfarm S02E01-E04 (library only, Task 4 copies). Spanish/Russian dub sets pending operator fetch (A7).
 
 ## Pre-flight scan
 
@@ -19,17 +19,17 @@ Test sets in hand: Fairy Tail 100YQ E11-E14 (~/fukikae-ws/fairytail, run through
 | T1-T9 self | tests vs code vs files | consistent |
 
 Ruling R1: matchers live in `src/fukikae/registry/matchers.py` from Task 3 on; `eval/identity` imports them. — Keeps the pipeline free of eval imports. — If wrong: a module move.
-Ruling R2: Task 4 first copies The Cyberfarm S02E01-E04 from the Plex share (read-only Docker NFS volume, as the foundation did) into ~/fukikae-ws/media/. — The set is required (live action) and not yet local. — If wrong: nothing; it's a copy.
+Ruling R2: Task 4 first copies The Cyberfarm S02E01-E04 from the NAS media share (read-only Docker NFS volume, as the foundation did) into ~/fukikae-ws/media/. — The set is required (live action) and not yet local. — If wrong: nothing; it's a copy.
 
 ## Tasks
-Task 1: dispatched (BASE d5a75ad, implementer a1f11c877bc446721, sonnet)
+Task 1: dispatched (BASE d5a75ad, implementer, sonnet)
 Task 1: implementer DONE_WITH_CONCERNS (3b2572a). Resolve order: profile base < profile lang/pair < workspace base < workspace lang/pair, R4 per layer.
 Ruling R3: profile tables must name `backend` explicitly (stage fallbacks read cfg.raw only); Task 9 writes profiles that way. — Cheaper than reworking three stage fallbacks; behaviour without a profile unchanged. — If wrong: extend the fallbacks to consult the profile.
 Task 1: complete (commits d5a75ad..3b2572a, review clean)
 Task 1: minor (deferred): audio_title always in extract config_key -> one re-extract per existing workspace (identical audio stops propagation; accepted).
 Task 1: minor (deferred): non-string audio_title raises AttributeError, not a config error. Wheel inclusion of profiles/*.toml unverified (check with uv build before Task 9).
 Ruling R4: choose_audio_track raises MediaError when a title is given and no track of the language matches it (no silent fallback). — Review Focus 3: a silent fallback picks the wrong dub. — If wrong: a warning instead. Fixed with Task 2's dispatch.
-Task 2: dispatched (BASE 3b2572a, implementer aeef80319bf8dc8f0, sonnet; includes R4 media fix)
+Task 2: dispatched (BASE 3b2572a, implementer, sonnet; includes R4 media fix)
 Task 2: implementer DONE_WITH_CONCERNS (00fd5f5, 603277b). Offset applied only if it gains >=0.1 AND reaches 0.6.
 Task 2: review: 2 Important (sound/action descriptions pass as speakers, Hangul especially; empty ground truth doesn't refuse). Fix round 1 sent (FIX_BASE 603277b).
 Task 2: minor (deferred): alignment share is speech-density blind (~70% density passes any offset); consider a shuffled/offset baseline. colour_name double-aliases (hits uncounted); title ignored when source_language is None; mixed-case `Name:` prefixes dropped (recall loss).
@@ -38,7 +38,7 @@ Task 2: minor (deferred): _PAIR matches department+role (수사과 형사) and �
 Task 2: fix round 2/5 (1 addressed, 0 open; commits 8353398..5f2d982)
 Task 2: complete (commits 3b2572a..5f2d982, review clean)
 Ruling R5: keep the multi-word clause of the Hangul description rule although it rejects `surname + 2-syllable name ending 음/다/며` (김 태음); Korean SDH/CC tags use the given name alone, and the clause catches real multi-word descriptions (손뼉을 짝 치며). — If wrong: an alias line restores such a name, or the clause narrows.
-Task 3: dispatched (BASE 5f2d982, implementer ad0ff93d16c2751e1, opus)
+Task 3: dispatched (BASE 5f2d982, implementer, opus)
 Task 3: implementer DONE_WITH_CONCERNS (190114d). Baseline reproduces exactly (70% speech-weighted, 0.17 strict). Concern: the 20 s bar passes the baseline (only Lucy and Laxus recur).
 Ruling R6: recurring = ≥ 5 s labeled speech per episode (CLI --min-speech, default 5.0), amending the spec's 20 s. — Labeled speech per character per episode is small (clean spans only, coverage 32%), so 20 s left 2 characters and passed a rework-grade system. — If wrong: a flag value. Flag to the operator.
 Ruling R7: holdout scoring pools the tune episodes into one registry; accepted.
@@ -50,13 +50,13 @@ Task 3: minor (deferred): cache key lacks backend-internal defaults/model revisi
 Task 3: fix round 1/5 (1 addressed, 0 open; commits 48b603b..37d844a)
 Task 3: complete (commits 5f2d982..37d844a, review clean)
 Task 3: minor (deferred): CharacterScore.modal_id is the tuning id while share/strict use held-out speech (documented).
-Task 4: dispatched (BASE 37d844a, runner a64d313c28b27c7e8, sonnet). Disk / has 47G free before copies and runs (watch: ~2G of artifacts per episode).
+Task 4: dispatched (BASE 37d844a, runner, sonnet). Disk / has 47G free before copies and runs (watch: ~2G of artifacts per episode).
 Task 4: runner DONE_WITH_CONCERNS (d21318b). Baselines: fairytail 0.33 fail nc68%; fairytail-en 0.70 fail nc72%; grid 0.50 (1/2) fail nc81% (12% coverage); cyberfarm dropped (0 recurring; SDH labels ~10 s in E02); linkclick-en dropped. Disk hit 100% during grid E05; runner freed 40G via uv cache prune. Cyberfarm needed [align] qwen3_forced_aligner (no Russian wav2vec2).
 Task 4: bug (carried to Task 5 dispatch): auto-label/harness track chooser failed to pick Grid's Korean CC sdh track and Fairy Tail E11's ASS (flagged forced) without --subtitle-track.
 Live-action gate (goal 3) at risk: queued as a decision.
 Task 4: complete (commits 37d844a..d21318b, review clean). Absent sets (DAN DA DAN, Link Click zh audio, Russian dub) are absent from the library (A7), not skipped.
 Task 4: minor (carried to Task 5): doc says fail means < 0.75; fail is < 0.90 or any merge. Doc's fairytail-en alignment explanation is an inference.
-Task 5: dispatched (BASE d21318b, implementer a67c874caefea9c18, sonnet; extras: track-chooser fix, test-sets doc wording)
+Task 5: dispatched (BASE d21318b, implementer, sonnet; extras: track-chooser fix, test-sets doc wording)
 Task 5: implementer DONE_WITH_CONCERNS (e23eb09, 171837b, a090d8e, f5fa1e0). Tests written after code (TDD lapse, noted). New extras sherpa, wavlm. NC ja-diar/ja-sub/en-diar/en-sub/grid-diar/grid-sub: ecapa 68/64/72/69/81/82; wespeaker 70/63/71/73/96/93; wavlm_sv 49/43/59/59/58/59; campplus 24/21/36/31/30/24; eres2netv2 69/71/71/75/85/89; titanet 67/60/78/72/85/86; fusion 71/63/72/73/96/93.
 Ruling R9: Task 6 carries ECAPA, WeSpeaker and ERes2NetV2 for anime and WeSpeaker for live action; WavLM-SV, CAM++ and fusion dropped. — Anime top four within ~4 points, so keep a spread for segmentation/matching interactions; WeSpeaker +15 on Grid (thin, 6 characters). — If wrong: rerun Task 6 with another embedder (cached).
 Task 5: review: 2 Important (no offline embed-body tests; doc compares unlike VRAM figures) + spec (fusion dim 0 until first embed; wespeaker vram estimated). Fix round 1 sent (FIX_BASE f5fa1e0). Ruling R9 already ledgered (reviewer's "ruling not recorded").
@@ -65,7 +65,7 @@ Task 5: fix round 1 committed (6e8ff4f). Found: ECAPA measured 4364 MiB (nvidia-
 Task 5: fix round 1/5 (3 addressed, 0 open; commits f5fa1e0..6e8ff4f)
 Task 5: complete (commits d21318b..6e8ff4f, review clean)
 Task 5: minor (carried to Task 6): addopts doesn't exclude `slow` (plain pytest downloads ~221 MB sherpa models); ECAPA vram_mb 1900 vs measured 4364 (fusion inherits).
-Task 6: dispatched (BASE 6e8ff4f, implementer a694fe0a4610fd2e6, opus; extras: ECAPA vram_mb, addopts not slow)
+Task 6: dispatched (BASE 6e8ff4f, implementer, opus; extras: ECAPA vram_mb, addopts not slow)
 Task 6: implementer idle on a stale 'waiting'; background runs had finished 2026-11-05 16:40 (18 variant diarizations, sweeps); commits 8edfa5f c0634b0 bb0c496 28c9707 in. Nudged to write the results doc and report (2026-11-06).
 Task 6: implementer DONE_WITH_CONCERNS (8edfa5f, c0634b0, bb0c496, 28c9707, b6d0986, d84c57b). 764 tuning runs. ja: baseline 0.33/70%/2 clean -> WeSpeaker+diar+centroid 0.44/72%/4 clean (JUVIA+LUCY still merged; nothing separates TOUKA/LUCY/JUVIA/CANA). en: joint@0.7 0.70/77-83%/7 clean no merges; eo0 lifts TOUKA 0->90%. grid: joint 1.00 (2/2) thin. knn/multi gain nothing; lda raises share only.
 Ruling R10: forward to Tasks 7-9: WeSpeaker embedder for all genres; matchers centroid (per-episode stage default) and joint (batch, 0.7 anime, 0.6/0.7 live action); pyannote exclude_overlap off at clustering 0.6 evaluated against shipped pyannote for anime in Task 9; knn and multi-centroid dropped; lda kept only as an option. — Clean-character counts, not raw fraction (the fraction rewards collapse). — If wrong: rerun from the cache.
@@ -79,7 +79,7 @@ Ruling R10 amended: anime = joint with episode_cannot_link on at 0.6/0.7 (batch,
 Task 6: fix round 1/5 (4 addressed, 0 open; commits d84c57b..a1f6e64)
 Task 6: complete (commits 6e8ff4f..a1f6e64, review clean)
 Task 6: minor (carried to Task 9): joint-on with eo0 at 0.6 on ja is 0.56/5/3 (three merges vs one on shipped diarization); the doc's "carry eo0 with joint" doesn't say so.
-Task 7: dispatched (BASE a1f6e64, implementer a044a5ad6b6102884, opus; scope per R10-R12: matcher option + lda projections + batch registry resolve + group_segments centroid linkage)
+Task 7: dispatched (BASE a1f6e64, implementer, opus; scope per R10-R12: matcher option + lda projections + batch registry resolve + group_segments centroid linkage)
 Task 7: implementer DONE_WITH_CONCERNS (4dd3f66, b5ca495, f87097e, cd4da07). Real check: registry resolve (joint 0.6, WeSpeaker) on a fairytail copy == harness exactly (0.556, 5/9, 5 clean, JUVIA+LUCY merge, share 81.4%).
 Ruling R13: registry resolve treats every actor from episodes outside the resolve set as a fixed anchor (matched against, never merged or replaced), not only locked/named ones; actors it creates get new ids on re-runs. — Prevents duplicating characters known from other episodes; consistent with rematch's id behavior. — If wrong: anchors limited to locked/named plus a merge pass.
 Check in review: an embedder change (ECAPA 192-d registry vs WeSpeaker 256-d) must fail loudly, not silently.
@@ -89,16 +89,16 @@ Note: downstream staleness after resolve marks characters done with a new key: m
 Task 7: fix round 1/5 (5 addressed, 0 open; commits cd4da07..dc93bf4)
 Task 7: complete (commits a1f6e64..dc93bf4, review clean)
 Task 7: minor (deferred): an anchor-dim error after mark_stale leaves characters marked stale (registry/assignments untouched); the anchor-dim test asserts message/exit only, not rollback contents.
-Task 8: dispatched (BASE dc93bf4, implementer af5fc7693182efa23, sonnet). Disk 37G free at dispatch.
+Task 8: dispatched (BASE dc93bf4, implementer, sonnet). Disk 37G free at dispatch.
 Task 8: implementer NEEDS_CONTEXT: audio-separator 0.48.0 has no dialogue/DnR model (vocal, karaoke, denoise etc. only); public DnR checkpoints (TIGER-DnR, DBS-TIGER-DnR, DBS-BSRNN-DnR) need their own library. Nothing committed; pins reverted.
 Ruling R14: Task 8 uses TIGER-DnR (or DBS-TIGER-DnR) via its own library as the `dialogue` backend; if it can't co-install without moving pins, fall back to a vocals Mel-Roformer via audio-separator, labeled a better music separator, not a dialogue stem. — The spec asks for a dialogue/music/effects separator; the plan's audio-separator assumption was wrong. — If wrong: the comparison measures B only.
 Task 8: BLOCKED: chose DBS-TIGER-DnR (dbs 1.0.0, git-only at github.com/JusperLee/Dynamic-Band-Splitting@ff526463); `uv add` of the git dependency denied by auto mode ("Code from External"). Not worked around. Queued to the operator: allow pinned git dep / audio-separator Mel-Roformer fallback / skip Task 8.
-D10 ruling (operator, 2026-11-07): allow the pinned git dependency. Controller added it: a504ed6 build: dialogue extra with dbs (DBS-TIGER-DnR) pinned to ff526463. Task 8 resumed (implementer af5fc7693182efa23, BASE a504ed6) to build the dialogue backend and run the comparison.
+D10 ruling (operator, 2026-11-07): allow the pinned git dependency. Controller added it: a504ed6 build: dialogue extra with dbs (DBS-TIGER-DnR) pinned to ff526463. Task 8 resumed (implementer, BASE a504ed6) to build the dialogue backend and run the comparison.
 
 ## RESUME STATE (2026-11-07, before compaction)
-- Branch feat/speaker-identity at a504ed6. Tasks 1-7 complete and reviewed (see lines above). Task 8 running (dialogue separation on DBS-TIGER-DnR vs Demucs; implementer af5fc7693182efa23). Task 9 next: per-genre threshold sweep, profiles (Ruling R3: profile tables name backend), one held-out confirmation per profile (Fairy Tail E14; grid E05; fairytail-en E14), results doc.
+- Branch feat/speaker-identity at a504ed6. Tasks 1-7 complete and reviewed (see lines above). Task 8 running (dialogue separation on DBS-TIGER-DnR vs Demucs; implementer). Task 9 next: per-genre threshold sweep, profiles (Ruling R3: profile tables name backend), one held-out confirmation per profile (Fairy Tail E14; grid E05; fairytail-en E14), results doc.
 - Current best (R10 amended): WeSpeaker embedder; anime = joint with episode_cannot_link on at 0.6/0.7 via `fukikae registry resolve` (R12/R13); live action = centroid 0.6, joint-off 0.6 a candidate. Best anime tune numbers: ja 0.56 / 5 clean / 1 merge (JUVIA+LUCY); en-dub 0.80 / 7 clean / 1 merge. Grid thin (2 recurring).
-- Open with the operator: D9 (live-action ground truth: recommend labeling Chimera video clips at ~/fukikae-ws/chimera/labels-video), A7 (Sonarr grab of ToonsHub multi-audio DAN DA DAN S01E01-E03 and Mob Psycho 100 S03E04-E05 / SPY x FAMILY S01E01-E02).
+- Open with the operator: D9 (live-action ground truth: recommend labeling Chimera video clips at ~/fukikae-ws/chimera/labels-video), A7 (fetch the multi-audio Crunchyroll DAN DA DAN S01E01-E03 and Mob Psycho 100 S03E04-E05 / SPY x FAMILY S01E01-E02).
 - Workspaces: ~/fukikae-ws/{fairytail,fairytail-en,grid,cyberfarm(dropped),linkclick-en(dropped),chimera}; harness outputs ~/fukikae-ws/{baselines,embedders,segmatch}; disk ~37 GB free (watch; `uv cache prune` freed 40 GB once).
 - Process: dispatch implementers with the task brief + implementer-common.md + global-constraints.md; review with task-reviewer-prompt.md; fix rounds resume the implementer; tell agents not to start background watchers (Tasks 5-6 stalled on them).
 Task 8: implementer DONE_WITH_CONCERNS (778e708, 92975eb). Dialogue (DBS-TIGER-DnR) vs Demucs, WeSpeaker, tune pairs: ja joint 4/0.44/1 vs 5/0.56/1; en joint 4/0.50/1 vs 7/0.80/1; grid not comparable (a character fell under 5 s). NC rises everywhere (ja 70->72, en 71->76, grid 96->100) yet end-to-end clean counts drop.
@@ -112,7 +112,7 @@ Task 8: fix round 3/5 (1 addressed, 0 open; commits b1c620d..05d18ed)
 Task 8: complete (commits a504ed6..05d18ed, review clean)
 Task 8: minor (deferred): separation doc line 9 now claims "the 1 h Grid episodes took about 7 minutes each" (unsupported by the report/results).
 Ruling R16: Task 9 runs now for the anime and default profiles (tuning sweeps, profiles, held-out checks on fairytail E14 and fairytail-en E14); the live-action profile is written provisionally from Grid (2 recurring characters, flagged thin, held-out on grid E05 reported but not a gate) and confirmed when D9's ground truth lands. — The plan's goal 3 requires live-action ground truth that doesn't exist yet; anime needn't wait. — If wrong: the live-action profile is replaced after D9.
-Task 9: dispatched (BASE 05d18ed, implementer ac78565fd8d81aa5a, sonnet; scope per R16)
+Task 9: dispatched (BASE 05d18ed, implementer, sonnet; scope per R16)
 Task 9: implementer DONE_WITH_CONCERNS (df7692b, 8002615). Picks (tuning only): anime joint cannot-link on 0.6 (12 clean, 2 merges over ja+dub; centroid 10); live-action provisional joint cannot-link off 0.6 (2/2); default WeSpeaker+centroid 0.6 (11 clean, 2 merges). Held-out once: anime ja E14 fail 0.55 (6/11); anime en E14 fail 0.60 (6/10, id 2 absorbs HAPPY+LUCY+WENDY); grid E05 provisional fail 0.80 (4/5, 새하+어진). All ship as measured with failures stated.
 Ruling R17: `fukikae registry resolve` reads a `[resolve]` config table (matcher, threshold, matcher options) through profile layering, CLI flags overriding; anime and live-action profiles set it to their picks. — Profiles must encode the tested settings; today joint's settings live only on the command line. — If wrong: documented CLI flags instead.
 Ruling R18: the profile picks above stand and ship despite failing held-out (plan rule: no re-tuning on held-out data); the default embedder becomes WeSpeaker, which invalidates diarize caches for no-profile workspaces (documented). — If wrong: revisit with live-action ground truth (D9) and visual cues.

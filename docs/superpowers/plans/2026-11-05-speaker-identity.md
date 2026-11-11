@@ -85,7 +85,7 @@ docs/results/                    # one results note per comparison
 - The alignment check (Review Focus 1): `eval auto-label` and `eval identity` refuse when `share_at_offset < 0.6` without `--force`, and apply `best_offset_s` when it improves the share by ≥ 0.1, reporting it.
 
 - [ ] **Step 1: Tests first.** ASS behavior unchanged (existing tests stay green). SDH: `"КОСТЯ: Привет"` → Костя; `"(새하) 뭐야"` → 새하; `"[music]"` and `"(sighs)"` → none; a dash-split cue `"- ARISU: Go!\n- KUINA: Wait."` → two lines with the cue's time split proportionally to text length. Colour: a VTT sample with yellow/cyan cues and `(LOLA)` on three yellow cues → yellow lines labeled LOLA, cyan lines `cyan@S04E01`. Alignment: lines shifted by +3 s against turns → `best_offset_s ≈ 3`, refusal below 0.6.
-- [ ] **Step 2–4:** RED, implement, GREEN; check the readers on the library samples in `/home/lokkju/.claude/jobs/d640b8ae/tmp/lib-probe/subs/` (Cyberfarm, Grid, Parallels) and the RTVE VTTs in `/home/lokkju/.claude/jobs/d640b8ae/tmp/liveaction-survey/rtve/`; record counts in the task report.
+- [ ] **Step 2–4:** RED, implement, GREEN; check the readers on the library samples in `<scratch>/lib-probe/subs/` (Cyberfarm, Grid, Parallels) and the RTVE VTTs in `<scratch>/liveaction-survey/rtve/`; record counts in the task report.
 - [ ] **Step 5:** Commit `feat(eval): sdh-prefix and colour ground-truth readers`.
 
 ### Task 3: Identity harness
@@ -109,7 +109,7 @@ docs/results/                    # one results note per comparison
 
 **Files:** Create `docs/results/2026-11-xx-identity-testsets.md`; workspaces outside the repo.
 
-- [ ] **Step 1:** For each set the copy agent verified (Fairy Tail ja and en-dub; The Cyberfarm S02E01-E04 ru; Grid pair ko if found; DAN DA DAN es-ES and es-419; Link Click zh; the Russian-dub ToonsHub series ru), create `~/fukikae-ws/<set>/fukikae.toml` with `source`, `source_language`, `extract.audio_track`/`audio_title` where needed, ASR language default, `gpu_device = 0`, and a `labels-aliases.yaml` from the auto-label `--report` suggestions you accept (note each).
+- [ ] **Step 1:** For each set the copy agent verified (Fairy Tail ja and en-dub; The Cyberfarm S02E01-E04 ru; Grid pair ko if found; DAN DA DAN es-ES and es-419; Link Click zh; the Russian-dub series ru), create `~/fukikae-ws/<set>/fukikae.toml` with `source`, `source_language`, `extract.audio_track`/`audio_title` where needed, ASR language default, `gpu_device = 0`, and a `labels-aliases.yaml` from the auto-label `--report` suggestions you accept (note each).
 - [ ] **Step 2:** Run `fukikae run <ws> <ep> --to diarize` for every episode (background; one GPU job at a time).
 - [ ] **Step 3:** `fukikae eval auto-label <ws> --source <kind> --report` per set; record per-set coverage, alignment and recurring-character counts in the test-sets doc; a set with no recurring characters or alignment < 0.6 is dropped and noted.
 - [ ] **Step 4:** Commit the doc `docs: identity test sets`.

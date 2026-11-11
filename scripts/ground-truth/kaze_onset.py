@@ -65,7 +65,7 @@ vad = rising(iv, 0.25)
 print(ep, "pyannote onsets", len(pya), "energy-VAD onsets", len(vad))
 for f in files:
     cues = [c for c in sa._merge_events(read_cues(S / f)) if c.end > c.start]
-    # collapse MagicStar's split pieces: same text, contiguous
+    # collapse the web .srt's split pieces: same text, contiguous
     m = []
     for c in cues:
         if m and c.text == m[-1][2] and abs(c.start - m[-1][1]) < 0.05:

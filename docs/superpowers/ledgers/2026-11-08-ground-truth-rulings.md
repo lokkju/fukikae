@@ -1,7 +1,7 @@
 # Ground-truth plan: execution ledger
 
 Plan: docs/superpowers/plans/2026-11-08-ground-truth.md (c75fcc5). Branch feat/ground-truth from main c75fcc5.
-Operator scope: D9, D14, D16 (2026-11-08). Media: BBT S01 grabbed by the operator; Kaze, Kaoru weeks 1-3 downloading via qBittorrent (not importable by Sonarr; copy from the download folder); Alice in Borderland in the library.
+Operator scope: D9, D14, D16 (2026-11-08). Media: BBT S01 added by the operator; Kaze, Kaoru weeks 1-3 still arriving (not in the library; copy from the share's incoming folder); Alice in Borderland in the library.
 Controller rulings: Kaze splits tune E01-E03, hold out E11; colour map may use held-out named lines (ground truth, not tuning).
 
 Task 1: dispatched (BASE c75fcc5, opus)
@@ -23,7 +23,7 @@ Task 4: dispatched (sonnet, HEAD f90f8d9)
 Task 1: fix round 1 committed (7418d0b); 548 pass. GT1, GT2, \n-only split, concurrent-append test, -uno, series in report key.
 Process note: concurrent implementers in one checkout collide: pre-commit stashes other agents' unstaged edits during each commit (Task 1's files vanished briefly twice, restored from ~/.cache/pre-commit/patch*). From now on one implementer commits at a time; reviewers (read-only) may run alongside. Tasks 3 and 4 already running concurrently: warned.
 Task 1: scoped re-review dispatched (sonnet).
-Task 3: implementer DONE_WITH_CONCERNS (9408c83); 565 pass. Kaze E01/E02/E03/E11 broadcast .ass -> MagicStar .srt: scale ~1.00003, offset -0.52..-0.55 s, all anchors inliers, rms 7-13 ms. Commit swept in ~49 lines of Task 4's uncommitted cli.py block (transcript-align fails at 9408c83 until Task 4 commits its module); Task 4 told. MagicStar .srt doubles each caption (short cue then repeat); first onset used.
+Task 3: implementer DONE_WITH_CONCERNS (9408c83); 565 pass. Kaze E01/E02/E03/E11 broadcast .ass -> web .srt: scale ~1.00003, offset -0.52..-0.55 s, all anchors inliers, rms 7-13 ms. Commit swept in ~49 lines of Task 4's uncommitted cli.py block (transcript-align fails at 9408c83 until Task 4 commits its module); Task 4 told. The web .srt doubles each caption (short cue then repeat); first onset used.
 Task 3: review dispatched (sonnet).
 Task 1: fix round 1/5 (8 addressed, 0 open; commits 60b1fad..7418d0b)
 Task 1: complete (commits c75fcc5..7418d0b, review clean; newer-schema rows are skipped with a line-numbered warning)
@@ -51,7 +51,7 @@ Task 4: fix round 1 sent (sole committer).
 Task 4: fix round 1/5 (1 addressed, 0 open; commits e7c8ae0..3f83029; whole-word group match)
 Task 4: complete (commits 9408c83 cli block + e7c8ae0..3f83029, review clean)
 Task 6: dispatched (sonnet, HEAD 3f83029, sole committer; GPU 0)
-Bazinga (A13 done): revision 96db30ff; TBBT S01E01 labels match the shipped audio (lag -0.01 s, drift 0.00002 s/s); audio PAL-fast (21:59.6 vs ~23 min), +0.71 semitone; speaker ids gold and consistent; timings silver, keep words with confidence >= 0.9 (0.1 = evenly spaced filler, issue #5); no overlap; discussions #5/#6 are the only timing ones. Proposed as D18 (new task before Task 7). Research scratch in ~/.claude/jobs/d640b8ae/tmp/bazinga/.
+Bazinga (A13 done): revision 96db30ff; TBBT S01E01 labels match the shipped audio (lag -0.01 s, drift 0.00002 s/s); audio PAL-fast (21:59.6 vs ~23 min), +0.71 semitone; speaker ids gold and consistent; timings silver, keep words with confidence >= 0.9 (0.1 = evenly spaced filler, issue #5); no overlap; discussions #5/#6 are the only timing ones. Proposed as D18 (new task before Task 7). Research scratch in <scratch>/bazinga/.
 Task 6: implementer DONE_WITH_CONCERNS (6225740); 611 pass. nc_overall renmin(zh)/shendiao(yue): eres2netv2 .957/.989, wespeaker .948/.962, titanet .937/.970, ecapa .930/.962, campplus .340/.797. R10 stands (eres2netv2 gain < 5 points). 8/23 renmin characters single-episode (unscored). Deviations: duration weighting via audio=; HF download include patterns fixed.
 Task 6: minor (deferred, worth a look later): campplus consistently very low (anime 24-36%, renmin 34%) -> likely a sherpa campplus backend bug, not the model.
 Task 6: review dispatched (sonnet).
@@ -69,8 +69,8 @@ Task 6: scoped re-review 2 dispatched (sonnet).
 Task 6: fix round 2/5 (6 addressed, 0 open; commits 8a5e716..4591303)
 Task 6: complete (commits 3f83029..4591303, review clean)
 Task 7: dispatched (opus, HEAD 4591303, sole committer; extras in task-7-brief-extras.md)
-Task 7: BLOCKED on Kaze only (packs 10-16% at 11:12 UTC in /mnt/mega/media/ums/downloads/torrents/incomplete/tv/). BBT S01 (Bluray-1080p) and Alice S01E01-E03 (WEBDL-720p) available. / has 137 GB free.
-Ruling GT7: Task 7 proceeds now with BBT (en/de/es) and Alice; Kaze is set up as Task 7b when the packs complete (copied from /mnt/mega/media/ums/downloads/torrents/complete/tv/ via a read-only volume on the parent export /mnt/mega/media/ums, removed after). Task 8 waits for Kaze. — No reason to idle two ready sets. — If wrong: nothing lost.
+Task 7: BLOCKED on Kaze only (packs 10-16% at 11:12 UTC on the media share). BBT S01 (Bluray-1080p) and Alice S01E01-E03 (WEBDL-720p) available. / has 137 GB free.
+Ruling GT7: Task 7 proceeds now with BBT (en/de/es) and Alice; Kaze is set up as Task 7b when the packs complete (copied from the media share via a read-only volume, removed after). Task 8 waits for Kaze. — No reason to idle two ready sets. — If wrong: nothing lost.
 D18 (operator, 2026-11-08): yes. Task 7c (Bazinga English sets + transcript-aligner check vs gold) added between Task 7 and Task 8; brief in task-7c-brief.md; the plan doc gets the amendment after Task 7 commits (sole-committer rule). Bazinga download dispatched now (no repo writes).
 Bazinga subset downloaded (rev 96db30ff) to ~/fukikae-ws/bazinga/data/{TheBigBangTheory,TheOffice}: S01E01-E05 wav+txt, characters/credits/episodes.txt (390 MB). Task 7c waits for Task 7 to finish committing.
 Task 7: implementer DONE_WITH_CONCERNS (dcb4935 wav2vec2 de/es alignment; 1389155 ledger doc). BBT en: 4/4 clean, 0 merges, pass (both profiles). BBT de: 2 clean, 1 merge (Leonard+Sheldon). BBT es: 1 clean, 3 merges. aib: 2 recurring (thin), 0 clean, scored with --force (overlap 56-66%). Kaze text steps done (subalign 15/15, colour map written); audio steps in task-7b-kaze.md. BBT English subs are image-only: OCR'd with tesseract. Dubs merge leads at 0.6 although NC 96-99% (threshold question for Task 8).
@@ -90,7 +90,7 @@ Task 7c: review (sonnet): approved; 98.17% reproduced exactly (10 ms frames, sin
 Task 7c: complete (commits 08a38ef..02ea184, review clean)
 Task 7c: minor (deferred): bazinga.py not in the plan's File Structure; agree.py and vadcheck.py live outside the repo (reproducible from the workspace only); Kurt alias gap (~1.7 s).
 Task 8 Step 1 (partial, GT10): DONE_WITH_CONCERNS; 540 ledger rows (t8-sweep-ct{0.6,0.5,0.4}[-pal|-film], t8-diag-*), 44 re-diarizations, no commits. Gate sums without Kaze: ct0.5 or ct0.4 with centroid / joint cannot-link on at 0.50-0.60: 17 clean / 1 merge; provisional (ct0.6, joint cannot-link off, 0.6): 16 / 4. es splits its leads from ct0.5 (1/3 -> 3/0); de never splits (one pyannote speaker holds both leads even at 0.4; subtitle-segmentation diagnostic shows de leads too close in WeSpeaker space at keep-whole thresholds). ct0.4 is outside VBx's tuning range (0.5-0.8). Grid ct0.5 dip is one character on 12% coverage. Workspaces ~/fukikae-ws/t8/ws/<set>-ct<v> (cp -al). Pick waits for Kaze (Task 7b).
-D19 (operator): yes. Character-cards Tasks 1-2 start in worktree /home/lokkju/projects/fukikae/.claude/worktrees/character-cards on feat/character-cards (from b60013d).
+D19 (operator): yes. Character-cards Tasks 1-2 start in worktree ~/projects/fukikae/.claude/worktrees/character-cards on feat/character-cards (from b60013d).
 2026-11-09: Kaze week 1 complete (E01-E05 in complete/tv/); weeks 2-3 ~60% (E11 63%).
 Ruling GT11: Task 7b runs now on E01-E03 (tuning) and E05 (green check); E11 (held-out) is copied, diarized and labelled in a short follow-up when week 3 completes; Task 8's sweep and pick proceed on tuning episodes, and held-out scoring waits for E11. — The pick needs only tuning; no reason to wait. — If wrong: nothing.
 Task 7b: dispatched (opus). Ground-truth GPU work has priority over the cards plan on GPU 0 (D22).
@@ -108,7 +108,7 @@ Ruling GT14: at ct0.5 the tie between centroid and joint cannot-link on (17/1/0.
 Task 8: fix round 1 sent (doc fixes).
 Task 8: fix round 1 committed (9d2d907, docs only). Task 8: complete except Kaze E11 (follow-up commands in doc and ledger).
 Kaze week 3 looks stalled (EP011 63% -> 64% over several hours; weeks 2-3 still in incomplete/).
-Ruling GT15: merge feat/ground-truth to main now with Kaze E11 held-out recorded as pending (the doc and ledger hold the exact unattended commands); score it once later as a small follow-up commit on main with the committed profile. — The plan's deliverables are done; one stalled torrent shouldn't hold them. — If wrong: nothing changes in the profile.
+Ruling GT15: merge feat/ground-truth to main now with Kaze E11 held-out recorded as pending (the doc and ledger hold the exact unattended commands); score it once later as a small follow-up commit on main with the committed profile. — The plan's deliverables are done; one stalled download shouldn't hold them. — If wrong: nothing changes in the profile.
 Final whole-branch review: dispatched (opus) over main..feat/ground-truth.
 Final review (opus): merge after fixes (docs + script copies). No Critical. Important (deferred to after Kaze E11, FOLLOW-UP): identity ledger rows don't record the resolved diarize backend/options/identity, so runs differing only in [diarize] share an options_hash. Minors: HF revision from refs/main makes a fresh cache re-diarize once (document); clip-set cache uses model_identity join not identity_key; registry adapt --gt colour ignores the colour map (latent); empty-map test inconsistency; embedders doc self-contradiction (l.225 vs 227); README/CLAUDE.md point only at 11-07 results; README ledger paragraph omits eval embedders; Kaze follow-up step 2 is a comment, no re-export/update steps; agree.py and vadcheck.py (behind 98.17%) live outside the repo.
 Final fix wave: sent to the Task 8 implementer.

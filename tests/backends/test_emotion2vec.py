@@ -135,12 +135,10 @@ def test_runtime_loads_never_download(hub):
 
 @pytest.mark.slow
 @pytest.mark.media
-def test_emotion2vec_on_fixture_clip(tmp_path: Path):
+def test_emotion2vec_on_fixture_clip(tmp_path: Path, fukikae_ws: Path):
     import wave
 
-    clip = Path(
-        "/home/lokkju/fukikae-ws/fairytail/.fukikae/episodes/S01E11/01-separate/vocals_16k.wav"
-    )
+    clip = fukikae_ws / "fairytail/.fukikae/episodes/S01E11/01-separate/vocals_16k.wav"
     if not clip.is_file():
         pytest.skip("no Fairy Tail E11 vocals on this machine")
     with wave.open(str(clip)) as w:

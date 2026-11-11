@@ -4,7 +4,7 @@ Plan: `docs/superpowers/plans/2026-11-08-character-cards.md`. Facts and numbers 
 
 ## Task 4: translate, ASR path, managed llama-server
 
-Run 2026-11-08 on a copy of the Fairy Tail workspace (E11, ja to en) at `~/.claude/jobs/d640b8ae/tmp/ft-ws`, never the original.
+Run 2026-11-08 on a copy of the Fairy Tail workspace (E11, ja to en) at `<scratch>/ft-ws`, never the original.
 
 ### llama-server and the model
 
@@ -30,7 +30,7 @@ Run 1 showed 105 cues of at most two characters: Qwen3's aligner stamps each cha
 
 ## Task 5: subtitle-first path with condense mode
 
-Run 2026-11-08 on a copy of the Fairy Tail workspace (E12, ja audio, Crunchyroll's English ASS) at `~/.claude/jobs/d640b8ae/tmp/t5-ws`, never the original. `[translate] source = "auto"` took the subtitle path: no `[subs]` and no sidecar, so it picked embedded stream 4 (eng, ASS, default), passing over stream 3 (eng, "Forced", forced disposition, three sign lines). The copy's extract, separate, asr and diarize keys were stale against today's code and re-ran on GPU 0 (212 s); the original workspace's registry is ECAPA (192-d), so the copy uses Task 4's re-embedded E11 registry, and characters re-ran against it. No character has a name, so speakers are `char<id>` and `extra:<cluster>`.
+Run 2026-11-08 on a copy of the Fairy Tail workspace (E12, ja audio, Crunchyroll's English ASS) at `<scratch>/t5-ws`, never the original. `[translate] source = "auto"` took the subtitle path: no `[subs]` and no sidecar, so it picked embedded stream 4 (eng, ASS, default), passing over stream 3 (eng, "Forced", forced disposition, three sign lines). The copy's extract, separate, asr and diarize keys were stale against today's code and re-ran on GPU 0 (212 s); the original workspace's registry is ECAPA (192-d), so the copy uses Task 4's re-embedded E11 registry, and characters re-ran against it. No character has a name, so speakers are `char<id>` and `extra:<cluster>`.
 
 | Cues | Spoken verbatim | Condensed | Over budget as written | Over budget after condense | Skipped | Unknown speaker | Errors | Translate stage |
 |---|---|---|---|---|---|---|---|---|

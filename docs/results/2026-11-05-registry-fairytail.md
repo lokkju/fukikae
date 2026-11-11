@@ -1,6 +1,6 @@
 # Cross-episode character registry: Fairy Tail: 100 Years Quest S01E12-E13
 
-_Run 2026-11-05 on ml-01 (RTX 3090, index 0), branch feat/foundation at 291171a._
+_Run 2026-11-05 on the GPU host (RTX 3090, index 0), branch feat/foundation at 291171a._
 
 ## Setup
 

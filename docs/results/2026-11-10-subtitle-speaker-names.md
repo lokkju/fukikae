@@ -1,6 +1,6 @@
 # Subtitle speaker names on Fairy Tail E11 to E14: results
 
-_Run 2026-11-10 on ml-01 (RTX 3090, index 0), branch `plan/subtitle-speaker-names`, Task 11 of `docs/superpowers/plans/2026-11-10-subtitle-speaker-names.md`. Every run used copies under `~/fukikae-scratch/names-t11/`; no original workspace changed. The commands are `scripts/names-eval/run_arms.sh`; the ledger rows are exported to `2026-11-10-subtitle-speaker-names.jsonl` (tags `t11b-names-<language>-<arm>`). Every table is the t11b re-measure: the arms rebuilt and rescored on b8afe4c (the remainder rule, below) and 9ad5be5 (eval names follow-ups); the t11 rows are retracted._
+_Run 2026-11-10 on the GPU host (RTX 3090, index 0), branch `plan/subtitle-speaker-names`, Task 11 of `docs/superpowers/plans/2026-11-10-subtitle-speaker-names.md`. Every run used copies under `~/fukikae-scratch/names-t11/`; no original workspace changed. The commands are `scripts/names-eval/run_arms.sh`; the ledger rows are exported to `2026-11-10-subtitle-speaker-names.jsonl` (tags `t11b-names-<language>-<arm>`). Every table is the t11b re-measure: the arms rebuilt and rescored on b8afe4c (the remainder rule, below) and 9ad5be5 (eval names follow-ups); the t11 rows are retracted._
 
 ## Setup
 
@@ -326,7 +326,7 @@ The first run of the arms left assignments naming characters the registry no lon
 
 ## Listening check (D29 #9)
 
-I ran the ja names arm through tag, translate and tts for E12 to E14 on GPU 0 (`fukikae run <ws> S01E12 S01E13 S01E14 --to tts`; the normal stage re-picked the stale automatic cards of Lucy, Cana, Gray and Erza and replaced nothing curated). IndexTTS2 ran in the main checkout's worker environment (`FUKIKAE_WORKER_CHECKOUT=/home/lokkju/projects/fukikae`; `workers/` is identical on this branch, and the worktree has no `.venvs/indextts2`). A first attempt without it made stock fallback cards, which the second run replaced as designed. Eight renders were flagged suspect after the seed retry.
+I ran the ja names arm through tag, translate and tts for E12 to E14 on GPU 0 (`fukikae run <ws> S01E12 S01E13 S01E14 --to tts`; the normal stage re-picked the stale automatic cards of Lucy, Cana, Gray and Erza and replaced nothing curated). IndexTTS2 ran in the main checkout's worker environment (`FUKIKAE_WORKER_CHECKOUT=~/projects/fukikae`; `workers/` is identical on this branch, and the worktree has no `.venvs/indextts2`). A first attempt without it made stock fallback cards, which the second run replaced as designed. Eight renders were flagged suspect after the seed retry.
 
 Where the cues of the two characters went (ground truth from the subtitle Name, before = t12, after = names arm):
 

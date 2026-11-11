@@ -1,6 +1,6 @@
 # Speaker-identity test sets
 
-_Run 2026-11-05 on ml-01 (RTX 3090, index 0), branch feat/speaker-identity._
+_Run 2026-11-05 on the GPU host (RTX 3090, index 0), branch feat/speaker-identity._
 
 Five workspaces under `~/fukikae-ws/` (media and workspaces stay outside the repo), each run through `fukikae run <ws> <ep> --to diarize`, labeled from subtitle ground truth with `fukikae eval auto-label`, and scored once with the ECAPA baseline: `fukikae eval identity <ws> --tune A,B --gt <kind> --segmentation diarization --embedder ecapa --matcher centroid --threshold 0.6`. No holdout was scored and nothing here was chosen by looking at one. A recurring character has at least 5 s of labeled speech in each tune episode (Ruling R6). Every set uses Demucs separation, pyannote community-1 diarization and ECAPA embeddings; the ASR backend is noted per set. The baseline outputs are in `~/fukikae-ws/baselines/<set>.{txt,json}`.
 
@@ -34,7 +34,7 @@ Alignment is the share of subtitle time over detected speech at the best global 
 
 ## grid (ko, live action)
 
-- Files: Grid (2022) S01E02, S01E04, S01E05, `Grid.2022.S01E0N.KOREAN.1080p.DSNP.WEBRip.DDP5.1.x264-HDCTV.mkv` in `~/fukikae-ws/media/Grid/`. E02 was copied from the Plex share (read-only NFS volume, removed afterwards); E04 and E05 were local.
+- Files: Grid (2022) S01E02, S01E04, S01E05, Korean audio, 1080p web `.mkv`, in `~/fukikae-ws/media/Grid/`. E02 was copied from the NAS media share (read-only NFS volume, removed afterwards); E04 and E05 were local.
 - Audio: `kor`, stream 1 (one audio track). ASR: `qwen3_asr` for ko.
 - Ground truth: `sdh`, the `Korean [CC]` track, stream 2. Auto-label's own track choice failed ("no text subtitle stream for sdh ground truth"), so `--subtitle-track 2` is passed to both auto-label and identity. Coverage is thin: 85 of 426 spans labeled in the three episodes, 12% of speech in the tune pair (E02 28 of 127 segments, E04 25 of 140). The CC track names a speaker only where the viewer would not know.
 - Aliases: none offered, none accepted.
@@ -42,7 +42,7 @@ Alignment is the share of subtitle time over detected speech at the best global 
 
 ## cyberfarm (ru, live action): dropped
 
-- Files: The Cyberfarm S02E01 to S02E04 (Venus Central, Space Trash, Izvinigorod, Legacy Code), WEBDL-720p `.mkv`, copied from `/mnt/mega/media/ums/media/TV/The Cyberfarm/Season 2/` through a read-only Docker NFS volume (only these four files; volume removed afterwards) into `~/fukikae-ws/media/The Cyberfarm/Season 2/`.
+- Files: The Cyberfarm S02E01 to S02E04 (Venus Central, Space Trash, Izvinigorod, Legacy Code), WEBDL-720p `.mkv`, copied from the NAS media share through a read-only Docker NFS volume (only these four files; volume removed afterwards) into `~/fukikae-ws/media/The Cyberfarm/Season 2/`.
 - Audio: each file has four `rus` tracks (stereo-as-5.1 `ac3` and `eac3`, each with an audio-description twin). `source_language = "ru"` takes the first, stream 1, `Русский 5.1`, the plain mix; checked on E01 and E04. ASR: `faster_whisper`.
 - Config: `[align] backend = "qwen3_forced_aligner"`. The default wav2vec2 aligner has no Russian model and the first run failed in the ASR stage with `wav2vec2 has no alignment model for language 'ru'`; the Qwen3 aligner covers ru. No code changed, and the failed run left nothing behind to clean.
 - Ground truth: `sdh`, `Русские (для слабослышащих)`, stream 6. Coverage 8% of spans (44 of 563 over four episodes), 21% of speech in the tune pair; alignment 83%, 75%, 83%, 83% for E01 to E04.

@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- `$REPO` is the checkout the plan runs in (a worktree under `/home/lokkju/projects/fukikae/.claude/worktrees/`). uv only, always `uv run --directory $REPO ...`; never pip, never `cd <dir> && <cmd>`; absolute paths everywhere. Pipeline and media commands through `mise -C $REPO exec -- <cmd>`.
+- `$REPO` is the checkout the plan runs in (a worktree under `~/projects/fukikae/.claude/worktrees/`). uv only, always `uv run --directory $REPO ...`; never pip, never `cd <dir> && <cmd>`; absolute paths everywhere. Pipeline and media commands through `mise -C $REPO exec -- <cmd>`.
 - Tests first, with RED evidence in each task report. Markers as in CLAUDE.md; default runs stay offline, model-free and GPU-free. Test fixtures are synthetic ASS text written in the test; no release subtitle file is committed.
 - Real-data runs (Task 11) work on hard-link copies (`cp -al`) under `~/fukikae-ws/t-names/`; source media and the existing workspaces are read-only. GPU 0 only if the operator approves the en E11 run (open decision 7); index 1 is vLLM.
 - Commits: stage explicit paths with `git -C $REPO add <paths>`, then a plain `git -C $REPO commit -m "<conventional message>"` (no pathspec). No AI attribution, no `Co-Authored-By`, no session links. One committer at a time in a checkout (pre-commit stashes other agents' unstaged edits).

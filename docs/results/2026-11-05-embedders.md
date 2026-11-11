@@ -1,6 +1,6 @@
 # Speaker embedders compared
 
-_Run 2026-11-05 on ml-01 (RTX 3090, index 0), branch feat/speaker-identity. Tuning pairs only: no `--holdout` was passed and nothing here was chosen by looking at a held-out episode._
+_Run 2026-11-05 on the GPU host (RTX 3090, index 0), branch feat/speaker-identity. Tuning pairs only: no `--holdout` was passed and nothing here was chosen by looking at a held-out episode._
 
 ## What was compared
 
