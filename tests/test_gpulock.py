@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -365,3 +367,51 @@ def test_fukikae_gpu_index_names_the_card_before_cuda_visible_devices(monkeypatc
     assert gpulock._on_card(4242, 2) is True and gpulock._on_card(4242, 0) is False
     monkeypatch.setattr(gpulock, "_read_environ", lambda _pid: [b"FUKIKAE_GPU_INDEX=x"])
     assert gpulock._on_card(4242, 0) is True  # unreadable value: on every card, as before
+
+
+def test_a_waiter_names_the_holder_and_how_long_it_has_held_the_card(monkeypatch, caplog, tmp_path):
+    """#29: "waiting for GPU N, held by pid P (<what>) for <dur>" at once and every
+    WAIT_LOG_S, and the wait shows in status.json while it lasts."""
+    import fcntl
+    import io
+    import json
+    import logging
+
+    from fukikae import progress
+
+    path = gpulock.lock_path(0)
+    path.write_text("4242 tts indextts2\n")
+    os.utime(path, (time.time() - 240, time.time() - 240))  # taken 4 minutes ago
+    fake_holder = os.open(path, os.O_RDWR)
+    fcntl.flock(fake_holder, fcntl.LOCK_EX)
+    monkeypatch.setattr(gpulock, "_alive", lambda pid: pid == 4242 or pid == os.getpid())
+    monkeypatch.setattr(gpulock, "WAIT_LOG_S", 0.2)
+    caplog.set_level(logging.WARNING, logger="fukikae.gpulock")
+    statuses: list[list[dict]] = []
+
+    def watch():
+        deadline = time.monotonic() + 0.7
+        while time.monotonic() < deadline:
+            data = progress.read_status(tmp_path)
+            if data and data["gpu"]:
+                statuses.append(data["gpu"])
+            time.sleep(0.05)
+        os.close(fake_holder)  # lets go of the lock
+
+    try:
+        with progress.run(tmp_path, ["S01E12"], stream=io.StringIO(), tty=False, status_every=0):
+            t = threading.Thread(target=watch)
+            t.start()
+            with gpu_lock(0, "asr", timeout_s=5, poll_s=0.05):
+                held = json.loads((tmp_path / ".fukikae" / "status.json").read_text())["gpu"]
+            t.join(5)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fake_holder)
+    waits = [r.getMessage() for r in caplog.records if r.getMessage().startswith("waiting for GPU")]
+    assert waits[0] == "waiting for GPU 0, held by pid 4242 (tts indextts2) for 4 min 0 s"
+    assert 2 <= len(waits) <= 6  # repeated every WAIT_LOG_S, not every poll
+    assert statuses and statuses[0][0]["state"] == "waiting"
+    assert statuses[0][0]["holder_pid"] == 4242 and statuses[0][0]["holder"] == "tts indextts2"
+    assert held == [{"gpu": 0, "thread": "head", "state": "held", "holder_pid": os.getpid(),
+                     "holder": "asr", "held_since": held[0]["held_since"]}]  # fmt: skip
