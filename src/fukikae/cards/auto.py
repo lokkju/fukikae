@@ -774,23 +774,30 @@ def ensure_assignments(
                     "replaces this stand-in with a clone"
                 )
                 by = FALLBACK_BY
+        again = "the current rules pick it again; kept, flagged for review"
+        held = reg.card_for(cid, language)
+        if (cid in repick or cid in floor or cid in purity) and held and new == held.card_id:
+            # the re-pick is the card it has: nothing changes, and every flag stays
+            if cid in repick:
+                flagged.append(
+                    f"character {_label(reg, cid)}: card {new} is cloned from turns the "
+                    f"subtitles now name otherwise ({_where((stale or {})[cid])}); {again}: "
+                    "`fukikae voices clone` replaces it"
+                )
+            if cid in purity:
+                flagged.append(_impure_flag(reg, cid, new, purity[cid], again))
+            if thin is not None:
+                flagged.append(_thin_flag(reg, cid, new, thin))
+            elif below is not None:
+                flagged.append(_floor_flag(reg, cid, new, below, again))
+            continue
         reasons: list[str] = []
         if cid in repick:
-            if new == repick[cid]:
-                continue
             reasons.append(f"{REPICK_NOTE} ({_where((stale or {})[cid])})")
         if cid in floor or (cid in repick and cid in (short or {})):
             sf = floor.get(cid) or (short or {})[cid]
-            if new == sf.card_id:
-                continue
             reasons.append(f"{FLOOR_NOTE} ({sf.phrase})")
         if cid in purity:
-            if new == purity[cid].card_id:
-                flagged.append(_impure_flag(
-                    reg, cid, new, purity[cid],
-                    "the current rules pick it again; kept, flagged for review",
-                ))  # fmt: skip
-                continue
             reasons.append(f"{PURITY_NOTE} ({purity[cid].gates})")
         if reasons:
             note = f"{'; '.join(reasons)}; {note}"

@@ -2188,3 +2188,46 @@ def test_impure_lines_treat_thin_picks_as_no_pick(tmp_path: Path, monkeypatch):
     assert line.endswith("no gate-passing reference pick exists; flagged: listen in "
                          "`fukikae studio`, or replace it with `fukikae voices clone`")  # fmt: skip
     reg.close()
+
+
+def test_a_repick_that_picks_the_same_card_keeps_every_flag(tmp_path: Path, vocals: Path):
+    """Review fix 4: an automatic card under the floor and impure whose re-pick comes back as
+    the same card changes nothing, and keeps both its impure and its floor flag (the floor
+    reason used to end the re-pick before the purity check ran)."""
+    from fukikae.cards.auto import Impurity, below_floor
+
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    cloning = _cloning({a: [(0.0, 4.2, None)]}, vocals)
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=cloning)
+    card = reg.card_for(a, "en")
+    assert card is not None and card.card_id is not None
+    short = below_floor(reg, store, [a], "en")
+    ref = {"episode": "S01E12", "start": 0.0, "end": 4.2, "gate": "unvoiced",
+           "gates": ["unvoiced"], "median": None, "voiced_fraction": 0.1}  # fmt: skip
+    impure = {a: Impurity(card.card_id, (ref,))}
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {a: [(0.0, 6.0)]}, vocals, cloning=cloning,
+                               short=short, impure=impure, flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(a, "en").card_id == card.card_id  # type: ignore[union-attr]
+    assert len(reg.card_history(a, "en")) == 1
+    assert any("fail the reference gates" in f and "pick it again" in f for f in flags), flags
+    assert any("below the clone floor (1 clip and 4.2 s" in f for f in flags), flags
+    reg.close()
+
+
+def test_a_stale_repick_that_picks_the_same_card_keeps_the_stale_flag(tmp_path: Path, vocals: Path):
+    """Review fix 4: a stale automatic card whose re-pick is the same card stays flagged."""
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    cloning = _cloning({a: [(0.0, 4.0, None), (6.0, 10.0, None)]}, vocals)
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, vocals, cloning=cloning)
+    old = reg.card_for(a, "en").card_id  # type: ignore[union-attr]
+    stale = {a: [{"episode": "S01E12", "start": 6.0, "end": 10.0, "overlap": 0.5,
+                  "names": ["wendy"]}]}  # fmt: skip
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, vocals, cloning=cloning,
+                               stale=stale, flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(a, "en").card_id == old  # type: ignore[union-attr]
+    assert any("now name otherwise" in f and "S01E12 6.00-10.00 (wendy)" in f for f in flags), flags
+    reg.close()
