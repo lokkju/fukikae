@@ -2170,3 +2170,21 @@ def test_extras_cards_record_their_tier(tmp_path: Path):
     assert store.get(cards["S9"]).meta["reference_tier"] == "floor"
     assert store.get(cards["unknown~c0103"]).meta["reference_tier"] == "thin"
     reg.close()
+
+
+def test_impure_lines_treat_thin_picks_as_no_pick(tmp_path: Path, monkeypatch):
+    """Review fix 2: thin picks never re-pick an impure card (ensure_assignments keeps and
+    flags it), so impure_lines says the same."""
+    from fukikae.cards.auto import CharacterRefs, impure_lines
+    from fukikae.cards.select import RefPick
+
+    reg, _, ws = _ws_impure(tmp_path)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 60.0, 64.5)])
+    thin = CharacterRefs(2.0, [RefPick(0.0, 2.0, "x", 30.0)], NAMED_EP, tier="thin")
+    monkeypatch.setattr("fukikae.cards.auto.find_references", lambda *_a, **_k: thin)
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    (line,) = impure_lines(ws, reg, store, [1], "en")
+    assert line.endswith("no gate-passing reference pick exists; flagged: listen in "
+                         "`fukikae studio`, or replace it with `fukikae voices clone`")  # fmt: skip
+    reg.close()

@@ -1919,7 +1919,7 @@ def impure_lines(
             out.append(f"{head}; kept: {PURITY_FIX}")
             continue
         found = find_references(ws, episodes, cid, None, loaded, exclusions)
-        if not found.picks:
+        if not found.picks or found.tier == "thin":  # thin picks set the gates aside
             out.append(f"{head}; no gate-passing reference pick exists; flagged: {PURITY_FIX}")
             continue
         n = len(found.picks)
