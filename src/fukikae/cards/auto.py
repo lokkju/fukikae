@@ -667,7 +667,8 @@ def ensure_assignments(
     the thin tier, so a character whose speech the names gave to others stops speaking in
     their voice. A curated or imported card, and an automatic one while no clone can be made, is
     only flagged (D29 #4): the flag lines go to ``flags`` (when given), never to the returned
-    lines, because they change nothing and would repeat on every run.
+    lines, because they change nothing and would repeat on every run. A card with several
+    reasons gets one flag line naming each (`_merged_flags`), as `card_status_lines` does.
 
     ``short`` (`below_floor`) lists automatic clone cards under the clone floor (D32). An
     unlocked one is re-picked the same way (noted `FLOOR_NOTE`) when ``cloning`` gives picks
@@ -696,6 +697,17 @@ def ensure_assignments(
     purity: dict[int, Impurity] = {}  # characters re-picked for impure references
     lines: list[str] = []
     flagged = flags if flags is not None else []
+    # one flag line per character's card (ruling 8, as card_status_lines gives them)
+    per: dict[int, list[str]] = {}
+
+    def flag(cid: int, line: str) -> None:
+        if line not in per.setdefault(cid, []):
+            per[cid].append(line)
+
+    def done() -> list[str]:
+        flagged.extend(_merged_flags(reg, per))
+        return lines
+
     for cid, spans in character_spans.items():
         a = reg.card_for(cid, language)
         refs = (stale or {}).get(cid)
@@ -707,7 +719,7 @@ def ensure_assignments(
                 purity[cid] = imp  # one re-pick with the stale or floor reason
             else:
                 why = _keep_why(a, cloning)
-                flagged.append(_impure_flag(reg, cid, a.card_id or "", imp, why))
+                flag(cid, _impure_flag(reg, cid, a.card_id or "", imp, why))
         held_stock = (stock or {}).get(cid)
         if held_stock is not None and (a is None or a.card_id != held_stock):
             held_stock = None  # read for another card
@@ -715,61 +727,65 @@ def ensure_assignments(
             if usable:
                 todo.append((cid, spans))
             else:
-                flagged.append(
+                flag(
+                    cid,
                     f"character {_label(reg, cid)} has no card, and {_no_clone(cloning)}; "
-                    "fukikae makes no stock voices (D41)"
+                    "fukikae makes no stock voices (D41)",
                 )
         elif held_stock is not None:
             if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
-                flagged.append(_stock_flag(reg, cid, a))
+                flag(cid, _stock_flag(reg, cid, a))
             elif usable:
                 todo.append((cid, spans))
                 restock[cid] = held_stock
             else:
-                flagged.append(_stock_flag(reg, cid, a, f"kept while {_no_clone(cloning)}"))
+                flag(cid, _stock_flag(reg, cid, a, f"kept while {_no_clone(cloning)}"))
         elif refs:
             where = _where(refs)
             also = floor_suffix(short, cid)
             if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
-                flagged.append(
+                flag(
+                    cid,
                     f"character {_label(reg, cid)}'s card {a.card_id} ({a.chosen_by}"
                     f"{', locked' if a.locked else ''}) was cloned from turns the subtitles "
-                    f"now name otherwise: {where}; `fukikae voices clone` replaces it{also}"
+                    f"now name otherwise: {where}; `fukikae voices clone` replaces it{also}",
                 )
             elif usable:
                 todo.append((cid, spans))
                 repick[cid] = a.card_id
             elif cloning is None:
-                flagged.append(
+                flag(
+                    cid,
                     f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns the "
                     f"subtitles now name otherwise ({where}); kept, because no [tts] "
                     "clone_backend is set to re-pick it with: set one, or replace it with "
-                    f"`fukikae voices clone` or `fukikae voices assign`{also}"
+                    f"`fukikae voices clone` or `fukikae voices assign`{also}",
                 )
             else:
                 name = cloning.backend.name
-                flagged.append(
+                flag(
+                    cid,
                     f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns the "
                     f"subtitles now name otherwise ({where}); kept until the clone backend "
                     f"{name} can run ({cloning.unavailable}; `fukikae backends setup {name}`), "
-                    f"and the next tts run then re-picks it{also}"
+                    f"and the next tts run then re-picks it{also}",
                 )
         elif cid in (short or {}):
             sf = (short or {})[cid]
             refusal = replace_refusal(a, "auto")
             if refusal is not None:
-                flagged.append(_short_flag(reg, cid, sf, f"kept: {refusal}"))
+                flag(cid, _short_flag(reg, cid, sf, f"kept: {refusal}"))
             elif usable:
                 todo.append((cid, spans))
                 floor[cid] = sf
             elif cloning is None:
-                flagged.append(_short_flag(
+                flag(cid, _short_flag(
                     reg, cid, sf,
                     "kept, because no [tts] clone_backend is set to re-pick it with",
                 ))  # fmt: skip
             else:
                 name = cloning.backend.name
-                flagged.append(_short_flag(
+                flag(cid, _short_flag(
                     reg, cid, sf,
                     f"kept until the clone backend {name} can run ({cloning.unavailable}; "
                     f"`fukikae backends setup {name}`), when the next tts run re-picks it if "
@@ -780,9 +796,9 @@ def ensure_assignments(
                 todo.append((cid, spans))
                 purity[cid] = imp
             else:
-                flagged.append(_impure_flag(reg, cid, a.card_id, imp, _keep_why(a, cloning)))
+                flag(cid, _impure_flag(reg, cid, a.card_id, imp, _keep_why(a, cloning)))
     if not todo:
-        return lines
+        return done()
     assert cloning is not None
     todo.sort(key=lambda item: (-sum(e - s for s, e in item[1]), item[0]))
     for cid, _spans in todo:
@@ -791,7 +807,7 @@ def ensure_assignments(
             a = reg.card_for(cid, language)
             assert a is not None
             hint = _skip_hint(found.skipped)
-            flagged.append(_stock_flag(
+            flag(cid, _stock_flag(
                 reg, cid, a, f"no speech of its own was found to clone a voice from{hint}",
             ))  # fmt: skip
             continue
@@ -799,12 +815,12 @@ def ensure_assignments(
         if cid in purity and cid not in repick and not gated_picks:
             imp = purity[cid]
             why = "no gate-passing reference pick exists; kept, flagged for review"
-            flagged.append(_impure_flag(reg, cid, imp.card_id, imp, why))
+            flag(cid, _impure_flag(reg, cid, imp.card_id, imp, why))
             if cid in floor:
-                flagged.append(_short_flag(reg, cid, floor[cid]))
+                flag(cid, _short_flag(reg, cid, floor[cid]))
             continue  # never a stock voice
         if cid in floor and cid not in purity and not _better(found, floor[cid]):
-            flagged.append(_short_flag(reg, cid, floor[cid], own=found))
+            flag(cid, _short_flag(reg, cid, floor[cid], own=found))
             continue  # the best picks there are: kept, flagged (never a stock voice)
         below: str | None = None
         thin: str | None = None
@@ -827,15 +843,17 @@ def ensure_assignments(
             cur = reg.card_for(cid, language)
             hint = _skip_hint(found.skipped)
             if cur is not None and cur.card_id is not None:
-                flagged.append(
+                flag(
+                    cid,
                     f"character {_label(reg, cid)}: card {cur.card_id} is kept, flagged: no "
                     f"speech of its own was found to re-pick it from{hint}; `fukikae voices "
-                    "clone` replaces it"
+                    "clone` replaces it",
                 )
             else:
-                flagged.append(
+                flag(
+                    cid,
                     f"character {_label(reg, cid)}: no speech of its own was found to clone a "
-                    f"voice from, so it has no card{hint}; `fukikae voices clone` makes one"
+                    f"voice from, so it has no card{hint}; `fukikae voices clone` makes one",
                 )
             continue
         again = "the current rules pick it again; kept, flagged for review"
@@ -844,17 +862,18 @@ def ensure_assignments(
             # the re-pick is the card it has: nothing changes, and every flag stays, a stale
             # card's shortfall on its own line (one line per card)
             if cid in repick:
-                flagged.append(
+                flag(
+                    cid,
                     f"character {_label(reg, cid)}: card {new} is cloned from turns the "
                     f"subtitles now name otherwise ({_where((stale or {})[cid])}); {again}: "
-                    f"`fukikae voices clone` replaces it{_shortfall_suffix(below, thin)}"
+                    f"`fukikae voices clone` replaces it{_shortfall_suffix(below, thin)}",
                 )
             if cid in purity:
-                flagged.append(_impure_flag(reg, cid, new, purity[cid], again))
+                flag(cid, _impure_flag(reg, cid, new, purity[cid], again))
             if cid not in repick and thin is not None:
-                flagged.append(_thin_flag(reg, cid, new, thin, own=found))
+                flag(cid, _thin_flag(reg, cid, new, thin, own=found))
             elif cid not in repick and below is not None:
-                flagged.append(_floor_flag(reg, cid, new, below, again))
+                flag(cid, _floor_flag(reg, cid, new, below, again))
             continue
         reasons: list[str] = [STOCK_NOTE] if cid in restock else []
         if cid in repick:
@@ -873,10 +892,27 @@ def ensure_assignments(
             continue
         lines.append(f"character {_label(reg, cid)}: {note}")
         if below is not None:
-            flagged.append(_floor_flag(reg, cid, new, below))
+            flag(cid, _floor_flag(reg, cid, new, below))
         if thin is not None:
-            flagged.append(_thin_flag(reg, cid, new, thin, own=found))
-    return lines
+            flag(cid, _thin_flag(reg, cid, new, thin, own=found))
+    return done()
+
+
+def _merged_flags(reg: Registry, per: dict[int, list[str]]) -> list[str]:
+    """One flag line per character (each speaks with one card): its lines in order, the
+    later ones joined to the first after ``also``, the ``character <label>`` they all open
+    with said once."""
+    out: list[str] = []
+    for cid, found in per.items():
+        head = f"character {_label(reg, cid)}"
+        rest = []
+        for line in found[1:]:
+            body = line.removeprefix(head)
+            if body.startswith("'s "):
+                body = f"its {body[3:]}"
+            rest.append(body.removeprefix(":").strip())
+        out.append("; also ".join([found[0], *rest]))
+    return out
 
 
 def _no_clone(cloning: Cloning | None) -> str:

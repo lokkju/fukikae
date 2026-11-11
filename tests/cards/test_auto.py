@@ -2076,6 +2076,31 @@ def test_a_repick_that_picks_the_same_card_keeps_every_flag(tmp_path: Path, voca
     reg.close()
 
 
+def test_run_flags_name_each_card_once(tmp_path: Path, vocals: Path):
+    """Ruling 8, as card_status_lines does it: a card with several reasons gets one flag line
+    naming each of them, here a locked card that is both stale and impure."""
+    from fukikae.cards.auto import Impurity
+
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    cloning = _cloning({a: [(0.0, 4.0, None), (6.0, 10.0, None)]}, vocals)
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, cloning=cloning)
+    card = reg.card_for(a, "en")
+    assert card is not None and card.card_id is not None
+    reg.lock_card(a, "en", True)
+    stale = {a: [{"episode": "S01E12", "start": 6.0, "end": 10.0, "overlap": 0.5,
+                  "names": ["wendy"]}]}  # fmt: skip
+    ref = {"episode": "S01E12", "start": 0.0, "end": 4.0, "gate": "unvoiced",
+           "gates": ["unvoiced"], "median": None, "voiced_fraction": 0.1}  # fmt: skip
+    flags: list[str] = []
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 10.0)]}, cloning=cloning, stale=stale,
+                       impure={a: Impurity(card.card_id, (ref,))}, flags=flags)  # fmt: skip
+    (line,) = flags
+    assert line.startswith(f"character {a}") and line.count(f"character {a}") == 1
+    assert "fail the reference gates" in line and "name otherwise" in line
+    reg.close()
+
+
 def test_a_stale_repick_that_picks_the_same_card_keeps_the_stale_flag(tmp_path: Path, vocals: Path):
     """Review fix 4: a stale automatic card whose re-pick is the same card stays flagged."""
     reg, (a,) = _registry(tmp_path, 1)
