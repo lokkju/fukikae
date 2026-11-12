@@ -44,13 +44,12 @@ max_speed = 1.25
 source = "auto"
 subs_condense = true
 
-[tts]   # Kokoro: stock voices (extras, and characters under 6 s of clean speech)
-backend = "kokoro"
+[tts]   # every voice is a clone of the speaker's own speech (D41: no stock voices)
 clone_backend = "indextts2"   # D24: the operator's listening verdict (Task 11)
 
-[tts.gender]   # anime voices sit high: a wide unknown band, and unknowns alternate pools
+[tts.gender]   # read only by eval tts's stock baselines; the tts stage's gates use 165/200 Hz
 male_below = 165.0
-female_above = 300.0
+female_above = 300.0   # pending operator decision D44 (165/200 on the median, or keep this)
 
 [timefit]   # character-cards Task 7: rate (tts) and time-stretch share max_speedup; then borrowed silence
 max_speedup = 1.25

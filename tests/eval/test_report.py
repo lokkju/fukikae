@@ -29,6 +29,7 @@ def test_headline_metrics():
         "embedder": "nc_overall",
         "tts": "speaker_similarity",
         "names": "cue_accuracy",
+        "gender": "mismatch_rate",
     }
 
 
@@ -119,6 +120,15 @@ def test_filters_stage_backend_set_split_tag():
 def test_identity_cell_shows_clean_and_merges():
     m = build_matrix([row(metrics={"fraction": 0.5625, "clean": 5, "merges": 1})])
     assert m.rows[0][1] == ["0.56 c5 m1"]
+
+
+def test_gender_cell_shows_mismatched_over_known():
+    m = build_matrix([row(stage="gender", metrics={
+        "mismatch_rate": 0.0678, "mismatched_strict": 25, "known": 369,
+    })])  # fmt: skip
+    assert m.rows[0][1] == ["0.07 25/369"]
+    m = build_matrix([row(stage="gender", metrics={"mismatch_rate": 0.0678})])
+    assert m.rows[0][1] == ["0.07"]  # an older row without the counts
 
 
 def test_render_text_aligns_columns():

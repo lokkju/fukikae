@@ -122,14 +122,14 @@ def test_every_configured_held_out_episode_is_checked_even_as_tune(tmp_path: Pat
 
 def test_reference_purity_counts_wrong_speaker_seconds(tmp_path: Path):
     """Without names the merged cluster is all Natsu's (20 s of his speech against Wendy's
-    10 s), and its loudest turns, the ones a clone picks first, are Wendy's: two of Natsu's
-    three 5 s clips are Wendy's, a purity of a third. With names, his references are his
-    own."""
+    10 s), and its loudest turns, the ones a clone picks first, are Wendy's: both of Natsu's
+    5 s clips are Wendy's (all five turns are one scene, so the A1 scene gate stops at the
+    floor's two clips), a purity of nothing. With names, his references are his own."""
     root, gt = _ws(tmp_path / "merged", names_on_tune=False)
     merged = names_eval(root, ["S01E12"], gt_file=gt)
     assert merged.modal == {1: "natsu"}
-    assert merged.tune.purity_per_character["Natsu"] == pytest.approx(1 / 3, abs=1e-5)
-    assert merged.tune.reference_seconds == pytest.approx(15.0)
+    assert merged.tune.purity_per_character["Natsu"] == pytest.approx(0.0, abs=1e-5)
+    assert merged.tune.reference_seconds == pytest.approx(10.0)
     root, gt = _ws(tmp_path / "named")
     named = names_eval(root, ["S01E12"], gt_file=gt)
     assert named.tune.purity_per_character == {"Natsu": 1.0, "Wendy": 1.0}
@@ -204,8 +204,8 @@ def test_ledger_rows_have_stage_names_and_one_row_per_split(tmp_path: Path):
     assert tune["metrics"]["cue_accuracy"] == 1.0 and tune["metrics"]["reference_purity"] == 1.0
     assert rows[1]["metrics"]["cue_accuracy"] == 0.75
     # purity per split, over the split's own picks: the held-out merged cluster's loudest
-    # turn is Wendy's
-    assert rows[1]["metrics"]["reference_purity"] == pytest.approx(2 / 3, abs=1e-5)
+    # turn is Wendy's (one scene: two clips, the floor)
+    assert rows[1]["metrics"]["reference_purity"] == pytest.approx(1 / 2, abs=1e-5)
     assert rows[1]["metrics"]["foreign_seconds"] == 5.0
     assert tune["detail"]["ceiling"] is True and rows[1]["detail"]["ceiling"] is False
     assert "tune (ceiling: graded on the names its run read) S01E12" in r.output

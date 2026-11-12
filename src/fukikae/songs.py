@@ -16,8 +16,12 @@ Fairy Tail E13 at 611 s scores 0.86), so a candidate must also be sung: at least
 periodic (normalized autocorrelation peak at least ``voiced_strength`` between 80 and 1000 Hz).
 Songs measured 0.77 to 0.94, that battle 0.53, dialogue 0.32 to 0.54. An accepted span grows
 while the next ``grow_s`` seconds on either side are at least ``grow_share`` song-like (an intro
-or outro with fewer vocals), up to ``max_song_s``, and is padded by ``pad_s``. Every candidate,
-accepted or not, is reported with its scores. The settings are ``[mix.songs]``.
+or outro with fewer vocals), up to ``max_song_s``, and is padded by ``pad_s``. An ending can
+hold more than one song stretch (Sol Bianca S00E01: 3658-3740 s and 3771-3817 s, dialogue
+between), so with ``tail_repeat`` the rest of the tail, clear of every accepted span, is searched
+again with a ``tail_window_s`` window under the same score and voicing tests, until a pass finds
+nothing; spans within ``grow_s`` of each other merge. Every candidate, accepted or not, is
+reported with its scores. The settings are ``[mix.songs]``.
 
 Measured on the separation stems (``docs/superpowers/ledgers/2026-11-08-character-cards.md``,
 Task 7; ``scripts/song_scores.py`` reproduces it): Fairy Tail E11-E14 openings and endings
@@ -40,7 +44,7 @@ FRAME_S = 0.1
 VOICED_FRAME_S = 0.04
 VOICED_HOP_S = 0.02
 VOICED_ACTIVE_DB = -45.0
-VERSION = 2  # 2: the voicing check
+VERSION = 3  # 2: the voicing check; 3: the tail searched again (tail_window_s, tail_repeat)
 
 
 @dataclass(frozen=True)
@@ -60,13 +64,15 @@ class SongSettings:
     head_s: int = 360
     tail_s: int = 240
     pad_s: float = 1.0
+    tail_window_s: int = 30
+    tail_repeat: bool = True
 
     def __post_init__(self) -> None:
         for name in ("active_share", "min_score", "voiced_strength", "voiced_share", "grow_share"):
             v = getattr(self, name)
             if not (0.0 <= v <= 1.0):
                 raise ValueError(f"{name} must be between 0 and 1, not {v!r}")
-        for name in ("window_s", "grow_s", "max_song_s", "head_s", "tail_s"):
+        for name in ("window_s", "grow_s", "max_song_s", "head_s", "tail_s", "tail_window_s"):
             v = getattr(self, name)
             if isinstance(v, bool) or not isinstance(v, int) or v < 1:
                 raise ValueError(f"{name} must be a whole number of seconds >= 1, not {v!r}")
@@ -77,6 +83,8 @@ class SongSettings:
                 raise ValueError(f"{name} must be a finite number")
         if self.pad_s < 0:
             raise ValueError("pad_s must be >= 0")
+        if not isinstance(self.tail_repeat, bool):
+            raise ValueError(f"tail_repeat must be true or false, not {self.tail_repeat!r}")
 
 
 SONG_KEYS = tuple(f.name for f in fields(SongSettings))
@@ -136,6 +144,13 @@ def _frame_db(path: Path) -> np.ndarray:
     return out
 
 
+def active_frames(vocals: Path, active_db: float = SongSettings.active_db) -> np.ndarray:
+    """Per ``FRAME_S`` frame of ``vocals``, whether the voice is on (above ``active_db``): the
+    frames `frame_features` counts into its per-second share, for the asrclean stage's
+    no-speech test."""
+    return _frame_db(vocals) > active_db
+
+
 def frame_features(
     background: Path, vocals: Path, active_db: float = SongSettings.active_db
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -183,6 +198,78 @@ def voiced_share(
     return float((ac[:, lo:hi].max(axis=1) >= strength).mean())
 
 
+def song_like_mask(
+    bg_db: np.ndarray, vo_db: np.ndarray, active: np.ndarray, s: SongSettings
+) -> np.ndarray:
+    """Per second, whether it is song-like: the voice on (``active_share`` of its 100 ms
+    frames) and the bed within ``music_margin_db`` of the voice. The windows of
+    `find_candidates` are scored on this; the A1 reference gate reads it per turn."""
+    return (active >= s.active_share) & (bg_db >= vo_db - s.music_margin_db)
+
+
+def song_like_seconds(
+    background: Path, vocals: Path, settings: SongSettings | None = None
+) -> np.ndarray:
+    """`song_like_mask` over the whole episode, from the separation stems."""
+    s = settings or SongSettings()
+    return song_like_mask(*frame_features(background, vocals, s.active_db), s)
+
+
+def _grow(
+    good: np.ndarray, a: int, b: int, s: SongSettings, blocked: np.ndarray
+) -> tuple[int, int]:
+    """Grow [a, b) while the next ``grow_s`` seconds on either side are ``grow_share`` song-like,
+    up to ``max_song_s``, never into a ``blocked`` second (an earlier accepted span)."""
+    dur = len(good)
+    while (
+        a > 0
+        and not blocked[a - 1]
+        and b - a < s.max_song_s
+        and good[max(0, a - s.grow_s) : a].mean() >= s.grow_share
+    ):
+        a -= 1
+    while (
+        b < dur
+        and not blocked[b]
+        and b - a < s.max_song_s
+        and good[b : b + s.grow_s].mean() >= s.grow_share
+    ):
+        b += 1
+    return a, b
+
+
+def _best_window(
+    good: np.ndarray,
+    lo: int,
+    hi: int,
+    w: int,
+    region: str,
+    s: SongSettings,
+    voiced: Callable[[float, float], float] | None,
+    blocked: np.ndarray,
+) -> Candidate | None:
+    """The best ``w`` s window inside [lo, hi) clear of ``blocked`` seconds, scored, checked
+    and grown when accepted; None when no such window fits."""
+    if hi - lo < w:
+        return None
+    score = np.convolve(good[lo:hi], np.ones(w), "valid") / w
+    clear = np.convolve(blocked[lo:hi].astype(np.float64), np.ones(w), "valid") == 0
+    if not clear.any():
+        return None
+    i = lo + int(np.argmax(np.where(clear, score, -1.0)))
+    best = round(float(score[i - lo]), 3)
+    if best < s.min_score:
+        return Candidate(region, float(i), float(i + w), best, None, False, "score")
+    v = None if voiced is None else round(voiced(float(i), float(i + w)), 3)
+    if v is not None and v < s.voiced_share:
+        return Candidate(region, float(i), float(i + w), best, v, False, "voiced")
+    a, b = _grow(good, i, i + w, s, blocked)
+    dur = float(len(good))
+    return Candidate(
+        region, max(0.0, a - s.pad_s), min(dur, b + s.pad_s), best, v, True, "accepted"
+    )
+
+
 def find_candidates(
     bg_db: np.ndarray,
     vo_db: np.ndarray,
@@ -192,46 +279,46 @@ def find_candidates(
 ) -> list[Candidate]:
     """The best window of the head and of the tail region, scored; ``voiced(start, end)``
     measures the voicing share of a window that passes on energy (no voicing check when
-    None)."""
-    good = ((active >= s.active_share) & (bg_db >= vo_db - s.music_margin_db)).astype(np.float64)
-    dur, w = len(good), s.window_s
-    if dur < w:
+    None). With ``tail_repeat``, once the tail's window is accepted the rest of the tail is
+    searched again with ``tail_window_s`` windows clear of every accepted span, under the same
+    tests, until a pass finds nothing (regions ``tail2``, ``tail3``, ...; the last, refused
+    one is reported too)."""
+    good = song_like_mask(bg_db, vo_db, active, s).astype(np.float64)
+    dur = len(good)
+    if dur < s.window_s:
         return []
-    score = np.convolve(good, np.ones(w), "valid") / w  # score[i]: the window starting at i
+    blocked = np.zeros(dur, dtype=bool)
     out: list[Candidate] = []
-    for region, (lo, hi) in (
-        ("head", (0, min(s.head_s, dur))),
-        ("tail", (max(0, dur - s.tail_s), dur)),
-    ):
-        if hi - lo < w:
-            continue
-        i = lo + int(np.argmax(score[lo : hi - w + 1]))
-        best = round(float(score[i]), 3)
-        if best < s.min_score:
-            out.append(Candidate(region, float(i), float(i + w), best, None, False, "score"))
-            continue
-        v = None if voiced is None else round(voiced(float(i), float(i + w)), 3)
-        if v is not None and v < s.voiced_share:
-            out.append(Candidate(region, float(i), float(i + w), best, v, False, "voiced"))
-            continue
-        a, b = i, i + w
-        while (
-            a > 0 and b - a < s.max_song_s and good[max(0, a - s.grow_s) : a].mean() >= s.grow_share
-        ):
-            a -= 1
-        while b < dur and b - a < s.max_song_s and good[b : b + s.grow_s].mean() >= s.grow_share:
-            b += 1
-        out.append(
-            Candidate(region, max(0.0, a - s.pad_s), min(float(dur), b + s.pad_s), best, v, True,
-                      "accepted")
-        )  # fmt: skip
+
+    def block(c: Candidate) -> None:
+        if c.accepted:
+            blocked[int(math.floor(c.start)) : int(math.ceil(c.end))] = True
+
+    tail = (max(0, dur - s.tail_s), dur)
+    for region, (lo, hi) in (("head", (0, min(s.head_s, dur))), ("tail", tail)):
+        c = _best_window(good, lo, hi, s.window_s, region, s, voiced, np.zeros(dur, dtype=bool))
+        if c is not None:
+            out.append(c)
+            block(c)
+    first = next((c for c in out if c.region == "tail"), None)
+    n = 1
+    while s.tail_repeat and first is not None and first.accepted:
+        n += 1
+        c = _best_window(good, *tail, s.tail_window_s, f"tail{n}", s, voiced, blocked)
+        if c is None:
+            break
+        out.append(c)
+        block(c)
+        if not c.accepted:
+            break
     return out
 
 
-def _spans(cands: list[Candidate]) -> list[SongSpan]:
+def merge_spans(cands: list[Candidate], gap: float = 0.0) -> list[SongSpan]:
+    """Accepted candidates as spans, merged where they overlap or lie within ``gap`` s."""
     merged: list[SongSpan] = []
     for c in sorted((c for c in cands if c.accepted), key=lambda c: c.start):
-        if merged and c.start <= merged[-1].end:
+        if merged and c.start <= merged[-1].end + gap:
             last = merged[-1]
             merged[-1] = SongSpan(
                 last.start, max(last.end, c.end), "detector", max(last.score or 0, c.score)
@@ -239,6 +326,11 @@ def _spans(cands: list[Candidate]) -> list[SongSpan]:
         else:
             merged.append(SongSpan(c.start, c.end, "detector", c.score))
     return merged
+
+
+def merge_gap(s: SongSettings) -> float:
+    """How close accepted spans must be to merge: ``grow_s`` with ``tail_repeat``, else 0."""
+    return float(s.grow_s) if s.tail_repeat else 0.0
 
 
 def theme_songs(
@@ -250,7 +342,8 @@ def theme_songs(
     voiced: Callable[[float, float], float] | None = None,
 ) -> list[SongSpan]:
     """Opening and ending theme spans from per-second features (see the module docstring)."""
-    return _spans(find_candidates(bg_db, vo_db, active, settings or SongSettings(), voiced))
+    s = settings or SongSettings()
+    return merge_spans(find_candidates(bg_db, vo_db, active, s, voiced), merge_gap(s))
 
 
 def detect_theme_songs(
@@ -262,4 +355,4 @@ def detect_theme_songs(
     cands = find_candidates(
         *feats, s, voiced=lambda a, b: voiced_share(vocals_16k, a, b, s.voiced_strength)
     )
-    return _spans(cands), cands
+    return merge_spans(cands, merge_gap(s)), cands

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -22,6 +23,13 @@ _GENRE = re.compile(r"[a-z0-9-]+")
 # A BCP 47-shaped language tag (a 2-3 letter language, then dash-separated subtags), the form
 # packs carry and import accepts.
 LANGUAGE_TAG = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")
+# D41: `[tts] backend` chose the stock voices of automatic and extras cards; it chooses no card
+# now (every voice is a clone of `[tts] clone_backend`). A config that sets it is told once
+# per process (per workspace), and the key stays accepted.
+TTS_BACKEND_WARNING = (
+    "[tts] backend no longer chooses any card (D41); clone_backend makes every voice"
+)
+_TTS_BACKEND_WARNED: set[str] = set()
 
 
 def normalize_language(tag: str) -> str:
@@ -341,6 +349,10 @@ def load_config(
         raw = _read(user_config)
     raw = _deep_merge(raw, _read(workspace / "fukikae.toml"))
 
+    tts = raw.get("tts")
+    if isinstance(tts, dict) and "backend" in tts and str(workspace) not in _TTS_BACKEND_WARNED:
+        _TTS_BACKEND_WARNED.add(str(workspace))
+        logging.getLogger(__name__).warning(TTS_BACKEND_WARNING)
     profile = str(raw.get("profile", "default"))
     profile_raw = load_profile(profile)
     reg = {**profile_raw.get("registry", {}), **raw.get("registry", {})}

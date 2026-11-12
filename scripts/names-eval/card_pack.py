@@ -23,6 +23,7 @@ from pathlib import Path
 from fukikae.artifacts import read_json
 from fukikae.cards.select import turn_text
 from fukikae.models import Transcript
+from fukikae.transcripts import transcript_path
 
 
 def plan(path: Path) -> dict[str, dict]:
@@ -46,7 +47,7 @@ def main() -> None:
     cues = {
         c["id"]: c for c in json.loads((work / "06-translate" / "cues.en.json").read_text())["cues"]
     }
-    transcript = read_json(work / "03-asr" / "transcript.json", Transcript)
+    transcript = read_json(transcript_path(work), Transcript)
     old_plan, new_plan = plan(args.old / "plan.json"), plan(work / "07-tts" / "plan.json")
     args.out.mkdir(parents=True, exist_ok=True)
     key_lines, rows = [], []

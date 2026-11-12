@@ -15,14 +15,22 @@ from the character's reference turns in the workspace's episodes
 (``cards.auto.workspace_cloning``; name-confirmed turns first when subtitle names were used, and
 an automatic clone card whose references the names now contradict is re-picked,
 ``cards.auto.stale_cards``, as is one under the clone floor of 2 clips and 10 s when a better
-pick exists, ``cards.auto.below_floor``; one with no better pick is kept and flagged in
-``run.json``), or, with under 6 s of clean speech or no ``clone_backend``, a
-gender-matched stock voice of the ``[tts]`` backend (the F0 estimate skips theme songs and
-tagged singing). Cues with no character (extras, and clusters the characters stage left for
-review) speak with a stock voice from the extras pools, one per label, fixed by first appearance
-in the episode. Every card is then checked (it exists, its backend can honor it at the model
-revision it names, its sidecars are present), so a broken card stops the stage, naming the
-character, before any model loads.
+pick exists, ``cards.auto.below_floor``, and one with references the A1 reference gates refuse
+when a gate-passing pick exists, ``cards.auto.impure_cards``; one with no better pick is kept
+and flagged in ``run.json``, as is a curated, imported or locked card any of these finds). Every
+speaker with speech gets a clone (A2, D41): below 3 s of gate-passing speech it is cloned from
+its longest turns and flagged as a thin reference, and one with no turn of its own anywhere from
+its own cues' spans. Cues with no character (extras, and clusters the characters stage left for
+review) speak with an episode-local clone of their cluster's own turns, and each cue with no
+cluster at all with a clone of its own source span (``cards.auto.extras_cards``); the label to
+card map is in the stage key, and each label's tier in ``run.json``. fukikae renders no stock
+voice it chose (D41): an automatic stock card (``auto``, ``auto-fallback``, ``restock``) is
+re-picked as a clone, a curated, imported or locked one kept and flagged; and when a card has to
+be made or re-picked, extras need cards, or a clone render isn't cached while ``[tts]
+clone_backend`` is unset or can't run here, the stage stops (`CloneBackendError`) before any
+model loads, naming ``fukikae backends setup``. Every card is then checked (it exists, its
+backend can honor it at the model revision it names, its sidecars are present), so a broken card
+stops the stage, naming the character, before any model loads.
 
 Renders are cached per cue in ``<workspace>/.fukikae/tts-cache/<key>.wav`` and hard-linked (or
 copied) into ``07-tts``. The key (``cue_key``) hashes the card id, the text, what the backend
@@ -68,14 +76,29 @@ that seed; if it still fails, or the backend takes no seed, ``plan.json`` marks 
 crying (``04b-tag/tags.json``, an input when present) passes no emotion audio
 (``emotion_dropped`` in ``passed``).
 
-``[tts]`` names the backend for automatic and extras cards; its options go to that backend
-only. ``[tts.<backend>]`` holds one backend's own options and its ``device`` (ruling CD14):
-the device is per backend (that table's ``device``, else the backend's ``default_device``,
-Kokoro cpu and the cloning workers cuda, else the legacy ``[tts] device``), so one run can mix
-CPU stock voices and GPU clones; it is never an option and stays out of every key, since the
-device doesn't change which voice a card is. ``[tts.gender]``
-(``male_below``, ``female_above`` in Hz) sets the bands of the automatic gender estimate.
-"""
+Line gate (A3, D41; `gender_gate`): each spoken cue's source span is classed by pitch
+(``fukikae.pitch``'s bands on the median, 165 and 200 Hz, at ``LINE_MIN_VOICED_S`` 0.4 s
+voiced) and set against its speaker's established gender (`established_gender`: the
+operator's when one is stored, else the clear majority register of the speaker's turns in
+the episode, the larger class needing ``pitch.BIMODAL_GATE_RATIO`` (2x) the other's seconds,
+else ``u``). A line in the other band (``m`` against ``f`` or the reverse; ``u`` on either
+side never gates) renders in its own speaker's card with no emotion audio
+(``emotion_dropped: "gender"``, which also gives it its own cache key), is marked
+``gender_gate`` in ``plan.json`` and flagged in ``run.json``. Extras clusters are gated
+against their own turns' register; a cluster-less line, cloned from its own span, never is.
+The rule is in `delivery_passed`, so ``eval tts`` holds it too (CD12). ``GATE_VERSION`` and
+the bands are in the stage key.
+
+``[tts]``'s own options go to ``[tts] backend`` when a workspace still names one (it chooses no
+card since D41, and the profiles name none), else to ``[tts] clone_backend``.
+``[tts.<backend>]`` holds one backend's own options and its ``device`` (ruling CD14): the device
+is per backend (that table's ``device``, else the backend's ``default_device``, Kokoro cpu and
+the cloning workers cuda, else the legacy ``[tts] device``), so one run can mix an operator's
+kept CPU stock card and GPU clones; it is never an option and stays out of every key, since the
+device doesn't change which voice a card is. ``[tts.gender]`` (``male_below``, ``female_above``
+in Hz, on the median F0) is read only by ``eval tts``'s stock baselines (the gender of the stock
+voice a character is compared against); this stage picks no stock voice (D41), and its line
+gate and the reference registers use ``fukikae.pitch``'s 165 and 200 Hz whatever it says."""
 
 from __future__ import annotations
 
@@ -96,7 +119,7 @@ from typing import Any, Protocol, cast
 
 import numpy as np
 
-from fukikae import progress, runctx
+from fukikae import pitch, progress, runctx
 from fukikae.artifacts import atomic_path, read_json, write_json
 from fukikae.backends import loader
 from fukikae.backends.base import Synthesizer
@@ -104,21 +127,26 @@ from fukikae.backends.identity import identity_key
 from fukikae.backends.tts import worker
 from fukikae.backends.tts.remote import WorkerSynthesizer
 from fukikae.cards.auto import (
-    FALLBACK_BY,
+    UNKNOWN_EXTRA,
+    CharacterRefs,
+    Cloning,
+    ExtraCard,
     below_floor,
     character_spans,
     clone_backend,
     ensure_assignments,
-    extras_voices,
-    repick_blocker,
+    extras_cards,
+    extras_label,
+    impure_cards,
     replace_refusal,
     stale_cards,
+    stock_cards,
     workspace_cloning,
 )
 from fukikae.cards.card import Card, CardError, validate_for_backend
-from fukikae.cards.stock import check_stock_voice, revision, stock_card
+from fukikae.cards.stock import check_stock_voice
 from fukikae.cards.store import CardStore
-from fukikae.config import BackendConfig, Config, ConfigError
+from fukikae.config import TTS_BACKEND_WARNING, BackendConfig, Config, ConfigError
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import (
@@ -129,7 +157,19 @@ from fukikae.models import (
     TtsPlanCue,
     TtsRun,
 )
+from fukikae.pitch import (
+    BIMODAL_GATE_RATIO,
+    FEMALE_ABOVE,
+    LINE_MIN_VOICED_S,
+    MALE_BELOW,
+    Gender,
+    GenderEstimate,
+    band_seconds,
+    cached_track,
+    turn_classes,
+)
 from fukikae.registry.store import Registry
+from fukikae.transcripts import transcript_path
 from fukikae.workspace import Episode, Workspace
 
 log = logging.getLogger(__name__)
@@ -165,6 +205,10 @@ GUARD_SHORT = 0.3
 # Tag events that make a source span a bad emotion prompt (the clone laughs instead of speaking),
 # when they cover at least DROP_EVENT_SHARE of it.
 DROP_EVENTS = frozenset({"laughter", "crying"})
+# A3: bump when the line gate changes which lines it gates for the same audio.
+GATE_VERSION = 1
+GATE_BANDS = (float(MALE_BELOW), float(FEMALE_ABOVE))
+GATE_DROPPED = "gender"
 DROP_EVENT_SHARE = 0.3
 # The delivery fields each capability hands the backend.
 _DELIVERY_BY_CAP = {
@@ -316,7 +360,7 @@ def pause_caps(cfg: Config) -> tuple[int, int]:
     """``[tts] max_pause_ms`` and ``max_pause_ms_ellipsis`` (ruling D33), the workspace's over
     the profile's; 200 and 500 when unset. Each is 0 (no cap) or whole milliseconds of at
     least ``PAUSE_MIN_MS``."""
-    options = cfg.resolve("tts").options
+    options = stage_options(cfg)
     out: list[int] = []
     for key, default in zip(PAUSE_KEYS, PAUSE_DEFAULTS, strict=True):
         value = options.get(key, default)
@@ -454,11 +498,24 @@ def _is_backend_table(key: str, value: Any) -> bool:
     return isinstance(value, dict) and key not in STAGE_KEYS
 
 
+_NO_BACKEND = "\x00none"
+
+
+def stage_options(cfg: Config) -> dict[str, Any]:
+    """Every ``[tts]`` option, the workspace's over the profile's, stage keys included. Needs
+    no backend: since D41 a profile names only ``clone_backend``."""
+    return cfg.resolve("tts", default=_NO_BACKEND).options
+
+
 def stage_settings(cfg: Config) -> tuple[BackendConfig, str | None]:
     """``[tts]`` as (backend config without the stage keys and the ``[tts.<backend>]`` tables,
-    the legacy stage-wide device preference)."""
-    bc = cfg.resolve("tts")
-    problem = loader.engine_problem("tts", bc.backend, "[tts] backend")
+    the legacy stage-wide device preference). The backend ``[tts]``'s own options go to is
+    ``[tts] backend`` when a workspace still sets it (it chooses no card since D41), else
+    ``[tts] clone_backend``, else none (an empty name: the options go nowhere)."""
+    bc = cfg.resolve("tts", default=clone_backend(cfg) or _NO_BACKEND)
+    if bc.backend == _NO_BACKEND:
+        bc = BackendConfig("", bc.options)
+    problem = bc.backend and loader.engine_problem("tts", bc.backend, "[tts] backend")
     if problem:
         raise ConfigError(problem)
     device = bc.options.get("device")
@@ -467,7 +524,35 @@ def stage_settings(cfg: Config) -> tuple[BackendConfig, str | None]:
     options = {
         k: v for k, v in bc.options.items() if k not in STAGE_KEYS and not _is_backend_table(k, v)
     }
+    _warn_routed_options(cfg, bc.backend)
     return BackendConfig(bc.backend, options), device
+
+
+_ROUTED_WARNED: set[tuple[str, tuple[str, ...]]] = set()
+
+
+def _warn_routed_options(cfg: Config, backend: str) -> None:
+    """Say once per process (per backend and keys) that a workspace's own ``[tts]`` options,
+    set without ``[tts] backend``, now configure the clone backend (D41); with ``[tts]
+    backend`` set, the config's own warning has said it."""
+    table = cfg.raw.get("tts")
+    if not isinstance(table, dict) or "backend" in table:
+        return
+    keys = tuple(
+        sorted(k for k, v in table.items() if k not in STAGE_KEYS and not _is_backend_table(k, v))
+    )
+    if not keys or (backend, keys) in _ROUTED_WARNED:
+        return
+    _ROUTED_WARNED.add((backend, keys))
+    where = f"clone_backend {backend}" if backend else "no backend (none is set)"
+    log.warning(
+        "%s; [tts] %s, set without [tts] backend, now go%s to %s: move %s to [tts.<backend>]",
+        TTS_BACKEND_WARNING,
+        ", ".join(keys),
+        "es" if len(keys) == 1 else "",
+        where,
+        "it" if len(keys) == 1 else "them",
+    )
 
 
 def backend_table(cfg: Config, backend: str) -> dict[str, Any]:
@@ -496,7 +581,41 @@ def backend_config(cfg: Config, backend: str) -> BackendConfig:
 
 class NoUsableGpuError(ConfigError):
     """A backend that refuses the CPU found no usable GPU: the machine's state, not a typo in
-    the config (``cards.auto.clone_problem`` falls back to stock voices on it)."""
+    the config (``cards.auto.clone_problem`` reports it, and the stage refuses to make or
+    render clones on it)."""
+
+
+class CloneBackendError(ConfigError):
+    """The tts stage needs the clone backend (a card to make or re-pick, an extras clone, a
+    clone render not in the cache) and it is unset or can't run here: the stage stops before
+    any model loads, naming the backend and ``fukikae backends setup``; fukikae renders no
+    stock voice in its place (D41)."""
+
+
+def clone_refusal(
+    cfg: Config, what: str, renderer: type[Synthesizer] | None = None
+) -> CloneBackendError | None:
+    """The refusal for ``what`` (the cues or cards that need a clone) when ``[tts]
+    clone_backend`` is unset or can't run here (``cards.auto.clone_problem``), else None.
+    ``renderer`` is the class that will render (an engine from ``[tts] engines``, such as
+    indextts2_trt); without it, the clone backend's own class, which makes the cards."""
+    from fukikae.cards.auto import clone_problem
+
+    name = clone_backend(cfg)
+    if name is None:
+        return CloneBackendError(
+            f"{what} need a clone voice and no [tts] clone_backend is set: set [tts] "
+            "clone_backend (IndexTTS2 in every profile); fukikae renders no stock voices (D41)"
+        )
+    cls = renderer or cast(type[Synthesizer], loader.backend_class("tts", name))
+    name = cls.name
+    problem = clone_problem(cls, cfg)
+    if problem is None:
+        return None
+    return CloneBackendError(
+        f"{what} need a clone voice and the clone backend {name} can't run here ({problem}); "
+        f"run `fukikae backends setup {name}`; fukikae renders no stock voices (D41)"
+    )
 
 
 def synth_device(cfg: Config, cls: type[Synthesizer]) -> str:
@@ -537,7 +656,7 @@ def tts_engines(cfg: Config) -> dict[str, str]:
     workspace's over the profile's (D28: ``{ indextts2 = "indextts2_trt" }``). The renders
     carry the engine's name and identity in their cache keys; the cards stay as they are. An
     engine must declare that it renders that backend's cards (``card_backend``)."""
-    raw = cfg.resolve("tts").options.get("engines")
+    raw = stage_options(cfg).get("engines")
     if raw is None:
         return {}
     if not isinstance(raw, dict) or not all(
@@ -615,8 +734,8 @@ def check_loaded_card(
         raise CardError(
             f"{who}: card {card_id} was made for {backend} model revision "
             f"{card.voice.model_revision!r}, and this fukikae renders with {rev!r}; the voice "
-            f"could differ, so it is not rendered. {fix[0].upper()}{fix[1:]} (a stock voice "
-            f"is `stock:{backend}:<voice>`)"
+            f"could differ, so it is not rendered. {fix[0].upper()}{fix[1:]}, or `fukikae "
+            "voices clone`"
         )
     if not loader.supports(cls, target):
         raise CardError(f"{who}: card {card_id}: {backend} does not speak {target!r}; {fix}")
@@ -651,25 +770,140 @@ def dropping_event(
     return best if best is not None and cover >= DROP_EVENT_SHARE * length else None
 
 
+def wrong_gender(line: GenderEstimate | None, voice: Gender) -> bool:
+    """Whether a source line's class is the other band from its speaker's: ``m`` against
+    ``f`` or the reverse; ``u`` (or no measurement) on either side never is."""
+    return line is not None and {line.gender, voice} == {"m", "f"}
+
+
+@dataclass(frozen=True)
+class GenderGate:
+    """The line gate's inputs for an episode's cues (A3): each spoken cue's source line class
+    (``lines``) and its speaker's established gender (``voices``), both by cue id."""
+
+    lines: Mapping[str, GenderEstimate]
+    voices: Mapping[str, Gender]
+
+    def line(self, cue_id: str) -> GenderEstimate | None:
+        return self.lines.get(cue_id)
+
+    def voice(self, cue_id: str) -> Gender:
+        return self.voices.get(cue_id, "u")
+
+
+def line_genders(
+    vocals: Path, cues: Sequence[DubCue], root: Path, bands: tuple[float, float] = GATE_BANDS
+) -> dict[str, GenderEstimate]:
+    """Each cue's source line class: the pitch class of its ``delivery.reference`` span on
+    ``vocals`` at ``LINE_MIN_VOICED_S``, each span read against its own loudness (one group
+    per span), through the workspace's pitch cache."""
+    if not cues:
+        return {}
+    spans = [(float(c.delivery.reference[0]), float(c.delivery.reference[1])) for c in cues]
+    track = cached_track(root, vocals, spans, list(range(len(spans))))
+    classes = turn_classes(track, bands, LINE_MIN_VOICED_S)
+    return {c.id: est for c, est in zip(cues, classes, strict=True)}
+
+
+def established_gender(
+    vocals: Path,
+    spans: Sequence[tuple[float, float]],
+    root: Path,
+    bands: tuple[float, float] = GATE_BANDS,
+    operator: Gender | None = None,
+) -> Gender:
+    """A speaker's established gender for the line gate: ``operator`` (the gender the operator
+    stored, Part B) when it is ``f`` or ``m``; else the register of the speaker's turns
+    (``spans``, each classed on its own median as A1's register gate classes them) when one
+    class holds at least ``BIMODAL_GATE_RATIO`` (2x) the other's seconds; else ``u``."""
+    if operator in ("f", "m"):
+        return operator
+    if not spans:
+        return "u"
+    secs = band_seconds(cached_track(root, vocals, list(spans)), bands)
+    m, f = secs["m"], secs["f"]
+    if m > 0 and m >= BIMODAL_GATE_RATIO * f:
+        return "m"
+    if f > 0 and f >= BIMODAL_GATE_RATIO * m:
+        return "f"
+    return "u"
+
+
+def gender_gate(
+    work: Path, cues: Sequence[DubCue], root: Path, bands: tuple[float, float] = GATE_BANDS
+) -> GenderGate:
+    """The line gate's inputs for an episode (``work``) and its cues: every spoken cue's line
+    class, and its speaker's `established_gender`: a character's from its own turns in
+    ``05-characters/assignments.json`` (extras and review clusters left out), an extras
+    cluster's from that cluster's turns, either from its own cues' source spans when it has no
+    turn there; a cluster-less line's is ``u`` (its clone is the line itself)."""
+    vocals = work / "01-separate" / "vocals.wav"
+    spoken = [c for c in cues if TtsStage._skipped(c) is None]
+    if not spoken or not vocals.exists():
+        return GenderGate({}, {})
+    asg_path = work / "05-characters" / "assignments.json"
+    asg = read_json(asg_path, Assignments) if asg_path.exists() else None
+    turns = list(asg.turns or []) if asg is not None else []
+    chars = character_spans(asg) if asg is not None else {}
+
+    def own_lines(same: Any) -> list[tuple[float, float]]:
+        return [
+            (float(x.delivery.reference[0]), float(x.delivery.reference[1]))
+            for x in spoken
+            if same(x)
+        ]
+
+    speaker: dict[str, str | None] = {}
+    spans: dict[str, list[tuple[float, float]]] = {}
+    for c in spoken:
+        if c.character_id is not None:
+            key = f"character {c.character_id}"
+            if key not in spans:
+                cid = c.character_id
+                spans[key] = chars.get(cid) or own_lines(lambda x, cid=cid: x.character_id == cid)
+        else:
+            label = extras_label(c)
+            if label.startswith(f"{UNKNOWN_EXTRA}~"):
+                speaker[c.id] = None
+                continue
+            key = f"extra {label}"
+            if key not in spans:
+                mine = [(float(t.start), float(t.end)) for t in turns if t.speaker == label]
+                spans[key] = mine or own_lines(
+                    lambda x, label=label: x.character_id is None and extras_label(x) == label
+                )
+        speaker[c.id] = key
+    established: dict[str | None, Gender] = {None: "u"}
+    for k, v in spans.items():
+        established[k] = established_gender(vocals, v, root, bands)
+    voices: dict[str, Gender] = {cue_id: established[k] for cue_id, k in speaker.items()}
+    return GenderGate(line_genders(vocals, spoken, root, bands), voices)
+
+
 def delivery_passed(
     c: DubCue,
     card: Card,
     cls: type[Synthesizer],
     slot: float,
     events: Sequence[tuple[float, float, str]] = (),
+    line: GenderEstimate | None = None,
+    voice: Gender = "u",
 ) -> dict[str, Any]:
     """What the backend gets beyond the card and the text, by its capabilities for the card's
     source; with ``emotion_strength`` 0, no emotion audio, vector or instruction. A source span
     the tag stage marks as laughter or crying (``events``) passes no emotion audio, recorded as
     ``emotion_dropped`` (ruling CD18: dropped rather than scaled down, since IndexTTS2 carried
-    E12 c0232's laugh at emotion strength 0.8, and a weaker prompt still holds the laugh)."""
+    E12 c0232's laugh at emotion strength 0.8, and a weaker prompt still holds the laugh).
+    Nor does a source line (``line``, its pitch class) in the other band from the speaker's
+    established gender (``voice``), whatever the card (A3, `wrong_gender`): recorded as
+    ``emotion_dropped: "gender"``, ahead of a laugh, so every such line is flagged."""
     caps = cls.capabilities_for(card.voice.source)
     if card.voice.emotion_strength == 0:
         caps = caps - DELIVERY_CAPS
     out: dict[str, Any] = {}
     d = c.delivery
     if "emotion_audio" in caps and d.reference[1] - d.reference[0] >= MIN_REFERENCE_S:
-        dropped = dropping_event(d.reference, events)
+        dropped = GATE_DROPPED if wrong_gender(line, voice) else dropping_event(d.reference, events)
         if dropped is not None:
             out["emotion_dropped"] = dropped
         else:
@@ -702,12 +936,14 @@ def prepare_cue(
     identity: dict[str, Any] | None = None,
     vocals: Path | None = None,
     events: Sequence[tuple[float, float, str]] = (),
+    line: GenderEstimate | None = None,
+    voice: Gender = "u",
 ) -> RenderJob:
     """The render job of one cue with ``card_id``: the card checked (``check_card`` with the
     config's ``[tts] engines``, unless ``checked`` holds its result), its backend config, the
     cache key and the delivery passed. ``identity`` is the backend's ``identity_key``, looked up
     when not given. ``vocals`` (the episode's separated vocals) is needed when the backend takes
-    ``emotion_audio``."""
+    ``emotion_audio``; ``line`` and ``voice`` are the line gate's (`GenderGate`)."""
     card, cls = (
         checked
         if checked is not None
@@ -716,7 +952,7 @@ def prepare_cue(
     bc = backend_config(cfg, cls.name)
     ident = identity if identity is not None else identity_key("tts", bc)
     slot = cue.end - cue.start
-    passed = delivery_passed(cue, card, cls, slot, events)
+    passed = delivery_passed(cue, card, cls, slot, events, line, voice)
     ref_digest = None
     if "emotion_audio" in passed:
         if vocals is None:
@@ -1012,17 +1248,6 @@ def tag_events(work: Path) -> list[tuple[float, float, str]]:
     return [(e.start, e.end, e.label) for e in read_json(path, Tags).events]
 
 
-def _song_spans(ep: Episode, cfg: Config) -> list[tuple[float, float]]:
-    """The episode's theme songs and tagged singing (``select.reference_exclusions``)."""
-    from fukikae.cards.select import reference_exclusions
-    from fukikae.models import Tags
-    from fukikae.stages.mix import mix_settings
-
-    tags_path = ep.work / "04b-tag" / "tags.json"
-    tags = read_json(tags_path, Tags) if tags_path.exists() else None
-    return reference_exclusions(ep.work, tags, mix_settings(cfg).songs)
-
-
 def pause_key(cfg: Config) -> dict[str, Any]:
     """The pause cap's part of the stage key: nothing while it is off, so turning it off keys
     the stage as before it existed."""
@@ -1078,19 +1303,21 @@ class TtsStage:
             return
         cues = read_json(path, DubCues).cues
         store = CardStore(ep.workspace_root)
-        self._prepared += self._assign(
-            ep, cfg, cues, store, ep.work / "01-separate" / "vocals.wav"
-        )[2]  # its flags are worked out again by run(), which records them
+        self._prepared += self._assign(ep, cfg, cues, store)[2]  # run() records the flags
+        if any(c.character_id is None and self._skipped(c) is None for c in cues):
+            self._extras_cloning(ep, cfg)  # refuses without a clone backend (D41)
 
     def inputs(self, ep: Episode) -> list[Path]:
         cfg = self._config(ep)
         cards = self._assigned(ep, self._cues(ep, cfg), cfg.target_language)
         store = CardStore(ep.workspace_root)
         tags = ep.work / "04b-tag" / "tags.json"
+        asg = ep.work / "05-characters" / "assignments.json"
         return [
             self._cues_path(ep, cfg),
             ep.work / "01-separate" / "vocals.wav",
             *([tags] if tags.exists() else []),
+            *([asg] if asg.exists() else []),  # the speakers' turns, for the line gate (A3)
             *(store.card_path(card) for _, card in sorted(cards.items())),
         ]
 
@@ -1125,7 +1352,15 @@ class TtsStage:
             "max_speedup": max_speedup(cfg),
             **pause_key(cfg),
             "cards": {str(k): v for k, v in sorted(cards.items())},
-            "extras": extras_voices(cues, cfg) if cues else {},
+            "extras": self._extras_key(ep, cues, cfg, store),
+            # the line gate's pitch tracks: a new estimator or voiced minimum can move a line
+            # across a band
+            "gender_gate": {
+                "version": GATE_VERSION,
+                "bands": list(GATE_BANDS),
+                "pitch": pitch.VERSION,
+                "line_min_voiced_s": LINE_MIN_VOICED_S,
+            },
             "version": RENDER_VERSION,
         }
 
@@ -1144,12 +1379,16 @@ class TtsStage:
         default_bc, _ = stage_settings(cfg)
         speedup = max_speedup(cfg)
 
-        cards, names, report, flags = self._assign(ep, cfg, cues, store, vocals)
+        cards, names, report, flags = self._assign(ep, cfg, cues, store)
         for line in flags:
             log.warning("tts: %s", line)
         report = self._prepared + report
         self._prepared = []
-        extra_cards = self._extra_cards(cues, cfg, store, default_bc.backend)
+        extras: dict[str, ExtraCard] = {}
+        extra_cards, extra_flags = self._extra_cards(ep, cues, cfg, store, extras)
+        for line in extra_flags:
+            log.warning("tts: %s", line)
+        flags = [*flags, *extra_flags]
 
         def who(c: DubCue) -> str:
             if c.character_id is not None:
@@ -1168,7 +1407,7 @@ class TtsStage:
                         f"{who(c)} has no {target!r} card; assign one with `fukikae voices assign`"
                     )
             else:
-                card = extra_cards[c.extra or "unknown"]
+                card = extra_cards[extras_label(c)]
             card_of[c.id] = card
             users.setdefault(card, who(c))
 
@@ -1181,6 +1420,14 @@ class TtsStage:
         }
 
         events = tag_events(ep.work)
+        # A3: the line gate is measured only when some card's backend takes emotion audio
+        takes_audio = any(
+            "emotion_audio" in cls.capabilities_for(card.voice.source)
+            for card, cls in checked.values()
+        )
+        gate = (
+            gender_gate(ep.work, spoken, ep.workspace_root) if takes_audio else GenderGate({}, {})
+        )
         jobs: dict[str, list[RenderJob]] = {}
         for c in spoken:
             card_id = card_of[c.id]
@@ -1195,8 +1442,23 @@ class TtsStage:
                 identity=identities[backend],
                 vocals=vocals,
                 events=events,
+                line=gate.line(c.id),
+                voice=gate.voice(c.id),
             )
             jobs.setdefault(backend, []).append(job)
+        gated = [
+            j for v in jobs.values() for j in v if j.passed.get("emotion_dropped") == GATE_DROPPED
+        ]
+        for c in [c for c in spoken if any(j.cue.id == c.id for j in gated)]:
+            est = gate.line(c.id)
+            assert est is not None and est.median is not None
+            whose = "character's" if c.character_id is not None else "cluster's"
+            line = (
+                f"{who(c)}: cue {c.id} source is {est.gender} ({est.median:.0f} Hz) against the "
+                f"{whose} {gate.voice(c.id)}; rendered without emotion audio"
+            )
+            log.warning("tts: %s", line)
+            flags.append(line)
 
         cache = ep.workspace_root / ".fukikae" / "tts-cache"
         cache.mkdir(parents=True, exist_ok=True)
@@ -1213,6 +1475,23 @@ class TtsStage:
         # until it turns out cached; only renders advance the count.
         n_cues = sum(len(v) for v in jobs.values())
         to_render = sum(not (cache / f"{j.key}.wav").exists() for v in jobs.values() for j in v)
+        # D41: a clone card's render that isn't cached needs the clone backend, set and able
+        # to run here; the class checked is the one that renders it ([tts] engines included)
+        clone = clone_backend(cfg)
+        uncached: dict[str, list[RenderJob]] = {}
+        for j in (j for v in jobs.values() for j in v):
+            if j.card.voice.source == "clone" and not (cache / f"{j.key}.wav").exists():
+                uncached.setdefault(j.cls.name, []).append(j)
+        for name in sorted(uncached):
+            on_clone = [j for j in uncached[name] if j.card.voice.backend == clone]
+            if clone is not None and not on_clone:
+                continue  # another backend's clone card: its own load reports a problem
+            whose = sorted({users[j.card_id] for j in (on_clone or uncached[name])})
+            refusal = clone_refusal(
+                cfg, f"{ep.id}: renders for {', '.join(whose)}", uncached[name][0].cls
+            )
+            if refusal is not None:
+                raise refusal
         progress.start(to_render, "cues", cached=n_cues - to_render)
         for backend in sorted(jobs):
             cls = jobs[backend][0].cls
@@ -1243,6 +1522,7 @@ class TtsStage:
                         retry_seed=guard.retry_seed,
                         suspect=guard.suspect,
                         **self._stripped(job),
+                        **self._gate_fields(job, gate),
                     )
             finally:
                 lazy.close()
@@ -1282,6 +1562,16 @@ class TtsStage:
                 flags=flags,
                 rate_estimated=rates.estimated,
                 rate_refits=rates.refits,
+                extras={
+                    label: {
+                        "card": e.card_id,
+                        "tier": e.tier,
+                        "seconds": e.seconds,
+                        "clips": len(e.clips),
+                        **({"issue": e.issue} if e.issue else {}),
+                    }
+                    for label, e in sorted(extras.items())
+                },  # fmt: skip
             ),
         )
         log.info(
@@ -1313,15 +1603,17 @@ class TtsStage:
 
     @classmethod
     def _assign(
-        cls, ep: Episode, cfg: Config, cues: list[DubCue], store: CardStore, vocals: Path
+        cls, ep: Episode, cfg: Config, cues: list[DubCue], store: CardStore
     ) -> tuple[dict[int, str], dict[int, str], list[str], list[str]]:
         """(character -> card id, character -> name, report lines, flag lines), after giving
-        every character with a cue to speak (not all skipped or errored) and no card one, and
-        re-picking stale automatic cards and those under the clone floor that a better pick
-        beats. The report lines are the cards assigned, appended to ``07-tts/assignments.log``;
-        the flags (curated cards the subtitle names contradict, episodes skipped for stale
-        assignments, clone cards under the floor that stay) changed nothing and go only to
-        ``run.json``."""
+        every character with a cue to speak (not all skipped or errored) and no card a clone,
+        re-picking automatic stock cards (D41), stale automatic cards, those under the clone
+        floor that a better pick beats and impure ones. A card to make or a stock card to
+        re-pick while ``[tts] clone_backend`` is unset or can't run here stops the stage
+        (`CloneBackendError`) before anything is assigned or loaded. The report lines are the
+        cards assigned, appended to ``07-tts/assignments.log``; the flags (curated cards the
+        subtitle names contradict, episodes skipped for stale assignments, clone cards under
+        the floor that stay, stock cards kept) changed nothing and go only to ``run.json``."""
         speaking = sorted(
             {c.character_id for c in cues if c.character_id is not None and cls._skipped(c) is None}
         )
@@ -1330,54 +1622,62 @@ class TtsStage:
         asg_path = ep.work / "05-characters" / "assignments.json"
         spans = character_spans(read_json(asg_path, Assignments)) if asg_path.exists() else {}
         flags: list[str] = []
+        language = cfg.target_language
         with Registry(Workspace(ep.workspace_root).registry_path) as reg:
             names = {c.id: c.name for c in reg.characters() if c.name}
-            current = {cid: reg.card_for(cid, cfg.target_language) for cid in speaking}
+            current = {cid: reg.card_for(cid, language) for cid in speaking}
             todo = [cid for cid, a in current.items() if a is None or a.card_id is None]
-            # stock stand-ins made while the clone backend couldn't run: replaced once it can,
-            # so they build the clone source only when cloning works now
-            fallback = [
+            # stock cards (D41): an automatic one is re-picked as a clone, the rest flagged
+            stock = stock_cards(reg, store, speaking, language)
+            restock = [
                 cid
-                for cid, a in current.items()
-                if a is not None and a.chosen_by == FALLBACK_BY and not a.locked
+                for cid in stock
+                if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
             ]
-            if fallback and repick_blocker(cfg) is not None:
-                fallback = []
+            if todo or restock:
+                who = [
+                    *(f"{cls._who(cid, names)} (no card)" for cid in todo),
+                    *(f"{cls._who(cid, names)} (an automatic stock card)" for cid in restock),
+                ]
+                refusal = clone_refusal(cfg, f"{ep.id}: {', '.join(who)}")
+                if refusal is not None:
+                    raise refusal
             # clone cards whose references the subtitle names now contradict (D29 #4)
             stale = stale_cards(
-                Workspace(ep.workspace_root), reg, store, speaking, cfg.target_language,
-                notes=flags,
-            )  # fmt: skip
+                Workspace(ep.workspace_root), reg, store, speaking, language, notes=flags
+            )
             # automatic clone cards under the clone floor (D32): re-picked when a better pick
             # exists, else flagged; only an unlocked one is worth a reference search
-            short = below_floor(reg, store, speaking, cfg.target_language)
+            short = below_floor(reg, store, speaking, language)
             repickable = [
                 cid
                 for cid in short
                 if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
             ]
-            work = bool(todo or stale or fallback or repickable)
-            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id) if work else None
-            if work:  # the gender estimate never reads a theme song or tagged singing
-                exclude = _song_spans(ep, cfg)
-                spans = {
-                    cid: [(s, e) for s, e in sp if not any(a < e and s < b for a, b in exclude)]
-                    for cid, sp in spans.items()
-                }
+            # clone cards with references the A1 gates now refuse: re-picked when automatic
+            impure = impure_cards(Workspace(ep.workspace_root), reg, store, language, speaking)
+            repurify = [
+                cid
+                for cid in impure
+                if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
+            ]
+            work = bool(todo or restock or stale or repickable or repurify)
+            cloning = workspace_cloning(ep.workspace_root, cfg, ep.id, cues=cues) if work else None
             report = ensure_assignments(
                 reg,
                 store,
                 cfg,
                 {cid: spans.get(cid, []) for cid in speaking},
-                vocals,
                 cloning=cloning,
                 stale=stale,
                 short=short,
+                impure=impure,
+                stock=stock,
                 flags=flags,
             )
             cards: dict[int, str] = {}
             for cid in speaking:
-                a = reg.card_for(cid, cfg.target_language)
+                a = reg.card_for(cid, language)
                 if a is not None and a.card_id is not None:
                     cards[cid] = a.card_id
         if report:
@@ -1387,22 +1687,58 @@ class TtsStage:
             with log_path.open("a", encoding="utf-8") as f:
                 for line in report:
                     log.info("tts: %s", line)
-                    f.write(f"{stamp} {ep.id} {cfg.target_language}: {line}\n")
+                    f.write(f"{stamp} {ep.id} {language}: {line}\n")
         return cards, names, report, flags
 
     @staticmethod
-    def _extra_cards(
-        cues: list[DubCue], cfg: Config, store: CardStore, backend: str
+    def _who(cid: int, names: Mapping[int, str]) -> str:
+        name = names.get(cid)
+        return f"character {cid}" + (f" ({name})" if name else "")
+
+    @staticmethod
+    def _extras_cloning(ep: Episode, cfg: Config) -> Cloning:
+        """The clone backend extras cards are made for (A2). Making a card reads only the
+        backend's name and model revision, so no environment or device check runs here (the
+        run checks before rendering one); without ``[tts] clone_backend`` the stage refuses
+        (`CloneBackendError`, D41)."""
+        name = clone_backend(cfg)
+        if name is None:
+            refusal = clone_refusal(cfg, f"{ep.id}: the extras")
+            assert refusal is not None
+            raise refusal
+        cls = cast(type[Synthesizer], loader.backend_class("tts", name))
+        if "clone" not in getattr(cls, "sources", ()):
+            raise ConfigError(f"[tts] clone_backend {name!r} makes no clone voices")
+        tr = transcript_path(ep)
+        language = cfg.source_language or ""
+        if tr.exists():
+            from fukikae.models import Transcript
+
+            language = read_json(tr, Transcript).language or language
+        return Cloning(cls, language, lambda _cid: CharacterRefs(seconds=0.0))
+
+    def _extras_key(
+        self, ep: Episode, cues: list[DubCue], cfg: Config, store: CardStore
     ) -> dict[str, str]:
-        voices = extras_voices(cues, cfg)
-        if not voices:
-            return {}
-        rev = revision(backend)
-        out: dict[str, str] = {}
-        for label, voice in voices.items():
-            check_stock_voice(backend, voice)
-            out[label] = store.put(stock_card(backend, voice, cfg.target_language, rev))
-        return out
+        """The stage key's ``extras``: each extras label's clone card id (A2; card ids are
+        content hashes, so the key is stable while the turns and the vocals are)."""
+        return self._extra_cards(ep, cues, cfg, store)[0]
+
+    def _extra_cards(
+        self,
+        ep: Episode,
+        cues: list[DubCue],
+        cfg: Config,
+        store: CardStore,
+        made: dict[str, ExtraCard] | None = None,
+    ) -> tuple[dict[str, str], list[str]]:
+        """(extras label -> card id, flags) for the cues with no character: an episode-local
+        clone of each extras cluster's own speech, and of each cluster-less line's own span
+        (``cards.auto.extras_cards``, A2), keyed by ``cards.auto.extras_label``."""
+        if not any(c.character_id is None and self._skipped(c) is None for c in cues):
+            return {}, []
+        cloning = self._extras_cloning(ep, cfg)
+        return extras_cards(ep, cues, cfg, store, cloning, cards=made)
 
     def _render(
         self,
@@ -1435,6 +1771,17 @@ class TtsStage:
         }
         n = worker.markup_stripped(req, extra)
         return {"stripped_markup": n > 0, "stripped_count": n}
+
+    @staticmethod
+    def _gate_fields(job: RenderJob, gate: GenderGate) -> dict[str, Any]:
+        """``source_gender`` and ``gender_gate`` for the plan (A3), when the line was measured."""
+        est = gate.line(job.cue.id)
+        if est is None:
+            return {}
+        return {
+            "source_gender": est.gender,
+            "gender_gate": job.passed.get("emotion_dropped") == GATE_DROPPED,
+        }
 
     @staticmethod
     def _link(src: Path, dest: Path) -> None:

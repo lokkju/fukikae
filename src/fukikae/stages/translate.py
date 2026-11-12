@@ -1,6 +1,7 @@
 """Translate stage: dub cues with a speakable target-language line each.
 
-Reads ``03-asr/transcript.json``, ``05-characters/assignments.json`` (with its ``turns``),
+Reads the transcript (``03b-asrclean/transcript.json``, `fukikae.transcripts`),
+``05-characters/assignments.json`` (with its ``turns``),
 ``04c-names/names.json`` on the subtitle path when it exists (not an input: what it gives the
 cues is ``cue_names`` in the key), ``04b-tag/tags.json`` when the tag stage is on,
 ``<workspace>/glossary.toml`` when present (its ``[terms]`` table maps source terms to
@@ -14,7 +15,7 @@ asked once more; a second failure leaves its cues with ``error`` and no ``text``
 them, and the mix keeps the original vocals there). Cues that come back longer than their
 budget are asked once more, together, with 85% of the budget (a budget is what the voice that
 will speak the cue says in the slot at ``max_speed``: the ``speech_cps`` of the character's
-card backend, else of ``[tts] clone_backend``, and of the ``[tts]`` backend for extras; else the
+card backend, else of ``[tts] clone_backend``, which makes extras' voices too (D41); else the
 language's typical rate); the shorter of the two
 renderings is kept, and one still long is flagged (``over_budget``, ``overrun``) and left to
 time fitting, never cut. A backend error (HTTP error, timeout) is retried once, then marks
@@ -76,6 +77,7 @@ from fukikae.names.models import NamesResult
 from fukikae.registry.store import Registry
 from fukikae.stages.language import LanguageResult
 from fukikae.subtitles import RULES, read_cues
+from fukikae.transcripts import transcript_path
 from fukikae.translation import (
     PromptTooLargeError,
     Rendering,
@@ -121,21 +123,24 @@ def backend_cps(name: str | None, language: str) -> float:
 
 
 def speech_cps(cfg: Config) -> float:
-    """The ``[tts]`` backend's rate: what extras (always stock voices) speak at."""
-    try:
-        name = cfg.resolve("tts").backend
-    except ConfigError:
-        name = None
+    """What extras speak at: ``[tts] clone_backend``'s rate, since every extra is a clone of
+    its own speech (A2, D41); without one, a ``[tts] backend`` a workspace still names, else
+    the language's typical rate."""
+    from fukikae.cards.auto import clone_backend
+
+    name = clone_backend(cfg)
+    if name is None:
+        try:
+            name = cfg.resolve("tts").backend
+        except ConfigError:
+            name = None
     return backend_cps(name, cfg.target_language)
 
 
 def unassigned_cps(cfg: Config) -> float:
     """The rate of a recurring character with no card yet: ``[tts] clone_backend``'s, since
-    it gets a clone by default (D12), else the ``[tts]`` backend's."""
-    from fukikae.cards.auto import clone_backend
-
-    name = clone_backend(cfg)
-    return backend_cps(name, cfg.target_language) if name else speech_cps(cfg)
+    it gets a clone (D12, D41); the same rate extras speak at (`speech_cps`)."""
+    return speech_cps(cfg)
 
 
 class TranslateStage:
@@ -159,7 +164,7 @@ class TranslateStage:
             return read_json(path, LanguageResult).language
         if cfg.source_language:
             return cfg.source_language
-        transcript = ep.work / "03-asr" / "transcript.json"
+        transcript = transcript_path(ep)
         if transcript.exists():
             return read_json(transcript, Transcript).language
         raise ConfigError("translate: the source language is unknown; run the language stage")
@@ -286,19 +291,34 @@ class TranslateStage:
 
     @staticmethod
     def _rates(ep: Episode, cfg: Config, cards: dict[int, str]) -> dict[str, Any]:
-        """The speech rates budgets use (C4): ``extras`` (the ``[tts]`` backend),
-        ``unassigned`` (``unassigned_cps``) and per character the backend of its assigned card
-        (a card that can't be read counts as unassigned; tts reports it). Only rates that
-        differ from ``unassigned`` are listed, so a card whose voice speaks at the same rate
-        (the clone tts assigns by default) never re-translates."""
+        """The speech rates budgets use (C4): ``extras`` (``speech_cps``: the ``[tts]``
+        backend a workspace still names, else the clone backend), ``unassigned``
+        (``unassigned_cps``) and per character the backend of its assigned card. A card that
+        can't be read counts as unassigned (tts reports it), and so does an automatic, unlocked
+        stock card (``replace_refusal(a, "auto")`` is None), since the next tts run re-picks it
+        as a clone (D41): the character is budgeted for that clone now, and translate reruns
+        once, not again after the re-pick. Only rates that differ from ``unassigned`` are
+        listed, so a card whose voice speaks at the same rate (the clone tts assigns by
+        default) never re-translates."""
+        from fukikae.cards.auto import replace_refusal
+
         store = CardStore(ep.workspace_root)
         unassigned = unassigned_cps(cfg)
         per: dict[str, float] = {}
+        path = Workspace(ep.workspace_root).registry_path
+        rows = {}
+        if cards and path.exists():
+            with Registry(path) as reg:
+                rows = {cid: reg.card_for(cid, cfg.target_language) for cid in cards}
         for cid, card in sorted(cards.items()):
             try:
-                backend = store.get(card).voice.backend
+                voice = store.get(card).voice
             except CardError:
                 continue
+            a = rows.get(cid)
+            if voice.source == "stock" and a is not None and replace_refusal(a, "auto") is None:
+                continue  # re-picked as a clone by the next tts run (D41)
+            backend = voice.backend
             cps = backend_cps(backend, cfg.target_language)
             if cps != unassigned:
                 per[str(cid)] = cps
@@ -361,7 +381,7 @@ class TranslateStage:
 
     def inputs(self, ep: Episode) -> list[Path]:
         paths = [
-            ep.work / "03-asr" / "transcript.json",
+            transcript_path(ep),
             ep.work / "05-characters" / "assignments.json",
         ]
         subtitles = self._subtitle_input(ep)
@@ -459,12 +479,10 @@ class TranslateStage:
         target = cfg.target_language
         sub_file, sub_track = self._subtitles(ep, cfg, settings["source"])
         subs = sub_file is not None or sub_track is not None
-        transcript_path = ep.work / "03-asr" / "transcript.json"
+        tr_path = transcript_path(ep)
         assignments_path = ep.work / "05-characters" / "assignments.json"
         # The subtitle path uses the transcript only to break ties between two speakers.
-        transcript = (
-            read_json(transcript_path, Transcript) if not subs or transcript_path.exists() else None
-        )
+        transcript = read_json(tr_path, Transcript) if not subs or tr_path.exists() else None
         assignments = read_json(assignments_path, Assignments)
         if assignments.turns is None:
             raise ConfigError(

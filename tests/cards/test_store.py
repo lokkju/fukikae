@@ -138,6 +138,17 @@ def test_re_put_without_fingerprint_keeps_the_stored_fingerprint_and_meta(tmp_pa
     assert got.meta == card.meta
 
 
+def test_re_put_merges_meta(tmp_path: Path):
+    """A re-put updates the stored [meta] with the card's own: keys the card sets win, keys
+    only the store has (a studio note on an automatic card) survive a re-pick that makes the
+    same id."""
+    store = CardStore(tmp_path)
+    card = parse_card(STOCK_CARD)
+    cid = store.put(replace(card, meta={"reference_tier": "thin", "studio_note": "ok by ear"}))
+    store.put(replace(card, meta={"reference_tier": "floor"}))
+    assert store.get(cid).meta == {"reference_tier": "floor", "studio_note": "ok by ear"}
+
+
 def test_re_put_over_a_corrupted_file_rewrites_it(tmp_path: Path):
     store = CardStore(tmp_path)
     card = parse_card(STOCK_CARD)

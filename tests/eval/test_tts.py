@@ -12,11 +12,11 @@ from typer.testing import CliRunner
 from fukikae.artifacts import write_json
 from fukikae.backends import loader
 from fukikae.backends.base import Synthesizer
-from fukikae.cards import stock
 from fukikae.cards.card import Voice, parse_card
 from fukikae.cards.store import CardStore
 from fukikae.cli import app
 from fukikae.config import BackendConfig, Config, SeriesInfo
+from fukikae.eval import stock
 from fukikae.eval import tts as ev
 from fukikae.eval.ledger import ledger_path, read_rows
 from fukikae.eval.report import build_matrix
@@ -825,6 +825,11 @@ class FakeClone(FakeSynth):
         return seconds
 
 
+# every profile's [tts] clone_backend: the stage clones extras with it (A2), so the fake
+# loader answers it with the cloning fake
+CLASSES[("tts", "indextts2")] = CLASSES[("tts", "fakeclone")] = FakeClone
+
+
 def _long_turns(root: Path, *, lucy_seconds: float = 4.0) -> None:
     """Natsu gets two clean 4 s turns (8 s, a clone); Lucy two of ``lucy_seconds``."""
     work = Workspace(root).work_dir("S01E11")
@@ -1168,3 +1173,62 @@ def test_heldout_headline_and_ceiling_are_both_per_character():
     o = ev.summarize(scores, max_speedup=1.25).overall
     assert o["speaker_similarity_heldout"] == pytest.approx(0.4)  # (0.6 + 0.2) / 2
     assert o["speaker_similarity_ceiling"] == pytest.approx(0.6)
+
+
+def test_eval_tts_applies_the_same_gate(tmp_path, monkeypatch):
+    """CD12: eval tts renders through delivery_passed with the stage's line gate, so a
+    wrong-gender source line never reaches a card as emotion_audio here either."""
+    from tests.fixtures.speechlike import speech
+
+    root = _workspace(tmp_path, emotions=False)
+    ws = Workspace(root)
+    work = ws.work_dir("S01E11")
+    x = np.zeros(40 * 16000, np.float32)
+    for i, (a, b, hz) in enumerate([(0, 2, 120), (3, 5, 250), (6, 8, 120), (9, 12, 250)]):
+        seg = speech(hz, b - a, seed=i, voiced_share=0.7)
+        x[a * 16000 : a * 16000 + len(seg)] = seg
+    with wave.open(str(work / "01-separate" / "vocals.wav"), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
+
+    def c(cid: str, who: int, ref: tuple[float, float], text: str) -> DubCue:
+        return DubCue(
+            id=cid, start=ref[0], end=ref[1], character_id=who, extra=None, speaker="x",
+            source_text="src", text=text, budget=40, delivery=Delivery(reference=ref),
+        )  # fmt: skip
+
+    cues = [
+        c("c0001", 1, (0.0, 2.0), "natsu low"),   # Natsu (male turns) in his own register
+        c("c0002", 2, (6.0, 8.0), "lucy low"),    # Lucy (female turns) on a male line
+        c("c0003", 1, (9.0, 11.0), "natsu high"),  # Natsu on a female line
+    ]  # fmt: skip
+    write_json(
+        work / "06-translate" / "cues.en.json",
+        DubCues(episode="S01E11", source_language="ja", target_language="en", path="asr",
+                cues=cues),
+    )  # fmt: skip
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    got: dict[str, Any] = {}
+    real = FakeSynth.synthesize
+
+    def spy(self, text, voice, language, out, **kw):
+        got[text] = kw.get("emotion_audio")
+        return real(self, text, voice, language, out, **kw)
+
+    monkeypatch.setattr(FakeSynth, "synthesize", spy)
+    with Registry(ws.registry_path) as reg:
+        cards = {cid: str(reg.card_for(cid, "en").card_id) for cid in (1, 2)}  # type: ignore[union-attr]
+    ev._render(ws, ws.config, CardStore(root), [("S01E11", q) for q in cues], cards, {})
+    assert got["natsu low"] is not None
+    assert got["lucy low"] is None and got["natsu high"] is None
+
+
+def test_stock_baseline_cards_never_enter_the_workspace_store(tmp_path):
+    """D41: eval tts keeps the stock cards it makes in a scratch store."""
+    root = _workspace(tmp_path, emotions=False)
+    before = sorted(p.name for p in CardStore(root).root.glob("*.toml"))
+    res = _invoke(str(root), "--episodes", "S01E11", "--backend", "fake2", "--no-ledger")
+    assert res.exit_code == 0, res.output
+    assert sorted(p.name for p in CardStore(root).root.glob("*.toml")) == before

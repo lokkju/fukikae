@@ -6,7 +6,8 @@ A spec (TOML) names one or more sets, each a workspace, an episode and the candi
 ``qwen3_tts:xvector``). For each set:
 
 1. The cues ``eval tts`` samples (``sample_cues``, 8 per character, seed 0) are rendered for
-   every candidate with the cards ``eval tts`` builds (clone cards from ``select_references``,
+   every candidate with the cards ``eval tts`` builds (clone cards from
+   ``cards.auto.character_references`` at ``PRE_FLOOR_S``,
    stock cards for a stock backend), through the tts stage's own path, including the rate fit
    (``render_for_slot``, ruling CD12). Renders already in ``.fukikae/tts-cache`` are reused;
    anything missing is rendered on the workspace's GPU under ``gpu_lock`` (ruling CD15).
@@ -57,6 +58,7 @@ import numpy as np
 if TYPE_CHECKING:
     from fukikae.cards.store import CardStore
     from fukikae.config import Config
+    from fukikae.eval.stock import ScratchStore
     from fukikae.stages.tts import RenderJob
     from fukikae.workspace import Workspace
 
@@ -1065,6 +1067,28 @@ class _Renderer:
         self.synths.clear()
 
 
+class _LineGate:
+    """The tts stage's line gate (A3, `fukikae.stages.tts.gender_gate`) over an episode's
+    cues, measured once and only when a cue's card takes emotion audio (as the stage does), so
+    an A/B render routes a gated line exactly as the stage's render of it."""
+
+    def __init__(self, work: Path, cues: Sequence[Any], root: Path) -> None:
+        self.work, self.cues, self.root = work, cues, root
+        self.gate: Any = None
+
+    def for_cue(self, cue: Any, checked: tuple[Any, Any]) -> dict[str, Any]:
+        """``line`` and ``voice`` for `prepare_cue`; nothing when the card takes no emotion
+        audio."""
+        from fukikae.stages import tts
+
+        card, cls = checked
+        if "emotion_audio" not in cls.capabilities_for(card.voice.source):
+            return {}
+        if self.gate is None:
+            self.gate = tts.gender_gate(self.work, self.cues, self.root)
+        return {"line": self.gate.line(cue.id), "voice": self.gate.voice(cue.id)}
+
+
 def pick_scene(
     cues: Sequence[Any],
     covered: set[int],
@@ -1110,6 +1134,7 @@ def gather_set(
     from fukikae.backends import loader
     from fukikae.cards.store import CardStore
     from fukikae.eval import tts as ev
+    from fukikae.eval.stock import ScratchStore
     from fukikae.registry.store import Registry
     from fukikae.stages.tts import check_card, prepare_cue, tag_events
     from fukikae.timefit import apply_fit, fit_settings, plan_fit
@@ -1121,7 +1146,9 @@ def gather_set(
     e = spec.episode
     docs = ev._cues(ws, [e], target)
     doc = docs[e]
-    store = CardStore(ws.root)
+    # stock baseline cards stay in a scratch store under the pack's tmp (D41); reads fall
+    # through to the workspace's store, where clone cards still go
+    store = ScratchStore(tmp / spec.name / "stock-cards", CardStore(ws.root))
     picked = ev.sample_cues(docs, SAMPLE_PER_CHARACTER, SAMPLE_SEED)
     chars = sorted({ev._cid(c) for _, c in picked})
     with Registry(ws.registry_path) as reg:
@@ -1146,7 +1173,7 @@ def gather_set(
         sources = getattr(cls, "sources", frozenset())
         if "clone" in sources and "stock" not in sources:
             clone_backends.add(cand.name)
-            cards[cand.name] = ev._clone_cards(ws, ccfg, store, cls, refs, doc.source_language)
+            cards[cand.name] = ev._clone_cards(ws, ccfg, store.base, cls, refs, doc.source_language)
         else:
             cards[cand.name] = ev._stock_cards(ws, ccfg, store, cand.backend, picked, assigned)
     covered = set(chars)
@@ -1162,6 +1189,7 @@ def gather_set(
     high = _high_wer(ledger, spec.ledger_runs)
     events = tag_events(ws.work_dir(e))
     vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
+    gate = _LineGate(ws.work_dir(e), doc.cues, ws.root)
 
     def who(cid: int) -> str:
         return f"character {cid}" + (f" ({names[cid]})" if cid in names else "")
@@ -1182,7 +1210,7 @@ def gather_set(
                 cid = ev._cid(c)
                 job = prepare_cue(
                     c, cards[cand.name][cid], ccfg, store, who=who(cid), checked=checked[cid],
-                    vocals=vocals, events=events,
+                    vocals=vocals, events=events, **gate.for_cue(c, checked[cid]),
                 )  # fmt: skip
                 r = renderer.render(cand, job, ccfg, ws, store, work=ws.work_dir(_ep))
                 made += r.renders_made
@@ -1261,7 +1289,21 @@ def gather_set(
     scenes: list[SceneMaterial] = []
     if spec.scene is not None:
         scenes.append(
-            _scene(spec, ws, cfg, cfgs, store, cards, covered, names, assigned, tmp, notes, log)
+            _scene(
+                spec,
+                ws,
+                cfg,
+                cfgs,
+                store,
+                cards,
+                covered,
+                names,
+                assigned,
+                tmp,
+                notes,
+                log,
+                gate=gate,
+            )
         )
     return out, scenes, notes
 
@@ -1271,7 +1313,7 @@ def _scene(
     ws: Workspace,
     cfg: Config,
     cfgs: Mapping[str, Config],
-    store: CardStore,
+    store: ScratchStore,
     cards: Mapping[str, Mapping[int, str]],
     covered: set[int],
     names: Mapping[int, str],
@@ -1279,6 +1321,8 @@ def _scene(
     tmp: Path,
     notes: list[str],
     log: Any,
+    *,
+    gate: _LineGate | None = None,
 ) -> SceneMaterial:
     """One window through tts, timefit and mix per candidate (the stages' own functions over
     the window's cues)."""
@@ -1313,8 +1357,18 @@ def _scene(
     w0, w1 = window
     inside = [c for c in ordered if c.start >= w0 and c.end <= w1]
     spoken = [c for c in inside if TtsStage._skipped(c) is None]
-    default_backend = stage_settings(cfg)[0].backend
-    extra_cards = TtsStage._extra_cards(doc.cues, cfg, store, default_backend)
+    # the stock fallback for characters with no clone in the scene (an eval baseline, R1):
+    # the [tts] backend a workspace still names when it has stock pools, else Kokoro (D41: the
+    # profiles name no [tts] backend)
+    from fukikae.eval.stock import STOCK_BASELINE, STOCK_POOLS
+
+    named = stage_settings(cfg)[0].backend
+    default_backend = named if named in STOCK_POOLS else STOCK_BASELINE
+    from fukikae.cards.auto import extras_label
+    from fukikae.workspace import Episode
+
+    here = Episode(source=work, id=e, work=work, workspace_root=ws.root)
+    extra_cards = TtsStage(cfg)._extra_cards(here, doc.cues, cfg, store.base)[0]
     chars = sorted({c.character_id for c in spoken if c.character_id is not None})
     stock = ev._stock_cards(
         ws, cfg, store, default_backend, [(e, c) for c in spoken if c.character_id is not None],
@@ -1322,6 +1376,7 @@ def _scene(
     )  # fmt: skip
     vocals = work / "01-separate" / "vocals.wav"
     events = tag_events(work)
+    gate = gate if gate is not None else _LineGate(work, doc.cues, ws.root)
     s = mix_settings(cfg)
     sdir = tmp / spec.name / "scene"
     sdir.mkdir(parents=True, exist_ok=True)
@@ -1359,19 +1414,17 @@ def _scene(
 
             def card_for(c: Any, mine: Mapping[int, str] = mine) -> str:
                 if c.character_id is None:
-                    return extra_cards[c.extra or "unknown"]
+                    return extra_cards[extras_label(c)]
                 return mine.get(c.character_id) or stock[c.character_id]
 
             jobs = []
             for c in spoken:
                 card = card_for(c)
                 who = c.speaker
+                checked = check_card(store, card, who, cfg.target_language, candidate_engines(cand))
                 job = prepare_cue(
-                    c, card, ccfg, store, who=who,
-                    checked=check_card(
-                        store, card, who, cfg.target_language, candidate_engines(cand)
-                    ),
-                    vocals=vocals, events=events,
+                    c, card, ccfg, store, who=who, checked=checked, vocals=vocals, events=events,
+                    **gate.for_cue(c, checked),
                 )  # fmt: skip
                 jobs.append(job)
             jobs.sort(key=lambda j: (j.cls.name, j.cue.start))

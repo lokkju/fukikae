@@ -13,7 +13,8 @@ A span is labeled with the ground-truth name covering at least 60% of it (the ru
 touch, then any time another speaker's line covers is removed (overlapped speech); pieces
 shorter than 1.0 s are dropped.
 
-`asr`: sentences from ``03-asr/transcript.json`` (word timings; a sentence ends at terminal
+`asr`: sentences from the episode's transcript (`transcript_path`: ``03b-asrclean``'s, else
+``03-asr``'s; word timings; a sentence ends at terminal
 punctuation, in a word or in the segment text right after it, or at a gap of more than
 `max_gap` between words), each cut into word windows of about `window` seconds that a speaker
 embedder embeds; the sentence is split between consecutive windows whose cosine distance
@@ -39,6 +40,7 @@ from fukikae.eval.speakers import label_key
 from fukikae.models import Diarization, Transcript, Turn, Word
 from fukikae.names.inputs import identity_inputs
 from fukikae.stages.diarize import clean_spans
+from fukikae.transcripts import transcript_path
 from fukikae.workspace import Workspace
 
 Kind = Literal["diarization", "subtitles", "asr"]
@@ -274,7 +276,7 @@ def segments(
     """The episode's segments for `kind`; `diarization` reads the identity turns
     (`identity_inputs`: ``04c-names/turns.json`` when names were used, else
     ``04-diarize/turns.json``) unless `turns` gives them (``assignments.turns``, so labels match
-    the assignments' clusters), `asr` reads ``03-asr/transcript.json`` and the turns (for
+    the assignments' clusters), `asr` reads the transcript (`transcript_path`) and the turns (for
     overlap) and needs `window_embed`; `options` are `asr_segments`' keyword options (window,
     split, max_gap)."""
     if kind == "subtitles":
@@ -295,7 +297,7 @@ def segments(
     unknown = set(opts) - {"window", "split", "max_gap"}
     if unknown:
         raise ValueError(f"unknown asr segmentation option(s): {', '.join(sorted(unknown))}")
-    tpath = w.work_dir(episode) / "03-asr" / "transcript.json"
+    tpath = transcript_path(w.work_dir(episode))
     if not tpath.is_file():
         raise FileNotFoundError(f"{episode}: no transcript at {tpath}")
     transcript = read_json(tpath, Transcript)

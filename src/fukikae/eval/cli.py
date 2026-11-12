@@ -246,6 +246,95 @@ def tts_cmd(
         write_ledger(rows, ledger)
 
 
+@eval_app.command("gender")
+def gender_cmd(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    episode: str = typer.Argument(..., help="Episode code, e.g. S01E01."),
+    similarity: bool = typer.Option(
+        False, "--similarity", help="Also score render-vs-source speaker cosine (WeSpeaker, CPU)."
+    ),
+    before: Path = typer.Option(
+        None,
+        "--before",
+        help="An earlier episode's 07-tts/plan.json (beside its 06-translate): report the cues "
+        "it voiced with a stock card apart, matched by source text and start.",
+    ),
+    json_out: Path = typer.Option(None, "--json", help="Write the report as JSON here."),
+    md_out: Path = typer.Option(None, "--md", help="Write the report as Markdown here."),
+    pitch_cache: Path = typer.Option(
+        None,
+        "--pitch-cache",
+        help="Root of the pitch cache (default: the workspace's own .fukikae/pitch-cache); "
+        "name one to leave a read-only workspace untouched.",
+    ),
+    min_voiced: float = typer.Option(
+        None,
+        "--min-voiced",
+        min=0.0,
+        help="Seconds voiced below which a line or render is u (default: pitch.LINE_MIN_VOICED_S).",
+    ),
+    test_set: str = typer.Option(
+        None, "--set", help="Ledger test-set name (default: the workspace directory's name)."
+    ),
+    tag: str = typer.Option(None, "--tag", help="Free-form ledger tag for this run."),
+    split: str = typer.Option("tune", "--split", help="Ledger split: tune or holdout."),
+    no_ledger: bool = typer.Option(
+        False, "--no-ledger", help="Do not append rows to the results ledger."
+    ),
+    ledger: Path = typer.Option(
+        None,
+        "--ledger",
+        help="Results ledger (default: $FUKIKAE_RESULTS, else "
+        "$XDG_DATA_HOME/fukikae/results.jsonl).",
+    ),
+) -> None:
+    """Score a dubbed episode's voice-register consistency: source line against render,
+    reference purity and tiers, stock-voiced cues, gated lines and wrong-gender emotion
+    prompts (Part A evaluation; CPU only)."""
+    import json
+
+    from fukikae import pitch
+    from fukikae.errors import user_errors
+    from fukikae.eval import gender as ev
+    from fukikae.eval.identity.cli import write_ledger
+    from fukikae.eval.ledger import SPLITS
+    from fukikae.workspace import Workspace
+
+    if split not in SPLITS:
+        typer.echo(f"error: --split {split!r}: use one of {', '.join(SPLITS)}", err=True)
+        raise typer.Exit(2)
+    ws = Workspace(workspace)
+    try:
+        cfg = ws.config
+        report = ev.measure(
+            ws.root,
+            episode,
+            similarity=similarity,
+            before=before,
+            cache_root=pitch_cache,
+            min_voiced_s=pitch.LINE_MIN_VOICED_S if min_voiced is None else min_voiced,
+        )
+    except (*user_errors(), FileNotFoundError) as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(1) from e
+    text = ev.format_report(report)
+    typer.echo(text)
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(
+            json.dumps(ev.report_json(report), ensure_ascii=False, indent=1, default=str) + "\n",
+            encoding="utf-8",
+        )
+    if md_out is not None:
+        md_out.parent.mkdir(parents=True, exist_ok=True)
+        md_out.write_text(text, encoding="utf-8")
+    if not no_ledger:
+        name = test_set or ws.root.resolve().name
+        write_ledger(
+            lambda: ev.gender_rows(report, cfg=cfg, test_set=name, split=split, tag=tag), ledger
+        )
+
+
 @eval_app.command("tts-ab")
 def tts_ab_cmd(
     spec: Path = typer.Argument(..., help="Pack spec (TOML): seed, [[set]] tables."),

@@ -187,7 +187,7 @@ def test_bad_caps_are_refused(table, match):
 
 
 def test_the_caps_are_stage_keys_not_backend_options():
-    cfg = Config(raw={"tts": {"backend": "fake", "max_pause_ms": 250}})
+    cfg = Config(raw={"tts": {**CFG.raw["tts"], "max_pause_ms": 250}}, source_language="ja")
     assert tts.pause_caps(cfg) == (250, 500)
     assert "max_pause_ms" not in tts.backend_config(cfg, "fake").options
     assert "max_pause_ms" not in tts.stage_settings(cfg)[0].options
@@ -211,7 +211,7 @@ def test_the_cue_key_does_not_hold_the_cap(ep):
     store = CardStore(ep.workspace_root)
     vocals = ep.work / "01-separate" / "vocals.wav"
     a = tts.prepare_cue(CUES[0], natsu, CFG, store, who="Natsu", vocals=vocals)
-    cfg = Config(raw={"tts": {"backend": "fake", "max_pause_ms": 300}})
+    cfg = Config(raw={"tts": {**CFG.raw["tts"], "max_pause_ms": 300}}, source_language="ja")
     b = tts.prepare_cue(CUES[0], natsu, cfg, store, who="Natsu", vocals=vocals)
     assert a.key == b.key
     assert (a.max_pause_ms, b.max_pause_ms) == (200, 300)
@@ -220,8 +220,8 @@ def test_the_cue_key_does_not_hold_the_cap(ep):
 def test_stage_key_holds_the_caps_only_while_capping(ep):
     _two_cards(ep)
     base = TtsStage(CFG).config_key(CFG, ep)
-    other = Config(raw={"tts": {"backend": "fake", "max_pause_ms": 300}})
-    off = Config(raw={"tts": {"backend": "fake", "max_pause_ms": 0}})
+    other = Config(raw={"tts": {**CFG.raw["tts"], "max_pause_ms": 300}}, source_language="ja")
+    off = Config(raw={"tts": {**CFG.raw["tts"], "max_pause_ms": 0}}, source_language="ja")
     assert base["pauses"] == {"max_pause_ms": 200, "max_pause_ms_ellipsis": 500, "version": 1}
     assert TtsStage(other).config_key(other, ep) != base
     assert "pauses" not in TtsStage(off).config_key(off, ep)
@@ -295,14 +295,14 @@ def test_changing_the_cap_rederives_without_rendering(ep, gappy):
     TtsStage(CFG).run(ep, CFG)
     first = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
     FakeSynth.CALLS.clear()
-    cfg = Config(raw={"tts": {"backend": "fake", "max_pause_ms": 400}})
+    cfg = Config(raw={"tts": {**CFG.raw["tts"], "max_pause_ms": 400}}, source_language="ja")
     TtsStage(cfg).run(ep, cfg)
     assert FakeSynth.CALLS == []
     again = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
     assert again.key != first.key
     assert again.seconds == pytest.approx(_seconds(first) + 0.2, abs=0.011)
     assert "c0001" in _run(ep).cached
-    off = Config(raw={"tts": {"backend": "fake", "max_pause_ms": 0}})
+    off = Config(raw={"tts": {**CFG.raw["tts"], "max_pause_ms": 0}}, source_language="ja")
     TtsStage(off).run(ep, off)
     assert FakeSynth.CALLS == []
     raw = {c.cue_id: c for c in _plan(ep).cues}["c0001"]
@@ -328,3 +328,17 @@ def test_an_ellipsis_cue_keeps_its_longer_pause(ep, gappy):
     TtsStage(CFG).run(ep, CFG)
     rate, data = wavfile.read(ep.work / "07-tts" / "c0001.wav")
     assert longest_pause_ms(data, rate) == 450
+
+
+def test_stage_keys_read_without_a_tts_backend():
+    # D41's profiles set only `clone_backend`; a workspace that names no `[tts] backend`
+    # (Sol Bianca on the anime profile) must still read the stage-wide keys.
+    cfg = Config(
+        raw={"tts": {"max_pause_ms": 250}},
+        profile="anime",
+        profile_raw={"tts": {"clone_backend": "indextts2"}},
+    )
+    assert tts.pause_caps(cfg) == (250, 500)
+    assert tts.tts_engines(cfg) == {}
+    assert tts.pause_caps(Config(raw={})) == (200, 500)
+    assert tts.tts_engines(Config(raw={})) == {}

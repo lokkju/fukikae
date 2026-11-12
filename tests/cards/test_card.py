@@ -205,14 +205,14 @@ def test_sidecars_lists_every_sha256_ref():
 
 
 class Fake:
-    """A minimal but complete Synthesizer: stock voices only, honors only `rate`."""
+    """A minimal but complete Synthesizer: stock and designed voices, honors only `rate`."""
 
     name: ClassVar[str] = "fake"
     kind: ClassVar[str] = "tts"
     languages: ClassVar[frozenset[str] | Literal["*"]] = "*"
     devices: ClassVar[frozenset[str]] = frozenset({"cpu"})
     vram_mb: ClassVar[int] = 0
-    sources: ClassVar[frozenset[str]] = frozenset({"stock"})
+    sources: ClassVar[frozenset[str]] = frozenset({"stock", "design"})
     voice_keys: ClassVar[frozenset[str]] = frozenset({"rate"})
     capabilities: ClassVar[frozenset[str]] = frozenset()
     sample_rate: ClassVar[int] = 24000

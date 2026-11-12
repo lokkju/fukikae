@@ -12,16 +12,16 @@ in the name means a swapped card or changed text renders again instead of reusin
 Metrics, per character and overall:
 
 - ``speaker_similarity``: WeSpeaker cosine between each render and the normalized mean of the
-  character's references: the clips ``cards.select.select_references`` picks from the sampled
-  episodes (``similarity_source = "references"``), the same spans a clone card of this run is
-  cut from, for every backend, so stock and clone renders are on one scale (the plan's
-  decision). A character with too little clean speech for that is compared with the clips of
-  its card when it has some (``"card"``), else with its three longest diarize turns no other
-  speaker overlaps (``"original"``). Across languages the original voice is another actor in another
-  language, so stock numbers are low by construction; they are a floor, not a verdict.
-  Each source has its own metric (``speaker_similarity_references``, ``_card``, ``_original``);
-  ``speaker_similarity``, the report's headline, exists only when every sampled character
-  shares one source, so the two kinds are never pooled.
+  character's references: the clips ``cards.auto.character_references`` picks from the sampled
+  episodes at ``cards.auto.PRE_FLOOR_S`` (``similarity_source = "references"``), the same spans
+  a clone card of this run is cut from, for every backend, so stock and clone renders are on one
+  scale (the plan's decision). A character with too little clean speech for that is compared
+  with the clips of its card when it has some (``"card"``), else with its three longest diarize
+  turns no other speaker overlaps (``"original"``). Across languages the original voice is
+  another actor in another language, so stock numbers are low by construction; they are a floor,
+  not a verdict. Each source has its own metric (``speaker_similarity_references``, ``_card``,
+  ``_original``); ``speaker_similarity``, the report's headline, exists only when every sampled
+  character shares one source, so the two kinds are never pooled.
 - ``speaker_similarity_heldout`` (ruling CD17): the same against held-out exemplars, up to 3
   eligible turns (``heldout_exemplars``) of the sampled episodes that are neither reference
   picks nor overlapping any sampled cue's delivery reference (a clone hears that span as its
@@ -85,6 +85,7 @@ import hashlib
 import math
 import random
 import shutil
+import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,13 +106,15 @@ from fukikae.cards.select import (
     reference_report,
     speaker_f0,
 )
-from fukikae.cards.stock import pick_stock, revision, stock_card
+from fukikae.cards.stock import revision, stock_card
 from fukikae.cards.store import CardStore
 from fukikae.config import BackendConfig, Config
 from fukikae.eval.asr import normalize
+from fukikae.eval.stock import ScratchStore, pick_stock
 from fukikae.gpu import device_string, free_mb, wait_for_vram
 from fukikae.gpulock import gpu_job
 from fukikae.models import Assignments, DubCue, DubCues, Tags, Transcript, Turn, Word
+from fukikae.transcripts import transcript_path
 from fukikae.workspace import Workspace
 
 EMBEDDER = BackendConfig("wespeaker", {})
@@ -672,13 +675,14 @@ def _cues(ws: Workspace, episodes: Sequence[str], target: str) -> dict[str, DubC
 def _stock_cards(
     ws: Workspace,
     cfg: Config,
-    store: CardStore,
+    store: ScratchStore,
     backend: str,
     picked: list[tuple[str, DubCue]],
     assigned: dict[int, str],
 ) -> dict[int, str]:
     """A card of ``backend`` per character: its assigned card when that is on ``backend``,
-    else a stock voice of its estimated gender (put in the store, never assigned)."""
+    else a stock voice of its estimated gender, put in ``store``, a scratch store (never the
+    workspace's, D41), and never assigned."""
     from fukikae.cards.auto import character_spans, gender_thresholds
 
     male_below, female_above = gender_thresholds(cfg)
@@ -805,13 +809,17 @@ def _render(
     engines: dict[str, str] | None = None,
 ) -> tuple[list[RenderedCue], dict[str, BackendConfig], dict[str, bool]]:
     """Each picked cue rendered through the tts stage's own render path (ruling CD12), each
-    card by its backend or the engine ``engines`` names for it."""
+    card by its backend or the engine ``engines`` names for it, with the stage's line gate
+    (A3: `gender_gate` over the episode's whole cue list, so a speaker's established gender is
+    the stage's)."""
     from fukikae.stages.tts import (
         DELIVERY_CAPS,
+        GenderGate,
         LazySynth,
         backend_config,
         capped,
         check_card,
+        gender_gate,
         prepare_cue,
         render_guarded,
         synth_device,
@@ -832,7 +840,17 @@ def _render(
     base = ws.root / ".fukikae" / "eval" / "tts"
     cache = ws.root / ".fukikae" / "tts-cache"
     cache.mkdir(parents=True, exist_ok=True)
-    events = {e: tag_events(ws.work_dir(e)) for e in sorted({e for e, _ in picked})}
+    episodes = sorted({e for e, _ in picked})
+    events = {e: tag_events(ws.work_dir(e)) for e in episodes}
+    takes_audio = any(
+        "emotion_audio" in cls.capabilities_for(card.voice.source) for card, cls in checked.values()
+    )
+    gates = {
+        e: gender_gate(ws.work_dir(e), _cues(ws, [e], cfg.target_language)[e].cues, ws.root)
+        if takes_audio
+        else GenderGate({}, {})
+        for e in episodes
+    }
     out: list[RenderedCue] = []
     for b in backends:
         jobs = [(e, c) for e, c in picked if checked[cards[_cid(c)]][1].name == b]
@@ -849,6 +867,7 @@ def _render(
                 job = prepare_cue(
                     c, card_ref, cfg, store, who=who(_cid(c)), checked=checked[card_ref],
                     identity=idents[b], vocals=vocals, events=events[e],
+                    line=gates[e].line(c.id), voice=gates[e].voice(c.id),
                 )  # fmt: skip
                 # the stage's cache and render guards (ruling CD18), then a copy named by key
                 g = render_guarded(job, lazy, cache, store, ref_dir=folder / "ref" / e)
@@ -1023,6 +1042,33 @@ def evaluate(
     floor_episode: str | None = None,
     characters: Sequence[int] | None = None,
 ) -> EvalResult:
+    """One eval tts run; the stock baseline cards it makes live in a temporary card store
+    (`ScratchStore`, D41) that is gone when it returns."""
+    with tempfile.TemporaryDirectory(prefix="fukikae-eval-stock-") as scratch:
+        return _evaluate(
+            root, episodes, backend=backend, per_character=per_character, seed=seed,
+            min_slot=min_slot, reference_workspace=reference_workspace, floor_subs=floor_subs,
+            floor_workspace=floor_workspace, floor_episode=floor_episode, characters=characters,
+            scratch=Path(scratch),
+        )  # fmt: skip
+
+
+def _evaluate(
+    root: Path,
+    /,
+    episodes: Sequence[str],
+    *,
+    backend: str | None = None,
+    per_character: int = 8,
+    seed: int = 0,
+    min_slot: float = MIN_SLOT_S,
+    reference_workspace: Path | None = None,
+    floor_subs: Path | None = None,
+    floor_workspace: Path | None = None,
+    floor_episode: str | None = None,
+    characters: Sequence[int] | None = None,
+    scratch: Path,
+) -> EvalResult:
     from fukikae.eval.autolabel import gt_path_for
     from fukikae.registry.store import Registry
     from fukikae.stages.tts import max_speedup
@@ -1124,6 +1170,7 @@ def evaluate(
                 if not picked:
                     raise ValueError("no sampled character has enough clean speech for a clone")
         else:
+            store = ScratchStore(scratch, store)  # stock cards stay out of the workspace (D41)
             cards = _stock_cards(ws, cfg, store, backend, picked, assigned)
             mode = "stock"
 
@@ -1203,7 +1250,7 @@ def evaluate(
     ref_vocals: dict[str, Path] = {}
     if ref_ws is not None:
         for e in sorted({r.episode for r in renders}):
-            tpath = ref_ws.work_dir(e) / "03-asr" / "transcript.json"
+            tpath = transcript_path(ref_ws.work_dir(e))
             vocals = ref_ws.work_dir(e) / "01-separate" / "vocals_16k.wav"
             if not tpath.exists() or not vocals.exists():
                 notes.append(f"{e}: the reference workspace has no transcript or vocals")

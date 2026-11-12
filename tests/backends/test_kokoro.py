@@ -12,8 +12,9 @@ from fukikae.backends.tts.kokoro import (
     KokoroSynthesizer,
 )
 from fukikae.cards.card import CardError, parse_card, validate_for_backend
-from fukikae.cards.stock import STOCK_POOLS, stock_card
+from fukikae.cards.stock import stock_card
 from fukikae.config import ConfigError
+from fukikae.eval.stock import STOCK_POOLS
 
 
 def test_kokoro_declares_stock_and_blend():

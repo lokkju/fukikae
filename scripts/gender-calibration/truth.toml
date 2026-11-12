@@ -1,0 +1,44 @@
+# Voice register as heard ("f" or "m"; never the character's gender in the story) for the main
+# characters (30 s or more of ground-truth speech) of the calibration sets' tuning episodes,
+# keyed by the ground-truth name (case and spacing don't matter). Filled from the sets' labels
+# and the casts, not by listening; an entry marked `# check` is the writer's guess for the
+# operator to confirm by ear.
+
+[fairytail]   # Fairy Tail 100 Years Quest E11-E13, ja audio, names from the en ASS
+"CANA" = "f"
+"ERZA" = "f"
+"GRAY" = "m"
+"HAPPY" = "f"            # spec: a male character with a high voice is f for fukikae
+"IGNEEL" = "m"
+"JELLAL" = "m"
+"JUVIA" = "f"
+"KIRIA" = "f"            # check
+"LAXUS" = "m"
+"LISANNA" = "f"
+"LUCY" = "f"
+"MAKAROV (WRAITH)" = "m" # check: the Wraith speaking through Makarov
+"MAVIS" = "f"
+"NATSU" = "m"
+"NEBARU" = "m"           # check
+"TOUKA" = "f"
+"WENDY" = "f"
+"WHITE MAGE" = "f"
+"WRAITH" = "m"           # check
+"YOUNG MAKAROV" = "f"    # check: a child's high voice, f by register as Happy is
+"ZEREF" = "m"
+"CHARLE" = "f"
+
+[bbt]   # The Big Bang Theory S01E01-E02, en audio, transcript-aligned names
+"Sheldon" = "m"
+"Leonard" = "m"
+"Penny" = "f"
+"Howard" = "m"
+"Raj" = "m"
+
+[kaze]   # 風、薫る E01-E03, ja audio, colour captions and （名前） prefixes
+"りん" = "f"
+"直美" = "f"
+"真風" = "f"             # the narrator and fortune teller, 研ナオコ (cast lists)
+"信右衛門" = "m"
+"安" = "f"               # check
+"美津" = "f"
