@@ -298,3 +298,43 @@ def test_registry_lock_character_marks_characters_stale_where_it_is_named(tmp_pa
     assert stale() == {"S01E03"}
     r = runner.invoke(app, ["registry", "lock", str(ws.root), "2", "--character", "--unlock"])
     assert r.exit_code == 0, r.output
+
+
+def test_registry_gender_and_kind_commands(tmp_path):
+    ws = _alias_ws(tmp_path)
+    r = runner.invoke(app, ["registry", "show", str(ws.root), "1"])
+    assert r.exit_code == 0, r.output
+    assert "gender -, kind character, reviewed never" in r.output
+    r = runner.invoke(app, ["registry", "gender", str(ws.root), "1", "f"])
+    assert r.exit_code == 0, r.output
+    assert "character 1: gender f (operator)" in r.output
+    r = runner.invoke(app, ["registry", "kind", str(ws.root), "1", "narrator"])
+    assert r.exit_code == 0, r.output
+    assert "character 1: kind narrator" in r.output
+    with Registry(ws.registry_path) as reg:
+        reg.mark_reviewed(1, "2026-11-12T10:00:00+00:00")
+    r = runner.invoke(app, ["registry", "show", str(ws.root), "1"])
+    assert "gender f (operator), kind narrator, reviewed 2026-11-12T10:00:00+00:00" in r.output
+    r = runner.invoke(app, ["registry", "gender", str(ws.root), "1", "--clear"])
+    assert r.exit_code == 0, r.output
+    assert "character 1: gender cleared" in r.output
+    with Registry(ws.registry_path) as reg:
+        c = reg.characters()[0]
+        assert (c.gender, c.gender_by, c.kind) == (None, None, "narrator")
+
+
+def test_registry_gender_and_kind_refuse_bad_input(tmp_path):
+    ws = _alias_ws(tmp_path)
+    for args in (
+        ["gender", str(ws.root), "1", "x"],
+        ["gender", str(ws.root), "1"],  # neither f|m nor --clear
+        ["gender", str(ws.root), "1", "f", "--clear"],
+        ["gender", str(ws.root), "9", "f"],
+        ["kind", str(ws.root), "1", "extra"],
+        ["kind", str(ws.root), "9", "narrator"],
+    ):
+        r = runner.invoke(app, ["registry", *args])
+        assert r.exit_code != 0, (args, r.output)
+    with Registry(ws.registry_path) as reg:
+        c = reg.characters()[0]
+        assert (c.gender, c.kind) == (None, "character")

@@ -268,7 +268,7 @@ def test_v1_registry_migrates_voice_into_history(tmp_path: Path):
         # a migrated voice keeps the character curated, as a v1 voice did
         assert reg.protected_actors() == {1, 2}
     con = sqlite3.connect(p)
-    assert con.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(5,)]
     assert con.execute("SELECT voice FROM characters").fetchall() == [(None,), (None,)]
     con.close()
     with Registry(p) as reg:  # reopening migrates nothing twice
@@ -295,11 +295,11 @@ def test_failed_migration_leaves_the_v1_file_untouched(tmp_path: Path, monkeypat
     con.close()
 
 
-def test_fresh_registry_is_schema_4(tmp_path: Path):
+def test_fresh_registry_is_schema_5(tmp_path: Path):
     p = tmp_path / "r.sqlite"
     Registry(p).close()
     con = sqlite3.connect(p)
-    assert con.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(5,)]
     con.close()
 
 
@@ -689,7 +689,7 @@ def test_v2_registry_migrates_to_3_with_chosen_by(tmp_path: Path):
     with Registry(p) as reg:
         assert [h.chosen_by for h in reg.card_history(cid, "en")] == ["assign", "assign"]
     con = sqlite3.connect(p)
-    assert con.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(5,)]
     con.close()
 
 
@@ -825,7 +825,7 @@ def test_v3_registry_migrates_names_to_operator_aliases(
     (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert f"character {ids['ＮＡＴＳＵ']}" in warning and f"character {ids['Natsu']}" in warning
     con = sqlite3.connect(p)
-    assert con.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(5,)]
     con.close()
     with Registry(p) as reg:  # reopening migrates nothing twice
         assert len(reg.aliases()) == 2
@@ -842,7 +842,7 @@ def test_v3_to_4_migration_is_idempotent(tmp_path: Path):
         assert {c.name_by for c in reg.characters()} == {"operator", None}
 
 
-def test_v1_registry_migrates_to_4(tmp_path: Path):
+def test_v1_registry_migrates_to_5(tmp_path: Path):
     p = _v1_file(tmp_path / "r.sqlite")
     with Registry(p) as reg:
         assert [(c.id, c.name, c.name_by) for c in reg.characters()] == [
@@ -856,7 +856,7 @@ def test_v1_registry_migrates_to_4(tmp_path: Path):
         assert [a.alias for a in reg.aliases()] == ["lucy"]
 
 
-def test_v2_registry_migrates_to_4(tmp_path: Path):
+def test_v2_registry_migrates_to_5(tmp_path: Path):
     p = tmp_path / "r.sqlite"
     with Registry(p) as reg:
         cid = _char(reg)
@@ -875,7 +875,7 @@ def test_v2_registry_migrates_to_4(tmp_path: Path):
         erza = reg.character_for_key("erza")
         assert erza is not None and erza.id == cid
     con = sqlite3.connect(p)
-    assert con.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(5,)]
     con.close()
 
 
@@ -1232,3 +1232,213 @@ def test_operator_alias_outranks_a_subs_name(reg: Registry):
     reg.rename_character(a, "Gray")
     with pytest.raises(AliasConflictError, match="name"):
         reg.add_alias(c, "gray", by="operator")  # an operator's name still blocks it
+
+
+# --- schema 5: character gender, kind and reviewed ----------------------------------------
+
+
+def _downgrade_to_4(path: Path) -> None:
+    """A schema-5 file made back into the schema-4 shape: no gender, gender_by, kind or
+    reviewed."""
+    # The table is rebuilt: SQLite's DROP COLUMN refuses the last column after a comment.
+    con = sqlite3.connect(path)
+    con.execute("PRAGMA legacy_alter_table = ON")
+    con.execute(
+        "CREATE TABLE characters4 (id INTEGER PRIMARY KEY, actor_id INTEGER NOT NULL"
+        " REFERENCES actors(id), name TEXT, voice TEXT, locked INTEGER NOT NULL DEFAULT 0,"
+        " external_id TEXT, name_by TEXT)"
+    )
+    con.execute(
+        "INSERT INTO characters4 SELECT id, actor_id, name, voice, locked, external_id, name_by"
+        " FROM characters"
+    )
+    con.execute("DROP TABLE characters")
+    con.execute("ALTER TABLE characters4 RENAME TO characters")
+    con.execute("UPDATE schema_version SET version = 4")
+    con.commit()
+    con.close()
+
+
+def test_v4_registry_migrates_to_5_with_defaults(tmp_path: Path):
+    p = tmp_path / "r.sqlite"
+    with Registry(p) as reg:
+        cid = _char(reg)
+        reg.rename_character(cid, "Janny")
+        reg.assign_card(cid, "en", A16, by="assign", locked=True)
+    _downgrade_to_4(p)
+    with Registry(p) as reg:
+        (c,) = reg.characters()
+        assert (c.kind, c.gender, c.gender_by, c.reviewed) == ("character", None, None, None)
+        assert (c.name, c.name_by) == ("Janny", "operator")
+        assert _cur(reg, cid, "en").card_id == A16
+    con = sqlite3.connect(p)
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(5,)]
+    con.close()
+    with Registry(p) as reg:  # reopening migrates nothing twice
+        with reg._tx() as con:
+            reg._migrate_4_to_5(con)
+        assert reg.characters()[0].kind == "character"
+
+
+def test_failed_4_to_5_migration_leaves_the_file_untouched(tmp_path: Path, monkeypatch):
+    import fukikae.registry.store as store
+
+    p = tmp_path / "r.sqlite"
+    with Registry(p) as reg:
+        _char(reg)
+    _downgrade_to_4(p)
+    real = store.Registry._migrate_4_to_5
+
+    def boom(self, con):  # noqa: ANN001, ANN202
+        real(self, con)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(store.Registry, "_migrate_4_to_5", boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        Registry(p)
+    con = sqlite3.connect(p)
+    assert con.execute("SELECT version FROM schema_version").fetchall() == [(4,)]
+    cols = {r[1] for r in con.execute("PRAGMA table_info(characters)")}
+    assert not cols & {"gender", "gender_by", "kind", "reviewed"}
+    con.close()
+
+
+def test_new_characters_start_with_the_defaults(reg: Registry):
+    cid = _char(reg)
+    c = reg.characters()[0]
+    assert (c.id, c.kind, c.gender, c.gender_by, c.reviewed) == (cid, "character", None, None, None)
+
+
+def test_set_gender_and_clear(reg: Registry):
+    a, b = _char(reg), _char(reg)
+    reg.set_character_gender(a, "f")
+    reg.set_character_gender(b, "m", by="cast")
+    got = {c.id: (c.gender, c.gender_by) for c in reg.characters()}
+    assert got == {a: ("f", "operator"), b: ("m", "cast")}
+    reg.set_character_gender(a, None)
+    assert (reg.characters()[0].gender, reg.characters()[0].gender_by) == (None, None)
+
+
+def test_set_gender_refuses_bad_values_and_unknown_characters(reg: Registry):
+    a = _char(reg)
+    with pytest.raises(ValueError, match="gender"):
+        reg.set_character_gender(a, "x")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="studio"):
+        reg.set_character_gender(a, "f", by="studio")
+    with pytest.raises(KeyError):
+        reg.set_character_gender(99, "f")
+    assert reg.characters()[0].gender is None
+
+
+def test_set_kind(reg: Registry):
+    a = _char(reg)
+    reg.set_character_kind(a, "narrator")
+    assert reg.characters()[0].kind == "narrator"
+    reg.set_character_kind(a, "ignored")
+    assert reg.characters()[0].kind == "ignored"
+    reg.set_character_kind(a, "character")
+    assert reg.characters()[0].kind == "character"
+
+
+def test_unknown_kind_is_refused(reg: Registry):
+    a = _char(reg)
+    with pytest.raises(ValueError, match="kind"):
+        reg.set_character_kind(a, "extra")
+    with pytest.raises(KeyError):
+        reg.set_character_kind(99, "narrator")
+    assert reg.characters()[0].kind == "character"
+
+
+def test_mark_reviewed(reg: Registry):
+    a = _char(reg)
+    reg.mark_reviewed(a, "2000-01-01T00:00:00+00:00")
+    assert reg.characters()[0].reviewed == "2000-01-01T00:00:00+00:00"
+    reg.mark_reviewed(a)
+    when = reg.characters()[0].reviewed
+    assert when is not None and when > "2000-01-01T00:00:00+00:00"
+    with pytest.raises(KeyError):
+        reg.mark_reviewed(99)
+
+
+def _two_actors(reg: Registry) -> tuple[int, int, int, int]:
+    a1, c1 = reg.create_actor_with_character(unit(1, 0))
+    a2, c2 = reg.create_actor_with_character(unit(0, 1))
+    reg.add_exemplars(a1, "e1", "c0", np.stack([unit(1, 0.1)]), 5.0)
+    reg.add_exemplars(a2, "e1", "c1", np.stack([unit(0.1, 1)]), 5.0)
+    return a1, c1, a2, c2
+
+
+def test_merge_keeps_the_kept_characters_gender_kind_and_reviewed(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.set_character_kind(c2, "narrator")
+    reg.mark_reviewed(c2, "2026-11-12T10:00:00+00:00")
+    reg.set_character_gender(c2, "f", by="cast")
+    reg.set_character_gender(c1, "m")
+    assert reg.merge_actors(a1, a2) == {c2: c1}
+    (c,) = reg.characters()
+    assert (c.id, c.gender, c.gender_by, c.kind, c.reviewed) == (
+        c1, "m", "operator", "character", None
+    )  # fmt: skip
+
+
+def test_merge_moves_the_only_operator_gender(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.set_character_gender(c2, "f")
+    reg.merge_actors(a1, a2)
+    (c,) = reg.characters()
+    assert (c.id, c.gender, c.gender_by) == (c1, "f", "operator")
+
+
+def test_merge_moves_an_operator_gender_over_a_cast_one(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.set_character_gender(c1, "m", by="cast")
+    reg.set_character_gender(c2, "f")
+    reg.merge_actors(a1, a2)
+    (c,) = reg.characters()
+    assert (c.id, c.gender, c.gender_by) == (c1, "f", "operator")
+
+
+def test_merge_with_one_operator_gender_on_both_sides_agrees(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.set_character_gender(c1, "f")
+    reg.set_character_gender(c2, "f")
+    reg.merge_actors(a1, a2)
+    assert [(c.id, c.gender) for c in reg.characters()] == [(c1, "f")]
+
+
+def test_merge_with_two_operator_genders_refuses(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.set_character_gender(c1, "m")
+    reg.set_character_gender(c2, "f")
+    with pytest.raises(ValueError, match=rf"character {c1}.*'m'.*character {c2}.*'f'"):
+        reg.merge_actors(a1, a2)
+    assert {c.id: c.gender for c in reg.characters()} == {c1: "m", c2: "f"}
+    assert {a.id for a in reg.actors()} == {a1, a2}  # nothing changed
+
+
+def test_merge_into_a_characterless_actor_keeps_the_adopted_characters_fields(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    with reg._tx() as con:  # an actor with no character (v1 shape allows it)
+        con.execute("DELETE FROM characters WHERE id = ?", (c1,))
+    reg.set_character_gender(c2, "f")
+    reg.set_character_kind(c2, "narrator")
+    assert reg.merge_actors(a1, a2) == {}
+    (c,) = reg.characters()
+    assert (c.id, c.actor_id, c.gender, c.kind) == (c2, a1, "f", "narrator")
+
+
+def test_studio_is_an_operator_source(reg: Registry):
+    from fukikae.registry.store import OPERATOR_BY, replace_refusal
+
+    assert "studio" in OPERATOR_BY
+    cid = _char(reg)
+    reg.assign_card(cid, "en", A16, by="auto", locked=False)
+    a = reg.assign_card(cid, "en", B16, by="studio", locked=True, note="draft 1.en v4")
+    assert (a.card_id, a.chosen_by, a.locked) == (B16, "studio", True)
+    assert replace_refusal(a, "auto") is not None
+    with pytest.raises(ProtectedAssignmentError):
+        reg.assign_card(cid, "en", C16, by="auto", locked=False)
+    reg.lock_card(cid, "en", False)
+    with pytest.raises(ProtectedAssignmentError, match="operator-chosen"):
+        reg.assign_card(cid, "en", C16, by="auto", locked=False)
+    assert cid in reg.curated_characters()

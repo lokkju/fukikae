@@ -308,6 +308,8 @@ def show(
                     + (f" (name by {c.name_by})" if c.name and c.name_by else "")
                     + (f" (external id {c.external_id})" if c.external_id else "")
                 )
+                gender = f"{c.gender} ({c.gender_by})" if c.gender else "-"
+                typer.echo(f"    gender {gender}, kind {c.kind}, reviewed {c.reviewed or 'never'}")
                 aliases = reg.aliases(c.id)
                 if aliases:
                     typer.echo("    aliases: " + ", ".join(f"{a.alias} ({a.by})" for a in aliases))
@@ -516,6 +518,55 @@ def lock(
         affected = set(reg.episode_counts(owner)) | set(users)
     typer.echo(f"{what} {actor_id}: {'unlocked' if unlock else 'locked'}")
     _stale(ws, sorted(affected))
+
+
+@registry_app.command("gender")
+def gender(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    character: str = typer.Argument(..., metavar="CHARACTER", help="Character id or name."),
+    value: str | None = typer.Argument(None, metavar="[f|m]", help="The voice register."),
+    clear: bool = typer.Option(False, "--clear", help="Clear the stored gender instead."),
+) -> None:
+    """Store a character's gender (its voice register, f or m) as the operator's, or clear it.
+    The pitch estimate is never stored; a stored gender is the operator's call."""
+    if clear == (value is not None):
+        raise _fail("give f or m, or --clear")
+    if value is not None and value not in ("f", "m"):
+        raise _fail(f"gender must be f or m, not {value!r}")
+    with _open(workspace) as reg:
+        try:
+            target = reg.character_by_ref(character)
+        except ValueError as e:
+            raise _fail(str(e)) from e
+        reg.set_character_gender(target.id, None if value is None else "f" if value == "f" else "m")
+    if clear:
+        typer.echo(f"character {target.id}: gender cleared")
+    else:
+        typer.echo(f"character {target.id}: gender {value} (operator)")
+
+
+@registry_app.command("kind")
+def kind(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    character: str = typer.Argument(..., metavar="CHARACTER", help="Character id or name."),
+    value: str = typer.Argument(
+        ..., metavar="character|narrator|ignored", help="The character's kind."
+    ),
+) -> None:
+    """Make a character a dialogue character, a narrator (its own card, exempt from the
+    one-scene reference gate and the line gender gate) or ignored (its lines are never
+    translated or rendered, and the mix keeps the original audio under them)."""
+    from fukikae.registry.store import KINDS
+
+    if value not in KINDS:
+        raise _fail(f"kind must be one of {', '.join(sorted(KINDS))}, not {value!r}")
+    with _open(workspace) as reg:
+        try:
+            target = reg.character_by_ref(character)
+        except ValueError as e:
+            raise _fail(str(e)) from e
+        reg.set_character_kind(target.id, value)
+    typer.echo(f"character {target.id}: kind {value}")
 
 
 @registry_app.command("actor")
