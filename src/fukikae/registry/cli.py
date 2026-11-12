@@ -18,8 +18,11 @@ def rematch(
 ) -> None:
     """Forget an episode's registry contributions and match its clusters again.
 
-    Actors only this episode created are deleted first (unless curated), so its clusters
-    are judged against the rest of the series, never against their own earlier result.
+    Actors only this episode created are deleted first (unless curated: locked, named, or
+    with a character that is named by the operator, has an operator alias, an external id, an
+    operator gender or a kind other than character, a migrated voice, or a locked or
+    hand-assigned card), so its clusters are judged against the rest of the series, never
+    against their own earlier result.
     """
     from fukikae import job
     from fukikae.artifacts import read_json
@@ -842,7 +845,9 @@ def resolve(
     their assignments.
 
     Every listed episode needs a done diarize stage. Actors only these episodes made are
-    replaced (unless curated: locked, named, or hand-voiced); every other actor is matched
+    replaced (unless curated: locked, named, or with a character that is named by the
+    operator, has an operator alias, an external id, an operator gender or a kind other than
+    character, a migrated voice, or a locked or hand-assigned card); every other actor is matched
     against and never merged with another. One registry transaction; assignments.json
     written after it.
     """

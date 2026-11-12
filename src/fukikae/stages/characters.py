@@ -19,8 +19,9 @@ When there is no earlier run to pin to (the first run, a deleted ``assignments.j
 ``rematch``), actors whose exemplars all came from this episode are deleted before
 matching, so the episode is judged against the rest of the series and never against its
 own earlier result. An actor someone has curated (locked, named, or with a curated
-character: named by the operator, with an operator alias or an external id, or with a
-hand-assigned or locked card) is kept. On
+character: named by the operator, with an operator alias, an external id, an operator gender
+or a kind other than ``character``, with a migrated voice, or with a hand-assigned or locked
+card) is kept. On
 a pinned rerun such actors stay matchable, and are deleted only if no cluster claims them
 again. The registry database lives in the workspace and is shared
 state outside the manifest's fingerprinting.
@@ -34,25 +35,26 @@ The batch ``joint`` matcher needs a season at once and is `fukikae registry reso
 Fit the projection only on episodes it will not later resolve for evaluation: leave the
 held-out episode(s) out of `registry adapt`.
 
-Subtitle names (D27, D29). When names were used, each named sub-cluster (``<cluster>~<slug>``)
-gets its character from its name key (`resolve_names`), never from the matcher, in this
-order: a sub-cluster whose pin or parent cluster's match is a locked actor (or locked
-character) stays with it (``source = "lock"``, reported); a key a character answers to
-(`Registry.character_for_key`: operator and subtitle aliases, then names) maps every
-sub-cluster of it to that character, several clusters of the episode included; a role label,
-or a key with under ``[names] min_new_seconds`` of named speech and no character, is
-``extra`` with its ``name``; an unnamed, uncurated character whose named speech here is at
-least ``RENAME_SHARE`` one key, where that key has at least ``RENAME_SHARE`` of its speech on
-the character, is named by subtitles (`Registry.name_character`) and takes it; any other key
-creates a character, named by subtitles. Locked actors, operator names and operator aliases
-beat subtitle names; a sub-cluster whose acoustics point at another character is reported,
-never acted on. A named sub-cluster's acoustics are its parent cluster's (the remainder's pin,
-else its own pin from an acoustic assignment, else the parent's match), never its own earlier
-name or lock decision, except that a label's own pin to a locked actor or locked character
-counts first whatever its source (the manual fallback: split, rename, lock). Every pin the
-remainder path takes is acoustic: only a voice-sourced earlier assignment carries over, so a
-name or lock decision never returns as a pin once names stop being used (off, held out, no
-named track). A key two characters answer to at the same rank takes the remainder path.
+Subtitle names (D27, D29). When names were used, each named sub-cluster (``<cluster>~<slug>``) gets
+its character from its name key (`resolve_names`), never from the matcher, in this order: a
+sub-cluster whose pin or parent cluster's match is a locked actor (or locked character) stays with
+it (``source = "lock"``, reported); a key a character answers to (`Registry.character_for_key`:
+operator and subtitle aliases, then names) maps every sub-cluster of it to that character, several
+clusters of the episode included; a role label, or a key with under ``[names] min_new_seconds`` of
+named speech and no character, is ``extra`` with its ``name``; an unnamed, unlocked character,
+curated by nothing but perhaps an operator gender (`Registry.curated_characters` with
+``gender=False``), whose named speech here is at least ``RENAME_SHARE`` one key, where that key has
+at least ``RENAME_SHARE`` of its speech on the character, is named by subtitles
+(`Registry.name_character`) and takes it; any other key creates a character, named by subtitles.
+Locked actors, operator names and operator aliases beat subtitle names; a sub-cluster whose
+acoustics point at another character is reported, never acted on. A named sub-cluster's acoustics
+are its parent cluster's (the remainder's pin, else its own pin from an acoustic assignment, else
+the parent's match), never its own earlier name or lock decision, except that a label's own pin to a
+locked actor or locked character counts first whatever its source (the manual fallback: split,
+rename, lock). Every pin the remainder path takes is acoustic: only a voice-sourced earlier
+assignment carries over, so a name or lock decision never returns as a pin once names stop being
+used (off, held out, no named track). A key two characters answer to at the same rank takes the
+remainder path.
 The unnamed remainder of each cluster goes through the pin and match path above,
 judged, like the parents, against one snapshot of the actors taken before this episode's
 named exemplars (plus the characters names created here); a character named sub-clusters
@@ -163,7 +165,7 @@ def resolve_names(
     first_char: dict[int, int] = {}
     for c in sorted(chars.values(), key=lambda c: c.id):
         first_char.setdefault(c.actor_id, c.id)
-    curated = reg.curated_characters()
+    curated = reg.curated_characters(gender=False)  # an operator gender doesn't stop naming
 
     def acoustic(label: str) -> tuple[int, int | None, str] | None:
         """The (actor, character, how) the label's acoustics give: its parent's pin, else its
@@ -264,7 +266,8 @@ def resolve_names(
                     assign(lb, "extra", None, None, "name")
         else:
             rest.append(k)
-    # 4. 60/60 rename of an unnamed, uncurated character, else 5. create
+    # 4. 60/60 rename of an unnamed character curated by nothing but an operator gender,
+    # else 5. create
     on_char: dict[int, float] = defaultdict(float)
     key_on: dict[str, dict[int, float]] = defaultdict(lambda: defaultdict(float))
     for lb, h in heard.items():

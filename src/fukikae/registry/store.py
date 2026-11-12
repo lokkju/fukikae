@@ -696,9 +696,11 @@ class Registry:
     ) -> None:
         """Subtitles name an unnamed, uncurated character: ``name = display``, ``name_by =
         'subs'`` and a ``subs`` alias for ``key``, all or nothing. ValueError when the
-        character has a name (subtitles never rename), is curated (`_is_curated`: an external
-        id, a locked or operator-chosen or imported card) or is locked, or its actor is
-        locked; AliasConflictError when another character answers to ``key``."""
+        character has a name (subtitles never rename), is curated other than by an operator
+        gender (`_is_curated` with ``gender=False``: an operator alias, an external id, a kind
+        other than ``character``, a migrated voice, a locked or not-``auto`` card) or is
+        locked, or its actor is locked; AliasConflictError when another character answers to
+        ``key``. An operator gender alone doesn't stop it, and the gender stays."""
         with self._tx() as con:
             c = self._character(con, character_id)
             if c is None:
@@ -711,7 +713,7 @@ class Registry:
             actor_locked = con.execute(
                 "SELECT locked FROM actors WHERE id = ?", (c.actor_id,)
             ).fetchone()[0]
-            if c.locked or actor_locked or self._is_curated(con, character_id):
+            if c.locked or actor_locked or self._is_curated(con, character_id, gender=False):
                 raise ValueError(f"character {character_id} is curated or locked; not naming it")
             con.execute(
                 "UPDATE characters SET name = ?, name_by = 'subs' WHERE id = ?",
@@ -862,23 +864,27 @@ class Registry:
             StoredProjection(r[0], r[1], _blob_array(r[2]), _blob_array(r[3]), r[4]) for r in rows
         ]
 
-    def _is_curated(self, con: sqlite3.Connection, character_id: int) -> bool:
+    def _is_curated(
+        self, con: sqlite3.Connection, character_id: int, *, gender: bool = True
+    ) -> bool:
         """Named by the operator (``name_by = 'operator'``; a name without ``name_by`` predates
         schema 4 and counts as the operator's), answering to an operator alias, with an
         external id, with an operator gender (``gender_by = 'operator'``), with a kind other
         than ``character``, with a schema-1 voice migrated into history, or with a current
         card (any target language) that is locked or was not chosen by ``auto`` (ruling CD2).
         A name or alias from subtitles curates nothing (D29 #2), nor does a cast gender, a
-        review time, or lock and unlock rows by themselves."""
+        review time, or lock and unlock rows by themselves. ``gender=False`` leaves the
+        operator gender out: subtitle naming (`name_character`) asks that way, because naming
+        sets only the name and the gender stays."""
         row = con.execute(
             "SELECT (name IS NOT NULL AND COALESCE(name_by, 'operator') = 'operator')"
-            " OR external_id IS NOT NULL OR gender_by IS 'operator' OR kind != 'character'"
-            " OR EXISTS (SELECT 1 FROM"
+            " OR external_id IS NOT NULL OR (? AND gender_by IS 'operator')"
+            " OR kind != 'character' OR EXISTS (SELECT 1 FROM"
             " card_history WHERE character_id = characters.id AND by = 'migrated')"
             " OR EXISTS (SELECT 1 FROM character_aliases WHERE character_id = characters.id"
             " AND by = 'operator')"
             " FROM characters WHERE id = ?",
-            (character_id,),
+            (gender, character_id),
         ).fetchone()
         if row is None:
             return False
@@ -892,10 +898,11 @@ class Registry:
             ).fetchall()
         )
 
-    def curated_characters(self) -> set[int]:
-        """Characters someone has curated (`_is_curated`)."""
+    def curated_characters(self, *, gender: bool = True) -> set[int]:
+        """Characters someone has curated (`_is_curated`); ``gender=False`` leaves out those
+        whose only curation is an operator gender, the set subtitle naming may not touch."""
         ids = [r[0] for r in self._con.execute("SELECT id FROM characters").fetchall()]
-        return {cid for cid in ids if self._is_curated(self._con, cid)}
+        return {cid for cid in ids if self._is_curated(self._con, cid, gender=gender)}
 
     def protected_actors(self) -> set[int]:
         """Actors someone has curated, which pruning never deletes: locked or named, or with

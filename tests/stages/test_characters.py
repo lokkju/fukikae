@@ -779,6 +779,30 @@ def test_curated_character_is_not_renamed(tmp_path):
         assert wendy is not None and wendy.id != cid
 
 
+def test_operator_gender_alone_does_not_stop_a_subtitle_rename(tmp_path):
+    ep, cid = pinned_merged(tmp_path)
+    with registry(ep) as reg:
+        reg.set_character_gender(cid, "f")
+    write_names(ep, merged_cluster())
+    CharactersStage().run(ep, NAMES_CFG)
+    with registry(ep) as reg:
+        c = next(c for c in reg.characters() if c.id == cid)
+        assert (c.name, c.name_by, c.gender, c.gender_by) == ("Wendy", "subs", "f", "operator")
+
+
+def test_narrator_is_not_renamed_by_subs(tmp_path):
+    ep, cid = pinned_merged(tmp_path)
+    with registry(ep) as reg:
+        reg.set_character_kind(cid, "narrator")
+    write_names(ep, merged_cluster())
+    CharactersStage().run(ep, NAMES_CFG)
+    with registry(ep) as reg:
+        c = next(c for c in reg.characters() if c.id == cid)
+        assert (c.name, c.kind) == (None, "narrator")
+        wendy = reg.character_for_key("wendy")
+        assert wendy is not None and wendy.id != cid
+
+
 def test_operator_named_character_is_never_renamed_by_subs(tmp_path):
     ep, cid = pinned_merged(tmp_path)
     with registry(ep) as reg:

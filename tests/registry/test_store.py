@@ -1544,3 +1544,20 @@ def test_mark_reviewed_refuses_a_naive_or_malformed_time(reg: Registry):
     with pytest.raises(ValueError):
         reg.mark_reviewed(a, "yesterday")
     assert reg.characters()[0].reviewed is None
+
+
+def test_name_character_names_a_character_with_only_an_operator_gender(reg: Registry):
+    cid = _char(reg)
+    reg.set_character_gender(cid, "m")
+    reg.name_character(cid, "Natsu", "natsu", "ja")
+    c = reg.characters()[0]
+    assert (c.name, c.name_by, c.gender, c.gender_by) == ("Natsu", "subs", "m", "operator")
+    assert cid in reg.curated_characters()  # still protected from pruning
+
+
+def test_name_character_refuses_a_narrator(reg: Registry):
+    cid = _char(reg)
+    reg.set_character_kind(cid, "narrator")
+    with pytest.raises(ValueError, match="curated"):
+        reg.name_character(cid, "Natsu", "natsu", "ja")
+    assert reg.characters()[0].name is None

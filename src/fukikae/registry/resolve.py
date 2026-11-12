@@ -10,9 +10,12 @@ seeded one group per diarization cluster. Against an existing registry:
   against its own earlier result, and are deleted at the end unless a cluster claimed them.
 - Every other actor is an *anchor*: one more group, seeded with its remaining exemplar rows
   (from episodes outside the list), or with its stored centroid when it has none left or is
-  locked. A curated orphan (locked, named, or with a curated character) is kept and
-  anchored by its centroid. Anchors never share a group, whatever `episode_cannot_link` says:
-  merging two existing actors is `registry merge`'s decision, not this command's.
+  locked. A curated orphan (locked, named, or with a curated character: named by the
+  operator, with an operator alias, an external id, an operator gender or a kind other than
+  ``character``, with a migrated voice, or with a locked or hand-assigned card;
+  `Registry.protected_actors`) is kept and anchored by its centroid. Anchors never share a
+  group, whatever `episode_cannot_link` says: merging two existing actors is `registry
+  merge`'s decision, not this command's.
 - Subtitle names (D27): each episode reads its identity inputs (`identity_inputs`: the names
   stage's sub-clusters when names were used), and a label its current ``assignments.json``
   decided by name or lock (``source`` ``name`` or ``lock``) is not grouped. It keeps its
