@@ -2,7 +2,7 @@
 
 _Run 2026-11-11 on CPU, branch feat/identification-part-a, estimator `fukikae.pitch` VERSION 2 (commit ae11bee). Tuning sets: Fairy Tail E11-E13 (ja, `~/fukikae-scratch/t12/fairytail`), The Big Bang Theory S01E01-E02 (en, `~/fukikae-ws/bbt-en`), Kaze S01E01-E03 (ja, `~/fukikae-ws/kaze`). Sol Bianca S00E01 (`~/fukikae-scratch/sol-bianca`) is reported and not tuned on; Fairy Tail E14 was not read. Records: `2026-11-11-gender-bands.jsonl` (2895 rows: per ground-truth line, per character pooled over the set's episodes, per diarize cluster, each with the A0 and pYIN medians and voiced seconds)._
 
-**Verdict: no pair of bands passes the acceptance rule on all three sets, and 165/200 Hz fails on each of them.** The anime profile's `[tts.gender]` override is left in place for the operator's decision (the plan's Step 4 stop). The defaults in `fukikae.pitch` and `cards.select` are 165/200 Hz (D43), which is the only pair that puts no main character of BBT or Kaze in the other class.
+**Verdict: no pair of bands passes the acceptance rule on all three sets, and 165/200 Hz fails on each of them.** The anime profile's `[tts.gender]` override was left in place for the operator's decision (the plan's Step 4 stop); ruling D44 has since removed it (below). The defaults in `fukikae.pitch` and `cards.select` are 165/200 Hz (D43), which is the only pair that puts no main character of BBT or Kaze in the other class.
 
 ## Caveats
 
@@ -120,4 +120,14 @@ BBT and Kaze share the live-action profile: BBT needs `male_below` over 195 Hz (
 
 - `cards.select` and `cards.auto.gender_thresholds` default to `fukikae.pitch.MALE_BELOW` and `FEMALE_ABOVE` (165/200). The old `cards.select` 180 Hz put both BBT leads in the other class; 200 leaves them unknown.
 - `gender_thresholds` warns once per run when a workspace (not a profile) sets `[tts.gender]`.
-- `profiles/anime.toml` keeps `female_above = 300` until the operator decides. On these numbers 165/200 is the better of the two on every set (one main character wrong against 38% unknown), but neither passes, and the plan stops here.
+- `profiles/anime.toml` kept `female_above = 300` until the operator decided. On these numbers 165/200 is the better of the two on every set (one main character wrong against 38% unknown), but neither passes, and the plan stopped here. D44 settled it (next section).
+
+## Ruling D44 (2026-11-12): one band rule on every profile
+
+The operator ruled that every profile uses 165/200 Hz on the median F0, and the anime profile's `female_above = 300` override is gone. `profiles/anime.toml` no longer has a `[tts.gender]` table, so `cards.auto.gender_thresholds` returns `fukikae.pitch`'s `MALE_BELOW` and `FEMALE_ABOVE` on every shipped profile; a workspace can still set `[tts.gender]` and still gets the median warning.
+
+The measurement above is why. No pair of bands met the plan's acceptance rule on all three tuning sets, so there was no calibrated band for the anime profile to keep in place of the default. Of the two candidates, 165/200 was the better one on every set: on Fairy Tail it puts one main character (Natsu, shouting) in the other class, while 165/300 leaves 38.0% of main speech in the unknown band, and on Kaze 300 Hz leaves 94.6% unknown. The 300 Hz value was tuned on the old 20th-percentile estimate and was never recalibrated for the median.
+
+After Part A the override barely mattered anyway. Since D41 nothing in the pipeline chooses a voice by these bands: the tts stage's line gate (`GATE_BANDS`) and the reference registers (`select.speaker_register`) read `fukikae.pitch`'s constants directly, and only `eval tts`'s stock baselines read `[tts.gender]`. Keeping a second rule that only one diagnostic read would have meant two answers to "what register is this speaker" depending on where the question was asked. One rule is simpler to reason about, and it is the one rule the studio (Part B) has to show and let the operator override.
+
+No cached decision depends on the override. The tts stage key's `gender_gate` holds `GATE_VERSION`, `GATE_BANDS`, `pitch.VERSION` and `LINE_MIN_VOICED_S`, all constants that D44 doesn't change; `STAGE_KEYS` keeps `[tts.gender]` out of the stage's options key; the register memo in `cards.auto` is keyed on the constant bands; the pitch cache holds F0 tracks, not classes; and `asrclean` reads no band. The stock baselines `eval tts` picks with `gender_thresholds` go into a scratch store on every run, and a render's key holds the voice it was made with, so a baseline that now picks a different stock voice renders under a new key. No VERSION bump was needed.
