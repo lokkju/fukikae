@@ -865,13 +865,15 @@ class Registry:
     def _is_curated(self, con: sqlite3.Connection, character_id: int) -> bool:
         """Named by the operator (``name_by = 'operator'``; a name without ``name_by`` predates
         schema 4 and counts as the operator's), answering to an operator alias, with an
-        external id, with a schema-1 voice migrated into history, or with a current card (any
-        target language) that is locked or was not chosen by ``auto`` (ruling CD2). A name or
-        alias from subtitles curates nothing (D29 #2), nor do lock and unlock rows by
-        themselves."""
+        external id, with an operator gender (``gender_by = 'operator'``), with a kind other
+        than ``character``, with a schema-1 voice migrated into history, or with a current
+        card (any target language) that is locked or was not chosen by ``auto`` (ruling CD2).
+        A name or alias from subtitles curates nothing (D29 #2), nor does a cast gender, a
+        review time, or lock and unlock rows by themselves."""
         row = con.execute(
             "SELECT (name IS NOT NULL AND COALESCE(name_by, 'operator') = 'operator')"
-            " OR external_id IS NOT NULL OR EXISTS (SELECT 1 FROM"
+            " OR external_id IS NOT NULL OR gender_by IS 'operator' OR kind != 'character'"
+            " OR EXISTS (SELECT 1 FROM"
             " card_history WHERE character_id = characters.id AND by = 'migrated')"
             " OR EXISTS (SELECT 1 FROM character_aliases WHERE character_id = characters.id"
             " AND by = 'operator')"
@@ -1251,11 +1253,19 @@ class Registry:
                 raise KeyError(character_id)
 
     def mark_reviewed(self, character_id: int, when: str | None = None) -> None:
-        """Record that the operator reviewed the character's identity, at ``when`` (ISO 8601)
-        or now."""
+        """Record that the operator reviewed the character's identity, at ``when`` (ISO 8601
+        with a timezone offset, stored in UTC as `_now` writes it) or now. ValueError when
+        ``when`` doesn't parse or has no offset."""
+        if when is None:
+            stamp = _now()
+        else:
+            t = datetime.fromisoformat(when)
+            if t.tzinfo is None or t.utcoffset() is None:
+                raise ValueError(f"review time {when!r} has no timezone offset")
+            stamp = t.astimezone(UTC).isoformat(timespec="microseconds")
         with self._tx() as con:
             cur = con.execute(
-                "UPDATE characters SET reviewed = ? WHERE id = ?", (when or _now(), character_id)
+                "UPDATE characters SET reviewed = ? WHERE id = ?", (stamp, character_id)
             )
             if cur.rowcount == 0:
                 raise KeyError(character_id)
@@ -1299,8 +1309,26 @@ class Registry:
     ) -> None:
         """Fold character ``drop`` into ``keep``: its aliases, its card history (`_fold_cards`),
         its external id when keep has none, and its operator gender when keep has none
-        (`_fold_gender`). Keep's own external id, kind and reviewed time win."""
+        (`_fold_gender`). Keep's own external id, kind and reviewed time win; a kind or
+        reviewed time of drop's that differs goes into ``report``."""
         self._fold_gender(con, drop, keep)
+        fields = {
+            r[0]: (r[1], r[2])
+            for r in con.execute(
+                "SELECT id, kind, reviewed FROM characters WHERE id IN (?, ?)", (drop, keep)
+            )
+        }
+        (my_kind, my_reviewed), (their_kind, their_reviewed) = fields[keep], fields[drop]
+        if their_kind != my_kind:
+            report.append(
+                f"character {keep} keeps kind {my_kind}; character {drop}'s {their_kind} "
+                "was dropped"
+            )
+        if their_reviewed is not None and their_reviewed != my_reviewed:
+            report.append(
+                f"character {keep} keeps reviewed {my_reviewed or 'never'}; character "
+                f"{drop}'s {their_reviewed} was dropped"
+            )
         ids = dict(
             con.execute("SELECT id, external_id FROM characters WHERE id IN (?, ?)", (drop, keep))
         )

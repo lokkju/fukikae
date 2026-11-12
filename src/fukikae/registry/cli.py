@@ -308,7 +308,9 @@ def show(
                     + (f" (name by {c.name_by})" if c.name and c.name_by else "")
                     + (f" (external id {c.external_id})" if c.external_id else "")
                 )
-                gender = f"{c.gender} ({c.gender_by})" if c.gender else "-"
+                gender = c.gender or "-"
+                if c.gender and c.gender_by:
+                    gender += f" ({c.gender_by})"
                 typer.echo(f"    gender {gender}, kind {c.kind}, reviewed {c.reviewed or 'never'}")
                 aliases = reg.aliases(c.id)
                 if aliases:

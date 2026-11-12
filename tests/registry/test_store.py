@@ -1352,7 +1352,7 @@ def test_unknown_kind_is_refused(reg: Registry):
 def test_mark_reviewed(reg: Registry):
     a = _char(reg)
     reg.mark_reviewed(a, "2000-01-01T00:00:00+00:00")
-    assert reg.characters()[0].reviewed == "2000-01-01T00:00:00+00:00"
+    assert reg.characters()[0].reviewed == "2000-01-01T00:00:00.000000+00:00"
     reg.mark_reviewed(a)
     when = reg.characters()[0].reviewed
     assert when is not None and when > "2000-01-01T00:00:00+00:00"
@@ -1442,3 +1442,105 @@ def test_studio_is_an_operator_source(reg: Registry):
     with pytest.raises(ProtectedAssignmentError, match="operator-chosen"):
         reg.assign_card(cid, "en", C16, by="auto", locked=False)
     assert cid in reg.curated_characters()
+
+
+def _orphan(reg: Registry) -> tuple[int, int]:
+    """An actor with one character and no exemplars, as `delete_episode` leaves one."""
+    return reg.create_actor_with_character(unit(1, 0))
+
+
+def test_prune_keeps_an_orphan_whose_character_kind_was_set(reg: Registry):
+    ignored, ci = _orphan(reg)
+    narrator, cn = _orphan(reg)
+    plain, _ = _orphan(reg)
+    reg.set_character_kind(ci, "ignored")
+    reg.set_character_kind(cn, "narrator")
+    assert reg.prune_actors([ignored, narrator, plain]) == [plain]
+    assert {a.id for a in reg.actors()} == {ignored, narrator}
+    assert {ci, cn} <= reg.curated_characters()
+    assert {ignored, narrator} <= reg.protected_actors()
+
+
+def test_prune_keeps_an_orphan_with_an_operator_gender_but_not_a_cast_one(reg: Registry):
+    op, co = _orphan(reg)
+    cast, cc = _orphan(reg)
+    reg.set_character_gender(co, "f")
+    reg.set_character_gender(cc, "m", by="cast")
+    assert reg.prune_actors([op, cast]) == [cast]
+    assert {a.id for a in reg.actors()} == {op}
+    assert co in reg.curated_characters()
+
+
+def test_reviewed_alone_curates_nothing(reg: Registry):
+    aid, cid = _orphan(reg)
+    reg.mark_reviewed(cid)
+    assert cid not in reg.curated_characters()
+    assert reg.prune_actors([aid]) == [aid]
+
+
+def test_name_character_refuses_a_character_with_a_set_kind(reg: Registry):
+    cid = _char(reg)
+    reg.set_character_kind(cid, "ignored")
+    with pytest.raises(ValueError, match="curated"):
+        reg.name_character(cid, "Natsu", "natsu", "ja")
+
+
+def test_merge_reports_the_dropped_characters_kind_and_reviewed(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.set_character_kind(c2, "narrator")
+    reg.mark_reviewed(c2, "2026-11-12T10:00:00+00:00")
+    report: list[str] = []
+    reg.merge_actors(a1, a2, report)
+    assert any(
+        f"character {c1} keeps kind character; character {c2}'s narrator was dropped" in line
+        for line in report
+    ), report
+    assert any(
+        f"character {c1} keeps reviewed never; character {c2}'s "
+        "2026-11-12T10:00:00.000000+00:00 was dropped" in line
+        for line in report
+    ), report
+
+
+def test_merge_reports_nothing_when_kind_and_reviewed_agree(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.set_character_kind(c1, "narrator")
+    reg.set_character_kind(c2, "narrator")
+    reg.mark_reviewed(c1, "2026-11-12T10:00:00+00:00")
+    report: list[str] = []
+    reg.merge_actors(a1, a2, report)
+    assert report == []
+
+
+def test_merge_does_not_report_an_unreviewed_dropped_character(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.mark_reviewed(c1, "2026-11-12T10:00:00+00:00")
+    report: list[str] = []
+    reg.merge_actors(a1, a2, report)
+    assert report == []
+    assert reg.characters()[0].reviewed == "2026-11-12T10:00:00.000000+00:00"
+
+
+def test_merge_does_not_carry_a_cast_gender(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.set_character_gender(c2, "f", by="cast")
+    reg.merge_actors(a1, a2)
+    (c,) = reg.characters()
+    assert (c.id, c.gender, c.gender_by) == (c1, None, None)
+
+
+def test_mark_reviewed_normalizes_to_utc_microseconds(reg: Registry):
+    a = _char(reg)
+    reg.mark_reviewed(a, "2026-11-12T19:00:00+09:00")
+    assert reg.characters()[0].reviewed == "2026-11-12T10:00:00.000000+00:00"
+    reg.mark_reviewed(a, "2026-11-12T10:00:00.5Z")
+    assert reg.characters()[0].reviewed == "2026-11-12T10:00:00.500000+00:00"
+
+
+def test_mark_reviewed_refuses_a_naive_or_malformed_time(reg: Registry):
+    a = _char(reg)
+    with pytest.raises(ValueError, match="offset"):
+        reg.mark_reviewed(a, "2026-11-12T10:00:00")
+    with pytest.raises(ValueError):
+        reg.mark_reviewed(a, "yesterday")
+    assert reg.characters()[0].reviewed is None

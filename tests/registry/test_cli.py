@@ -314,7 +314,9 @@ def test_registry_gender_and_kind_commands(tmp_path):
     with Registry(ws.registry_path) as reg:
         reg.mark_reviewed(1, "2026-11-12T10:00:00+00:00")
     r = runner.invoke(app, ["registry", "show", str(ws.root), "1"])
-    assert "gender f (operator), kind narrator, reviewed 2026-11-12T10:00:00+00:00" in r.output
+    assert (
+        "gender f (operator), kind narrator, reviewed 2026-11-12T10:00:00.000000+00:00" in r.output
+    )
     r = runner.invoke(app, ["registry", "gender", str(ws.root), "1", "--clear"])
     assert r.exit_code == 0, r.output
     assert "character 1: gender cleared" in r.output
@@ -338,3 +340,13 @@ def test_registry_gender_and_kind_refuse_bad_input(tmp_path):
     with Registry(ws.registry_path) as reg:
         c = reg.characters()[0]
         assert (c.gender, c.kind) == (None, "character")
+
+
+def test_registry_show_omits_gender_by_when_unset(tmp_path):
+    ws = _alias_ws(tmp_path)
+    with Registry(ws.registry_path) as reg, reg.transaction():
+        reg._con.execute("UPDATE characters SET gender = 'm', gender_by = NULL WHERE id = 1")
+    r = runner.invoke(app, ["registry", "show", str(ws.root), "1"])
+    assert r.exit_code == 0, r.output
+    assert "gender m, kind character" in r.output
+    assert "(None)" not in r.output
