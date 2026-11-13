@@ -17,6 +17,7 @@ instead, unless the names stage hid the line or the cue lies under a sub-cluster
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import unicodedata
@@ -478,15 +479,37 @@ def assign_subtitle_speakers(
     return out
 
 
-def windows(cues: list[DubCue], *, gap_s: float = 2.0, max_cues: int = 12) -> list[list[DubCue]]:
-    """Scene-sized groups: a new window after a pause over ``gap_s`` or ``max_cues`` cues."""
+def windows(
+    cues: list[DubCue],
+    *,
+    gap_s: float = 2.0,
+    max_cues: int = 12,
+    min_cues: int = 4,
+    cut_every: int = 4,
+) -> list[list[DubCue]]:
+    """Scene-sized groups: a new window after a pause over ``gap_s``, at ``max_cues`` cues, or
+    once a window holds ``min_cues`` after a cue whose text hashes to a cut point (one cue in
+    ``cut_every``). The cut points depend on each cue's own text, never its position, so a
+    changed, added or dropped line moves only the boundaries near it and every window past
+    the next cut is the same window again, cached by the translate stage (#41)."""
     out: list[list[DubCue]] = []
     for c in cues:
-        if out and len(out[-1]) < max_cues and c.start - out[-1][-1].end <= gap_s:
-            out[-1].append(c)
+        w = out[-1] if out else None
+        if (
+            w is not None
+            and len(w) < max_cues
+            and c.start - w[-1].end <= gap_s
+            and not (len(w) >= min_cues and _cut_point(w[-1], cut_every))
+        ):
+            w.append(c)
         else:
             out.append([c])
     return out
+
+
+def _cut_point(cue: DubCue, every: int) -> bool:
+    digest = hashlib.sha256(cue.source_text.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % every == 0
 
 
 def is_marked(cue: DubCue) -> bool:

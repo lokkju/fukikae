@@ -7,7 +7,11 @@ when one is needed, is read from the environment variable ``api_key_env`` names,
 name ever appears in errors or logs.
 
 Requests ask for JSON by schema (``response_format`` ``json_schema``, which llama-server
-turns into a grammar) and turn Qwen3's thinking off.
+turns into a grammar) and turn Qwen3's thinking off. Sampling is greedy (``temperature`` 0)
+with a fixed ``seed`` by default, so the same request gets the same answer wherever the server
+honours them (#41); a strict retry (#38) is greedy whatever ``temperature`` says. A managed
+llama-server is also asked not to reuse its prompt cache, which changes batch sizes and with
+them the logits a greedy pick reads.
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ log = logging.getLogger(__name__)
 OPTIONS = frozenset(
     {
         "mode", "model", "file", "revision", "binary", "ctx", "base_url", "api_key_env",
-        "temperature", "timeout_s", "vram_mb", "gpu_index", "max_tokens",
+        "temperature", "seed", "timeout_s", "vram_mb", "gpu_index", "max_tokens",
     }
 )  # fmt: skip
 DEFAULT_VRAM_MB = 10000
@@ -72,7 +76,8 @@ class OpenAICompatTranslator:
         self.ctx = int(options.get("ctx", 8192))
         self.base_url_option: str | None = options.get("base_url")
         self.api_key_env: str | None = options.get("api_key_env")
-        self.temperature = float(options.get("temperature", 0.2))
+        self.temperature = float(options.get("temperature", 0.0))
+        self.seed = int(options.get("seed", 0))
         self.timeout_s = float(options.get("timeout_s", 300))
         self.max_tokens = int(options.get("max_tokens", 4096))
         self.vram_mb = int(options.get("vram_mb", DEFAULT_VRAM_MB))
@@ -151,10 +156,11 @@ class OpenAICompatTranslator:
                 f"prompt of about {need} tokens exceeds the {room} the context leaves "
                 f"(ctx {self.ctx} - max_tokens {self.max_tokens})"
             )
-        body = {
+        body: dict[str, Any] = {
             "model": self.model or "default",
             "messages": messages,
-            "temperature": self.temperature,
+            "temperature": 0.0 if req.strict else self.temperature,
+            "seed": self.seed,
             "max_tokens": self.max_tokens,
             "response_format": {
                 "type": "json_schema",
@@ -162,6 +168,8 @@ class OpenAICompatTranslator:
             },
             "chat_template_kwargs": {"enable_thinking": False},
         }
+        if self.mode == "managed":
+            body["cache_prompt"] = False  # llama.cpp only; other servers may refuse the field
         log.debug("translate request: %d cue(s), mode %s", len(req.cues), req.mode)
         reply = self._post(body)
         try:

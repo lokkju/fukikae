@@ -193,3 +193,42 @@ def test_managed_mode_sends_the_servers_key(monkeypatch, fake, tmp_path):
         t.unload()
     headers = json.loads(record.read_text().splitlines()[0])["headers"]
     assert headers["Authorization"] == f"Bearer {key}"
+
+
+def test_sampling_is_greedy_and_seeded_by_default(monkeypatch, fake, tmp_path):
+    """#41: identical requests give identical answers where the server honours it."""
+    record = tmp_path / "requests.jsonl"
+    monkeypatch.setenv("FAKE_LLAMA_RECORD", str(record))
+    with LlamaServer(fake, tmp_path / "m.gguf", 0) as server:
+        t = OpenAICompatTranslator({"mode": "external", "base_url": server.base_url + "/v1"}, "cpu")
+        t.load()
+        t.translate(_req())
+        hot = OpenAICompatTranslator(
+            {"mode": "external", "base_url": server.base_url + "/v1", "temperature": 0.7,
+             "seed": 7},
+            "cpu",
+        )  # fmt: skip
+        hot.load()
+        hot.translate(_req())
+        hot.translate(_req().model_copy(update={"strict": True}))
+    plain, warm, strict = (json.loads(x)["body"] for x in record.read_text().splitlines())
+    assert plain["temperature"] == 0.0 and plain["seed"] == 0
+    assert "cache_prompt" not in plain  # external servers get no llama.cpp-only field
+    assert warm["temperature"] == 0.7 and warm["seed"] == 7
+    assert strict["temperature"] == 0.0  # #38: the strict retry is greedy whatever is set
+
+
+def test_managed_mode_turns_prompt_caching_off(monkeypatch, fake, tmp_path):
+    """llama-server's prompt cache changes batch sizes, so logits and greedy picks drift."""
+    gguf = tmp_path / "x.gguf"
+    gguf.write_bytes(b"GGUF")
+    record = tmp_path / "requests.jsonl"
+    monkeypatch.setenv("FAKE_LLAMA_RECORD", str(record))
+    monkeypatch.setattr(openai_compat, "local_file", lambda *_a, **_k: gguf)
+    t = OpenAICompatTranslator({"model": "r/m", "file": "x.gguf", "binary": fake}, "cuda:0")
+    t.load()
+    try:
+        t.translate(_req())
+    finally:
+        t.unload()
+    assert json.loads(record.read_text().splitlines()[0])["body"]["cache_prompt"] is False

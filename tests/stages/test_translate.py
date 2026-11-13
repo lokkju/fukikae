@@ -910,3 +910,270 @@ def test_an_automatic_stock_card_budgets_as_unassigned(ep):
     with Registry(Workspace(ep.workspace_root).registry_path) as reg:
         reg.lock_card(1, "en", True)
     assert "1" in stage.config_key(CFG, ep)["cps"]["characters"]
+
+
+# -- #38: answers in the wrong language ----------------------------------------------------
+
+
+def chinese(req: TranslateRequest) -> dict[str, Rendering]:
+    return {c.id: Rendering(literal="这是", text="这到底是什么", direction=None) for c in req.cues}
+
+
+def chinese_c0002(req: TranslateRequest) -> dict[str, Rendering]:
+    return {
+        c.id: Rendering(
+            literal=None, text="这到底是什么" if c.id == "c0002" else f"ok {c.id}", direction=None
+        )
+        for c in req.cues
+    }
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_window_in_the_wrong_language_is_asked_again_strictly(ep):
+    FakeTranslator.SCRIPT = [chinese]
+    TranslateStage().run(ep, CFG)
+    first, again = FakeTranslator.REQUESTS
+    assert not first.strict and again.strict
+    assert again.previous == []
+    out = _out(ep).cues
+    assert [c.text for c in out] == ["ok c0001", "ok c0002"]
+    assert all(c.error is None for c in out)
+
+
+@pytest.mark.usefixtures("fake")
+def test_lines_still_in_the_wrong_language_fail_instead_of_reaching_tts(ep):
+    FakeTranslator.SCRIPT = [chinese_c0002, chinese_c0002]
+    TranslateStage().run(ep, CFG)
+    good, bad = _out(ep).cues
+    assert good.text == "ok c0001" and good.error is None
+    assert bad.text is None and bad.literal is None
+    assert (bad.error or "").startswith("translate: wrong language: ")
+    assert "Han" in (bad.error or "")
+
+
+@pytest.mark.usefixtures("fake")
+def test_the_strict_answer_fixes_only_the_lines_that_were_wrong(ep):
+    def wrong_c0001(req):
+        return {
+            c.id: Rendering(
+                literal=None, text="なんだ" if c.id == "c0001" else f"ko {c.id}",
+                direction=None,
+            )
+            for c in req.cues
+        }  # fmt: skip
+
+    FakeTranslator.SCRIPT = [chinese_c0002, wrong_c0001]
+    TranslateStage().run(ep, CFG)
+    assert [c.text for c in _out(ep).cues] == ["ok c0001", "ko c0002"]
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_wrong_language_window_is_never_the_next_ones_context(ep):
+    _three_windows(ep)
+    FakeTranslator.SCRIPT = [chinese, chinese]  # window 1, then its strict retry
+    TranslateStage().run(ep, CFG)
+    second = FakeTranslator.REQUESTS[2]
+    assert [c.id for c in second.cues] == ["c0003"]
+    assert second.previous == []
+
+
+@pytest.mark.usefixtures("fake")
+def test_an_over_budget_retry_in_the_wrong_language_is_ignored(ep):
+    def long(req):
+        return {c.id: Rendering(literal=None, text="z" * 80, direction=None) for c in req.cues}
+
+    def short_chinese(req):
+        return {c.id: Rendering(literal=None, text="这", direction=None) for c in req.cues}
+
+    FakeTranslator.SCRIPT = [long, short_chinese]
+    TranslateStage().run(ep, CFG)
+    assert all(c.text == "z" * 80 and c.error is None for c in _out(ep).cues)
+
+
+# -- #41: reruns reuse what was translated ------------------------------------------------
+
+
+def _say(text: str) -> str:
+    """An English stand-in that depends only on the source text."""
+    return "s" + text.encode("utf-8").hex()[:3]
+
+
+def by_text(req: TranslateRequest) -> dict[str, Rendering]:
+    return {c.id: Rendering(literal=None, text=_say(c.text), direction=None) for c in req.cues}
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_rerun_with_unchanged_inputs_reuses_every_window_and_starts_no_server(ep):
+    _three_windows(ep)
+    TranslateStage().run(ep, CFG)
+    path = ep.work / "06-translate" / "cues.en.json"
+    first = path.read_bytes()
+    FakeTranslator.REQUESTS.clear()
+    FakeTranslator.LOG.clear()
+    TranslateStage().run(ep, CFG)
+    assert FakeTranslator.REQUESTS == []
+    assert FakeTranslator.LOG == []  # never loaded: no server, no GPU
+    assert path.read_bytes() == first
+
+
+def _retext(ep: Episode, index: int, text: str) -> None:
+    path = ep.work / "03-asr" / "transcript.json"
+    tr = read_json(path, Transcript)
+    seg = tr.segments[index]
+    tr.segments[index] = Segment(
+        start=seg.start, end=seg.end, text=text, words=_words(seg.start, text)
+    )
+    write_json(path, tr)
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_changed_line_re_requests_only_its_own_window(ep):
+    _three_windows(ep)
+    FakeTranslator.SCRIPT = [by_text] * 20
+    TranslateStage().run(ep, CFG)
+    _retext(ep, 3, "なるほど")  # window 3, the last
+    FakeTranslator.REQUESTS.clear()
+    FakeTranslator.SCRIPT = [by_text] * 20
+    TranslateStage().run(ep, CFG)
+    (req,) = FakeTranslator.REQUESTS
+    assert [c.text for c in req.cues] == ["なるほど"]
+    assert _out(ep).cues[3].text == _say("なるほど")
+
+
+@pytest.mark.usefixtures("fake")
+def test_renumbered_cues_still_hit_the_cache(ep):
+    """A line added before the others shifts every cue id; the windows whose text and context
+    are unchanged are still reused."""
+    _three_windows(ep)
+    path = ep.work / "03-asr" / "transcript.json"
+    tr = read_json(path, Transcript)
+    tr.segments = [s.model_copy(update={"start": s.start + 30, "end": s.end + 30,
+                                        "words": _words(s.start + 30, s.text)})
+                   for s in tr.segments]  # fmt: skip
+    write_json(path, tr)
+    asg = read_json(ep.work / "05-characters" / "assignments.json", Assignments)
+    asg.turns = [Turn(start=0.0, end=32.5, speaker="S0"), Turn(start=32.5, end=60.0, speaker="S1")]
+    write_json(ep.work / "05-characters" / "assignments.json", asg)
+    FakeTranslator.SCRIPT = [by_text] * 20
+    TranslateStage().run(ep, CFG)
+    tr.segments.insert(0, Segment(start=0.0, end=1.0, text="おい", words=_words(0.0, "おい")))
+    write_json(path, tr)
+    FakeTranslator.REQUESTS.clear()
+    FakeTranslator.SCRIPT = [by_text] * 20
+    TranslateStage().run(ep, CFG)
+    # the new window, and the old first window whose previous lines are now the new ones
+    assert [[c.text for c in r.cues] for r in FakeTranslator.REQUESTS] == [
+        ["おい"],
+        ["妖精の尻尾だ", "はい"],
+    ]
+    assert [c.id for c in _out(ep).cues] == ["c0001", "c0002", "c0003", "c0004", "c0005"]
+    assert [c.text for c in _out(ep).cues] == [
+        _say(t) for t in ("おい", "妖精の尻尾だ", "はい", "いいえ", "そうか")
+    ]
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_rerun_after_a_strict_retry_makes_no_request(ep):
+    """The wrong-language answer and its strict retry are both cached: greedy sampling would
+    give the same wrong answer again, so a rerun reproduces the outcome without the server."""
+    FakeTranslator.SCRIPT = [chinese]
+    TranslateStage().run(ep, CFG)
+    path = ep.work / "06-translate" / "cues.en.json"
+    first = path.read_bytes()
+    FakeTranslator.REQUESTS.clear()
+    FakeTranslator.LOG.clear()
+    TranslateStage().run(ep, CFG)
+    assert FakeTranslator.REQUESTS == [] and FakeTranslator.LOG == []
+    assert path.read_bytes() == first
+    assert [c.text for c in _out(ep).cues] == ["ok c0001", "ok c0002"]
+
+
+@pytest.mark.usefixtures("fake")
+def test_backend_options_and_the_cache_switch(ep):
+    TranslateStage().run(ep, CFG)
+    hotter = Config(
+        source_language="ja",
+        raw={"translate": {"backend": "fake", "max_speed": 1.25, "temperature": 0.7}},
+    )
+    FakeTranslator.REQUESTS.clear()
+    TranslateStage().run(ep, hotter)
+    assert len(FakeTranslator.REQUESTS) == 1  # another sampling setting is another answer
+    off = Config(
+        source_language="ja",
+        raw={"translate": {"backend": "fake", "max_speed": 1.25, "temperature": 0.7,
+                           "cache": False}},
+    )  # fmt: skip
+    FakeTranslator.REQUESTS.clear()
+    TranslateStage().run(ep, off)
+    assert len(FakeTranslator.REQUESTS) == 1
+    assert "cache" not in TranslateStage().config_key(off, ep)["options"]
+
+
+def _cache_files(ep: Episode) -> list[Path]:
+    return sorted((ep.workspace_root / ".fukikae" / "translate-cache").glob("*.json"))
+
+
+@pytest.mark.usefixtures("fake")
+def test_cache_false_refreshes_entries_instead_of_skipping_them(ep, caplog):
+    """``cache = false`` reads nothing but still writes: a cached wrong-language answer is
+    replaced, and turning the cache back on reads the new one."""
+    FakeTranslator.SCRIPT = [chinese, chinese]  # cached: the answer and its strict retry
+    TranslateStage().run(ep, CFG)
+    assert all((c.error or "").startswith("translate: wrong language") for c in _out(ep).cues)
+    assert "translate-cache" in caplog.text and "cache = false" in caplog.text
+    refresh = Config(
+        source_language="ja",
+        raw={"translate": {"backend": "fake", "max_speed": 1.25, "temperature": 0.2,
+                           "cache": False}},
+    )  # fmt: skip
+    FakeTranslator.REQUESTS.clear()
+    TranslateStage().run(ep, refresh)  # the default echo answers in English
+    assert len(FakeTranslator.REQUESTS) == 1
+    assert [c.text for c in _out(ep).cues] == ["ok c0001", "ok c0002"]
+    FakeTranslator.REQUESTS.clear()
+    FakeTranslator.SCRIPT = [chinese, chinese]  # would answer wrong if asked
+    TranslateStage().run(ep, CFG)
+    assert FakeTranslator.REQUESTS == []
+    assert [c.text for c in _out(ep).cues] == ["ok c0001", "ok c0002"]
+
+
+def _rerun_requests(ep: Episode, cfg: Config = CFG) -> int:
+    FakeTranslator.REQUESTS.clear()
+    TranslateStage().run(ep, cfg)
+    return len(FakeTranslator.REQUESTS)
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_glossary_change_misses_the_cache(ep):
+    TranslateStage().run(ep, CFG)
+    (ep.workspace_root / "glossary.toml").write_text(
+        '[terms]\n"燃えて" = "burning"\n', encoding="utf-8"
+    )
+    assert _rerun_requests(ep) == 1
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_style_change_misses_the_cache(ep):
+    _assign(ep, 1, "am_adam")
+    TranslateStage().run(ep, CFG)
+    _assign(ep, 1, "am_adam", style="soft and polite")
+    assert _rerun_requests(ep) == 1
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_source_language_change_misses_the_cache(ep):
+    TranslateStage().run(ep, CFG)
+    korean = Config(
+        source_language="ko",
+        raw={"translate": {"backend": "fake", "max_speed": 1.25, "temperature": 0.2}},
+    )
+    assert _rerun_requests(ep, korean) == 1
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_corrupt_cache_entry_is_a_miss(ep):
+    TranslateStage().run(ep, CFG)
+    (entry,) = _cache_files(ep)
+    entry.write_text("{not json", encoding="utf-8")
+    assert _rerun_requests(ep) == 1
+    assert [c.text for c in _out(ep).cues] == ["ok c0001", "ok c0002"]
