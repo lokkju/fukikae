@@ -28,11 +28,21 @@ Task 7; ``scripts/song_scores.py`` reproduces it): Fairy Tail E11-E14 openings a
 found within a few seconds of the lyrics, including E13's opening after a 3.5 minute cold open;
 Kaze, Kaoru's opening on E01-E03; no span on The Big Bang Theory (en, de) or Grid. A
 mid-episode insert song is not a theme and is left to the tag stage and subtitles.
+
+`frame_features` reads both stems whole (about 20 s for a 24-minute episode), so its result is
+kept per process and, for stems inside a workspace, in ``<root>/.fukikae/song-cache/<key>.npz``
+beside the pitch cache; the key is the vocals' sha256 (the digest the pitch cache computes, so
+it is paid once), the background's size and modification time (hashing it too would add about
+1.6 s to every fresh process), ``active_db``, ``FRAME_S`` and ``FEATURES_VERSION``. An
+unreadable cache file is computed again.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import zipfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -45,6 +55,8 @@ VOICED_FRAME_S = 0.04
 VOICED_HOP_S = 0.02
 VOICED_ACTIVE_DB = -45.0
 VERSION = 3  # 2: the voicing check; 3: the tail searched again (tail_window_s, tail_repeat)
+# In the song cache's key: bump it with any change to what frame_features returns.
+FEATURES_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -151,11 +163,72 @@ def active_frames(vocals: Path, active_db: float = SongSettings.active_db) -> np
     return _frame_db(vocals) > active_db
 
 
+Features = tuple[np.ndarray, np.ndarray, np.ndarray]
+# per process: frame_features by cache key (`features_key`)
+_FEATURES_MEMO: dict[str, Features] = {}
+_FEATURES_MEMO_MAX = 64
+
+
+def features_cache_dir(root: Path) -> Path:
+    return Path(root) / ".fukikae" / "song-cache"
+
+
+def _workspace_root(path: Path) -> Path | None:
+    """The workspace ``path`` sits in (the parent of its ``.fukikae`` ancestor), else None."""
+    for parent in Path(path).absolute().parents:
+        if parent.name == ".fukikae":
+            return parent.parent
+    return None
+
+
+def features_key(background: Path, vocals: Path, active_db: float) -> str:
+    from fukikae.pitch import file_digest
+
+    st = Path(background).stat()
+    payload = {
+        "background": [st.st_size, st.st_mtime_ns],
+        "vocals": file_digest(Path(vocals)),
+        "active_db": float(active_db),
+        "frame_s": FRAME_S,
+        "version": FEATURES_VERSION,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
 def frame_features(
     background: Path, vocals: Path, active_db: float = SongSettings.active_db
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Features:
     """Per second: the bed's dBFS, the voice's dBFS and the share of 100 ms frames with the
-    voice on (above ``active_db``)."""
+    voice on (above ``active_db``); through the per-process memo and the workspace's song
+    cache (the module docstring)."""
+    from fukikae.artifacts import atomic_path
+
+    key = features_key(background, vocals, active_db)
+    hit = _FEATURES_MEMO.get(key)
+    if hit is not None:
+        return hit
+    root = _workspace_root(vocals)
+    path = None if root is None else features_cache_dir(root) / f"{key}.npz"
+    got: Features | None = None
+    if path is not None:
+        try:
+            with np.load(path) as z:
+                got = (z["bg"], z["vo"], z["active"])
+        except (OSError, EOFError, KeyError, ValueError, zipfile.BadZipFile):
+            got = None
+    if got is None:
+        got = _frame_features(background, vocals, active_db)
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with atomic_path(path) as tmp, tmp.open("wb") as fh:
+                np.savez(fh, bg=got[0], vo=got[1], active=got[2])
+    if len(_FEATURES_MEMO) >= _FEATURES_MEMO_MAX:
+        _FEATURES_MEMO.clear()
+    _FEATURES_MEMO[key] = got
+    return got
+
+
+def _frame_features(background: Path, vocals: Path, active_db: float) -> Features:
     bg = _frame_db(background)
     vo = _frame_db(vocals)
     per = int(round(1 / FRAME_S))
