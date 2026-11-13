@@ -34,6 +34,7 @@ EXTRAS: dict[str, str] = {
     "indextts2_trt": "indextts2_trt",
     "cosyvoice3": "cosyvoice3",
     "qwen3_tts": "qwen3tts",
+    "zonos3": "zonos3",
 }
 
 
