@@ -9,7 +9,12 @@ only the windows whose content or context changed. Entries live in
 ``<workspace>/.fukikae/translate-cache/<key>.json`` as the window's renderings in order.
 
 Only answers that passed validation are stored (a format or backend error never reaches the
-cache); an unreadable entry counts as a miss.
+cache); an unreadable entry counts as a miss. ``read=False`` (``[translate] cache = false``)
+reads nothing but still writes, so one such run refreshes every entry it asks for.
+
+The model identity comes from the configured ``model`` (and ``revision``): an external server
+whose alias now resolves to a different model still hits the old entries, so clear the cache
+or change the model id when the model behind an alias changes.
 """
 
 from __future__ import annotations
@@ -32,12 +37,15 @@ CACHE_VERSION = 1
 
 
 class TranslationCache:
-    """``root`` None is a cache that never hits and stores nothing (``[translate] cache =
-    false``)."""
+    """``root`` None is a cache that never hits and stores nothing; ``read=False`` never
+    hits but still stores (``[translate] cache = false``: a refresh)."""
 
-    def __init__(self, root: Path | None, fingerprint: dict[str, Any]) -> None:
+    def __init__(
+        self, root: Path | None, fingerprint: dict[str, Any], *, read: bool = True
+    ) -> None:
         self.root = root
         self.fingerprint = fingerprint
+        self.read = read
         self.hits = 0
         self.misses = 0
 
@@ -58,7 +66,7 @@ class TranslationCache:
 
     def get(self, req: TranslateRequest) -> dict[str, Rendering] | None:
         path = self._path(req)
-        if path is None or not path.exists():
+        if path is None or not self.read or not path.exists():
             self.misses += 1
             return None
         try:

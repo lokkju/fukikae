@@ -45,7 +45,8 @@ LANGUAGE_NAMES = {
 # The scripts a target language is written in (#38). A letter of any other known script in a
 # rendering means the model answered in another language: Qwen3 slips into Chinese on runs of
 # Japanese lines. A language missing here is not checked.
-_LATIN = frozenset({"Latin"})
+# Latin targets allow Greek too: names such as "μ's" are written in it.
+_LATIN = frozenset({"Latin", "Greek"})
 LANGUAGE_SCRIPTS: dict[str, frozenset[str]] = {
     **dict.fromkeys(
         ("en", "de", "es", "fr", "it", "pt", "nl", "sv", "da", "no", "fi", "pl", "cs", "tr",

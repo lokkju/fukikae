@@ -1107,3 +1107,73 @@ def test_backend_options_and_the_cache_switch(ep):
     TranslateStage().run(ep, off)
     assert len(FakeTranslator.REQUESTS) == 1
     assert "cache" not in TranslateStage().config_key(off, ep)["options"]
+
+
+def _cache_files(ep: Episode) -> list[Path]:
+    return sorted((ep.workspace_root / ".fukikae" / "translate-cache").glob("*.json"))
+
+
+@pytest.mark.usefixtures("fake")
+def test_cache_false_refreshes_entries_instead_of_skipping_them(ep, caplog):
+    """``cache = false`` reads nothing but still writes: a cached wrong-language answer is
+    replaced, and turning the cache back on reads the new one."""
+    FakeTranslator.SCRIPT = [chinese, chinese]  # cached: the answer and its strict retry
+    TranslateStage().run(ep, CFG)
+    assert all((c.error or "").startswith("translate: wrong language") for c in _out(ep).cues)
+    assert "translate-cache" in caplog.text and "cache = false" in caplog.text
+    refresh = Config(
+        source_language="ja",
+        raw={"translate": {"backend": "fake", "max_speed": 1.25, "temperature": 0.2,
+                           "cache": False}},
+    )  # fmt: skip
+    FakeTranslator.REQUESTS.clear()
+    TranslateStage().run(ep, refresh)  # the default echo answers in English
+    assert len(FakeTranslator.REQUESTS) == 1
+    assert [c.text for c in _out(ep).cues] == ["ok c0001", "ok c0002"]
+    FakeTranslator.REQUESTS.clear()
+    FakeTranslator.SCRIPT = [chinese, chinese]  # would answer wrong if asked
+    TranslateStage().run(ep, CFG)
+    assert FakeTranslator.REQUESTS == []
+    assert [c.text for c in _out(ep).cues] == ["ok c0001", "ok c0002"]
+
+
+def _rerun_requests(ep: Episode, cfg: Config = CFG) -> int:
+    FakeTranslator.REQUESTS.clear()
+    TranslateStage().run(ep, cfg)
+    return len(FakeTranslator.REQUESTS)
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_glossary_change_misses_the_cache(ep):
+    TranslateStage().run(ep, CFG)
+    (ep.workspace_root / "glossary.toml").write_text(
+        '[terms]\n"燃えて" = "burning"\n', encoding="utf-8"
+    )
+    assert _rerun_requests(ep) == 1
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_style_change_misses_the_cache(ep):
+    _assign(ep, 1, "am_adam")
+    TranslateStage().run(ep, CFG)
+    _assign(ep, 1, "am_adam", style="soft and polite")
+    assert _rerun_requests(ep) == 1
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_source_language_change_misses_the_cache(ep):
+    TranslateStage().run(ep, CFG)
+    korean = Config(
+        source_language="ko",
+        raw={"translate": {"backend": "fake", "max_speed": 1.25, "temperature": 0.2}},
+    )
+    assert _rerun_requests(ep, korean) == 1
+
+
+@pytest.mark.usefixtures("fake")
+def test_a_corrupt_cache_entry_is_a_miss(ep):
+    TranslateStage().run(ep, CFG)
+    (entry,) = _cache_files(ep)
+    entry.write_text("{not json", encoding="utf-8")
+    assert _rerun_requests(ep) == 1
+    assert [c.text for c in _out(ep).cues] == ["ok c0001", "ok c0002"]

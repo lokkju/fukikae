@@ -36,7 +36,8 @@ only on the first request the cache can't answer, so a rerun with unchanged inpu
 request, starts no server and writes the same cues byte for byte; a changed line re-requests
 its own window, and the next one only if the changed window's rendering changed. Windows cut
 at points chosen by each cue's text (`cues.windows`), so one changed line doesn't shift the
-windows after it. ``[translate] cache = false`` turns the cache off (it is no key input).
+windows after it. ``[translate] cache = false`` reads no entry but still writes each answer
+(it is no key input), so one such run refreshes the entries, wrong-language ones included.
 
 ``[translate] source``: ``asr`` builds cues from the transcript; ``subs`` is the subtitle-first
 path: cues come from target-language subtitles (``media.find_target_subtitles``: ``[subs] file``,
@@ -590,8 +591,9 @@ class TranslateStage:
             # condense is English to shorter English: the glossary maps source-language terms
             mode, src, glossary = "condense", target, {}
         started = time.monotonic()
+        cache_dir = ep.workspace_root / ".fukikae" / "translate-cache"
         self._cache = TranslationCache(
-            ep.workspace_root / ".fukikae" / "translate-cache" if settings["cache"] else None,
+            cache_dir,
             {
                 "backend": bc.backend,
                 "options": {
@@ -600,6 +602,7 @@ class TranslateStage:
                 "identity": identity_key("translate", bc),
                 "prompt_version": PROMPT_VERSION,
             },
+            read=settings["cache"],
         )
         if todo:
             with contextlib.ExitStack() as stack:
@@ -653,6 +656,12 @@ class TranslateStage:
         failed = sum(1 for c in spoken if c.error is not None)
         wrong = sum(1 for c in spoken if (c.error or "").startswith(WRONG_LANGUAGE))
         cache = self._cache
+        if wrong:
+            log.warning(
+                "translate %s: %d line(s) still in the wrong language; their answers are "
+                "cached in %s, and one run with [translate] cache = false asks again and "
+                "refreshes them", ep.id, wrong, cache_dir,
+            )  # fmt: skip
         if subs:
             condensed = sum(1 for c in todo if c.text != c.source_text)
             log.info(

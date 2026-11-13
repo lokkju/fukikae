@@ -169,6 +169,8 @@ def test_special_tokens_in_style_never_reach_the_prompt():
         ("Sancho 桑丘", "en", True),  # one stray name in Han is still not English
         ("なんだこれは", "en", True),
         ("что", "en", True),
+        ("μ's live tonight", "en", False),  # Greek letters in names pass a Latin target
+        ("Σοφία kommt", "de", False),
         ("なんだこれは、漢字もカタカナも", "ja", False),
         ("这到底是什么", "zh", False),
         ("anything at all 这", "xx", False),  # a language with no known script: no check
