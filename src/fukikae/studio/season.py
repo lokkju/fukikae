@@ -16,7 +16,7 @@ An episode without its vocals stem is still listed, with a note, and gives no sa
 
 The index detects nothing on its own and writes nothing but ``season.json``, the sample clips
 under ``<ws>/studio/audio/`` (a build deletes the clips its document no longer refers to,
-`prune_clips`) and the pitch cache: the registry is only read (opening an older one
+`prune_clips`) and the pitch and song caches: the registry is only read (opening an older one
 migrates it, as every command does), and no stock voice is ever proposed (D41).
 `load_or_build` rebuilds it when its inputs' digest changes: each episode's assignments,
 turns, transcripts, names files, cues, tts plan and run, dropped hallucinations and manifest,
