@@ -342,7 +342,11 @@ class DraftVersion(_Strict):
     own unless the operator removes them; they are in its card, and listed nowhere else.
     ``thin_origin`` is the pipeline thin card whose references are exactly this version's
     (`fukikae.studio.apply.thin_origin`): the one selection exempt from the clean rule, at
-    draft time and at accept."""
+    draft time and at accept. Version 1 (opened from a card or the automatic proposal) is
+    checked at open by accept's own rules but never refused: ``acceptable`` says whether
+    accept would take it and ``accept_problems`` gives accept's refusal reasons
+    (`fukikae.studio.drafts.accept_problems`); later versions are refused at draft time, so
+    they are always acceptable when made."""
 
     n: int = Field(ge=1)
     backend: str
@@ -356,6 +360,8 @@ class DraftVersion(_Strict):
     tier: Tier
     unlisted: int = Field(default=0, ge=0)
     thin_origin: str | None = None
+    acceptable: bool = True
+    accept_problems: list[str] = []
 
 
 class Draft(_Strict):

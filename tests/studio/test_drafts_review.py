@@ -501,3 +501,40 @@ def test_a_decision_proceeds_while_a_drafts_request_holds_the_drafts_lock(api):
         t.start()
         t.join(timeout=20)
         assert not t.is_alive() and got["status"] == 200
+
+
+# --- version 1 is checked at open, never refused --------------------------------------------
+
+
+def test_an_overlapping_proposal_opens_flagged_with_accepts_reason(overlap_ws, monkeypatch):
+    from fukikae.studio import drafts
+
+    monkeypatch.setattr(drafts, "_proposal", lambda *_a: ([_span(E1, 11.0, 13.0)], "thin"))
+    d = _open(overlap_ws)
+    (v,) = d.versions
+    assert d.base == "proposed" and v.acceptable is False
+    assert len(v.accept_problems) == 1
+    assert "S01E01 11.00-13.00" in v.accept_problems[0]
+    assert "overlaps another speaker" in v.accept_problems[0]
+
+
+def test_a_clean_proposal_opens_acceptable(clone_ws):
+    (v,) = _open(clone_ws).versions
+    assert v.acceptable is True and v.accept_problems == []
+
+
+def test_a_first_version_from_a_card_that_fails_opens_flagged(overlap_ws):
+    card = _clone(overlap_ws, CardStore(overlap_ws.root), E1, [(10.0, 14.0), (10.0, 14.0)])
+    _assign(overlap_ws, 1, card, by="studio")
+    d = _open(overlap_ws)
+    (v,) = d.versions
+    assert d.base == "card" and v.card_id == card and v.acceptable is False
+    assert any("more than once" in p for p in v.accept_problems)
+    assert any("overlaps another speaker" in p for p in v.accept_problems)
+
+
+def test_the_pipeline_thin_card_opens_acceptable(overlap_ws):
+    thin = _clone(overlap_ws, CardStore(overlap_ws.root), E1, [(10.0, 14.0)], tier="thin")
+    _assign(overlap_ws, 1, thin)
+    (v,) = _open(overlap_ws).versions
+    assert v.acceptable is True and v.thin_origin == thin

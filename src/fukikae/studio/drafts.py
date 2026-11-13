@@ -715,13 +715,46 @@ def _check_refs(ws: Workspace, refs: Sequence[RefSpan]) -> None:
             )
         if r.episode not in ready:
             raise DraftError(f"{r.episode} has no assignments and vocals to cut a reference from")
+    if (problem := _duplicates(refs)) is not None:
+        raise DraftError(problem)
+
+
+def _duplicates(refs: Sequence[RefSpan]) -> str | None:
+    """Why ``refs`` count a piece of audio more than once, or None."""
     ordered = sorted(refs, key=lambda r: (r.episode, r.start, r.end))
     for a, b in zip(ordered, ordered[1:], strict=False):
         if a.episode == b.episode and b.start < a.end - 1e-9:
-            raise DraftError(
+            return (
                 f"a version names the same audio more than once (duplicate, nested or "
                 f"overlapping references): {a.label()} and {b.label()}"
             )
+    return None
+
+
+def accept_problems(
+    ws: Workspace | Path, character_id: int, card_id: str, refs: Sequence[RefSpan]
+) -> list[str]:
+    """What accept would refuse a version's card for, as accept says it
+    (`fukikae.studio.apply._own_speech`: strict own speech, the thin exemption, stale
+    episodes, the cue-span rule), and any audio its references name more than once; empty
+    when accept would take it. Changes nothing."""
+    from fukikae.cards.card import CardError
+    from fukikae.cards.store import CardStore
+    from fukikae.studio.apply import DecisionRefused, _own_speech
+
+    w = _workspace(ws)
+    out: list[str] = []
+    if (problem := _duplicates(refs)) is not None:
+        out.append(problem)
+    try:
+        card = CardStore(w.root).get(card_id)
+        with _registry(w) as reg:
+            _own_speech(w, reg, character_id, card_id, card)
+    except DecisionRefused as e:
+        out.append(str(e))
+    except CardError as e:
+        out.append(f"card {card_id} can't be read: {e}")
+    return out
 
 
 def _ref_set(refs: Sequence[RefSpan], carried: Sequence[Any]) -> frozenset[tuple[Any, ...]]:
@@ -1060,7 +1093,9 @@ def open_draft(
 ) -> Draft:
     """A new draft for the character and target language, version 1 from its current clone
     card; else from an accepted card of another language (copied as ``voices derive`` does);
-    else from the automatic proposal (see the module notes). Not saved (`save_draft`); the
+    else from the automatic proposal (see the module notes). Version 1 is checked by accept's
+    rules and never refused: ``acceptable`` and ``accept_problems`` say what accept would
+    refuse (`accept_problems`). Not saved (`save_draft`); the
     registry is only read."""
     from fukikae.cards.auto import clone_backend
     from fukikae.cards.store import CardStore
@@ -1107,11 +1142,12 @@ def open_draft(
         card_id, _ = _build_card(w, cfg, character_id, language, refs, cls, {}, tier,
                                  thin_origin=origin)  # fmt: skip
     offered = candidates(w, cfg, character_id) if offered is None else offered
+    problems = accept_problems(w, character_id, card_id, refs)
     version = DraftVersion(
         n=1, backend=backend, references=refs, params=params, card_id=card_id,
         overrides=overrides(refs, offered), created=_now(),
         digest=_digest(w, character_id, language), tier=tier, unlisted=unlisted,
-        thin_origin=origin,
+        thin_origin=origin, acceptable=not problems, accept_problems=problems,
     )  # fmt: skip
     return Draft(
         character_id=character_id, language=language, base=base, derived_from=derived_from,
@@ -1124,6 +1160,7 @@ __all__ = [
     "DraftError",
     "NoRegistry",
     "UnknownCharacter",
+    "accept_problems",
     "add_version",
     "backends",
     "candidates",
