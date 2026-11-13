@@ -48,3 +48,8 @@ def test_the_token_helper_ships_and_the_page_has_no_inline_script():
     assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", page)  # every script is a file
     assert "document.cookie" not in page and "?t=" not in page
     assert "#t=" in html.unescape(page)
+
+
+def test_the_token_helper_fetches_video_into_a_blob_url():
+    js = (STATIC / "token.js").read_text(encoding="utf-8")
+    assert "export async function videoUrl" in js and "/video/" in js

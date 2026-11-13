@@ -5,8 +5,9 @@ command's ``--allow-non-loopback``), and then only one IPv4 interface address (n
 0.0.0.0). The per-run random token reaches the page in the start-up URL's fragment
 (``/#t=<token>``), which a browser never sends to a server; the page (``static/token.js``)
 moves it into ``sessionStorage``, clears the fragment, and sends it as the
-``X-Fukikae-Token`` header on every request, audio included (fetched into a blob URL). There
-is no cookie and no ``?t=``: every ``/api`` and ``/audio`` request needs the header
+``X-Fukikae-Token`` header on every request, audio and video included (fetched into a blob
+URL). There is no cookie and no ``?t=``: every ``/api``, ``/audio`` and ``/video`` request
+needs the header
 (compared in constant time), so a link, form or media element on another site can't make
 one. ``GET /`` and ``/static/*`` serve only the shipped shell, which holds no data, without
 the token. ``Host`` must be the bound address (or ``localhost``) with the port (DNS
@@ -24,8 +25,16 @@ inputs change; a decision changes them) and writes only through
 `fukikae.studio.apply.apply_decision`, the studio's one writer; a preview is its dry run.
 Audio is served only for the clips the current index refers to (`referenced_clips`), as bare
 ``<sha256>.wav`` names under ``<ws>/studio/audio``, each directory and the file opened
-without following symlinks, the file non-blocking and only when it is a regular file. Static
-files come only from the package's ``static/`` directory, opened the same way.
+without following symlinks, the file non-blocking and only when it is a regular file. Video
+is served the same way, only for the ``<sha256>.mp4`` names the current index refers to
+(`referenced_videos`), from ``<ws>/studio/video``; a named clip not yet on disk is cut on its
+first fetch (`fukikae.studio.season.cut_video`), at most `MAX_CUTS` at once and each name
+once, and only when the source still gives that name (a source replaced since the index was
+built gives a 404 until the page reloads the index). ``/audio`` and ``/video`` answer a
+single ``Range: bytes=`` range with 206 (416 when it starts past the end; any other Range
+form gets the whole file), after the same token check and allow-list as a whole fetch; the
+names are content hashes, so a clip never changes under a range. Static files come only
+from the package's ``static/`` directory, opened the same way.
 
 Voice drafts (`fukikae.studio.drafts`): a character's reference candidates, its draft per
 target language and the draft's versions, and the clone backends with their voice keys. These
@@ -63,6 +72,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from fukikae.media import MediaError
 from fukikae.registry.store import RegistrySchemaError
 from fukikae.studio.apply import (
     DecisionError,
@@ -103,11 +113,17 @@ from fukikae.studio.model import (
 )
 from fukikae.studio.season import (
     CLIP_NAME,
+    VIDEO_NAME,
+    NoVideo,
     cut_sample,
+    cut_video,
     inputs_digest,
     load_or_build,
     referenced_clips,
+    referenced_videos,
     sample_name,
+    video_name,
+    video_source,
 )
 from fukikae.workspace import Workspace
 
@@ -124,6 +140,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 MAX_CANDIDATES = 200  # candidates per page at most
 DEFAULT_CANDIDATES = 50
 MAX_OFFERED = 20000  # clip names offered for lazy cutting, oldest forgotten first
+MAX_CUTS = 2  # video clips cut at once (each ffmpeg uses every core)
 
 # (method, path, what it does): the API as the placeholder page lists it
 ROUTES: tuple[tuple[str, str, str], ...] = (
@@ -131,7 +148,17 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
     ("GET", "/static/<file>", "the page's files, from the package only; need no token"),
     ("GET", "/api/season", "the season index (SeasonDoc), rebuilt when its inputs changed"),
     ("GET", "/api/characters/<id>", "one character's entry (CharacterEntry) from the index"),
-    ("GET", "/audio/<sha256>.wav", "a clip the index refers to (a sample's clip field)"),
+    (
+        "GET",
+        "/audio/<sha256>.wav",
+        "a clip the index refers to (a sample's clip field); one Range: bytes= range, 206/416",
+    ),
+    (
+        "GET",
+        "/video/<sha256>.mp4",
+        "a sample's video clip the index refers to (its video field), cut on first fetch; "
+        "one Range: bytes= range, 206/416",
+    ),
     (
         "POST",
         "/api/decisions/preview",
@@ -165,6 +192,7 @@ _SEGMENT = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 _CHARACTER = re.compile(r"/api/characters/([0-9]{1,9})")
 _CANDIDATES = re.compile(r"/api/characters/([0-9]{1,9})/candidates")
 _LANG = r"([A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8}){0,3})"
+_RANGE = re.compile(r"bytes=([0-9]{0,18})-([0-9]{0,18})")
 _DRAFT = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG)
 _VERSIONS = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG + "/versions")
 _CONTENT_TYPES = {
@@ -260,6 +288,9 @@ class StudioServer(ThreadingHTTPServer):
         self._offered: OrderedDict[str, tuple[str, float, float]] = OrderedDict()
         self._cut: set[str] = set()
         self._clip_lock = threading.Lock()
+        # video: one cut per name at a time, at most MAX_CUTS cuts at once
+        self._video_locks: dict[str, threading.Lock] = {}
+        self._cut_slots = threading.BoundedSemaphore(MAX_CUTS)
         super().__init__((bind, port), _Handler)
         p = self.server_address[1]
         names = ["127.0.0.1", "localhost"] if _loopback(bind) else [bind]
@@ -327,6 +358,37 @@ class StudioServer(ThreadingHTTPServer):
             names = referenced_clips(doc)
         with self._clip_lock:
             return names | self._cut
+
+    def video_names(self) -> dict[str, tuple[str, float, float]]:
+        """The video names ``/video`` may serve, each with its sample's episode and span:
+        those the last index served refers to."""
+        with self._lock:
+            doc = self._doc or self.season()
+            return referenced_videos(doc)
+
+    def ensure_video(self, name: str, span: tuple[str, float, float]) -> None:
+        """Cut a referenced video clip that isn't on disk; anything already at its path (a
+        file, a symlink, a FIFO) is left for the read to judge. Cuts nothing when the source
+        is gone or now gives another name."""
+        path = self.ws.root / "studio" / "video" / name
+        if os.path.lexists(path):
+            return
+        with self._clip_lock:
+            lock = self._video_locks.setdefault(name, threading.Lock())
+        try:
+            with lock:
+                if os.path.lexists(path):
+                    return
+                with self._cut_slots:
+                    try:
+                        src = video_source(self.ws, self.cfg, span[0])
+                        if video_name(src, span[1], span[2]) == name:
+                            cut_video(self.ws, src, span[1], span[2])
+                    except (NoVideo, OSError, MediaError):
+                        traceback.print_exc(file=sys.stderr)
+        finally:
+            with self._clip_lock:
+                self._video_locks.pop(name, None)
 
     # -- drafts -------------------------------------------------------------------------------
 
@@ -471,7 +533,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _route(self, method: str) -> None:
         self._guard()
         path = urlsplit(self.path).path
-        guarded = path == "/api" or path.startswith(("/api/", "/audio/"))
+        guarded = path == "/api" or path.startswith(("/api/", "/audio/", "/video/"))
         if guarded and not self._authorized():
             raise _Reply(403, "forbidden", f"no valid studio token (send {TOKEN_HEADER})")
         get = method in ("GET", "HEAD")
@@ -506,6 +568,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif path.startswith("/audio/"):
             self._need(method, get, "GET")
             self._audio(path[len("/audio/") :])
+        elif path.startswith("/video/"):
+            self._need(method, get, "GET")
+            self._video(path[len("/video/") :])
         elif path == "/api/decisions/preview":
             self._need(method, method == "POST", "POST")
             self._preview(self._decision())
@@ -801,7 +866,43 @@ class _Handler(BaseHTTPRequestHandler):
             os.close(dfd)
         if data is None:
             raise _Reply(404, "not-found", "no such clip")
-        self._bytes(200, "audio/wav", data)
+        self._media("audio/wav", data)
+
+    def _video(self, name: str) -> None:
+        span = self.server.video_names().get(name) if VIDEO_NAME.fullmatch(name) else None
+        if span is None:
+            raise _Reply(404, "not-found", "no such video in the index")
+        self.server.ensure_video(name, span)
+        try:
+            dfd = os.open(self.server.ws.root, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            raise _Reply(404, "not-found", "no such video") from None
+        try:
+            data = _read_regular(dfd, ["studio", "video", name])
+        finally:
+            os.close(dfd)
+        if data is None:
+            raise _Reply(404, "not-found", "no such video")
+        self._media("video/mp4", data)
+
+    def _media(self, ctype: str, data: bytes) -> None:
+        """A clip, whole or the one byte range the request asks for (`_byte_range`)."""
+        n = len(data)
+        try:
+            got = _byte_range(self.headers.get("Range"), n)
+        except _Unsatisfiable:
+            body = json.dumps({"error": "range", "message": f"the clip is {n} bytes"}).encode()
+            self._bytes(416, "application/json; charset=utf-8", body, headers={
+                "Accept-Ranges": "bytes", "Content-Range": f"bytes */{n}",
+            })  # fmt: skip
+            return
+        if got is None:
+            self._bytes(200, ctype, data, headers={"Accept-Ranges": "bytes"})
+        else:
+            a, b = got
+            self._bytes(206, ctype, data[a : b + 1], headers={
+                "Accept-Ranges": "bytes", "Content-Range": f"bytes {a}-{b}/{n}",
+            })  # fmt: skip
 
     # -- responses --------------------------------------------------------------------------
 
@@ -811,10 +912,15 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
 
-    def _bytes(self, status: int, ctype: str, data: bytes, *, csp: bool = False) -> None:
+    def _bytes(
+        self, status: int, ctype: str, data: bytes, *, csp: bool = False,
+        headers: dict[str, str] | None = None,
+    ) -> None:  # fmt: skip
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         if csp:
             self.send_header("Content-Security-Policy", _CSP)
         self._common_headers()
@@ -836,6 +942,32 @@ class _VersionRequest(BaseModel):
     references: list[RefSpan] = Field(min_length=1, max_length=MAX_REFERENCES)
     backend: str = Field(min_length=1, max_length=64)
     params: dict[str, Any] = {}
+
+
+class _Unsatisfiable(Exception):  # noqa: N818
+    """A byte range that starts at or past the end of the file (416)."""
+
+
+def _byte_range(header: str | None, n: int) -> tuple[int, int] | None:
+    """The inclusive ``(first, last)`` byte range of one ``bytes=`` range in a Range header
+    over ``n`` bytes, clamped to the end; None for no header or any form not taken (several
+    ranges, another unit, last before first), which gets the whole file. `_Unsatisfiable`
+    when it starts at or past the end, or asks for an empty suffix."""
+    m = _RANGE.fullmatch(header.strip()) if header else None
+    if m is None or not (m.group(1) or m.group(2)):
+        return None
+    if not m.group(1):  # the last k bytes
+        k = int(m.group(2))
+        if k == 0 or n == 0:
+            raise _Unsatisfiable
+        return max(0, n - k), n - 1
+    a = int(m.group(1))
+    b = int(m.group(2)) if m.group(2) else n - 1
+    if m.group(2) and b < a:
+        return None
+    if a >= n:
+        raise _Unsatisfiable
+    return a, min(b, n - 1)
 
 
 def _read_regular(dfd: int, parts: list[str]) -> bytes | None:

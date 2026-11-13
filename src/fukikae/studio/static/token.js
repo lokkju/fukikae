@@ -2,8 +2,8 @@
 // browser never sends to a server; this moves it into sessionStorage (this tab only), clears
 // the fragment from the address bar and history, and sends it as the X-Fukikae-Token header
 // on every API and audio request. It never goes in a query string, and the server stores
-// nothing in the browser. An <audio> element can't send a header, so audioUrl() fetches a
-// clip with it and hands back a blob URL.
+// nothing in the browser. An <audio> or <video> element can't send a header, so audioUrl()
+// and videoUrl() fetch a clip with it and hand back a blob URL.
 
 const KEY = "fukikae-studio-token";
 const HEADER = "X-Fukikae-Token";
@@ -45,5 +45,13 @@ export async function api(path, opts = {}) {
 export async function audioUrl(clip) {
   const r = await api(`/audio/${encodeURIComponent(clip)}`);
   if (!r.ok) throw new Error(`audio ${clip}: HTTP ${r.status}`);
+  return URL.createObjectURL(await r.blob());
+}
+
+// A blob URL for a sample's video clip (its video field: <sha256>.mp4, cut by the server on
+// first fetch, so the first one takes a second or so); revoke it when done.
+export async function videoUrl(clip) {
+  const r = await api(`/video/${encodeURIComponent(clip)}`);
+  if (!r.ok) throw new Error(`video ${clip}: HTTP ${r.status}`);
   return URL.createObjectURL(await r.blob());
 }

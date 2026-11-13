@@ -9,6 +9,20 @@ from fukikae.config import Config
 from fukikae.workspace import Episode
 
 
+def source_track(cfg: Config, source: Path) -> media.AudioTrack:
+    """The source-language audio track of ``source`` the extract stage takes: ``[extract]
+    audio_track`` when set, else the source language (and ``audio_title``), else the first
+    non-English track (`media.choose_audio_track`)."""
+    table = cfg.raw.get("extract", {})
+    override = table.get("audio_track")
+    return media.choose_audio_track(
+        media.probe(source),
+        cfg.source_language,
+        None if override is None else int(override),
+        table.get("audio_title"),
+    )
+
+
 class ExtractStage:
     name = "extract"
 
@@ -19,14 +33,7 @@ class ExtractStage:
         return [ep.work / "00-extract" / "audio.wav"]
 
     def _track(self, cfg: Config, ep: Episode) -> media.AudioTrack:
-        table = cfg.raw.get("extract", {})
-        override = table.get("audio_track")
-        return media.choose_audio_track(
-            media.probe(ep.source),
-            cfg.source_language,
-            None if override is None else int(override),
-            table.get("audio_title"),
-        )
+        return source_track(cfg, ep.source)
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:
         return {

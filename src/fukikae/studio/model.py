@@ -145,13 +145,17 @@ class Decisions(_Strict):
 
 class Sample(_Strict):
     """A clip of a character's (or an extras cluster's) speech: ``clip`` is the file name
-    under ``<ws>/studio/audio/`` (`fukikae.studio.season.cut_sample`)."""
+    under ``<ws>/studio/audio/`` (`fukikae.studio.season.cut_sample`), and ``video`` the name
+    of the same span with picture and the source-language audio under ``<ws>/studio/video/``
+    (`fukikae.studio.season.cut_video`, cut when first fetched), None when the episode's
+    source video can't be found or has no picture (its `EpisodeEntry.video_note` says why)."""
 
     episode: str
     start: float
     end: float
     transcript: str
     clip: str
+    video: str | None = None
 
 
 class GenderInfo(_Strict):
@@ -258,14 +262,16 @@ class ExtraEntry(_Strict):
 class EpisodeEntry(_Strict):
     """An episode with a work dir: the last stage its manifest records done, whether the
     studio can use it (its characters stage has written assignments), the command that
-    brings it in when not, and a ``note`` on what the studio can't show for it (no vocals
-    stem: no samples or pitch)."""
+    brings it in when not, a ``note`` on what the studio can't show for it (no vocals
+    stem: no samples or pitch), and a ``video_note`` when its samples have no video (no
+    ``source`` setting, no source file, no picture stream)."""
 
     id: str
     last_stage: str | None
     ready: bool
     command: str | None
     note: str | None = None
+    video_note: str | None = None
 
 
 class SeasonDoc(_Strict):

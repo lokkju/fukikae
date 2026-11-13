@@ -16,14 +16,26 @@ tier and samples. ``queue`` orders the characters for review (`order_queue`).
 
 An episode without its vocals stem is still listed, with a note, and gives no samples or pitch.
 
+Every sample also names a video clip (``video``): the same span with 0.3 s either side, from
+the episode's source file (found under the ``source`` setting as `fukikae run` finds it),
+picture scaled to `VIDEO_WIDTH` px (deinterlaced when the source is interlaced) with the
+source-language audio track the extract stage takes, H.264 and AAC in a faststart MP4. Its
+name hashes the span, the source file's size and time, both stream indexes and the encode
+settings, so a replaced source never serves an old clip. The build only names it; the studio
+server cuts it when the page first fetches it (`cut_video`), so a build costs one probe per
+episode and the operator pays about a second per clip actually watched. An episode whose
+source can't be found or has no picture stream gives samples without video and a
+``video_note``; the build never fails for it.
+
 The index detects nothing on its own and writes nothing but ``season.json``, the sample clips
-under ``<ws>/studio/audio/`` (a build deletes the clips its document no longer refers to,
-`prune_clips`) and the pitch and song caches: the registry is only read (opening an older one
-migrates it, as every command does), and no stock voice is ever proposed (D41).
-`load_or_build` rebuilds it when its inputs' digest changes: each episode's assignments,
-turns, transcripts, names files, cues, tts plan and run, dropped hallucinations and manifest,
-the vocals' size and time, the resolved config (profile, user config and ``fukikae.toml``,
-`config_digest`, without ``[review]``) and the registry's contents.
+under ``<ws>/studio/audio/`` and ``<ws>/studio/video/`` (a build deletes the clips its
+document no longer refers to, `prune_clips`) and the pitch and song caches: the registry is
+only read (opening an older one migrates it, as every command does), and no stock voice is
+ever proposed (D41). `load_or_build` rebuilds it when its inputs' digest changes: each
+episode's assignments, turns, transcripts, names files, cues, tts plan and run, dropped
+hallucinations and manifest, the vocals' size and time, the source video's path, size and
+time, the resolved config (profile, user config and ``fukikae.toml``, `config_digest`,
+without ``[review]``) and the registry's contents.
 """
 
 from __future__ import annotations
@@ -54,7 +66,7 @@ from fukikae.studio.model import (
     SeasonDoc,
     Suggestion,
 )
-from fukikae.workspace import Workspace
+from fukikae.workspace import VIDEO_SUFFIXES, Workspace, episode_id
 
 if TYPE_CHECKING:
     from fukikae.cards.store import CardStore
@@ -64,7 +76,7 @@ if TYPE_CHECKING:
     from fukikae.registry.store import Character, Registry
 
 # Bumped when the index built from the same inputs changes shape or content.
-SEASON_VERSION = 3
+SEASON_VERSION = 4
 # Registry centroid cosine at or over which two characters are suggested as one (spec, Part B).
 MERGE_SUGGEST_COS = 0.5
 MERGE_NEAREST = 3  # merge suggestions per character, nearest first
@@ -88,6 +100,14 @@ STAGE_ORDER = (
 TIERS = ("floor", "short", "thin")
 # a sample clip's file name under studio/audio (`sample_name`); pruning touches only these
 CLIP_NAME = re.compile(r"[0-9a-f]{64}\.wav")
+# a video clip's file name under studio/video (`video_name`); pruning touches only these
+VIDEO_NAME = re.compile(r"[0-9a-f]{64}\.mp4")
+VIDEO_WIDTH = 480  # px; the height keeps the display aspect
+VIDEO_CRF = 28
+VIDEO_PRESET = "medium"  # as small as slow at CRF 28 on Sol Bianca, and faster
+VIDEO_AUDIO = "96k"  # AAC stereo
+VIDEO_PAD_S = 0.3  # seconds of picture either side of the span
+VIDEO_VERSION = 1  # bumped when the encode changes; part of every video clip's name
 EXTRA_STATUSES = ("extra", "review")  # clusters with no character: their cues are extras
 
 
@@ -160,6 +180,127 @@ def cut_sample(ws: Workspace | Path, episode: str, start: float, end: float) -> 
     return dest
 
 
+# -- video clips ----------------------------------------------------------------------------
+
+
+class NoVideo(Exception):  # noqa: N818
+    """An episode's samples can have no video: the message says why."""
+
+
+@dataclass(frozen=True)
+class VideoSource:
+    """An episode's source file as a video clip is cut from it: its identity (size and time
+    as found), the picture stream and the source-language audio stream."""
+
+    episode: str
+    path: Path
+    size: int
+    mtime_ns: int
+    video: int
+    audio: int
+    interlaced: bool
+
+
+def source_files(cfg: Config) -> dict[str, Path]:
+    """Episode id -> source file under the ``source`` setting, matched the way
+    `Workspace.find_episode` matches (the first file in path order wins)."""
+    root = cfg.source
+    if root is None or not root.is_dir():
+        return {}
+    out: dict[str, Path] = {}
+    for p in sorted(root.rglob("*")):
+        if p.suffix.lower() in VIDEO_SUFFIXES and p.is_file():
+            out.setdefault(episode_id(p), p)
+    return out
+
+
+def video_source(
+    ws: Workspace | Path, cfg: Config, episode: str, files: dict[str, Path] | None = None
+) -> VideoSource:
+    """The episode's `VideoSource`; `NoVideo` when there is no ``source`` setting, no file
+    for the episode, no picture stream, or no audio track the extract stage would take."""
+    from fukikae import media
+    from fukikae.stages.extract import source_track
+
+    if cfg.source is None:
+        raise NoVideo(f"no `source` in {_workspace(ws).root / 'fukikae.toml'}, so no video")
+    path = (source_files(cfg) if files is None else files).get(episode)
+    if path is None:
+        raise NoVideo(f"no source video for {episode} under {cfg.source}")
+    try:
+        st = path.stat()
+        stream = media.probe_video(path)
+        if stream is None:
+            raise NoVideo(f"{path.name} has no video stream")
+        audio = source_track(cfg, path).index
+    except (OSError, media.MediaError) as e:
+        raise NoVideo(f"{path.name} can't be read for video: {e}") from None
+    return VideoSource(
+        episode=episode, path=path, size=st.st_size, mtime_ns=st.st_mtime_ns,
+        video=stream.index, audio=audio, interlaced=stream.interlaced,
+    )  # fmt: skip
+
+
+def video_filter(*, interlaced: bool) -> str:
+    """The ffmpeg filter chain: yadif for an interlaced source, then `VIDEO_WIDTH` wide at
+    the display aspect (an even height), square pixels."""
+    scale = f"scale={VIDEO_WIDTH}:trunc({VIDEO_WIDTH}/dar/2)*2:flags=lanczos,setsar=1"
+    return ("yadif," if interlaced else "") + scale
+
+
+def video_name(src: VideoSource, start: float, end: float) -> str:
+    """``<sha>.mp4``: the video clip's file name, from the span, the source's size and time,
+    both stream indexes and the encode settings."""
+    key = {
+        "episode": src.episode, "start": round(float(start), 3), "end": round(float(end), 3),
+        "source": [src.size, src.mtime_ns], "video": src.video, "audio": src.audio,
+        "filter": video_filter(interlaced=src.interlaced), "pad": VIDEO_PAD_S,
+        "encode": [VIDEO_VERSION, VIDEO_CRF, VIDEO_PRESET, VIDEO_AUDIO],
+    }  # fmt: skip
+    return hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest() + ".mp4"
+
+
+def _video_dir(ws: Workspace) -> Path:
+    d = ws.root / "studio" / "video"
+    if d.is_symlink():
+        raise NoVideo("studio/video is a symlink; no clip is cut through it")
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(d, 0o700)
+    return d
+
+
+def cut_video(ws: Workspace | Path, src: VideoSource, start: float, end: float) -> Path:
+    """``<ws>/studio/video/<video_name>``: ``[start, end]`` of ``src`` with `VIDEO_PAD_S`
+    either side, cut once into an owner-only directory. `NoVideo` when the source file has
+    changed (size or time) since ``src`` was read: the name would be another file's."""
+    from fukikae import media
+    from fukikae.artifacts import atomic_path
+
+    w = _workspace(ws)
+    dest = _video_dir(w) / video_name(src, start, end)
+    if os.path.lexists(dest):
+        return dest
+    try:
+        st = src.path.stat()
+    except OSError as e:
+        raise NoVideo(f"{src.path.name} is gone: {e}") from None
+    if (st.st_size, st.st_mtime_ns) != (src.size, src.mtime_ns):
+        raise NoVideo(f"{src.path.name} changed since the index named its clips")
+    a = max(0.0, float(start) - VIDEO_PAD_S)
+    b = float(end) + VIDEO_PAD_S
+    with atomic_path(dest) as tmp:
+        media.run_ffmpeg([
+            "-ss", f"{a:.3f}", "-i", str(src.path.resolve()), "-t", f"{b - a:.3f}",
+            "-map", f"0:{src.video}", "-map", f"0:{src.audio}",
+            "-vf", video_filter(interlaced=src.interlaced),
+            "-c:v", "libx264", "-preset", VIDEO_PRESET, "-crf", str(VIDEO_CRF),
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", VIDEO_AUDIO, "-ac", "2",
+            "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
+            "-movflags", "+faststart", str(tmp),
+        ])  # fmt: skip
+    return dest
+
+
 def _sample(ep: _Episode, ws: Workspace, start: float, end: float) -> Sample | None:
     """A sample clip of ``[start, end]`` (its first `SAMPLE_MAX_S`); None when the episode has
     no vocals stem to cut it from."""
@@ -170,7 +311,8 @@ def _sample(ep: _Episode, ws: Workspace, start: float, end: float) -> Sample | N
     end = min(end, start + SAMPLE_MAX_S)
     text = turn_text(ep.transcript, start, end) if ep.transcript is not None else ""
     clip = cut_sample(ws, ep.id, start, end).name
-    return Sample(episode=ep.id, start=start, end=end, transcript=text, clip=clip)
+    video = video_name(ep.video, start, end) if ep.video is not None else None
+    return Sample(episode=ep.id, start=start, end=end, transcript=text, clip=clip, video=video)
 
 
 def _pick(turns: Sequence[Turn], n: int, clean: set[tuple[float, float]]) -> list[Turn]:
@@ -241,6 +383,7 @@ class _Episode:
     names: NamesResult | None  # used names only
     report: NamesReport | None
     voice_splits: dict[str, VoiceSplit] = field(default_factory=dict)  # names.json's, any
+    video: VideoSource | None = None  # its source file, when its samples get video
     clean: set[tuple[float, float]] = field(default_factory=set)
     # character -> cluster -> its turns
     speech: dict[int, dict[str, list[Turn]]] = field(default_factory=dict)
@@ -418,16 +561,23 @@ def inputs_digest(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> str:
 
     w = _workspace(ws)
     episodes: dict[str, Any] = {}
+    sources = source_files(cfg)
     for e in episode_ids(w):
         work = w.work_dir(e)
         files = {str(p.relative_to(work)): _file_sha(p) for p in _episode_files(work)}
         v = _vocals(w, e)
         st = v.stat() if v.exists() else None
         split = w.root / "studio" / "splits" / f"{e}.json"
+        src = sources.get(e)
+        try:
+            sst = src.stat() if src is not None else None
+        except OSError:
+            sst = None
         episodes[e] = {
             "files": files,
             "vocals": [st.st_size, st.st_mtime_ns] if st is not None else None,
             "split": _file_sha(split),
+            "source": [str(src), sst.st_size, sst.st_mtime_ns] if sst is not None else None,
         }
     registry = None
     if w.registry_path.exists():
@@ -819,18 +969,27 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
     digest = inputs_digest(w, cfg, clips=clips)
     episodes: list[EpisodeEntry] = []
     eps: dict[str, _Episode] = {}
+    sources = source_files(cfg)
     for e in episode_ids(w):
         ready = _assignments_path(w, e).exists()
-        note = None
+        note = video_note = None
+        video: VideoSource | None = None
         if ready and not _vocals(w, e).is_file():
             note = (f"no {_vocals(w, e).relative_to(w.work_dir(e))}, so no samples or pitch; "
                     f"fukikae run {w.root} {e} --to separate brings it back")  # fmt: skip
+        if ready:
+            try:
+                video = video_source(w, cfg, e, sources)
+            except NoVideo as exc:
+                video_note = f"{exc}; its samples have no video"
         episodes.append(EpisodeEntry(
             id=e, last_stage=_last_stage(w, e), ready=ready,
             command=None if ready else f"fukikae run {w.root} {e} --to characters", note=note,
+            video_note=video_note,
         ))  # fmt: skip
         if ready:
             eps[e] = _load(w, cfg, e)
+            eps[e].video = video
     extras = [x for e in sorted(eps) for x in _extras(w, eps[e])]
     characters: list[CharacterEntry] = []
     if w.registry_path.exists():
@@ -907,6 +1066,27 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
     return doc
 
 
+def referenced_videos(doc: SeasonDoc) -> dict[str, tuple[str, float, float]]:
+    """The video clip names ``doc`` refers to, each with its sample's episode and span: the
+    only video the studio server cuts and serves."""
+    out: dict[str, tuple[str, float, float]] = {}
+    for s in _all_samples(doc):
+        if s.get("video"):
+            out[str(s["video"])] = (str(s["episode"]), float(s["start"]), float(s["end"]))
+    return out
+
+
+def _all_samples(doc: SeasonDoc) -> list[dict[str, Any]]:
+    """Every sample in ``doc`` as a dict: characters', extras' and split parts'."""
+    out = [s.model_dump() for c in doc.characters for s in c.samples]
+    out += [s.model_dump() for x in doc.extras for s in x.samples]
+    for c in doc.characters:
+        for sugg in c.suggestions:
+            for part in (sugg.parts or {}).values():
+                out += [x for x in part.get("samples", []) if isinstance(x, dict)]
+    return out
+
+
 def referenced_clips(doc: SeasonDoc) -> set[str]:
     """The clip names under ``<ws>/studio/audio`` that ``doc`` refers to: the only audio the
     studio server serves from the index."""
@@ -925,17 +1105,23 @@ def _clips(doc: SeasonDoc) -> set[str]:
 
 
 def prune_clips(ws: Workspace | Path, doc: SeasonDoc) -> list[str]:
-    """Delete the clips under ``<ws>/studio/audio`` that ``doc`` no longer refers to: only
-    regular files named like `sample_name` (``<sha>.wav``) directly in that directory, never
-    a symlink, a subdirectory or anything else. Returns the names deleted."""
-    d = _workspace(ws).root / "studio" / "audio"
+    """Delete the clips under ``<ws>/studio/audio`` and ``<ws>/studio/video`` that ``doc`` no
+    longer refers to: only regular files named like `sample_name` (``<sha>.wav``) or
+    `video_name` (``<sha>.mp4``) directly in those directories, never a symlink, a
+    subdirectory or anything else. Returns the names deleted."""
+    root = _workspace(ws).root / "studio"
+    gone = _prune(root / "audio", _clips(doc), CLIP_NAME)
+    gone += _prune(root / "video", set(referenced_videos(doc)), VIDEO_NAME)
+    return sorted(gone)
+
+
+def _prune(d: Path, keep: set[str], pattern: re.Pattern[str]) -> list[str]:
     if d.is_symlink() or not d.is_dir():
         return []
-    keep = _clips(doc)
     gone: list[str] = []
     with os.scandir(d) as it:
         for entry in it:
-            if entry.name in keep or not CLIP_NAME.fullmatch(entry.name):
+            if entry.name in keep or not pattern.fullmatch(entry.name):
                 continue
             if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
                 continue
@@ -944,7 +1130,7 @@ def prune_clips(ws: Workspace | Path, doc: SeasonDoc) -> list[str]:
             except FileNotFoundError:
                 continue
             gone.append(entry.name)
-    return sorted(gone)
+    return gone
 
 
 def load_or_build(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> SeasonDoc:
@@ -970,18 +1156,27 @@ def load_or_build(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Seaso
 __all__ = [
     "MERGE_SUGGEST_COS",
     "SEASON_VERSION",
+    "VIDEO_NAME",
+    "NoVideo",
+    "VideoSource",
     "bimodal_clusters",
     "build_season",
     "config_digest",
     "cut_sample",
+    "cut_video",
     "episode_ids",
     "inputs_digest",
     "load_or_build",
     "order_queue",
     "prune_clips",
     "referenced_clips",
+    "referenced_videos",
     "register_turns",
     "registry_digest",
     "sample_name",
     "season_path",
+    "source_files",
+    "video_filter",
+    "video_name",
+    "video_source",
 ]

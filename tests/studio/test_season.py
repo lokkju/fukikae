@@ -4,6 +4,7 @@ and the review queue, built from the workspace without writing to the registry (
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import stat
 import wave
@@ -666,3 +667,177 @@ def test_a_voice_part_against_its_characters_stored_gender_raises_a_gender_flag(
     with Registry(ws.registry_path) as reg:
         reg.set_character_gender(1, "m")
     assert not [f for f in _entry(_build(ws), 1).flags if f.kind == "gender"]
+
+
+# -- video sample clips ----------------------------------------------------------------------
+
+
+def _make_source(path: Path, *, video: bool = True) -> Path:
+    """100 s at 64x48, 4 fps: video 0 (unless ``video`` is False), eng stereo 880 Hz, jpn
+    stereo 440 Hz (stream 2 with video)."""
+    import subprocess
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    inputs = ["-f", "lavfi", "-i", "testsrc=s=64x48:r=4:d=100"] if video else []
+    n = 1 if video else 0
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-y", *inputs,
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=100",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=100",
+            *(["-map", "0:v"] if video else []), "-map", f"{n}:a", "-map", f"{n + 1}:a",
+            *(["-c:v", "mpeg4"] if video else []), "-c:a", "aac", "-ac", "2",
+            "-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=jpn",
+            str(path),
+        ],
+        check=True,
+    )  # fmt: skip
+    return path
+
+
+@pytest.fixture(scope="session")
+def source_mkv(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _make_source(tmp_path_factory.mktemp("source") / "made.mkv")
+
+
+def _with_source(ws: Workspace, src: Path, media: Path) -> Path:
+    """``src`` copied as the workspace's S01E01 under ``media`` (`source`); S01E02 has none."""
+    import shutil
+
+    media.mkdir(parents=True, exist_ok=True)
+    dest = media / "Show - S01E01.mkv"
+    shutil.copy(src, dest)
+    toml = ws.root / "fukikae.toml"
+    toml.write_text(toml.read_text(encoding="utf-8") + f'source = "{media}"\n', encoding="utf-8")
+    return dest
+
+
+@pytest.fixture
+def video_ws(ws: Workspace, source_mkv: Path, tmp_path: Path) -> Workspace:
+    _with_source(ws, source_mkv, tmp_path / "media")
+    return ws
+
+
+def _videos(doc) -> list[tuple[str, str | None]]:
+    """(episode, video) of every sample: characters', split parts' and extras'."""
+    out = [(s.episode, s.video) for c in doc.characters for s in c.samples]
+    out += [(s.episode, s.video) for x in doc.extras for s in x.samples]
+    out += [(smp["episode"], smp.get("video")) for c in doc.characters for s in c.suggestions
+            if s.parts for p in s.parts.values() for smp in p.get("samples", [])]  # fmt: skip
+    return out
+
+
+def _ffprobe(path: Path) -> dict:
+    import subprocess
+
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "format=duration:stream=codec_name,codec_type,width,height", "-of", "json", str(path)],
+        check=True, capture_output=True, text=True,
+    ).stdout  # fmt: skip
+    return json.loads(out)
+
+
+@pytest.mark.ffmpeg
+def test_samples_name_a_video_clip_cut_from_the_source_on_first_fetch(video_ws):
+    from fukikae.studio.season import VIDEO_NAME, cut_video, video_source
+
+    cfg = load_config(video_ws.root, user_config=None)
+    doc = _build(video_ws, clips=4)
+    got = _videos(doc)
+    e1 = [v for e, v in got if e == E1]
+    assert e1 and all(v is not None and VIDEO_NAME.fullmatch(v) for v in e1)
+    assert any(smp.get("video") for c in doc.characters for s in c.suggestions if s.parts
+               for p in s.parts.values() for smp in p.get("samples", []))  # fmt: skip
+    assert [v for e, v in got if e == E2] and all(v is None for e, v in got if e == E2)
+    eps = {e.id: e for e in doc.episodes}
+    assert eps[E1].video_note is None
+    note = eps[E2].video_note
+    assert note is not None and "no source video" in note
+    videos = video_ws.root / "studio" / "video"
+    assert not list(videos.glob("*.mp4"))  # nothing is cut until it is fetched
+    s = next(s for s in _entry(doc, 1).samples if s.episode == E1)
+    src = video_source(video_ws, cfg, E1)
+    assert (src.video, src.audio, src.interlaced) == (0, 2, False)  # the jpn track
+    path = cut_video(video_ws, src, s.start, s.end)
+    assert path.name == s.video and path.parent == videos
+    assert stat.S_IMODE(videos.stat().st_mode) == 0o700
+    info = _ffprobe(path)
+    streams = {x["codec_type"]: x for x in info["streams"]}
+    assert streams["video"]["codec_name"] == "h264" and streams["audio"]["codec_name"] == "aac"
+    assert (streams["video"]["width"], streams["video"]["height"]) == (480, 360)
+    pad = 2 * 0.3 if s.start >= 0.3 else 0.3 + s.start
+    assert float(info["format"]["duration"]) == pytest.approx(s.end - s.start + pad, abs=0.35)
+    assert cut_video(video_ws, src, s.start, s.end) == path  # cut once
+
+
+def test_without_a_source_setting_no_sample_has_video_and_the_index_says_why(ws):
+    doc = _build(ws)
+    assert all(v is None for _, v in _videos(doc))
+    for e in doc.episodes:
+        if e.ready:
+            assert e.video_note is not None and "source" in e.video_note
+    assert not (ws.root / "studio" / "video").exists() or not list(
+        (ws.root / "studio" / "video").iterdir()
+    )
+
+
+@pytest.mark.ffmpeg
+def test_a_source_without_a_video_stream_gives_no_video(ws, tmp_path):
+    _with_source(ws, _make_source(tmp_path / "audio-only.mkv", video=False), tmp_path / "m")
+    doc = _build(ws)
+    assert all(v is None for _, v in _videos(doc))
+    note = next(e for e in doc.episodes if e.id == E1).video_note
+    assert note is not None and "no video stream" in note
+
+
+@pytest.mark.ffmpeg
+def test_a_replaced_source_renames_its_clips_and_never_serves_a_stale_one(video_ws):
+    from fukikae.studio.season import NoVideo, cut_video, inputs_digest, video_source
+
+    cfg = load_config(video_ws.root, user_config=None)
+    first = _build(video_ws, clips=4)
+    before = inputs_digest(video_ws, cfg, clips=4)
+    s = next(s for s in _entry(first, 1).samples if s.episode == E1)
+    old = video_source(video_ws, cfg, E1)
+    src = old.path
+    st = src.stat()
+    os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert inputs_digest(video_ws, cfg, clips=4) != before
+    second = _build(video_ws, clips=4)
+    s2 = next(x for x in _entry(second, 1).samples if (x.episode, x.start) == (E1, s.start))
+    assert s2.video is not None and s2.video != s.video
+    with pytest.raises(NoVideo, match="changed"):
+        cut_video(video_ws, old, s.start, s.end)  # named before the replacement: refused
+    assert not (video_ws.root / "studio" / "video" / s.video).exists()
+
+
+@pytest.mark.ffmpeg
+def test_a_rebuild_prunes_video_clips_no_longer_referenced(video_ws, tmp_path):
+    from fukikae.studio.season import cut_video, video_source
+
+    cfg = load_config(video_ws.root, user_config=None)
+    first = _build(video_ws, clips=6)
+    s = next(s for s in _entry(first, 1).samples if s.episode == E1)
+    kept = cut_video(video_ws, video_source(video_ws, cfg, E1), s.start, s.end)
+    videos = kept.parent
+    stray = videos / ("0" * 64 + ".mp4")
+    stray.write_bytes(b"old clip")
+    odd = videos / "keep.mp4"
+    odd.write_bytes(b"not ours")
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"outside")
+    link = videos / ("1" * 64 + ".mp4")
+    link.symlink_to(outside)
+    second = _build(video_ws, clips=6)
+    assert {v for _, v in _videos(second)} >= {kept.name}
+    assert kept.exists() and not stray.exists()
+    assert odd.exists() and link.is_symlink() and outside.exists()
+
+
+def test_the_video_filter_deinterlaces_an_interlaced_source():
+    from fukikae.studio.season import video_filter
+
+    assert video_filter(interlaced=True).startswith("yadif,")
+    assert "yadif" not in video_filter(interlaced=False)
+    assert "scale=480:" in video_filter(interlaced=False)

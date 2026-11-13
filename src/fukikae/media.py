@@ -106,6 +106,36 @@ def probe(path: Path) -> ProbeResult:
     return parse_probe(json.loads(proc.stdout))
 
 
+@dataclass(frozen=True)
+class VideoStream:
+    index: int
+    codec: str
+    interlaced: bool  # ffprobe's field_order names a field order (tt, bb, tb, bt)
+
+
+INTERLACED_ORDERS = frozenset({"tt", "bb", "tb", "bt"})
+
+
+def probe_video(path: Path) -> VideoStream | None:
+    """The source's first picture stream (cover art, an attached picture, skipped), or None
+    when it has none."""
+    proc = _run(
+        [
+            "ffprobe", "-v", "error", "-select_streams", "v",
+            "-show_entries", "stream=index,codec_name,field_order:stream_disposition=attached_pic",
+            "-of", "json",
+            str(Path(path).resolve()),
+        ]
+    )  # fmt: skip
+    for s in json.loads(proc.stdout).get("streams", []):
+        if (s.get("disposition") or {}).get("attached_pic"):
+            continue
+        return VideoStream(
+            int(s["index"]), s.get("codec_name", ""), s.get("field_order") in INTERLACED_ORDERS
+        )
+    return None
+
+
 def _count(tags: dict[str, Any]) -> int | None:
     """The NUMBER_OF_FRAMES statistics tag (mkvmerge writes it, maybe with a language suffix)."""
     for key, value in tags.items():

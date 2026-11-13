@@ -201,7 +201,7 @@ def test_a_fresh_token_per_server(ws):  # noqa: F811
 @pytest.mark.parametrize("path", ["/api/season", "/api/characters/1", "/api/nothing"])
 def test_api_requests_without_the_token_header_are_refused(studio, path):
     assert studio.request("GET", path, token=None)[0] == 403
-    assert studio.request("GET", path, token="wrong")[0] == 403  # noqa: S106
+    assert studio.request("GET", path, token="wrong")[0] == 403  # noqa: S106  # noqa: S106
 
 
 def test_audio_without_the_token_header_is_refused(studio):
@@ -942,3 +942,167 @@ def test_studio_startup_reports_index_failures_in_one_line(ws, monkeypatch, whic
     assert r.exception is None or isinstance(r.exception, SystemExit)
     errs = [ln for ln in r.output.splitlines() if ln.startswith("error:")]
     assert len(errs) == 1 and str(exc) in errs[0]
+
+
+# --- range requests ------------------------------------------------------------------------
+
+
+def test_audio_answers_a_single_byte_range(studio, ws):  # noqa: F811
+    clip = _a_clip(_season(studio))
+    data = (ws.root / "studio" / "audio" / clip).read_bytes()
+    n = len(data)
+    status, headers, body = studio.request("GET", f"/audio/{clip}")
+    assert status == 200 and headers["accept-ranges"] == "bytes"
+    status, headers, body = studio.request("GET", f"/audio/{clip}",
+                                           headers={"Range": "bytes=0-99"})  # fmt: skip
+    assert status == 206 and body == data[:100]
+    assert headers["content-range"] == f"bytes 0-99/{n}" and headers["content-length"] == "100"
+    assert headers["content-type"] == "audio/wav"
+    status, headers, body = studio.request("GET", f"/audio/{clip}",
+                                           headers={"Range": "bytes=100-"})  # fmt: skip
+    assert status == 206 and body == data[100:]
+    assert headers["content-range"] == f"bytes 100-{n - 1}/{n}"
+    status, _, body = studio.request("GET", f"/audio/{clip}", headers={"Range": "bytes=-10"})
+    assert status == 206 and body == data[-10:]
+    status, headers, body = studio.request("GET", f"/audio/{clip}",
+                                           headers={"Range": f"bytes=10-{n + 500}"})  # fmt: skip
+    assert status == 206 and body == data[10:]
+    assert headers["content-range"] == f"bytes 10-{n - 1}/{n}"
+
+
+@pytest.mark.parametrize("rng", ["bytes={n}-", "bytes={n}-{m}", "bytes=-0"])
+def test_an_unsatisfiable_range_is_416(studio, ws, rng):  # noqa: F811
+    clip = _a_clip(_season(studio))
+    n = (ws.root / "studio" / "audio" / clip).stat().st_size
+    status, headers, _ = studio.request(
+        "GET", f"/audio/{clip}", headers={"Range": rng.format(n=n, m=n + 10)}
+    )
+    assert status == 416 and headers["content-range"] == f"bytes */{n}"
+
+
+@pytest.mark.parametrize("rng", ["bytes=5-2", "bytes=0-1,4-5", "items=0-5", "bytes=x-", "bytes="])
+def test_a_range_the_server_does_not_take_gets_the_whole_clip(studio, ws, rng):  # noqa: F811
+    clip = _a_clip(_season(studio))
+    data = (ws.root / "studio" / "audio" / clip).read_bytes()
+    status, _, body = studio.request("GET", f"/audio/{clip}", headers={"Range": rng})
+    assert status == 200 and body == data
+
+
+def test_a_range_still_needs_the_token_and_a_referenced_clip(studio, ws):  # noqa: F811
+    clip = _a_clip(_season(studio))
+    rng = {"Range": "bytes=0-9"}
+    assert studio.request("GET", f"/audio/{clip}", token=None, headers=rng)[0] == 403
+    stray = "e" * 64 + ".wav"
+    (ws.root / "studio" / "audio" / stray).write_bytes(b"RIFF" * 10)
+    assert studio.request("GET", f"/audio/{stray}", headers=rng)[0] == 404
+
+
+# --- video ---------------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _serve_ws(w: Workspace) -> Iterator[Client]:
+    from fukikae.studio.server import StudioServer
+
+    server = StudioServer(w, load_config(w.root, user_config=None), port=0, token=TOKEN)
+    t = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+    t.start()
+    try:
+        yield Client(server)
+    finally:
+        server.shutdown()
+        server.server_close()
+        t.join(5)
+
+
+@pytest.fixture
+def video_studio(ws: Workspace, tmp_path: Path) -> Iterator[Client]:  # noqa: F811
+    from tests.studio.test_season import _make_source, _with_source
+
+    _with_source(ws, _make_source(tmp_path / "made.mkv"), tmp_path / "media")
+    with _serve_ws(ws) as c:
+        yield c
+
+
+def _a_video(doc: dict) -> str:
+    return next(s["video"] for c in doc["characters"] for s in c["samples"] if s.get("video"))
+
+
+@pytest.mark.ffmpeg
+def test_a_referenced_video_is_cut_on_first_fetch_and_served(video_studio, ws):  # noqa: F811
+    name = _a_video(_season(video_studio))
+    path = ws.root / "studio" / "video" / name
+    assert not path.exists()
+    status, headers, data = video_studio.request("GET", f"/video/{name}")
+    assert status == 200 and headers["content-type"] == "video/mp4"
+    assert headers["accept-ranges"] == "bytes" and headers["cache-control"] == "no-store"
+    assert data == path.read_bytes() and data[4:8] == b"ftyp"
+    status, headers, part = video_studio.request("GET", f"/video/{name}",
+                                                 headers={"Range": "bytes=0-1023"})  # fmt: skip
+    assert status == 206 and part == data[:1024]
+    assert headers["content-range"] == f"bytes 0-1023/{len(data)}"
+    status, headers, _ = video_studio.request("GET", f"/video/{name}",
+                                              headers={"Range": f"bytes={len(data)}-"})  # fmt: skip
+    assert status == 416 and headers["content-range"] == f"bytes */{len(data)}"
+
+
+@pytest.mark.ffmpeg
+def test_video_needs_the_token_header(video_studio):
+    name = _a_video(_season(video_studio))
+    assert video_studio.request("GET", f"/video/{name}", token=None)[0] == 403
+    assert video_studio.request("GET", f"/video/{name}", token="wrong")[0] == 403  # noqa: S106
+    assert video_studio.request("GET", f"/video/{name}", token=None,
+                                headers={"Range": "bytes=0-9"})[0] == 403  # fmt: skip
+    assert video_studio.request("GET", "/video/nothing.mp4", token=None)[0] == 403
+
+
+@pytest.mark.ffmpeg
+def test_unreferenced_or_odd_video_names_are_404(video_studio, ws):  # noqa: F811
+    _season(video_studio)
+    videos = ws.root / "studio" / "video"
+    videos.mkdir(parents=True, exist_ok=True)
+    stray = "f" * 64 + ".mp4"
+    (videos / stray).write_bytes(b"\0\0\0\x18ftypisom" * 8)
+    odd = ("/video/../season.json", "/video/%2e%2e/season.json", "/video/" + "A" * 64 + ".mp4",
+           "/video/" + "a" * 64 + ".wav", "/video/")  # fmt: skip
+    for path in (f"/video/{stray}", *odd):
+        assert video_studio.request("GET", path)[0] == 404, path
+    assert video_studio.request("GET", f"/video/{stray}", headers={"Range": "bytes=0-9"})[0] == 404
+    clip = _a_clip(_season(video_studio))  # an audio clip's name is not a video
+    assert video_studio.request("GET", f"/video/{clip}")[0] == 404
+    assert video_studio.request("POST", f"/video/{_a_video(_season(video_studio))}", {})[0] == 405
+
+
+@pytest.mark.ffmpeg
+def test_a_symlink_or_fifo_in_place_of_a_video_is_refused(video_studio, ws, tmp_path):  # noqa: F811
+    import time
+
+    doc = _season(video_studio)
+    names = [s["video"] for c in doc["characters"] for s in c["samples"] if s.get("video")]
+    videos = ws.root / "studio" / "video"
+    videos.mkdir(parents=True, exist_ok=True)
+    secret = tmp_path / "secret.mp4"
+    secret.write_bytes(b"secret")
+    os.symlink(secret, videos / names[0])
+    assert video_studio.request("GET", f"/video/{names[0]}")[0] == 404
+    assert secret.read_bytes() == b"secret"
+    os.mkfifo(videos / names[1])
+    p = video_studio.port
+    t0 = time.monotonic()
+    out = _raw(p, (f"GET /video/{names[1]} HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n"
+                   f"X-Fukikae-Token: {TOKEN}\r\n\r\n").encode(), timeout=3)  # fmt: skip
+    assert time.monotonic() - t0 < 2
+    assert out.startswith(b"HTTP/1.0 404"), out[:200]
+
+
+@pytest.mark.ffmpeg
+def test_a_symlinked_video_directory_is_not_followed(video_studio, ws, tmp_path):  # noqa: F811
+    name = _a_video(_season(video_studio))
+    moved = tmp_path / "elsewhere"
+    moved.mkdir()
+    videos = ws.root / "studio" / "video"
+    if videos.exists():
+        videos.rmdir()
+    os.symlink(moved, videos)
+    assert video_studio.request("GET", f"/video/{name}")[0] == 404
+    assert list(moved.iterdir()) == []  # nothing was cut through the link

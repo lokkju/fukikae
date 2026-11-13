@@ -10,13 +10,13 @@
 <main>
 <h1>fukikae studio</h1>
 <p>The studio page is pending: its design waits on the operator's pick (D47). The server, the
-JSON API and audio serving are running; this placeholder lists the API.</p>
+JSON API and audio and video serving are running; this placeholder lists the API.</p>
 <p>The token printed at start-up rides in this page's address after <code>#t=</code>, a
 part of the URL a browser never sends to a server. <code>/static/token.js</code> moves it
 into this tab's session storage and clears it from the address bar; every
-<code>/api</code> and <code>/audio</code> request then sends it as the
-<code>X-Fukikae-Token</code> header, and audio is fetched with that header and played from
-a blob URL. There is no cookie and no token in a query string. This page and
+<code>/api</code>, <code>/audio</code> and <code>/video</code> request then sends it as the
+<code>X-Fukikae-Token</code> header, and audio and video are fetched with that header and
+played from a blob URL. There is no cookie and no token in a query string. This page and
 <code>/static/</code> need no token and hold no data. POST bodies are JSON (1 MB at
 most).</p>
 <h2>Routes</h2>
@@ -29,7 +29,13 @@ its inputs changed.</li>
 <li><code>GET /api/characters/&lt;id&gt;</code>: one character's entry
 (<code>CharacterEntry</code>).</li>
 <li><code>GET /audio/&lt;sha256&gt;.wav</code>: a clip the index refers to (a sample's
-<code>clip</code>).</li>
+<code>clip</code>). One <code>Range: bytes=</code> range gets 206, one starting past the end
+416; any other Range form gets the whole clip.</li>
+<li><code>GET /video/&lt;sha256&gt;.mp4</code>: a sample's video clip (its
+<code>video</code>: picture and the source-language audio, H.264 and AAC, 480 px wide), only
+for names the index refers to, cut by the server on first fetch. Ranges as for
+<code>/audio</code>. A sample has no <code>video</code> when its episode's source file can't
+be found or has no picture; the episode's <code>video_note</code> says why.</li>
 <li><code>POST /api/decisions/preview</code>: a dry run of an identity decision: what it
 would rerun, whether its digest is stale or missing, and the decision with its digest
 filled in (<code>decision</code>), to post as previewed; writes nothing.</li>
