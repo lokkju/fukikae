@@ -61,6 +61,10 @@ takes at most one clip per scene (starts within ``SCENE_GAP_S``, 60 s, of a take
 until the floor needs more, so one long scene (an opening narration) can't fill every
 slot; ``scene_gap=None`` turns it off (narrators).
 
+For the studio's candidate list, ``eligible_references`` also reports (``refused``) each of
+the speaker's turns that no candidate covers, with every check it fails (`REASONS`) and, when
+the gates run, what they measure of it (`Refusal`).
+
 Reference tiers (A2, D41: fukikae never renders a stock voice). `tiered_references` is the one
 entry point for any speaker, a character or an extras cluster: ``floor`` when the gated picks
 reach the D32 floor (2 clips, 10 s); ``short`` when they reach ``CLONE_MIN_S`` (3 s, after
@@ -397,6 +401,25 @@ class RefVerdict:
         return not self.gates
 
 
+# Why a turn of the speaker is no candidate at all (`eligible_references`' ``refused``): out
+# of the length range, overlapping another speaker, inside an exclusion (a theme song, tagged
+# singing, a names-excluded line), `FOREIGN_MAX` or more under someone else's names, no ASR
+# text, text too sparse, or (``repeat``) passing every check alone but overlapping the end of
+# a joined candidate that already holds its audio.
+REASONS = ("length", "overlap", "excluded", "foreign", "no_text", "sparse", "repeat")
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A turn of the speaker that no eligible candidate covers: the turn (with what the A1
+    gates measured of it, when they ran), every check it fails (`REASONS`) and the gates that
+    would refuse it as well."""
+
+    pick: RefPick
+    reasons: tuple[str, ...]
+    gates: tuple[Gate, ...] = ()
+
+
 @dataclass(frozen=True)
 class Gated:
     """How many candidates each gate refused (a candidate refused by several counts under
@@ -674,6 +697,7 @@ def eligible_references(
     gated: list[Gated] | None = None,
     verdicts: list[RefVerdict] | None = None,
     song_spans: Sequence[tuple[float, float]] | None = None,
+    refused: list[Refusal] | None = None,
 ) -> list[RefPick]:
     """Every turn of the speaker that could be a reference (no overlap with another speaker,
     within ``each``, outside ``exclude``, under `FOREIGN_MAX` of it in ``foreign``, with an
@@ -693,7 +717,11 @@ def eligible_references(
     other turn (another speaker's, or one of the speaker's own that isn't clean) falls in the
     gap and the result stays within ``each[1]`` (D32 #1). A joined turn is checked like any
     other (``exclude`` and ``foreign`` over its gaps, its transcript, its text rate); where
-    one fails, `_split` cuts the run at the failing gap and keeps the valid sub-joins."""
+    one fails, `_split` cuts the run at the failing gap and keeps the valid sub-joins.
+
+    ``refused`` (an out-parameter, for the studio's candidate list) receives a `Refusal` for
+    each of the speaker's turns that no candidate covers, with every check it fails, and,
+    when the gates run, what they measure of it; asking for it changes nothing else."""
     from scipy.io import wavfile
 
     mine = {speaker} if isinstance(speaker, str) else set(speaker)
@@ -744,7 +772,50 @@ def eligible_references(
     for run in _chains(good, blockers, join_gap):
         eligible += _split(run, pick, each[1])
     eligible.sort(key=rank_key)
-    if register is None and song_like is None and song_spans is None:
+    gating = not (register is None and song_like is None and song_spans is None)
+    if refused is not None:
+
+        def reasons(t: Turn) -> list[str]:
+            start, end = t.start, t.end
+            why = [] if each[0] <= end - start <= each[1] else ["length"]
+            if any(o.start < end and start < o.end for o in others):
+                why.append("overlap")
+            if any(a < end and start < b for a, b in exclude):
+                why.append("excluded")
+            if t in dropped:
+                why.append("foreign")
+            text = turn_text(transcript, start, end)
+            if not text:
+                why.append("no_text")
+            elif _sparse(text_units(text, lang) / max(end - start, 1e-9), median, lang):
+                why.append("sparse")
+            return why
+
+        lost: list[tuple[RefPick, tuple[str, ...]]] = []
+        seen: set[tuple[float, float]] = set()
+        for t in sorted((*own, *dropped), key=lambda t: (t.start, t.end)):
+            s, e = round(t.start, 3), round(t.end, 3)
+            if e <= s or (s, e) in seen:
+                continue
+            seen.add((s, e))
+            if any(p.start - 1e-6 <= s and e <= p.end + 1e-6 for p in eligible):
+                continue
+            snr = round(snr_db(_samples(data, rate, s, e), rate), 2)
+            text = turn_text(transcript, s, e)
+            lost.append(
+                (RefPick(s, e, text, snr, _emotion(tags, s, e)), tuple(reasons(t)) or ("repeat",))
+            )
+        if gating and lost:
+            measured = gate_candidates(
+                [p for p, _ in lost], vocals, register=register, song_like=song_like,
+                turn_spans=spans, bands=bands, pitch_root=pitch_root, song_spans=song_spans,
+            )  # fmt: skip
+            refused += [
+                Refusal(v.pick, why, v.gates) for v, (_, why) in zip(measured, lost, strict=True)
+            ]
+        else:
+            refused += [Refusal(p, why) for p, why in lost]
+    if not gating:
         if verdicts is not None:
             verdicts += [RefVerdict(p, (), i) for i, p in enumerate(eligible)]
         return eligible
@@ -1178,27 +1249,56 @@ def clone_card(
     the same id replaces the stored tier (``CardStore.put`` keeps stored ``[meta]`` only for a
     card with none). With no ``tier``, the picks' own: ``floor`` when they reach the D32 floor,
     ``short`` from `CLONE_MIN_S`, else ``thin``. Not put in the store."""
+    return clone_card_spans(
+        backend, [SpanPick(p, episode, vocals, source_language) for p in picks], store,
+        target_language, tier,
+    )  # fmt: skip
+
+
+class SpanPick(NamedTuple):
+    """A reference pick with the episode it comes from, that episode's vocals and the
+    language its transcript speaks: what a clone card's references may mix across episodes
+    (the studio's drafts)."""
+
+    pick: RefPick
+    episode: str
+    vocals: Path
+    language: str
+
+
+def clone_card_spans(
+    backend: type[Synthesizer],
+    picks: Sequence[SpanPick],
+    store: CardStore,
+    target_language: str,
+    tier: Tier | None = None,
+) -> Card:
+    """`clone_card` for picks that may come from several episodes: each reference cut from its
+    own episode's vocals, with that episode in its origin and that transcript's language. The
+    same picks from one episode make the same card as `clone_card`. Not put in the store."""
     from fukikae.cards.card import Card, Reference, Voice
 
     refs: list[Reference] = []
     with tempfile.TemporaryDirectory(prefix="fukikae-clip-") as tmp:
-        for i, p in enumerate(picks):
-            clip = cut_clip(vocals, p.start, p.end, Path(tmp) / f"{i}.wav")
+        for i, sp in enumerate(picks):
+            p = sp.pick
+            clip = cut_clip(sp.vocals, p.start, p.end, Path(tmp) / f"{i}.wav")
             refs.append(
                 Reference(
                     clip=store.add_sidecar(clip, "clip"),
                     transcript=p.transcript,
-                    language=source_language,
-                    origin={"episode": episode, "start": p.start, "end": p.end},
+                    language=sp.language,
+                    origin={"episode": sp.episode, "start": p.start, "end": p.end},
                 )
             )
-    labels = sorted({p.emotion for p in picks if p.emotion})
+    plain = [sp.pick for sp in picks]
+    labels = sorted({p.emotion for p in plain if p.emotion})
     # always written, empty too: a re-put of the same id merges [meta] (CardStore.put), so a
     # key left out would keep a stale value
     meta: dict[str, Any] = {"reference_emotions": labels}
     if tier is None:
-        seconds = sum(p.seconds for p in picks)
-        tier = "floor" if meets_floor(picks) else "short" if seconds >= CLONE_MIN_S else "thin"
+        seconds = sum(p.seconds for p in plain)
+        tier = "floor" if meets_floor(plain) else "short" if seconds >= CLONE_MIN_S else "thin"
     meta["reference_tier"] = tier
     return Card(
         target_language=target_language,

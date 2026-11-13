@@ -36,6 +36,21 @@ filled in (<code>decision</code>), to post as previewed; writes nothing.</li>
 <li><code>POST /api/decisions</code>: apply an identity decision (every op but
 <code>accept</code>); returns the rebuilt character. 409 when stale or unfinished, 422 when
 refused or carrying no digest, 423 while a run or another writer holds the studio lock.</li>
+<li><code>GET /api/characters/&lt;id&gt;/candidates</code>: the character's reference
+candidates (its own speech only), each with its rank, gate verdicts and reasons, a page at
+a time: <code>?offset=</code>, <code>?limit=</code> (200 at most), <code>?gated=1</code> to
+include the refused turns. A candidate's <code>clip</code> is cut when first fetched from
+<code>/audio</code>.</li>
+<li><code>GET /api/drafts/&lt;id&gt;/&lt;lang&gt;</code>: the character's voice draft for a
+target language, opened (version 1 from its current card, an accepted card of another
+language, or the automatic proposal) when it has none; with the meter and the clip of each
+reference.</li>
+<li><code>POST /api/drafts/&lt;id&gt;/&lt;lang&gt;/versions</code>: a new version from
+<code>{references, backend, params}</code>: its card id, the gated references chosen anyway
+(<code>overrides</code>) and the meter. 422 for a voice key the backend lacks or a reference
+that isn't the character's own speech. Writes no registry row.</li>
+<li><code>GET /api/backends</code>: the clone backends and each one's voice keys, with type
+and range.</li>
 </ul>
 </main>
 </body>

@@ -116,7 +116,7 @@ if TYPE_CHECKING:
 
     from fukikae.backends.base import Synthesizer
     from fukikae.cards.card import Card
-    from fukikae.cards.select import Gate, Measured, RefPick, Register, Tier
+    from fukikae.cards.select import Gate, Measured, RefPick, Refusal, RefVerdict, Register, Tier
     from fukikae.config import Config
     from fukikae.models import Assignments, ClusterAssignment, DubCue, Tags, Transcript
     from fukikae.names.models import NamesResult
@@ -133,6 +133,7 @@ __all__ = [
     "REPICK_NOTE",
     "STOCK_NOTE",
     "STALE_OVERLAP",
+    "CandidateReport",
     "CharacterRefs",
     "Cloning",
     "ProtectedAssignmentError",
@@ -230,6 +231,19 @@ class CharacterRefs:
     # thin picks only: the candidates the operator's register refused in the gated tiers
     # (each episode counted once, its larger tier), the reason those tiers came up short
     refused: int = 0
+
+
+@dataclass(frozen=True)
+class CandidateReport:
+    """One episode's candidates as `character_candidates` judged them, for the studio: every
+    candidate eligible before the A1 gates with its verdict (CD5 order), every turn no
+    candidate covers with its reasons, whether the turns searched were the name-confirmed ones,
+    and those turns' spans."""
+
+    verdicts: list[RefVerdict]
+    refused: list[Refusal]
+    confirmed: bool
+    turn_spans: list[tuple[float, float]]
 
 
 @dataclass(frozen=True)
@@ -1740,6 +1754,7 @@ def character_candidates(
     acoustic: bool = False,
     gated: dict[str, Gated] | None = None,
     gender: Gender | None = None,
+    report: dict[str, CandidateReport] | None = None,
 ) -> dict[str, list[RefPick]]:
     """Per episode, the character's eligible reference turns (``eligible_references``, songs
     and singing excluded), ranked. ``exclusions`` caches each episode's excluded spans and
@@ -1774,7 +1789,11 @@ def character_candidates(
     or with ``acoustic`` all of its turns, unnamed remainders included; either way never a
     span of the names stage's inner-voice and multi lines, nor a turn with `STALE_OVERLAP` of
     it under someone else's names (`foreign_spans`). A names-used episode whose assignments
-    are older than its names (``skipped``) offers nothing."""
+    are older than its names (``skipped``) offers nothing.
+
+    ``report`` receives each searched episode's `CandidateReport` (every candidate's verdict
+    and every refused turn with its reasons: the studio's candidate list); asking for it reads
+    the episode afresh and changes nothing in the result."""
     from fukikae.cards.select import (
         eligible_references,
         operator_register,
@@ -1834,14 +1853,20 @@ def character_candidates(
             str(work), tuple(sorted(speakers)), tuple(exclude), tuple(foreign), register,
             gkey, _stamp(*_candidate_files(work)),
         )  # fmt: skip
-        if key not in _CANDIDATES_MEMO:
+        if key not in _CANDIDATES_MEMO or report is not None:
             counts: list[Gated] = []
+            verdicts: list[RefVerdict] | None = [] if report is not None else None
+            refused: list[Refusal] | None = [] if report is not None else None
             picks = eligible_references(
                 a.assignments.turns, speakers, a.transcript, a.tags, a.vocals, exclude=exclude,
                 foreign=foreign, register=register, song_like=song_like, bands=bands,
-                pitch_root=ws.root, gated=counts, song_spans=accepted,
+                pitch_root=ws.root, gated=counts, song_spans=accepted, verdicts=verdicts,
+                refused=refused,
             )  # fmt: skip
             _remember(_CANDIDATES_MEMO, key, (picks, counts[0] if counts else Gated()))
+            if report is not None:
+                assert verdicts is not None and refused is not None
+                report[e] = CandidateReport(verdicts, refused, confirmed, spans)
         picks, found = _CANDIDATES_MEMO[key]
         out[e] = list(picks)
         if gated is not None:

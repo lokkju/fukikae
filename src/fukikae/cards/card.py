@@ -344,6 +344,17 @@ def _parse_fingerprint(raw: Any) -> Fingerprint:
     )
 
 
+# The float [voice] keys' bounds, as `_float` takes them (``lo_open``: the bound itself is
+# out); the studio reads them for its parameter controls.
+VOICE_RANGES: dict[str, dict[str, Any]] = {
+    "temperature": {"lo": 0.0, "lo_open": True},
+    "top_p": {"lo": 0.0, "lo_open": True, "hi": 1.0},
+    "rate": {"lo": 0.0, "lo_open": True},
+    "pitch_semitones": {},
+    "emotion_strength": {"lo": 0.0, "hi": 1.0},
+}
+
+
 def _parse_voice(raw: Any) -> Voice:
     where = "[voice]"
     t = _table(raw, where)
@@ -357,14 +368,7 @@ def _parse_voice(raw: Any) -> Voice:
         kw["seed"] = _int(t["seed"], "seed", where)
         if not 0 <= kw["seed"] <= SEED_MAX:
             raise CardError(f"[voice] seed must be 0 to {SEED_MAX} (32 bits), got {kw['seed']}")
-    ranges: dict[str, dict[str, Any]] = {
-        "temperature": {"lo": 0.0, "lo_open": True},
-        "top_p": {"lo": 0.0, "lo_open": True, "hi": 1.0},
-        "rate": {"lo": 0.0, "lo_open": True},
-        "pitch_semitones": {},
-        "emotion_strength": {"lo": 0.0, "hi": 1.0},
-    }
-    for key, bounds in ranges.items():
+    for key, bounds in VOICE_RANGES.items():
         if key in t:
             kw[key] = _float(t[key], key, where, **bounds)
     for key in ("voice", "description"):

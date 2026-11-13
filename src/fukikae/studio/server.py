@@ -27,6 +27,15 @@ Audio is served only for the clips the current index refers to (`referenced_clip
 without following symlinks, the file non-blocking and only when it is a regular file. Static
 files come only from the package's ``static/`` directory, opened the same way.
 
+Voice drafts (`fukikae.studio.drafts`): a character's reference candidates, its draft per
+target language and the draft's versions, and the clone backends with their voice keys. These
+routes never take the decisions lock, so a long candidate read never holds up a decision; they
+take their own lock, one draft request at a time. A candidate list is cached per character
+until the index's inputs change, and is served a page at a time (at most `MAX_CANDIDATES`).
+Candidate and draft clips are cut only when first fetched, by the server itself
+(`fukikae.studio.season.cut_sample`), and only a clip the server has cut joins the audio it
+serves; listing cuts nothing.
+
 The page itself waits on the design pick (D47); ``static/index.html`` is a placeholder that
 lists `ROUTES`.
 """
@@ -45,11 +54,14 @@ import stat
 import sys
 import threading
 import traceback
+from collections import OrderedDict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from fukikae.registry.store import RegistrySchemaError
 from fukikae.studio.apply import (
@@ -63,16 +75,40 @@ from fukikae.studio.apply import (
     UnfinishedRecords,
     apply_decision,
 )
+from fukikae.studio.drafts import (
+    MAX_REFERENCES,
+    DraftError,
+    NoRegistry,
+    UnknownCharacter,
+    add_version,
+    backends,
+    candidates,
+    floor_meter,
+    language_of,
+    load_draft,
+    open_draft,
+    save_draft,
+)
 from fukikae.studio.model import (
     IDENTITY_OPS,
+    Candidate,
     CharacterEntry,
     Decision,
+    Draft,
     MergeDecision,
+    RefSpan,
     SeasonDoc,
     ValidationError,
     parse_decision,
 )
-from fukikae.studio.season import CLIP_NAME, load_or_build, referenced_clips
+from fukikae.studio.season import (
+    CLIP_NAME,
+    cut_sample,
+    inputs_digest,
+    load_or_build,
+    referenced_clips,
+    sample_name,
+)
 from fukikae.workspace import Workspace
 
 if TYPE_CHECKING:
@@ -85,6 +121,9 @@ TOKEN_HEADER = "X-Fukikae-Token"  # noqa: S105 (a header name)
 REQUEST_TIMEOUT = 30.0  # seconds a connection may wait between reads
 MAX_HANDLERS = 16  # connections handled at once; past that, a prompt 503
 STATIC_DIR = Path(__file__).parent / "static"
+MAX_CANDIDATES = 200  # candidates per page at most
+DEFAULT_CANDIDATES = 50
+MAX_OFFERED = 20000  # clip names offered for lazy cutting, oldest forgotten first
 
 # (method, path, what it does): the API as the placeholder page lists it
 ROUTES: tuple[tuple[str, str, str], ...] = (
@@ -103,10 +142,31 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
         "/api/decisions",
         "apply an identity decision; returns the rebuilt character, 409 when stale",
     ),
+    (
+        "GET",
+        "/api/characters/<id>/candidates",
+        "the character's reference candidates with their verdicts, a page at a time "
+        "(?offset=, ?limit= up to 200, ?gated=1 to include refused turns)",
+    ),
+    (
+        "GET",
+        "/api/drafts/<id>/<lang>",
+        "the character's voice draft for a target language, opened (version 1) when missing",
+    ),
+    (
+        "POST",
+        "/api/drafts/<id>/<lang>/versions",
+        "a new draft version from {references, backend, params}: its card id, overrides and meter",
+    ),
+    ("GET", "/api/backends", "the clone backends and each one's voice keys (type and range)"),
 )
 
 _SEGMENT = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 _CHARACTER = re.compile(r"/api/characters/([0-9]{1,9})")
+_CANDIDATES = re.compile(r"/api/characters/([0-9]{1,9})/candidates")
+_LANG = r"([A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8}){0,3})"
+_DRAFT = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG)
+_VERSIONS = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG + "/versions")
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -192,6 +252,14 @@ class StudioServer(ThreadingHTTPServer):
         if request_timeout is not None:
             self.request_timeout = request_timeout
         self._slots = threading.BoundedSemaphore(max_handlers)
+        # drafts: their own lock (never the decisions lock), the candidate lists cached per
+        # character with the index inputs digest they were read under, the clip names offered
+        # for cutting (name -> episode, start, end) and the ones the server has cut
+        self._drafts_lock = threading.RLock()
+        self._candidates: dict[int, tuple[str, list[Candidate]]] = {}
+        self._offered: OrderedDict[str, tuple[str, float, float]] = OrderedDict()
+        self._cut: set[str] = set()
+        self._clip_lock = threading.Lock()
         super().__init__((bind, port), _Handler)
         p = self.server_address[1]
         names = ["127.0.0.1", "localhost"] if _loopback(bind) else [bind]
@@ -252,10 +320,58 @@ class StudioServer(ThreadingHTTPServer):
             return self._doc
 
     def audio_names(self) -> set[str]:
-        """The clip names ``/audio`` may serve: those the last index served refers to."""
+        """The clip names ``/audio`` may serve: those the last index served refers to, and the
+        candidate and draft clips the server itself has cut."""
         with self._lock:
             doc = self._doc or self.season()
-            return referenced_clips(doc)
+            names = referenced_clips(doc)
+        with self._clip_lock:
+            return names | self._cut
+
+    # -- drafts -------------------------------------------------------------------------------
+
+    def candidates(self, character_id: int) -> list[Candidate]:
+        """The character's candidates (`drafts.candidates`), read again only when the index's
+        inputs changed since; under the drafts lock, never the decisions lock."""
+        with self._drafts_lock:
+            digest = inputs_digest(self.ws, self.cfg, clips=self.clips)
+            got = self._candidates.get(character_id)
+            if got is None or got[0] != digest:
+                got = (digest, candidates(self.ws, self.cfg, character_id))
+                self._candidates[character_id] = got
+            return got[1]
+
+    def offer(self, episode: str, start: float, end: float) -> str | None:
+        """The clip name of a span the page may fetch, remembered so ``/audio`` cuts it on
+        first request; None when the episode has no vocals to cut it from."""
+        try:
+            name = sample_name(self.ws, episode, start, end)
+        except OSError:
+            return None
+        with self._clip_lock:
+            self._offered[name] = (episode, start, end)
+            self._offered.move_to_end(name)
+            while len(self._offered) > MAX_OFFERED:
+                self._offered.popitem(last=False)
+        return name
+
+    def ensure_clip(self, name: str) -> None:
+        """Cut an offered clip that isn't on disk (first fetch, or pruned by a rebuild), and
+        let ``/audio`` serve it."""
+        with self._clip_lock:
+            span = self._offered.get(name)
+        if span is None:
+            return
+        path = self.ws.root / "studio" / "audio" / name
+        if not path.is_file():
+            try:
+                cut = cut_sample(self.ws, *span)
+            except (OSError, ValueError):  # the vocals went away: nothing to serve
+                return
+            if cut.name != name:  # the vocals changed since the span was offered
+                return
+        with self._clip_lock:
+            self._cut.add(name)
 
     def character(self, character_id: int) -> CharacterEntry | None:
         return next((c for c in self.season().characters if c.id == character_id), None)
@@ -368,6 +484,18 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/season":
             self._need(method, get, "GET")
             self._json(200, self._season().model_dump(mode="json"))
+        elif m := _CANDIDATES.fullmatch(path):
+            self._need(method, get, "GET")
+            self._candidates(int(m.group(1)), urlsplit(self.path).query)
+        elif m := _VERSIONS.fullmatch(path):
+            self._need(method, method == "POST", "POST")
+            self._version(int(m.group(1)), m.group(2))
+        elif m := _DRAFT.fullmatch(path):
+            self._need(method, get, "GET")
+            self._draft(int(m.group(1)), m.group(2))
+        elif path == "/api/backends":
+            self._need(method, get, "GET")
+            self._json(200, {"backends": backends(self.server.cfg)})
         elif m := _CHARACTER.fullmatch(path):
             self._need(method, get, "GET")
             cid = int(m.group(1))
@@ -548,6 +676,97 @@ class _Handler(BaseHTTPRequestHandler):
             return _Reply(409, "registry-unreadable", msg)
         return _Reply(422, "refused", msg)
 
+    # -- drafts -----------------------------------------------------------------------------
+
+    def _draft_refusal(self, e: DraftError) -> _Reply:
+        if isinstance(e, UnknownCharacter):
+            return _Reply(404, "not-found", str(e))
+        if isinstance(e, NoRegistry):
+            return _Reply(409, "no-registry", "the workspace has no registry yet")
+        return _Reply(422, "refused", _PATHS.sub("<path>", str(e)))
+
+    def _candidates(self, cid: int, query: str) -> None:
+        q = parse_qs(query, keep_blank_values=True)
+
+        def number(key: str, default: int, lo: int, hi: int) -> int:
+            raw = q.get(key, [str(default)])[-1]
+            if not raw.isdigit() or not lo <= int(raw) <= hi:
+                raise _Reply(400, "bad-query", f"{key} must be a whole number {lo} to {hi}")
+            return int(raw)
+
+        offset = number("offset", 0, 0, 10**9)
+        limit = number("limit", DEFAULT_CANDIDATES, 1, MAX_CANDIDATES)
+        gated = q.get("gated", ["0"])[-1]
+        if gated not in ("0", "1"):
+            raise _Reply(400, "bad-query", "gated is 0 or 1")
+        try:
+            got = self.server.candidates(cid)
+        except DraftError as e:
+            raise self._draft_refusal(e) from None
+        shown = got if gated == "1" else [c for c in got if c.rank is not None]
+        page = shown[offset : offset + limit]
+        for c in page:
+            self.server.offer(c.episode, c.start, c.end)
+        self._json(200, {
+            "character": cid, "total": len(shown),
+            "eligible": sum(c.rank is not None for c in got), "offset": offset, "limit": limit,
+            "candidates": [c.model_dump(mode="json") for c in page],
+        })  # fmt: skip
+
+    def _draft_body(self, draft: Draft) -> dict[str, Any]:
+        clips: dict[str, str] = {}
+        for v in draft.versions:
+            for r in v.references:
+                name = self.server.offer(r.episode, r.start, r.end)
+                if name is not None:
+                    clips[r.label()] = name
+        latest = draft.versions[-1].references if draft.versions else []
+        return {"draft": draft.model_dump(mode="json"), "meter": floor_meter(latest),
+                "clips": clips}  # fmt: skip
+
+    def _load_or_open(self, cid: int, lang: str) -> Draft:
+        s = self.server
+        try:
+            language = language_of(lang)
+            draft = load_draft(s.ws, cid, language)
+            if draft is None:
+                draft = open_draft(s.ws, s.cfg, cid, language, offered=s.candidates(cid))
+                save_draft(s.ws, draft)
+        except DraftError as e:
+            raise self._draft_refusal(e) from None
+        except ValueError as e:  # a draft file that isn't one
+            raise _Reply(409, "draft-unreadable", f"the saved draft can't be read: {_why(e)}"
+                         ) from None  # fmt: skip
+        return draft
+
+    def _draft(self, cid: int, lang: str) -> None:
+        with self.server._drafts_lock:
+            draft = self._load_or_open(cid, lang)
+        self._json(200, self._draft_body(draft))
+
+    def _version(self, cid: int, lang: str) -> None:
+        body = self._body()
+        try:
+            req = _VersionRequest.model_validate_json(body)
+        except ValidationError as e:
+            raise _Reply(
+                400, "invalid", "not a draft version", detail=json.loads(e.json(include_url=False))
+            ) from None
+        s = self.server
+        with s._drafts_lock:
+            draft = self._load_or_open(cid, lang)
+            try:
+                offered = s.candidates(cid)
+                draft, version = add_version(
+                    s.ws, s.cfg, draft, req.references, req.backend, req.params, offered=offered
+                )
+            except DraftError as e:
+                raise self._draft_refusal(e) from None
+        clips = {r.label(): n for r in version.references
+                 if (n := s.offer(r.episode, r.start, r.end)) is not None}  # fmt: skip
+        self._json(200, {"version": version.model_dump(mode="json"),
+                         "meter": floor_meter(version.references), "clips": clips})  # fmt: skip
+
     # -- files ------------------------------------------------------------------------------
 
     def _static(self, rel: str, *, page: bool = False) -> None:
@@ -568,6 +787,8 @@ class _Handler(BaseHTTPRequestHandler):
         self._bytes(200, ctype, data, csp=page or ctype.startswith("text/html"))
 
     def _audio(self, name: str) -> None:
+        if CLIP_NAME.fullmatch(name):
+            self.server.ensure_clip(name)
         if not CLIP_NAME.fullmatch(name) or name not in self.server.audio_names():
             raise _Reply(404, "not-found", "no such clip in the index")
         try:
@@ -604,6 +825,17 @@ class _Handler(BaseHTTPRequestHandler):
     def _json(self, status: int, obj: Any) -> None:
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self._bytes(status, "application/json; charset=utf-8", data)
+
+
+class _VersionRequest(BaseModel):
+    """``POST /api/drafts/<id>/<lang>/versions``: the references in order, the backend and
+    its voice keys."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    references: list[RefSpan] = Field(min_length=1, max_length=MAX_REFERENCES)
+    backend: str = Field(min_length=1, max_length=64)
+    params: dict[str, Any] = {}
 
 
 def _read_regular(dfd: int, parts: list[str]) -> bytes | None:

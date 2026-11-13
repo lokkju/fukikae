@@ -279,9 +279,101 @@ class SeasonDoc(_Strict):
     queue: list[int]  # character ids, the review order (`fukikae.studio.season.order_queue`)
 
 
+# -- voice drafts (`fukikae.studio.drafts`, ``<ws>/studio/drafts/<character>.<language>.json``)
+
+
+class Candidate(_Strict):
+    """A stretch of the character's own speech offered as a reference: an eligible candidate
+    (``rank``, its place in the CD5 order: name-confirmed turns first, then by emotion and
+    SNR) or a refused turn (``rank`` None). ``verdicts`` has every check that ran (True:
+    passed): ``length``, ``overlap``, ``excluded``, ``foreign``, ``no_text``, ``sparse``
+    (`fukikae.cards.select.REASONS`), the A1 gates ``off_register``, ``unvoiced`` and
+    ``song_like``, and ``scene``, False when a better-ranked eligible candidate of the episode
+    starts within ``SCENE_GAP_S`` (the automatic fill takes one clip per scene first; it
+    refuses nothing, so it is never a reason). ``reasons`` names each failed check (``repeat``:
+    a turn passing alone whose audio a joined candidate already holds). ``gender`` is the
+    band of ``median``. ``clip`` is the file name under ``<ws>/studio/audio/``, cut when
+    first fetched. ``source`` is ``cue`` for a character with no turn anywhere: its own spoken
+    cues' source spans, what the cue-thin tier clones it from."""
+
+    episode: str
+    start: float
+    end: float
+    seconds: float
+    transcript: str
+    snr: float | None
+    median: float | None
+    gender: Literal["f", "m", "u"] | None
+    rank: int | None
+    verdicts: dict[str, bool]
+    reasons: list[str]
+    clip: str
+    emotion: str | None = None
+    confirmed: bool = False  # a name-confirmed turn of a names-used episode
+    source: Literal["turn", "cue"] = "turn"
+
+    def span(self) -> RefSpan:
+        return RefSpan(episode=self.episode, start=self.start, end=self.end)
+
+
+class Audition(_Strict):
+    """One audition of a draft version (Task 19 renders them): the line, and what the render
+    gave."""
+
+    line: dict[str, Any]
+    cue_key: str | None = None
+    seconds: float | None = None
+    suspect: bool | None = None
+    passed: bool | None = None
+    wav: str | None = None
+
+
+class DraftVersion(_Strict):
+    """One version of a voice draft: the clone card built from ``references`` with
+    ``backend`` and ``params`` (the backend's voice keys), the references the A1 gates or the
+    other checks refused that the operator chose anyway (``overrides``), the digest of the
+    language's card assignment when it was made (`fukikae.studio.apply.row_digest`: what an
+    accept of it carries), its tier (`fukikae.studio.drafts.floor_meter`) and its auditions.
+    ``unlisted`` counts the card's references with no origin span (only a version 1 opened
+    from a card can have them; they are kept in its card, and listed nowhere else)."""
+
+    n: int = Field(ge=1)
+    backend: str
+    references: list[RefSpan]
+    params: dict[str, Any]
+    card_id: str
+    overrides: list[RefSpan] = []
+    created: str
+    auditions: list[Audition] = []
+    digest: str | None = None
+    tier: Tier
+    unlisted: int = Field(default=0, ge=0)
+
+
+class Draft(_Strict):
+    """A character's voice-tuning session for one target language: where version 1 came
+    from (``card``: its current card; ``derived``: an accepted card of ``derived_from``;
+    ``proposed``: the automatic rules, assigned nowhere), and every version since."""
+
+    schema_version: Literal[1] = 1
+    character_id: int
+    language: str
+    base: Literal["card", "derived", "proposed"]
+    derived_from: str | None = None
+    versions: list[DraftVersion]
+
+    @property
+    def name(self) -> str:
+        return f"{self.character_id}.{self.language}"
+
+
 __all__ = [
     "AcceptDecision",
     "AliasDecision",
+    "Audition",
+    "Candidate",
+    "Draft",
+    "DraftVersion",
     "CardInfo",
     "CharacterEntry",
     "Decision",
