@@ -397,20 +397,40 @@ def merge(
 ) -> None:
     """Merge actor DROP into actor KEEP; DROP's characters fold into KEEP's first one. The
     characters stage reruns, with assignments remapped, in every episode DROP's characters
-    speak in or are named in, and every episode whose names stage used one of their keys."""
+    speak in or are named in, and every episode whose names stage used one of their keys.
+    It is logged in studio/decisions.jsonl as a studio merge is: a remap that fails is
+    finished by `fukikae studio resume`, and blocks later decisions until it is."""
+    from fukikae.registry.invalidate import Invalidation, stale_message
+    from fukikae.studio.apply import DecisionError, DecisionRefused, apply_registry_change
+
     ws = Workspace(workspace)
-    with _open(workspace) as reg:
+
+    def stage(reg: Any) -> tuple[list[str], list[Invalidation], list[dict[str, Any]]]:
         notes: list[str] = []
         try:
             affected = merge_episodes(ws, reg, drop)
             chars = reg.merge_actors(keep, drop, report=notes)
         except (KeyError, ValueError) as e:
-            raise _fail(f"cannot merge {drop} into {keep}: {e!r}") from e
-    for line in notes:
+            raise DecisionRefused(f"cannot merge {drop} into {keep}: {e!r}") from e
+        remaps = [
+            {"do": "remap", "episode": eid, "actor_map": [[drop, keep]],
+             "character_map": [[k, v] for k, v in chars.items()]}
+            for eid in affected
+        ]  # fmt: skip
+        return notes, [Invalidation(e, "characters") for e in affected], remaps
+
+    # Recorded as a studio decision is: the stale marks first (a remap that fails must not
+    # leave them fresh), then the remaps; one that fails is finished by `studio resume`.
+    try:
+        result = apply_registry_change(
+            ws, "merge", {"command": "merge", "keep": keep, "drop": drop}, stage
+        )
+    except DecisionError as e:
+        raise _fail(str(e)) from e
+    for line in result.lines:
         typer.echo(line)
-    _stale(ws, affected)  # first: a remap that fails below must not leave them fresh
-    for eid in affected:
-        _remap_assignments(ws, eid, {drop: keep}, character_map=chars)
+    if not result.invalidations:
+        typer.echo(stale_message([]))
 
 
 @registry_app.command("split")

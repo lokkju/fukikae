@@ -8,13 +8,18 @@ refusal rolls everything back (`DecisionRefused`). ``force`` skips the digest ch
 every decision it is given; the results say which were unchecked and which carried no
 digest, and `fukikae studio apply --force` counts them.
 
-After the commit, `job.mark_stale` runs on every stage the decision invalidates, then the
-file changes the registry change needs (assignments remapped after a merge or split, a pitch
-split file), then a line goes into ``<ws>/studio/decisions.jsonl``. Those steps are data in
-that line. When one fails, the line is still written, with ``incomplete`` naming the errors
-and the steps left, and `IncompleteDecision` says the registry part landed; every step is
-idempotent, so `resume_incomplete` (`fukikae studio resume`) redoes only what is left, and
-until it has, `apply_decision` refuses new decisions.
+Before the transaction commits, a write-ahead record goes into
+``<ws>/studio/decisions.jsonl`` (the decision, its steps, ``incomplete: {left: <every step>,
+pending: true}``) and a `decision_marks` row with the record's id goes into the registry in
+the same transaction, so the row says afterwards whether the commit landed. After the
+commit, `job.mark_stale` runs on every stage the decision invalidates, then the file changes
+the registry change needs (assignments remapped after a merge or split, a pitch split file),
+then a completion record closes the write-ahead one, naming any step that failed or was
+interrupted (`IncompleteDecision` says the registry part landed). Every step is idempotent,
+so `resume_incomplete` (`fukikae studio resume`) redoes only what is left; a pending record
+whose commit never landed is logged as aborted, with nothing to redo. Until every record is
+finished, `apply_decision`, `fukikae registry merge` (`apply_registry_change`, the same
+records) and `fukikae run` (`unfinished_message`) refuse to start.
 """
 
 from __future__ import annotations
@@ -24,8 +29,8 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -61,7 +66,12 @@ from fukikae.workspace import Workspace
 
 
 class DecisionError(Exception):
-    """A decision that was not applied; nothing it would have changed has changed."""
+    """A decision that was not applied; nothing it would have changed has changed. From
+    `apply_file`, ``results`` holds the results of the decisions before it in the file."""
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+        self.results: list[ApplyResult] = []
 
 
 class StaleDecision(DecisionError):  # noqa: N818 (the plan's name)
@@ -90,6 +100,7 @@ class ApplyResult:
     invalidations: list[Invalidation] = field(default_factory=list)
     unchecked: bool = False  # applied with force: the digest was not checked
     undigested: bool = False  # it carried no digest
+    skipped: bool = False  # a replayed log record whose decision had already landed
 
 
 class _DryRun(Exception):  # noqa: N818
@@ -393,13 +404,120 @@ def _accept(ws: Workspace, reg: Registry, d: AcceptDecision) -> str:
             f"{who}: card {d.card_id} names sidecar(s) missing from {store.root}: "
             f"{', '.join(missing)}"
         )
+    own = _own_speech(ws, reg, d.character, d.card_id, card)
     note = f"studio: draft {d.draft} version {d.version}, {d.auditions} auditions; references " + (
         ", ".join(_ref_label(r) for r in card.voice.references) or "none"
     )
     if d.overrides:
         note += "; gated override: " + ", ".join(r.label() for r in d.overrides)
     _call(d.op, reg.assign_card, d.character, language, d.card_id, "studio", True, note=note)
-    return f"character {d.character}: {language} card {d.card_id} accepted (studio, locked)"
+    return f"character {d.character}: {language} card {d.card_id} accepted (studio, locked); {own}"
+
+
+# How far a reference may run past the character's turns (the origin's float rounding).
+_SPAN_SLACK_S = 0.01
+
+
+def _own_turns(asg: Any, character: int) -> list[tuple[float, float]]:
+    """The character's turns in an episode (the diarize turns of its clusters, extras and
+    review clusters left out, as `cards.auto.character_spans` reads them), adjacent ones
+    joined across a gap of at most `select.JOIN_GAP_S` that no other speaker's turn falls in,
+    as reference selection joins them."""
+    from fukikae.cards.select import JOIN_GAP_S
+
+    own = {
+        a.cluster
+        for a in asg.clusters
+        if a.character_id == character and a.status not in ("extra", "review")
+    }
+    turns = [(float(t.start), float(t.end), t.speaker in own) for t in asg.turns or []]
+    mine = sorted((s, e) for s, e, ours in turns if ours)
+    others = [(s, e) for s, e, ours in turns if not ours]
+    out: list[tuple[float, float]] = []
+    for a, b in mine:
+        if out:
+            pa, pb = out[-1]
+            gap_free = not any(s < a and e > pb for s, e in others)
+            if a - pb <= JOIN_GAP_S and gap_free:
+                out[-1] = (pa, max(pb, b))
+                continue
+        out.append((a, b))
+    return out
+
+
+def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card: Any) -> str:
+    """Refuse a clone card whose references are not verifiably the character's own speech
+    (D41), and say what was verified. A reference with an origin span (episode, start, end)
+    must lie inside one of the character's turns in that episode, read from the episode's
+    assignments (the registry keeps no exemplar spans). A reference with no origin (a
+    sidecar only, such as a `voices clone` clip) can't be checked against turns; it is taken
+    only when the card came from this character's own clone path: the card's ``[meta]
+    character`` names it, or the character's card history already names the card."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments
+
+    turns_of: dict[str, list[tuple[float, float]] | None] = {}
+
+    def turns(ep: str) -> list[tuple[float, float]] | None:
+        if ep not in turns_of:
+            path = ws.work_dir(ep) / "05-characters" / "assignments.json"
+            got = None
+            if path.is_file():
+                try:
+                    asg = read_json(path, Assignments)
+                except (OSError, ValueError):
+                    asg = None
+                if asg is not None and asg.turns is not None:
+                    got = _own_turns(asg, character)
+            turns_of[ep] = got
+        return turns_of[ep]
+
+    refs = card.voice.references
+    refused: list[str] = []
+    verified = bare = 0
+    for r in refs:
+        o = r.origin or {}
+        try:
+            ep, start, end = str(o["episode"]), float(o["start"]), float(o["end"])
+        except (KeyError, TypeError, ValueError):
+            bare += 1
+            continue
+        label = f"{ep} {start:.2f}-{end:.2f}"
+        mine = turns(ep)
+        if mine is None:
+            refused.append(f"{label} (no assignments with turns for {ep} to check it against)")
+        elif not any(a - _SPAN_SLACK_S <= start and end <= b + _SPAN_SLACK_S for a, b in mine):
+            refused.append(f"{label} (not inside character {character}'s turns in {ep})")
+        else:
+            verified += 1
+    if bare:
+        tagged = card.meta.get("character") if isinstance(card.meta, dict) else None
+        if tagged is not None:
+            own_path = str(tagged) == str(character)
+            how = f"its [meta] character is {tagged}"
+        else:
+            own_path = card_id in reg.card_ids_for(character)
+            names = "names" if own_path else "never names"
+            how = f"character {character}'s card history {names} it"
+        if not own_path:
+            refused.append(
+                f"{bare} reference(s) with no origin span (a sidecar only), and the card is not "
+                f"from character {character}'s own clone path ({how})"
+            )
+    if refused:
+        raise DecisionRefused(
+            f"character {character}: card {card_id} is not verifiably the character's own "
+            f"speech (D41: only a clone of the speaker's own speech): {verified} of "
+            f"{len(refs)} reference(s) verified inside its turns; could not verify "
+            + "; ".join(refused)
+        )
+    line = f"{verified} of {len(refs)} references verified inside its own turns"
+    if bare:
+        line += (
+            f"; {bare} with no origin span not verified against its turns, taken because the "
+            f"card came from character {character}'s own clone path ({how})"
+        )
+    return line
 
 
 def _write(ws: Workspace, reg: Registry, d: Decision, lines: list[str]) -> list[dict[str, Any]]:
@@ -503,7 +621,7 @@ def _write_split(
             tmp.write_text(json.dumps(splits, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-# --- steps after the commit, the log, and finishing an incomplete decision ------------------
+# --- steps after the commit ----------------------------------------------------------------
 
 
 def _step_label(s: dict[str, Any]) -> str:
@@ -536,23 +654,56 @@ def _run_step(ws: Workspace, s: dict[str, Any]) -> str | None:
     return None
 
 
-def _run_steps(
-    ws: Workspace, steps: list[dict[str, Any]]
-) -> tuple[list[str], list[dict[str, Any]], list[str]]:
-    """Run every step, carrying on past a failure (the steps are independent); returns the
-    lines the done ones printed, the steps left and their errors."""
-    lines: list[str] = []
-    left: list[dict[str, Any]] = []
-    errors: list[str] = []
-    for s in steps:
+@dataclass
+class _Progress:
+    """What `_run_steps` got through, filled in as it goes so an interrupt can record it."""
+
+    steps: list[dict[str, Any]]
+    lines: list[str] = field(default_factory=list)
+    done: set[int] = field(default_factory=set)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def left(self) -> list[dict[str, Any]]:
+        return [s for i, s in enumerate(self.steps) if i not in self.done]
+
+
+def _run_steps(ws: Workspace, p: _Progress) -> None:
+    """Run every step, carrying on past a failure (the steps are independent). An interrupt
+    (Ctrl-C, SystemExit) stops at once and propagates, with ``p`` saying what was done."""
+    for i, s in enumerate(p.steps):
         try:
             line = _run_step(ws, s)
-        except Exception as e:  # noqa: BLE001 (the record must be written; re-raised below)
-            left.append(s)
-            errors.append(f"{_step_label(s)}: {type(e).__name__}: {e}")
+        except Exception as e:  # noqa: BLE001 (recorded; the caller raises IncompleteDecision)
+            p.errors.append(f"{_step_label(s)}: {type(e).__name__}: {e}")
             continue
-        lines.append(line or f"done: {_step_label(s)}")
-    return lines, left, errors
+        except BaseException as e:
+            p.errors.append(f"{_step_label(s)}: interrupted ({type(e).__name__})")
+            raise
+        p.done.add(i)
+        p.lines.append(line or f"done: {_step_label(s)}")
+
+
+def _stale_steps(invs: list[Invalidation]) -> list[dict[str, Any]]:
+    by_stage: dict[str, list[str]] = {}
+    for inv in invs:
+        by_stage.setdefault(inv.stage, []).append(inv.episode)
+    return [{"do": "stale", "stage": st, "episodes": eps} for st, eps in by_stage.items()]
+
+
+# --- the decisions log: write-ahead, completion, aborted and resume records -----------------
+#
+# A decision (or `fukikae registry merge`) appends a write-ahead record inside its registry
+# transaction, before COMMIT: the decision (or the registry command), its lines, its
+# invalidations, its steps, and ``incomplete: {left: <every step>, pending: true}``. The same
+# transaction inserts a `decision_marks` row under the record's id, so the row exists exactly
+# when the registry writes do. After the commit and the steps, a completion record
+# (``completes: <id>``) closes it, carrying ``incomplete: {left, errors}`` when a step failed
+# or was interrupted. A pending record with no completion is settled by the next writer:
+# without its mark the commit never landed, and an ``aborts: <id>`` record closes it with
+# nothing to redo; with it, its steps are left and `resume_incomplete` reruns them, closing it
+# with ``resumes: <id>``. Writers hold ``studio/.lock`` from before the write-ahead record to
+# after the completion record, so a pending record seen by a lock holder is never live.
 
 
 def _log_records(ws: Workspace) -> list[dict[str, Any]]:
@@ -570,30 +721,126 @@ def _log_records(ws: Workspace) -> list[dict[str, Any]]:
     return out
 
 
-def incomplete_records(ws: Workspace | Path) -> list[dict[str, Any]]:
-    """The log's incomplete records that no later resume finished, oldest first."""
+_CLOSERS = ("completes", "resumes", "aborts")
+
+
+def _open_records(ws: Workspace) -> list[dict[str, Any]]:
+    """Records with ``incomplete`` that no later record closed, oldest first: pending
+    write-ahead records and completion or resume records that left steps."""
     pending: dict[str, dict[str, Any]] = {}
-    for rec in _log_records(_workspace(ws)):
-        if rec.get("resumes"):
-            pending.pop(rec["resumes"], None)
+    for rec in _log_records(ws):
+        for k in _CLOSERS:
+            if rec.get(k):
+                pending.pop(rec[k], None)
         if rec.get("incomplete") and rec.get("id"):
             pending[rec["id"]] = rec
     return list(pending.values())
+
+
+def _is_pending(rec: dict[str, Any]) -> bool:
+    return bool((rec.get("incomplete") or {}).get("pending"))
+
+
+def _landed(ws: Workspace, record_id: str) -> bool:
+    """Whether the write-ahead record's transaction committed: its `decision_marks` row."""
+    path = ws.registry_path
+    if not path.is_file():
+        return False
+    con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT 1 FROM decision_marks WHERE id = ?", (record_id,)).fetchone()
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e).lower():
+            return False
+        raise DecisionRefused(
+            f"can't tell whether the decision logged as {record_id} landed: the registry "
+            f"{path} can't be read ({e}); try again"
+        ) from e
+    except sqlite3.DatabaseError as e:
+        raise DecisionRefused(
+            f"can't tell whether the decision logged as {record_id} landed: {path} is not a "
+            f"readable registry ({e})"
+        ) from e
+    finally:
+        con.close()
+    return row is not None
+
+
+def _classify(ws: Workspace) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The open records split into those with steps left (pending records whose commit
+    landed, and incomplete completions) and pending records whose commit never landed."""
+    todo: list[dict[str, Any]] = []
+    aborted: list[dict[str, Any]] = []
+    for rec in _open_records(ws):
+        if _is_pending(rec) and not _landed(ws, rec["id"]):
+            aborted.append(rec)
+        else:
+            todo.append(rec)
+    return todo, aborted
+
+
+@contextmanager
+def _studio_lock(ws: Workspace) -> Iterator[None]:
+    """``studio/.lock``, held exclusively by a writer from before its write-ahead record to
+    after its completion record. Taken without waiting: another writer is a refusal."""
+    path = studio_dir(ws) / ".lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            raise DecisionRefused(
+                f"another `fukikae studio` or `fukikae registry merge` is applying decisions to "
+                f"{ws.root} ({path} is held); nothing changed, try again when it is done"
+            ) from e
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def incomplete_records(ws: Workspace | Path) -> list[dict[str, Any]]:
+    """The log's records whose steps are still to do, oldest first: pending write-ahead
+    records whose commit landed (every step left) and completion or resume records that left
+    steps. A pending record whose commit never landed is aborted, so it is not among them
+    (the next writer logs that). Read-only; `DecisionRefused` while another writer holds the
+    studio lock and a pending record might be its own."""
+    w = _workspace(ws)
+    recs = _open_records(w)
+    if not any(_is_pending(r) for r in recs):
+        return recs
+    with _studio_lock(w):
+        return _classify(w)[0]
+
+
+def unfinished_message(ws: Workspace | Path) -> str | None:
+    """Why stages that read assignments must not start now (a decision whose steps are left,
+    or one being applied), or None. What `fukikae run` checks."""
+    w = _workspace(ws)
+    if not decisions_log(w).is_file():
+        return None
+    try:
+        recs = incomplete_records(w)
+    except DecisionRefused as e:
+        return f"{e}; assignments may be mid-change"
+    if not recs:
+        return None
+    return (
+        f"the {_record_op(recs[0])} logged at {recs[0].get('time')} is incomplete "
+        f"({_why(recs[0])}), so assignments may not match the registry; run "
+        f"`fukikae studio resume {w.root}` first"
+    )
 
 
 def _record_op(rec: dict[str, Any]) -> str:
     return (rec.get("decision") or {}).get("op") or rec.get("op") or "decision"
 
 
-def _refuse_if_incomplete(ws: Workspace) -> None:
-    pending = incomplete_records(ws)
-    if pending:
-        rec = pending[0]
-        raise DecisionRefused(
-            f"the {_record_op(rec)} logged at {rec.get('time')} is incomplete "
-            f"({'; '.join(rec['incomplete']['errors'])}); fix the cause and run "
-            f"`fukikae studio resume {ws.root}` before applying more decisions"
-        )
+def _why(rec: dict[str, Any]) -> str:
+    errors = (rec.get("incomplete") or {}).get("errors")
+    if errors:
+        return "; ".join(errors)
+    return "interrupted after its registry part committed, before its steps finished"
 
 
 def _append_log(ws: Workspace, rec: dict[str, Any]) -> None:
@@ -601,83 +848,149 @@ def _append_log(ws: Workspace, rec: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        f.flush()
 
 
 def _new_record(ws: Workspace) -> dict[str, Any]:
     return {
         "id": uuid.uuid4().hex,
         "time": datetime.now(UTC).isoformat(timespec="seconds"),
-        "workspace": str(ws.root),
+        "workspace": str(ws.root.resolve()),
     }
 
 
-def _finish(
-    ws: Workspace,
-    d: Decision,
-    lines: list[str],
-    invs: list[Invalidation],
-    steps: list[dict[str, Any]],
-    force: bool,
-) -> ApplyResult:
-    """After the commit: the stale marks first (so a file change that fails can't leave an
-    episode looking current), then the file changes, then the log line, which is written
-    whatever failed before it."""
-    by_stage: dict[str, list[str]] = {}
-    for inv in invs:
-        by_stage.setdefault(inv.stage, []).append(inv.episode)
-    stale = [{"do": "stale", "stage": st, "episodes": eps} for st, eps in by_stage.items()]
-    done, left, errors = _run_steps(ws, stale + steps)
-    lines = lines + [ln for ln in done if not ln.startswith("done: ")]
-    result = ApplyResult(lines, invs, unchecked=force, undigested=d.digest is None)
-    rec = _new_record(ws) | {
-        "decision": d.model_dump(mode="json"),
-        "forced": force,
-        "lines": result.lines,
-        "invalidations": [list(i) for i in invs],
-    }
-    if left:
-        rec["incomplete"] = {"errors": errors, "left": left}
+def _settle(ws: Workspace) -> list[dict[str, Any]]:
+    """With the studio lock held: log an ``aborts`` record for each pending record whose
+    commit never landed, and return the records with steps left."""
+    todo, aborted = _classify(ws)
+    for rec in aborted:
+        _append_log(ws, _new_record(ws) | {
+            "aborts": rec["id"], "op": _record_op(rec),
+            "reason": "its registry transaction never committed (no decision_marks row); "
+            "nothing changed, nothing to redo",
+        })  # fmt: skip
+    return todo
+
+
+def _refusal(ws: Workspace, rec: dict[str, Any]) -> DecisionRefused:
+    return DecisionRefused(
+        f"the {_record_op(rec)} logged at {rec.get('time')} is incomplete ({_why(rec)}); fix "
+        f"the cause and run `fukikae studio resume {ws.root}` before applying more decisions"
+    )
+
+
+def _refuse_if_incomplete(ws: Workspace) -> None:
+    """With the studio lock held (it may log aborted records)."""
+    todo = _settle(ws)
+    if todo:
+        raise _refusal(ws, todo[0])
+
+
+def _refuse_if_incomplete_readonly(ws: Workspace) -> None:
+    """For dry runs: the same refusal, writing nothing."""
+    todo = incomplete_records(ws)
+    if todo:
+        raise _refusal(ws, todo[0])
+
+
+def _commit_recorded(
+    w: Workspace,
+    reg: Registry,
+    op: str,
+    base: dict[str, Any],
+    stage: Callable[[], tuple[list[str], list[Invalidation], list[dict[str, Any]]]],
+) -> tuple[dict[str, Any], list[str], list[Invalidation], list[dict[str, Any]]]:
+    """``stage`` (the registry writes, returning lines, invalidations and file steps) in one
+    transaction with the decision's mark row and its write-ahead record, appended before
+    COMMIT. A log that can't be written rolls everything back."""
+    rec = _new_record(w) | base
+    with reg.transaction():
+        lines, invs, file_steps = stage()
+        steps = _stale_steps(invs) + file_steps
+        reg.mark_decision(rec["id"], op)
+        rec |= {
+            "lines": lines, "invalidations": [list(i) for i in invs], "steps": steps,
+            "incomplete": {"left": steps, "pending": True},
+        }  # fmt: skip
+        try:
+            _append_log(w, rec)
+        except OSError as e:
+            raise DecisionRefused(
+                f"{op}: the decisions log {decisions_log(w)} could not be written ({e}); "
+                "nothing changed"
+            ) from e
+    return rec, lines, invs, steps
+
+
+def _after_commit(
+    w: Workspace, rec: dict[str, Any], op: str, steps: list[dict[str, Any]]
+) -> tuple[list[str], list[dict[str, Any]], list[str]]:
+    """Run the steps (stale marks first, so a file change that fails can't leave an episode
+    looking current) and log the completion record. An interrupt logs it too (with what is
+    left) and propagates. Returns the lines printed, the steps left and their errors."""
+    p = _Progress(steps)
     try:
-        _append_log(ws, rec)
+        _run_steps(w, p)
+    except BaseException:
+        with suppress(OSError):  # the pending record still says every step is left
+            _append_log(w, _completion(w, rec, op, p))
+        raise
+    try:
+        _append_log(w, _completion(w, rec, op, p))
     except OSError as e:
-        todo = ", ".join(_step_label(s) for s in left) or "nothing"
         raise IncompleteDecision(
-            f"{d.op} landed in the registry, but the decisions log {decisions_log(ws)} could "
-            f"not be written ({e}); `studio resume` can't finish what it doesn't know about, "
-            f"so finish by hand: {todo}" + (f" (errors: {'; '.join(errors)})" if errors else "")
+            f"{op} landed in the registry, but its completion record could not be written to "
+            f"{decisions_log(w)} ({e}); its write-ahead record stays pending, so fix the cause "
+            f"and run `fukikae studio resume {w.root}`, which reruns its steps (each is "
+            "idempotent)"
         ) from e
-    if left:
-        stale_ok = not any(s["do"] == "stale" for s in left)
-        raise IncompleteDecision(
-            f"{d.op} landed in the registry, but {len(left)} step(s) after it failed: "
-            f"{'; '.join(errors)}. "
-            + ("Its invalidations are marked stale. " if stale_ok else "")
-            + f"Fix the cause and run `fukikae studio resume {ws.root}`, which redoes only "
-            "what is left; until then `studio apply` refuses new decisions"
-        )
-    return result
+    return [ln for ln in p.lines if not ln.startswith("done: ")], p.left, p.errors
+
+
+def _completion(w: Workspace, rec: dict[str, Any], op: str, p: _Progress) -> dict[str, Any]:
+    out = _new_record(w) | {"completes": rec["id"], "op": op, "lines": p.lines}
+    if p.left:
+        out["incomplete"] = {"errors": p.errors, "left": p.left}
+    return out
+
+
+def _incomplete(w: Workspace, op: str, left: list[dict[str, Any]], errors: list[str]) -> str:
+    stale_ok = not any(s["do"] == "stale" for s in left)
+    return (
+        f"{op} landed in the registry, but {len(left)} step(s) after it failed: "
+        f"{'; '.join(errors)}. "
+        + ("Its invalidations are marked stale. " if stale_ok else "")
+        + f"Fix the cause and run `fukikae studio resume {w.root}`, which redoes only what is "
+        "left; until then `studio apply`, `registry merge` and `fukikae run` refuse to start"
+    )
 
 
 def resume_incomplete(ws: Workspace | Path) -> list[ApplyResult]:
-    """Finish every incomplete decision in the log: run the steps it left (all idempotent)
-    and append a ``resumes`` record. `IncompleteDecision` when a step still fails (its new
-    record carries what is left, so a later resume picks it up)."""
+    """Settle the log: an ``aborts`` record for each pending record whose commit never
+    landed, and for every record with steps left, run them (all idempotent) and append a
+    ``resumes`` record. `IncompleteDecision` when a step still fails (its new record carries
+    what is left, so a later resume picks it up)."""
     w = _workspace(ws)
     out: list[ApplyResult] = []
-    for rec in incomplete_records(w):
-        done, left, errors = _run_steps(w, rec["incomplete"]["left"])
-        new = _new_record(w) | {"resumes": rec["id"], "op": _record_op(rec), "lines": done}
-        if left:
-            new["incomplete"] = {"errors": errors, "left": left}
-        _append_log(w, new)
-        if left:
-            raise IncompleteDecision(
-                f"the {_record_op(rec)} logged at {rec.get('time')} is still incomplete: "
-                f"{'; '.join(errors)}; fix the cause and run `fukikae studio resume {w.root}` "
-                "again"
-            )
-        invs = [Invalidation(*i) for i in rec.get("invalidations", [])]
-        out.append(ApplyResult(done, invs))
+    with _studio_lock(w):
+        for rec in _settle(w):
+            p = _Progress(rec["incomplete"]["left"])
+            new = _new_record(w) | {"resumes": rec["id"], "op": _record_op(rec)}
+            try:
+                _run_steps(w, p)
+            finally:
+                new["lines"] = p.lines
+                if p.left:
+                    new["incomplete"] = {"errors": p.errors, "left": p.left}
+                _append_log(w, new)
+            if p.left:
+                raise IncompleteDecision(
+                    f"the {_record_op(rec)} logged at {rec.get('time')} is still incomplete: "
+                    f"{'; '.join(p.errors)}; fix the cause and run `fukikae studio resume "
+                    f"{w.root}` again"
+                )
+            invs = [Invalidation(*i) for i in rec.get("invalidations", [])]
+            out.append(ApplyResult(p.lines, invs))
     return out
 
 
@@ -695,29 +1008,57 @@ def _schema_version(path: Path) -> int | None:
         con.close()
 
 
+def _tables(path: Path) -> set[str]:
+    con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        return {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    except sqlite3.DatabaseError:
+        return set()
+    finally:
+        con.close()
+
+
 def _busy(e: sqlite3.OperationalError) -> bool:
     msg = str(e).lower()
     return "locked" in msg or "busy" in msg
 
 
+def _require_registry(w: Workspace) -> None:
+    if not w.registry_path.is_file():
+        raise DecisionRefused(
+            f"{w.root} has no registry ({w.registry_path}); decisions name registry rows, so "
+            "there is nothing to apply them to (`fukikae run` creates it)"
+        )
+
+
 @contextmanager
 def _session(w: Workspace, dry_run: bool) -> Iterator[Registry]:
     """The workspace's registry, open. Refused when there is none (a decision names registry
-    rows; nothing creates one here), and in a dry run when opening it would migrate it. A
-    locked registry (another run or studio writing it) is a refusal, not a traceback."""
+    rows; nothing creates one here), and in a dry run when opening it would write it: no
+    schema version (an empty or foreign file), an older version (a migration), or a table
+    this version adds missing. A locked registry (another run or studio writing it) is a
+    refusal, not a traceback."""
     path = w.registry_path
-    if not path.is_file():
-        raise DecisionRefused(
-            f"{w.root} has no registry ({path}); decisions name registry rows, so there is "
-            "nothing to apply them to (`fukikae run` creates it)"
-        )
+    _require_registry(w)
     if dry_run:
         version = _schema_version(path)
-        if version is not None and version < SCHEMA_VERSION:
+        if version is None:
+            raise DecisionRefused(
+                f"registry {path} has no schema version (an empty file, or not a fukikae "
+                "registry), and a dry run never creates its tables; check the file, or apply "
+                "for real"
+            )
+        if version < SCHEMA_VERSION:
             raise DecisionRefused(
                 f"registry {path} is schema version {version}, and a dry run never migrates "
                 f"it to {SCHEMA_VERSION}; apply for real, or run `fukikae registry list "
                 f"{w.root}`, which migrates it first"
+            )
+        if "decision_marks" not in _tables(path):
+            raise DecisionRefused(
+                f"registry {path} has no decision_marks table yet, and a dry run never "
+                f"creates tables; run `fukikae registry list {w.root}`, which adds it, or "
+                "apply for real"
             )
     try:
         with Registry(path) as reg:
@@ -758,37 +1099,82 @@ def apply_decision(
     ws: Workspace | Path, d: Decision, *, dry_run: bool = False, force: bool = False
 ) -> ApplyResult:
     """Apply one decision: digest check (`StaleDecision`, or `UncheckedDecision` with no
-    digest, unless ``force``), the registry writes and the review mark in one transaction
-    (`DecisionRefused` on a registry refusal, nothing changed), then ``job.mark_stale`` for
-    each invalidation, the file changes and the log line (`IncompleteDecision` when one of
-    those fails). ``dry_run`` runs the same checks and writes, rolls them back, and returns
-    the preview lines."""
+    digest, unless ``force``), the registry writes, the review mark, the decision's mark row
+    and its write-ahead log record in one transaction (`DecisionRefused` on a registry
+    refusal, nothing changed), then ``job.mark_stale`` for each invalidation, the file changes
+    and the completion record (`IncompleteDecision` when one of those fails). ``dry_run`` runs
+    the same checks and writes, rolls them back, and returns the preview lines."""
     w = _workspace(ws)
-    _refuse_if_incomplete(w)
-    with _session(w, dry_run) as reg:
-        if dry_run:
+    if dry_run:
+        _refuse_if_incomplete_readonly(w)
+        with _session(w, dry_run=True) as reg:
             try:
                 with reg.transaction():
                     lines, invs, _ = _stage(reg, w, d, force)
                     raise _DryRun
             except _DryRun:
                 return _preview(d, lines, invs, force)
-        lines, invs, steps = _stage(reg, w, d, force)
-    return _finish(w, d, lines, invs, steps, force)
+    _require_registry(w)  # before the lock, which would create studio/
+    with _studio_lock(w):
+        _refuse_if_incomplete(w)
+        with _session(w, dry_run=False) as reg:
+            rec, lines, invs, steps = _commit_recorded(
+                w, reg, d.op, {"decision": d.model_dump(mode="json"), "forced": force},
+                lambda: _stage(reg, w, d, force),
+            )  # fmt: skip
+        done, left, errors = _after_commit(w, rec, d.op, steps)
+    if left:
+        raise IncompleteDecision(_incomplete(w, d.op, left, errors))
+    return ApplyResult(lines + done, invs, unchecked=force, undigested=d.digest is None)
 
 
-def read_decisions(ws: Workspace | Path, path: Path) -> list[Decision]:
-    """The decisions in a file: a `Decisions` document, one decision, a list of them, or
-    JSON lines of decisions or of ``decisions.jsonl`` records (whose ``decision`` is
-    replayed; resume records carry none and are skipped). A document or record for another
-    workspace is refused."""
+def apply_registry_change(
+    ws: Workspace | Path,
+    op: str,
+    command: dict[str, Any],
+    stage: Callable[[Registry], tuple[list[str], list[Invalidation], list[dict[str, Any]]]],
+) -> ApplyResult:
+    """A `fukikae registry` change with file steps after it (a merge's remaps), recorded as a
+    decision is: write-ahead record and mark row in its transaction, then the steps and a
+    completion record, so a failed step is finished by `fukikae studio resume` and blocks
+    later decisions until it is. ``stage(reg)`` makes the registry writes (raising
+    `DecisionRefused` for a refusal) and returns lines, invalidations and steps."""
     w = _workspace(ws)
+    _require_registry(w)  # before the lock, which would create studio/
+    with _studio_lock(w):
+        _refuse_if_incomplete(w)
+        with _session(w, dry_run=False) as reg:
+            rec, lines, invs, steps = _commit_recorded(
+                w, reg, op, {"op": op, "registry": command}, lambda: stage(reg)
+            )
+        done, left, errors = _after_commit(w, rec, op, steps)
+    if left:
+        raise IncompleteDecision(_incomplete(w, op, left, errors))
+    return ApplyResult(lines + done, invs)
+
+
+def _applied_ids(ws: Workspace) -> set[str]:
+    """Ids of logged decisions whose registry part landed: those a completion record closed,
+    and records from before write-ahead records (logged after their commit)."""
+    out: set[str] = set()
+    for rec in _log_records(ws):
+        if rec.get("completes"):
+            out.add(rec["completes"])
+        elif rec.get("decision") and rec.get("id") and not _is_pending(rec):
+            out.add(rec["id"])
+    return out
+
+
+def _read_entries(w: Workspace, path: Path) -> list[tuple[Decision, dict[str, Any] | None]]:
+    """The decisions in a file, each with the log record it came from (None for a bare
+    decision or a `Decisions` document)."""
     text = Path(path).read_text(encoding="utf-8")
 
     def ours(where: str | None) -> None:
         if where and Path(where).resolve() != w.root.resolve():
             raise DecisionRefused(
-                f"{path} is for workspace {where}, not {w.root}; registry ids are workspace-local"
+                f"{path} is for workspace {where}, not {w.root.resolve()}; registry ids are "
+                "workspace-local"
             )
 
     try:
@@ -799,55 +1185,85 @@ def read_decisions(ws: Workspace | Path, path: Path) -> list[Decision]:
         if isinstance(obj, dict) and "decisions" in obj:
             doc = Decisions.model_validate(obj)
             ours(doc.workspace)
-            return list(doc.decisions)
+            return [(d, None) for d in doc.decisions]
         if isinstance(obj, dict):
             obj = [obj]
         if not isinstance(obj, list):
             obj = [json.loads(ln) for ln in text.splitlines() if ln.strip()]
-        out: list[Decision] = []
+        out: list[tuple[Decision, dict[str, Any] | None]] = []
         for x in obj:
-            if isinstance(x, dict) and "resumes" in x:
-                continue
             if isinstance(x, dict) and "decision" in x:
                 ours(x.get("workspace"))
-                x = x["decision"]
-            out.append(parse_decision(x))
+                out.append((parse_decision(x["decision"]), x))
+            elif isinstance(x, dict) and any(k in x for k in (*_CLOSERS, "registry")):
+                continue  # a completion, resume or aborted record, or a registry command's
+            else:
+                out.append((parse_decision(x), None))
         return out
     except (ValidationError, json.JSONDecodeError) as e:
         raise DecisionRefused(f"{path}: not a decisions file: {e}") from e
 
 
+def read_decisions(ws: Workspace | Path, path: Path) -> list[Decision]:
+    """The decisions in a file: a `Decisions` document, one decision, a list of them, or
+    JSON lines of decisions or of ``decisions.jsonl`` records (whose ``decision`` is
+    replayed; completion, resume and aborted records and `registry merge` records carry none
+    and are skipped). A document or record for another workspace is refused."""
+    return [d for d, _ in _read_entries(_workspace(ws), path)]
+
+
+def _already(i: int, d: Decision, rec: dict[str, Any]) -> ApplyResult:
+    return ApplyResult(
+        [f"decision {i + 1} ({d.op}): already applied (logged {rec['id'][:8]} at "
+         f"{rec.get('time')}); skipped"],
+        skipped=True,
+    )  # fmt: skip
+
+
 def apply_file(
     ws: Workspace | Path, path: Path, *, dry_run: bool = False, force: bool = False
 ) -> list[ApplyResult]:
-    """Apply a file's decisions in order, each in its own transaction. The first refusal
-    stops the file (decisions before it stay applied) and its error says how many were.
-    A dry run checks them all in one transaction, rolled back at the end, so a decision that
-    depends on an earlier one is checked as it will apply."""
+    """Apply a file's decisions in order, each in its own transaction. A log record whose
+    decision already landed (a completion record closed it) is skipped and says so. The first
+    refusal stops the file (decisions before it stay applied); its error says how many were,
+    and carries their results (``results``). A dry run checks them all in one transaction,
+    rolled back at the end, so a decision that depends on an earlier one is checked as it
+    will apply."""
     w = _workspace(ws)
-    decisions = read_decisions(w, path)
-    n = len(decisions)
+    entries = _read_entries(w, path)
+    applied = _applied_ids(w)
+    n = len(entries)
     out: list[ApplyResult] = []
     if dry_run:
-        _refuse_if_incomplete(w)
+        _refuse_if_incomplete_readonly(w)
         with _session(w, dry_run=True) as reg:
             try:
                 with reg.transaction():
-                    for i, d in enumerate(decisions):
+                    for i, (d, rec) in enumerate(entries):
+                        if rec is not None and rec.get("id") in applied:
+                            out.append(_already(i, d, rec))
+                            continue
                         try:
                             lines, invs, _ = _stage(reg, w, d, force)
                         except DecisionError as e:
-                            raise type(e)(
+                            err = type(e)(
                                 f"decision {i + 1} ({d.op}): {e}; {i} of {n} decisions checked"
-                            ) from e
+                            )
+                            err.results = out
+                            raise err from e
                         out.append(_preview(d, lines, invs, force))
                     raise _DryRun
             except _DryRun:
                 return out
-    for i, d in enumerate(decisions):
+    for i, (d, rec) in enumerate(entries):
+        if rec is not None and rec.get("id") in applied:
+            out.append(_already(i, d, rec))
+            continue
         try:
             out.append(apply_decision(w, d, force=force))
         except DecisionError as e:
-            done = i + 1 if isinstance(e, IncompleteDecision) else i
-            raise type(e)(f"decision {i + 1} ({d.op}): {e}; {done} of {n} decisions applied") from e
+            done = sum(not r.skipped for r in out) + isinstance(e, IncompleteDecision)
+            err = type(e)(f"decision {i + 1} ({d.op}): {e}; {done} of {n} decisions applied")
+            err.results = out
+            raise err from e
     return out

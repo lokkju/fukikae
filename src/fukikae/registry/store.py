@@ -133,6 +133,13 @@ CREATE TABLE IF NOT EXISTS character_aliases (
     language TEXT, -- the subtitle track's language, informational
     created TEXT NOT NULL
 );
+-- schema 5: one row per decision whose registry writes committed, written in the same
+-- transaction, so a decisions.jsonl write-ahead record can tell afterwards whether it landed
+CREATE TABLE IF NOT EXISTS decision_marks (
+    id TEXT PRIMARY KEY, -- the decisions.jsonl record id
+    op TEXT NOT NULL,
+    applied TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS character_aliases_character ON character_aliases(character_id);
 CREATE INDEX IF NOT EXISTS card_history_character ON card_history(character_id, target_language);
 CREATE INDEX IF NOT EXISTS exemplars_actor ON exemplars(actor_id);
@@ -436,8 +443,8 @@ class Registry:
 
     def _migrate_4_to_5(self, con: sqlite3.Connection) -> None:
         """Schema 4 to 5: ``characters.gender``, ``gender_by``, ``kind`` (``character`` for
-        every existing row) and ``reviewed``, all unset. Runs inside `_init_schema`'s one
-        transaction; safe to run twice."""
+        every existing row) and ``reviewed``, all unset, and ``decision_marks`` (created by
+        ``_SCHEMA``). Runs inside `_init_schema`'s one transaction; safe to run twice."""
         cols = {r[1] for r in con.execute("PRAGMA table_info(characters)")}
         for col, decl in (
             ("gender", "TEXT"),
@@ -1258,6 +1265,33 @@ class Registry:
             cur = con.execute("UPDATE characters SET kind = ? WHERE id = ?", (kind, character_id))
             if cur.rowcount == 0:
                 raise KeyError(character_id)
+
+    def mark_decision(self, record_id: str, op: str) -> None:
+        """Record that the decision logged as ``record_id`` committed: call it inside the
+        decision's own transaction, so the row exists exactly when its writes do."""
+        with self._tx() as con:
+            con.execute(
+                "INSERT INTO decision_marks(id, op, applied) VALUES (?, ?, ?)",
+                (record_id, op, _now()),
+            )
+
+    def decision_marked(self, record_id: str) -> bool:
+        """Whether the decision logged as ``record_id`` committed (`mark_decision`)."""
+        row = self._con.execute(
+            "SELECT 1 FROM decision_marks WHERE id = ?", (record_id,)
+        ).fetchone()
+        return row is not None
+
+    def card_ids_for(self, character_id: int) -> set[str]:
+        """Every card id the character's assignment history names, in any target language."""
+        return {
+            r[0]
+            for r in self._con.execute(
+                "SELECT DISTINCT card_id FROM card_history WHERE character_id = ?"
+                " AND card_id IS NOT NULL",
+                (character_id,),
+            )
+        }
 
     def mark_reviewed(self, character_id: int, when: str | None = None) -> None:
         """Record that the operator reviewed the character's identity, at ``when`` (ISO 8601

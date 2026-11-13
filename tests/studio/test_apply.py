@@ -16,7 +16,7 @@ from fukikae.cards.card import parse_card
 from fukikae.cards.store import CardStore
 from fukikae.cli import app
 from fukikae.job import Manifest, StageRecord, load_manifest, save_manifest
-from fukikae.models import Assignments, ClusterAssignment
+from fukikae.models import Assignments, ClusterAssignment, Turn
 from fukikae.registry.invalidate import Invalidation
 from fukikae.registry.store import Registry
 from fukikae.studio.apply import (
@@ -73,9 +73,12 @@ def ws(tmp_path: Path) -> Workspace:
             for e, cl in spans
             if e == ep
         ]
+        # each cluster speaks ten seconds in turn: S0 0-10 s and S2 10-20 s in S01E01
+        turns = [Turn(start=10.0 * k, end=10.0 * k + 10, speaker=c.cluster)
+                 for k, c in enumerate(clusters)]  # fmt: skip
         write_json(
             work / "05-characters" / "assignments.json",
-            Assignments(episode=ep, threshold=0.5, clusters=clusters),
+            Assignments(episode=ep, threshold=0.5, clusters=clusters, turns=turns),
         )
     return w
 
@@ -256,8 +259,13 @@ def fake_backends(monkeypatch):
 
 
 def clone_card(
-    ws: Workspace, tmp_path: Path, seed: int = 1, origin: tuple[str, float, float] | None = None
+    ws: Workspace,
+    tmp_path: Path,
+    seed: int = 1,
+    origin: tuple[str, float, float] | None = ("S01E01", 1.0, 4.5),
 ) -> str:
+    """A clone card in the store; its one reference's origin is inside character 1's turn
+    (S01E01 S0, 0-10 s) unless ``origin`` says otherwise."""
     store = CardStore(ws.root)
     wav = tmp_path / f"ref{seed}.wav"
     with wave.open(str(wav), "wb") as w:
@@ -350,9 +358,10 @@ def test_accept_of_a_card_for_another_language_is_refused(ws, tmp_path):
 def test_every_applied_decision_is_logged(ws):
     d = decision_for(ws, "gender", character=3, gender="m")
     r = apply_decision(ws, d)
-    (rec,) = log_lines(ws)
-    assert rec["decision"] == d.model_dump(mode="json")
-    assert rec["lines"] == r.lines and rec["forced"] is False
+    rec, done = log_lines(ws)
+    assert rec["decision"] == d.model_dump(mode="json") and done["completes"] == rec["id"]
+    steps = [ln for ln in done["lines"] if not ln.startswith("done: ")]
+    assert r.lines == rec["lines"] + steps and rec["forced"] is False
     assert rec["invalidations"] == [["S01E01", "tts"], ["S01E02", "tts"]]
     datetime.fromisoformat(rec["time"])
 
@@ -405,7 +414,7 @@ def test_apply_file_stops_at_the_first_refusal(ws, tmp_path):
         apply_file(ws, path)
     assert char(ws, 1).gender == "m"  # earlier decisions stay applied
     assert char(ws, 3).kind == "character"
-    assert len(log_lines(ws)) == 1
+    assert len(log_lines(ws)) == 2  # the first decision's write-ahead and completion records
 
 
 def test_apply_file_replays_the_log_format(ws, tmp_path):
@@ -533,8 +542,8 @@ def test_a_failed_file_change_after_commit_is_logged_and_resumable(ws):
     with reg_of(ws) as reg:  # the registry part landed
         assert [c.id for c in reg.characters()] == [1, 3]
     assert "characters" not in stages_left(ws, "S01E02")  # marked stale before the files
-    (rec,) = log_lines(ws)
-    assert rec["decision"] == d.model_dump(mode="json")
+    first, rec = log_lines(ws)
+    assert first["decision"] == d.model_dump(mode="json") and rec["completes"] == first["id"]
     inc = rec["incomplete"]
     assert inc["errors"] and "S01E02" in inc["errors"][0]
     assert [s["episode"] for s in inc["left"]] == ["S01E02"]
@@ -717,8 +726,8 @@ def test_programming_errors_are_not_refusals(ws, monkeypatch):
 
 def test_log_records_carry_the_workspace_and_replays_check_it(ws, tmp_path):
     apply_decision(ws, decision_for(ws, "gender", character=1, gender="f"))
-    (rec,) = log_lines(ws)
-    assert rec["workspace"] == str(ws.root)
+    rec = log_lines(ws)[0]
+    assert rec["workspace"] == str(ws.root.resolve())
     rec["workspace"] = "/elsewhere"
     path = tmp_path / "other.jsonl"
     path.write_text(json.dumps(rec) + "\n")

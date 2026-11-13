@@ -161,6 +161,24 @@ def cache_key(stage: Stage, ep: Episode, cfg: Config) -> str:
     return key
 
 
+# The stages that read assignments.json or the studio's split files, which a studio decision
+# (or `registry merge`) changes after its registry commit.
+ASSIGNMENT_STAGES = frozenset({"names", "characters", "tag", "translate", "tts", "timefit", "mix"})
+
+
+def refuse_unfinished_decisions(workspace_root: Path, stage_names: Sequence[str]) -> None:
+    """ValueError when ``stage_names`` include one that reads assignments while a studio
+    decision's steps are left (or one is being applied): its assignments may not match the
+    registry until `fukikae studio resume` finishes it."""
+    if not ASSIGNMENT_STAGES.intersection(stage_names):
+        return
+    from fukikae.studio.apply import unfinished_message
+
+    msg = unfinished_message(workspace_root)
+    if msg is not None:
+        raise ValueError(msg)
+
+
 def run_stages(
     ep: Episode,
     cfg: Config,
@@ -174,6 +192,7 @@ def run_stages(
             raise ValueError(f"unknown {label} {value!r}; stages are {names}")
     start = names.index(from_stage) if from_stage else 0
     stop = names.index(to_stage) + 1 if to_stage else len(stages)
+    refuse_unfinished_decisions(ep.workspace_root, names[:stop])
 
     manifest = load_manifest(ep)
     cache = _HashCache(ep)
@@ -248,6 +267,8 @@ def run_episodes(
     for label, value in (("from_stage", from_stage), ("to_stage", to_stage)):
         if value is not None and value not in names:
             raise ValueError(f"unknown {label} {value!r}; stages are {names}")
+    if episodes:
+        refuse_unfinished_decisions(episodes[0].workspace_root, names)
     split = len(stages)
     while split > 0 and stages[split - 1].name in tail:
         split -= 1
