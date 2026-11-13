@@ -118,7 +118,7 @@ def resolve_episodes(
     """Joint-resolve `episodes` (each with a done diarize stage; the caller checks) and write
     the registry and their assignments. `options` are `JointMatcher` options; ``seed`` must
     stay ``clusters`` (assignments are per cluster)."""
-    from fukikae.stages.characters import CharactersStage
+    from fukikae.stages.characters import CharactersStage, ignored_characters, mark_ignored
 
     cfg = ws.config
     min_new = cfg.registry.min_new_seconds if min_new_seconds is None else float(min_new_seconds)
@@ -389,6 +389,7 @@ def resolve_episodes(
             reg.recompute_centroid(aid)
         in_use = actors_in_use(ws.root, skip=set(order))  # another episode still names them
         pruned = reg.prune_actors(sorted(orphans - touched - claimed - in_use))
+        ignored = ignored_characters(reg)
 
     for ep in episodes:
         evs, _ = loaded[ep.id]
@@ -399,7 +400,7 @@ def resolve_episodes(
             Assignments(
                 episode=ep.id,
                 threshold=threshold,
-                clusters=[result[ep.id][ev.cluster] for ev in evs],
+                clusters=mark_ignored([result[ep.id][ev.cluster] for ev in evs], ignored),
                 turns=turns[ep.id].turns,
             ),
         )

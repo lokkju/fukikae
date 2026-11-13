@@ -66,6 +66,12 @@ named siblings), else ``extra`` (reported); only a parent with no named sub-clus
 the parent's match over all its sub-clusters' rows, at the threshold. On a fresh run (or
 ``rematch``) an actor whose character answers to one of this episode's keys (or is one an
 ambiguous key could mean) is not pruned before matching.
+
+Ignored characters (identification workflow, Part B). A cluster whose character the operator
+made ``kind = 'ignored'`` (crowd walla, a TV in the background, a hallucination A4 misses) is
+matched and pinned as any other, and keeps its exemplars, but is written with ``status =
+"ignored"`` (`mark_ignored`), so the cues builder skips its lines. With no ignored character the
+assignments are byte-identical to what they were before the status existed.
 """
 
 from __future__ import annotations
@@ -107,6 +113,27 @@ STAGE_MATCHERS = ("centroid", "lda")
 RENAME_SHARE = 0.6  # D29 #3, both directions
 
 Tops = dict[str, tuple[int, float] | None]
+
+
+def mark_ignored(
+    clusters: list[ClusterAssignment], ignored: set[int] | frozenset[int]
+) -> list[ClusterAssignment]:
+    """The clusters with ``status = "ignored"`` for each one whose character is in ``ignored``
+    (the characters the operator made ``kind = 'ignored'``), and ``matched`` again for one
+    marked ignored whose character no longer is; every other cluster unchanged."""
+    out = []
+    for c in clusters:
+        if c.character_id is not None and c.character_id in ignored:
+            c = c.model_copy(update={"status": "ignored"}) if c.status != "ignored" else c
+        elif c.status == "ignored":
+            c = c.model_copy(update={"status": "matched"})
+        out.append(c)
+    return out
+
+
+def ignored_characters(reg: Registry) -> set[int]:
+    """The characters the operator made ``kind = 'ignored'``."""
+    return {c.id for c in reg.characters() if c.kind == "ignored"}
 
 
 def _cosine(a: np.ndarray | None, b: np.ndarray | None) -> float | None:
@@ -682,13 +709,14 @@ class CharactersStage:
                 reg.recompute_centroid(aid)
             kept = claimed | {a.actor_id for a in result.values() if a.actor_id is not None}
             reg.prune_actors([a for a in orphans if a not in kept])
+            ignored = ignored_characters(reg)
 
         write_json(
             assignments_path,
             Assignments(
                 episode=ep.id,
                 threshold=threshold,
-                clusters=[result[ev.cluster] for ev in evidence],
+                clusters=mark_ignored([result[ev.cluster] for ev in evidence], ignored),
                 turns=turns.turns,
             ),
         )

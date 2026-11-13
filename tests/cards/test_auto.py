@@ -2442,3 +2442,140 @@ def test_a_stale_repick_under_the_floor_that_picks_the_same_card_flags_once(
     assert "subtitles now name otherwise" in flag and "pick it again" in flag
     assert "below the clone floor (1 clip and 4.2 s" in flag
     reg.close()
+
+
+# -- Task 13: operator gender and narrators ---------------------------------------------------
+
+# Character 1, acoustic only (no names): four 240 Hz turns and three 130 Hz turns, near even
+# (24 s against 18 s), so the estimate gates no pitch; the operator knows he is male.
+MIXED_TURNS = [
+    (0.0, 6.0, "S0", 0.02), (8.0, 14.0, "S0", 0.02), (16.0, 22.0, "S0", 0.02),
+    (24.0, 30.0, "S0", 0.02),
+    (60.0, 66.0, "S0", 0.02), (70.0, 76.0, "S0", 0.02), (80.0, 86.0, "S0", 0.02),
+]  # fmt: skip
+MIXED_HZ = [240.0, 240.0, 240.0, 240.0, 130.0, 130.0, 130.0]
+
+
+def _ws_mixed(tmp_path: Path, turns=MIXED_TURNS, hz=MIXED_HZ):
+    from fukikae.workspace import Workspace
+    from tests.cards.test_select import _voices
+
+    reg, ids = _registry(tmp_path, 1)
+    work = _named_episode(tmp_path / "ws", NAMED_EP, turns, [{"cluster": "S0", "character_id": 1}])
+    _voices(
+        work / "01-separate" / "vocals.wav",
+        [(a, b, f, n) for (a, b, _, n), f in zip(turns, hz, strict=True)],
+        seconds=120.0,
+    )
+    return reg, ids, Workspace(tmp_path / "ws")
+
+
+def _refs_class(ws, store: CardStore, card: str) -> str:
+    from fukikae.pitch import band_seconds, cached_track
+
+    origins = [r.origin or {} for r in store.get(card).voice.references]
+    spans = [(o["start"], o["end"]) for o in origins]
+    secs = band_seconds(
+        cached_track(ws.root, ws.work_dir(NAMED_EP) / "01-separate" / "vocals.wav", spans),
+        (165.0, 200.0),
+    )
+    return max(("m", "f", "u"), key=lambda g: secs[g])
+
+
+def test_gender_mismatches_name_cards_whose_references_are_the_other_class(tmp_path: Path):
+    from fukikae.cards.auto import gender_mismatches
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    assert gender_mismatches(ws, reg, store, "en") == {}  # no operator gender: no reason
+    reg.set_character_gender(1, "f")
+    assert gender_mismatches(ws, reg, store, "en") == {}  # the references agree
+    reg.set_character_gender(1, "m")
+    (mm,) = gender_mismatches(ws, reg, store, "en").values()
+    assert (mm.card_id, mm.operator, mm.refs) == (old, "m", "f")
+    reg.set_character_gender(1, "m", by="cast")  # a cast prior is not the operator's call
+    assert gender_mismatches(ws, reg, store, "en") == {}
+    reg.close()
+
+
+def test_operator_gender_repicks_an_auto_clone_with_other_class_references(tmp_path: Path):
+    from fukikae.cards.auto import GENDER_NOTE, gender_mismatches
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    assert _refs_class(ws, store, old) == "f"
+    reg.set_character_gender(1, "m")
+    flags: list[str] = []
+    (line,) = ensure_assignments(
+        reg, store, CFG, {1: [(0.0, 86.0)]}, cloning=_cloning_ws(ws),
+        genders=gender_mismatches(ws, reg, store, "en"), flags=flags,
+    )  # fmt: skip
+    a = reg.card_for(1, "en")
+    assert a is not None and a.card_id != old and a.by == "auto" and not a.locked
+    assert (a.note or "").startswith(GENDER_NOTE) and line.startswith(f"character 1: {GENDER_NOTE}")
+    assert _refs_class(ws, store, a.card_id or "") == "m"
+    assert [h.card_id for h in reg.card_history(1, "en")] == [old, a.card_id]  # CD1
+    assert flags == []
+    # the next run has nothing to do
+    assert gender_mismatches(ws, reg, store, "en") == {}
+    reg.close()
+
+
+@pytest.mark.parametrize("by", ["assign", "import:Pack", "auto-locked", "studio"])
+def test_operator_gender_only_flags_a_locked_card(tmp_path: Path, by: str):
+    from fukikae.cards.auto import gender_mismatches
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    locked = by in ("auto-locked", "studio")
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)],
+                      by="auto" if by == "auto-locked" else by, locked=locked)  # fmt: skip
+    reg.set_character_gender(1, "m")
+    genders = gender_mismatches(ws, reg, store, "en")
+    assert list(genders) == [1]
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 86.0)]}, cloning=_cloning_ws(ws),
+                               genders=genders, flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
+    assert len(reg.card_history(1, "en")) == 1
+    (flag,) = flags
+    assert "operator gender m" in flag and "references are f" in flag
+    assert "voices clone" in flag
+    reg.close()
+
+
+def test_operator_gender_sets_the_register_of_the_reference_gates(tmp_path: Path):
+    """The estimate reads a near-even bimodal register (no pitch gate); the operator's
+    gender picks which part is the character's, so the other part's turns are refused."""
+    from fukikae.cards.auto import character_candidates, impure_cards
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    assert impure_cards(ws, reg, store, "en") == {}
+    assert len(character_candidates(ws, [NAMED_EP], 1)[NAMED_EP]) == 7
+    reg.set_character_gender(1, "m")
+    found = impure_cards(ws, reg, store, "en")
+    assert list(found) == [1] and found[1].gates == "off-register"
+    got = character_candidates(ws, [NAMED_EP], 1, gender="m")[NAMED_EP]
+    assert sorted(p.start for p in got) == [60.0, 70.0, 80.0]
+    reg.close()
+
+
+# Character 1 narrates: three loud turns in one scene, and a quieter one far later.
+NARRATION_TURNS = [
+    (0.0, 6.0, "S0", 0.01), (10.0, 16.0, "S0", 0.01), (20.0, 26.0, "S0", 0.01),
+    (90.0, 96.0, "S0", 0.06),
+]  # fmt: skip
+
+
+def test_narrator_references_may_share_a_scene(tmp_path: Path):
+    reg, _, ws = _ws_mixed(tmp_path, NARRATION_TURNS, [130.0] * 4)
+    picks = _cloning_ws(ws).references(1).picks
+    assert picks is not None and 90.0 in {p.start for p in picks}  # one clip per scene
+    reg.set_character_kind(1, "narrator")
+    picks = _cloning_ws(ws).references(1).picks
+    assert picks is not None and sorted(p.start for p in picks) == [0.0, 10.0, 20.0]
+    reg.close()

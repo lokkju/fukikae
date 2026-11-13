@@ -408,6 +408,19 @@ def as_register(r: RegisterLike) -> Register:
     return r if isinstance(r, Register) else Register(r[0], r[1])
 
 
+def operator_register(estimate: Register, gender: Gender | None) -> Register:
+    """``estimate`` (`speaker_register`) with the operator's stored gender (``f`` or ``m``)
+    as its class: the operator's call beats the pitch estimate (Part B). The median stays when
+    the estimate is the same class, and the bimodal flag stays (the cluster still holds two
+    voices), but the gate always runs: the operator's class says which part is the
+    character's, so a near-even cluster is gated too. Without an operator gender, the
+    estimate unchanged."""
+    if gender not in ("f", "m"):
+        return estimate
+    median = estimate.median if estimate.gender == gender else None
+    return Register(gender, median, estimate.bimodal, False)
+
+
 SPLIT_NOTE = "needs a split: the speaker's turns are in both registers, so no register gate ran"
 SPLIT_GATED_NOTE = (
     "needs a split: the speaker's turns are in both registers; the register gate read the "

@@ -101,8 +101,8 @@ def _same_dims(dims: dict[str, int], hint: str) -> None:
         )
 
 
-def _stale(ws: Workspace, episodes: list[str]) -> None:
-    """Delete each episode's `characters` manifest record and say so."""
+def _stale(ws: Workspace, episodes: list[str], stage: str = "characters") -> None:
+    """Delete each episode's ``stage`` manifest record and say so."""
     from fukikae.job import mark_stale
 
     if not episodes:
@@ -110,8 +110,17 @@ def _stale(ws: Workspace, episodes: list[str]) -> None:
         return
     for eid in episodes:
         ep = Episode(source=Path(eid), id=eid, work=ws.work_dir(eid), workspace_root=ws.root)
-        mark_stale(ep, "characters")
-    typer.echo(f"stale (characters will rerun on the next `fukikae run`): {', '.join(episodes)}")
+        mark_stale(ep, stage)
+    typer.echo(f"stale ({stage} will rerun on the next `fukikae run`): {', '.join(episodes)}")
+
+
+def _character_episodes(ws: Workspace, reg: Any, character_id: int, actor_id: int) -> list[str]:
+    """The episodes a character speaks in: those with its actor's exemplars and those whose
+    assignments name it."""
+    from fukikae.registry.usage import episodes_naming
+
+    found = set(reg.episode_counts(actor_id)) | set(episodes_naming(ws.root, (), (character_id,)))
+    return sorted(found)
 
 
 def _remap_assignments(
@@ -533,7 +542,10 @@ def gender(
     clear: bool = typer.Option(False, "--clear", help="Clear the stored gender instead."),
 ) -> None:
     """Store a character's gender (its voice register, f or m) as the operator's, or clear it.
-    The pitch estimate is never stored; a stored gender is the operator's call."""
+    The pitch estimate is never stored; a stored gender is the operator's call. It beats the
+    estimate in the reference gates and the line gate, and an automatic clone card whose
+    references are the other register is re-picked, so tts reruns next time for the
+    character's episodes."""
     if clear == (value is not None):
         raise _fail("give f or m, or --clear")
     if value is not None and value not in ("f", "m"):
@@ -544,10 +556,12 @@ def gender(
         except ValueError as e:
             raise _fail(str(e)) from e
         reg.set_character_gender(target.id, None if value is None else "f" if value == "f" else "m")
+        affected = _character_episodes(Workspace(workspace), reg, target.id, target.actor_id)
     if clear:
         typer.echo(f"character {target.id}: gender cleared")
     else:
         typer.echo(f"character {target.id}: gender {value} (operator)")
+    _stale(Workspace(workspace), affected, "tts")
 
 
 @registry_app.command("kind")
@@ -560,7 +574,9 @@ def kind(
 ) -> None:
     """Make a character a dialogue character, a narrator (its own card, exempt from the
     one-scene reference gate and the line gender gate) or ignored (its lines are never
-    translated or rendered, and the mix keeps the original audio under them)."""
+    translated or rendered, and the mix keeps the original audio under them). The characters
+    stage reruns next time for the character's episodes (it marks an ignored character's
+    clusters), and everything after it whose inputs that changes."""
     from fukikae.registry.store import KINDS
 
     if value not in KINDS:
@@ -571,7 +587,9 @@ def kind(
         except ValueError as e:
             raise _fail(str(e)) from e
         reg.set_character_kind(target.id, value)
+        affected = _character_episodes(Workspace(workspace), reg, target.id, target.actor_id)
     typer.echo(f"character {target.id}: kind {value}")
+    _stale(Workspace(workspace), affected)
 
 
 @registry_app.command("actor")

@@ -350,3 +350,46 @@ def test_registry_show_omits_gender_by_when_unset(tmp_path):
     assert r.exit_code == 0, r.output
     assert "gender m, kind character" in r.output
     assert "(None)" not in r.output
+
+
+# -- Task 13: gender and kind invalidation ---------------------------------------------------
+
+
+def _stages_ws(tmp_path):
+    """`_lock_ws` with a tts record beside each episode's characters record."""
+    from fukikae.job import load_manifest
+
+    ws, _ = _lock_ws(tmp_path)
+    now = datetime.now(UTC)
+    eps = {}
+    for eid in ("S01E01", "S01E02", "S01E03"):
+        from fukikae.workspace import Episode
+
+        ep = Episode(source=tmp_path / eid, id=eid, work=ws.work_dir(eid), workspace_root=ws.root)
+        rec = StageRecord(key="k", status="done", started=now)
+        save_manifest(ep, Manifest(stages={"characters": rec, "tts": rec}))
+        eps[eid] = ep
+
+    def stale(stage: str) -> set[str]:
+        return {e for e, ep in eps.items() if stage not in load_manifest(ep).stages}
+
+    return ws, stale
+
+
+def test_registry_gender_marks_only_tts_stale_for_the_characters_episodes(tmp_path):
+    ws, stale = _stages_ws(tmp_path)
+    r = runner.invoke(app, ["registry", "gender", str(ws.root), "1", "m"])
+    assert r.exit_code == 0, r.output
+    assert stale("tts") == {"S01E01", "S01E02"} and stale("characters") == set()
+    assert "stale (tts will rerun on the next `fukikae run`): S01E01, S01E02" in r.output
+    r = runner.invoke(app, ["registry", "gender", str(ws.root), "2", "--clear"])
+    assert r.exit_code == 0, r.output
+    assert stale("tts") == {"S01E01", "S01E02", "S01E03"} and stale("characters") == set()
+
+
+def test_registry_kind_marks_characters_stale_for_the_characters_episodes(tmp_path):
+    ws, stale = _stages_ws(tmp_path)
+    r = runner.invoke(app, ["registry", "kind", str(ws.root), "2", "ignored"])
+    assert r.exit_code == 0, r.output
+    assert stale("characters") == {"S01E03"} and stale("tts") == set()
+    assert "stale (characters will rerun on the next `fukikae run`): S01E03" in r.output

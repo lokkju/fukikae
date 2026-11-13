@@ -514,3 +514,44 @@ def test_the_overlap_and_lock_lookups_move_the_cue_back_by_the_offset():
     (plain,) = _by_name([late], turns, clusters, name_map=nm)
     assert (moved.character_id, plain.character_id) == (2, 9)
     assert (moved.start, moved.end) == (late.start, late.end)  # the cue keeps its own times
+
+
+# ---- Task 13: ignored characters ----
+
+
+def test_ignored_cues_are_skipped_on_the_asr_path():
+    seg = Segment(
+        start=0.0, end=4.0, text="あい",
+        words=[Word(start=0.1, end=0.5, text="あ"), Word(start=2.1, end=2.5, text="い")],
+    )  # fmt: skip
+    turns = [Turn(start=0.0, end=1.0, speaker="S0"), Turn(start=2.0, end=3.0, speaker="S1")]
+    asg = _assignments(turns, [_cluster("S0", 3), _cluster("S1", 5, status="ignored")])
+    walla_free, walla = build_asr_cues(_transcript([seg]), asg, None, {}, "en", 1.25)
+    assert walla_free.skip is None and walla_free.character_id == 3
+    # never translated or rendered, and never an extra (no extras clone)
+    assert walla.skip == "ignored" and walla.text is None
+    assert walla.character_id == 5 and walla.extra is None
+
+
+def test_ignored_cues_are_skipped_on_the_subtitle_path():
+    turns = [Turn(start=0.0, end=1.0, speaker="S0"), Turn(start=1.0, end=2.0, speaker="S1")]
+    cues = [Cue(0.0, 1.0, "Hello."), Cue(1.0, 2.0, "Rhubarb."), Cue(1.0, 2.0, "♪ la ♪")]
+    got = _subs(cues, turns, [_cluster("S0", 3), _cluster("S1", 5, status="ignored")])
+    hello, rhubarb, song = got
+    assert hello.skip is None
+    assert rhubarb.skip == "ignored" and rhubarb.text is None and rhubarb.extra is None
+    assert song.skip == "song"  # a song keeps its own reason (the mix protects it)
+
+
+def test_a_name_naming_an_ignored_character_is_skipped():
+    turns = [Turn(start=0.0, end=2.0, speaker="S0")]
+    named = ClusterAssignment(
+        cluster="S1~tv", actor_id=5, character_id=5, score=None, clean_seconds=1.0,
+        status="ignored", name="tv", source="name",
+    )  # fmt: skip
+    asg = _assignments(turns, [_cluster("S0", 3), named])
+    got = assign_subtitle_speakers(
+        [Cue(0.0, 1.0, "News at ten.", name="TV")], turns, asg, None, None, {}, "en", 1.25,
+        ("sdh",), name_map=name_map(asg),
+    )  # fmt: skip
+    assert got[0].character_id == 5 and got[0].skip == "ignored"

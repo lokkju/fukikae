@@ -76,14 +76,16 @@ class ClusterAssignment(BaseModel):
     sub-cluster stands for, and ``source`` how it got its character: ``voice`` (pinned or
     matched acoustically), ``name`` (by its name key) or ``lock`` (kept by a locked actor
     against its name). Both are left out of the JSON at their defaults, so assignments written
-    without names are byte-identical to those written before the fields existed."""
+    without names are byte-identical to those written before the fields existed. ``status``
+    ``ignored`` is a cluster whose character the operator made ``kind = 'ignored'``: its cues
+    are skipped (``skip = "ignored"``), never translated or rendered."""
 
     cluster: str
     actor_id: int | None
     character_id: int | None
     score: float | None
     clean_seconds: float
-    status: Literal["matched", "new", "extra", "pinned", "review"]
+    status: Literal["matched", "new", "extra", "pinned", "review", "ignored"]
     name: str | None = None
     source: Literal["voice", "name", "lock"] = "voice"
 

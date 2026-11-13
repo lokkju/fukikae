@@ -1912,3 +1912,72 @@ def test_tts_options_without_a_tts_backend_warn_once_that_they_reach_the_clone_b
         with caplog.at_level("WARNING", logger="fukikae.stages.tts"):
             tts.stage_settings(quiet)
     assert not [r for r in caplog.records if TTS_BACKEND_WARNING in r.getMessage()]
+
+
+# ---- Task 13: operator gender and narrators in the line gate ----------------------------------
+
+
+def test_operator_gender_wins_over_the_estimate_in_the_line_gate(ep, monkeypatch):
+    """Natsu's turns are as much in one band as the other (no established gender): the
+    operator's m makes his high line c0104 the other band, so it renders without emotion
+    audio. Lucy's stored f agrees with her speech and changes nothing."""
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    _two_cards(ep)
+    _gendered(ep)
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.set_character_gender(1, "m")
+        reg.set_character_gender(2, "f")
+    gate = tts.gender_gate(ep.work, GATE_CUES, ep.workspace_root)
+    assert gate.voices["c0104"] == "m" and gate.voices["c0101"] == "f"
+    TtsStage(GATE_CFG).run(ep, GATE_CFG)
+    plan = {c.cue_id: c for c in _plan(ep).cues}
+    assert plan["c0104"].gender_gate and plan["c0104"].passed == {"emotion_dropped": "gender"}
+    assert any("cue c0104" in f and "against the character's m" in f for f in _run(ep).flags)
+
+
+def test_narrator_lines_are_not_flagged_by_the_line_gate(ep, monkeypatch):
+    """A narrator's other-band line still gets no emotion audio (the rule holds on every
+    path), but it is not flagged: narration often sits in another register by design."""
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"emotion_audio"}))
+    _two_cards(ep)
+    _gendered(ep)
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.set_character_kind(2, "narrator")
+    TtsStage(GATE_CFG).run(ep, GATE_CFG)
+    plan = {c.cue_id: c for c in _plan(ep).cues}
+    assert plan["c0101"].gender_gate and plan["c0101"].passed == {"emotion_dropped": "gender"}
+    gated = [f for f in _run(ep).flags if "rendered without emotion audio" in f]
+    assert len(gated) == 1 and gated[0].startswith("extra S5: cue c0105")
+
+
+def test_operator_state_enters_the_stage_key_only_when_set(ep):
+    _two_cards(ep)
+    before = TtsStage(CFG).config_key(CFG, ep)
+    assert "operator" not in before  # workspaces without operator state keep their key
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.set_character_kind(1, "character")  # the default changes nothing
+    assert TtsStage(CFG).config_key(CFG, ep) == before
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.set_character_gender(1, "m")
+    gendered = TtsStage(CFG).config_key(CFG, ep)
+    assert gendered["operator"] == {"1": {"gender": "m"}}
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.set_character_kind(2, "narrator")
+    assert TtsStage(CFG).config_key(CFG, ep)["operator"] == {
+        "1": {"gender": "m"}, "2": {"kind": "narrator"},
+    }  # fmt: skip
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.set_character_gender(1, "m", by="cast")  # not the operator's: no key
+        reg.set_character_kind(2, "character")
+    assert TtsStage(CFG).config_key(CFG, ep) == before
+
+
+def test_ignored_cues_are_never_rendered(ep):
+    _two_cards(ep)
+    cues = [c.model_copy(deep=True) for c in CUES]
+    cues[0] = cues[0].model_copy(update={"skip": "ignored", "text": None})
+    _write_cues(ep, cues)
+    TtsStage(CFG).run(ep, CFG)
+    plan = {c.cue_id: c for c in _plan(ep).cues}
+    assert plan[cues[0].id].skipped == "skip: ignored"
+    assert cues[0].text is None and CUES[0].text not in {t for t, _, _ in FakeSynth.CALLS}

@@ -13,6 +13,11 @@ The subtitle path (`assign_subtitle_speakers`) gives each subtitle cue the diari
 overlaps it most; when the names stage used the same track's Name column (D27), a cue whose own
 Name keys a speaker the characters stage decided by name (`name_map`) is spoken by that speaker
 instead, unless the names stage hid the line or the cue lies under a sub-cluster a lock kept.
+
+On both paths a cue spoken by a character the operator made ``kind = 'ignored'`` (its clusters'
+``status = "ignored"``, `ignored_speakers`) is ``skip = "ignored"``, with no ``text``: never
+translated or rendered, so the mix keeps the original vocals under it. A cue some other rule
+already skips keeps its own reason (a song stays ``song``, which the mix protects).
 """
 
 from __future__ import annotations
@@ -127,6 +132,16 @@ def _who(
     if a is None or a.status in ("extra", "review") or a.character_id is None:
         return None, turn.speaker
     return a.character_id, None
+
+
+def ignored_speakers(assignments: Assignments) -> frozenset[int]:
+    """The characters whose clusters the characters stage marked ``ignored`` (the operator made
+    them ``kind = 'ignored'``)."""
+    return frozenset(
+        a.character_id
+        for a in assignments.clusters
+        if a.status == "ignored" and a.character_id is not None
+    )
 
 
 # A run of words for one speaker: ((character_id, extra), [(segment index, word), ...]).
@@ -254,6 +269,7 @@ def build_asr_cues(
 
     events = [e for e in (tags.events if tags else []) if e.label == "singing"]
     emotions = tags.emotions if tags else []
+    ignored = ignored_speakers(assignments)
     cues: list[DubCue] = []
     for (character_id, extra), pairs in groups:
         ws = [w for _, w in pairs]
@@ -281,7 +297,11 @@ def build_asr_cues(
                     emotion=None if emotion is None else emotion.label,
                     emotion_confidence=None if emotion is None else emotion.confidence,
                 ),
-                skip="song" if any(e.start <= mid <= e.end for e in events) else None,
+                skip="song"
+                if any(e.start <= mid <= e.end for e in events)
+                else "ignored"
+                if character_id in ignored
+                else None,
             )
         )
     return cues
@@ -430,6 +450,7 @@ def assign_subtitle_speakers(
     words = [w for seg in transcript.segments for w in (seg.words or [])] if transcript else []
     singing = [e for e in (tags.events if tags else []) if e.label == "singing"]
     locked_parents = {_parent(a.cluster) for a in assignments.clusters if a.source == "lock"}
+    ignored = ignored_speakers(assignments)
     out: list[DubCue] = []
     for cue in merge_layers(cues):
         heard = replace(cue, start=cue.start - offset_s, end=cue.end - offset_s)
@@ -455,6 +476,8 @@ def assign_subtitle_speakers(
             skip = "song"
         if skip is None and (not text or cue.end <= cue.start):
             skip = "empty"  # nothing to say, or no slot to say it in
+        if skip is None and character_id in ignored:
+            skip = "ignored"  # the operator's: never translated or rendered
         emotion = _emotion(tags, cue.start, cue.end)
         out.append(
             DubCue(

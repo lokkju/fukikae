@@ -390,6 +390,27 @@ def _before_stock(before: Path, store: CardStore) -> set[str]:
     return out
 
 
+def _operator_genders(root: Path, scratch: Path) -> dict[int, Any]:
+    """`cards.auto.operator_genders` over a copy of the workspace's registry made under
+    ``scratch`` (the registry opens read-write, so the workspace's own is never opened)."""
+    import shutil
+    import tempfile
+
+    from fukikae.cards.auto import operator_genders
+    from fukikae.registry.store import Registry
+    from fukikae.workspace import Workspace
+
+    path = Workspace(root).registry_path
+    if not path.exists():
+        return {}
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=scratch) as tmp:
+        for f in path.parent.glob(path.name + "*"):
+            shutil.copy2(f, Path(tmp) / f.name)
+        with Registry(Path(tmp) / path.name) as reg:
+            return dict(operator_genders(reg))
+
+
 def _gate_owner(root: Path, scratch: Path) -> Callable[[str], int | None]:
     """`cards.auto.key_owner` over a copy of the workspace's registry made under ``scratch``
     on first use (the registry opens read-write, so the workspace's own is never opened)."""
@@ -529,7 +550,10 @@ def measure(
                 cards[cid] = None
         return cards[cid]
 
-    gate = tts.gender_gate(work, cues, cache)
+    # the operator's genders as the tts stage reads them, from a scratch copy of the registry
+    gate = tts.gender_gate(
+        work, cues, cache, operator=_operator_genders(root, pitch.cache_dir(cache) / "registry")
+    )
 
     # -- per cue ---------------------------------------------------------------------------
     renders: dict[str, Path] = {}

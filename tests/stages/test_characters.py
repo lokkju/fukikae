@@ -1343,3 +1343,76 @@ def test_a_split_renamed_locked_sub_cluster_stays_on_rerun(tmp_path):
     assert (got.actor_id, got.character_id, got.source) == (new_aid, new_cid, "lock")
     CharactersStage().run(ep, NAMES_CFG)  # and the next run again
     assert by_cluster(ep)["SPEAKER_08~happy"].character_id == new_cid
+
+
+# -- Task 13: ignored characters -----------------------------------------------------------------
+
+
+def _two_speakers(tmp_path):
+    ep = make_ep(tmp_path)
+    write_diarize(
+        ep,
+        {"S0": ([unit([1, 0, 0])], 40.0), "S1": ([unit([0, 1, 0])], 30.0)},
+        [(0, 20, "S0"), (20, 40, "S1")],
+    )
+    CharactersStage().run(ep, CFG)
+    return ep
+
+
+def test_ignored_character_clusters_get_status_ignored(tmp_path):
+    ep = _two_speakers(tmp_path)
+    a = {c.cluster: c for c in assignments(ep).clusters}
+    walla = a["S1"].character_id
+    assert walla is not None
+    with registry(ep) as reg:
+        reg.set_character_kind(walla, "ignored")
+    CharactersStage().run(ep, CFG)
+    got = {c.cluster: c for c in assignments(ep).clusters}
+    assert got["S1"].status == "ignored" and got["S1"].character_id == walla
+    assert got["S1"].actor_id == a["S1"].actor_id  # still that speaker: matching is unchanged
+    assert got["S0"].status == "pinned"
+    aid = got["S1"].actor_id
+    assert aid is not None
+    with registry(ep) as reg:  # its exemplars stay, so later episodes still recognise it
+        assert reg.exemplar_count(aid) == 1
+    CharactersStage().run(ep, CFG)  # stable on rerun (the pin carries the character)
+    assert {c.cluster: c.status for c in assignments(ep).clusters}["S1"] == "ignored"
+    with registry(ep) as reg:  # the operator changes their mind
+        reg.set_character_kind(walla, "character")
+    CharactersStage().run(ep, CFG)
+    back = {c.cluster: c for c in assignments(ep).clusters}["S1"]
+    assert back.status == "pinned" and back.character_id == walla
+
+
+def test_assignments_without_ignored_characters_are_byte_identical(tmp_path):
+    ep = _two_speakers(tmp_path)
+    CharactersStage().run(ep, CFG)
+    path = ep.work / "05-characters" / "assignments.json"
+    before = path.read_bytes()
+    with registry(ep) as reg:
+        cid = assignments(ep).clusters[0].character_id
+        assert cid is not None
+        reg.set_character_kind(cid, "narrator")
+        reg.set_character_gender(cid, "f")
+    CharactersStage().run(ep, CFG)
+    assert path.read_bytes() == before
+    assert b"ignored" not in before
+
+
+def test_mark_ignored_sets_and_clears_the_status():
+    """The one rule the characters stage and `registry resolve` both apply."""
+    from fukikae.models import ClusterAssignment
+    from fukikae.stages.characters import mark_ignored
+
+    c = [
+        ClusterAssignment(cluster="S0", actor_id=1, character_id=1, score=None,
+                          clean_seconds=1.0, status="matched"),
+        ClusterAssignment(cluster="S1", actor_id=2, character_id=2, score=None,
+                          clean_seconds=1.0, status="new"),
+        ClusterAssignment(cluster="S2", actor_id=None, character_id=None, score=None,
+                          clean_seconds=1.0, status="extra"),
+    ]  # fmt: skip
+    got = mark_ignored(c, {2})
+    assert [x.status for x in got] == ["matched", "ignored", "extra"]
+    assert mark_ignored(got, set())[1].status == "matched"  # no longer ignored
+    assert mark_ignored(c, set()) == c
