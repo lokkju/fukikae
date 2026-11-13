@@ -126,15 +126,23 @@ SHIPPED = ("default", "anime", "live-action")
 @pytest.mark.parametrize("name", SHIPPED)
 def test_every_profile_table_names_its_backend(name):
     for kind, table in cfgmod.load_profile(name).items():
-        # [registry], [timefit], [mix] and [names] hold plain settings (no model behind
-        # them); [resolve] selects its matcher by `matcher`, as [characters] does (R17);
+        # [registry], [timefit], [mix], [names] and [review] hold plain settings (no model
+        # behind them); [resolve] selects its matcher by `matcher`, as [characters] does (R17);
         # [tts] chooses no card by `backend` since D41: `clone_backend` makes every voice.
-        if kind in ("registry", "timefit", "mix", "names"):
+        if kind in ("registry", "timefit", "mix", "names", "review"):
             continue
         key = {"characters": "matcher", "resolve": "matcher", "tts": "clone_backend"}.get(
             kind, "backend"
         )
         assert isinstance(table, dict) and table.get(key), f"{name}: [{kind}] lacks {key}"
+
+
+@pytest.mark.parametrize("name", SHIPPED)
+def test_no_shipped_profile_turns_a_review_gate_on(tmp_path, name):
+    # open decision 2: both gates are opt-in, off in every profile
+    (tmp_path / "fukikae.toml").write_text(f'profile = "{name}"\n')
+    r = cfgmod.load_config(tmp_path, user_config=None).review
+    assert (r.identity, r.voices) == (False, False)
 
 
 @pytest.mark.parametrize("name", SHIPPED)

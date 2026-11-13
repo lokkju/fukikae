@@ -15,7 +15,7 @@ from fukikae.studio.cli import studio_app
 
 if TYPE_CHECKING:
     from fukikae.config import Config
-    from fukikae.job import Stage
+    from fukikae.job import ReviewRequired, Stage
 
 # torch must number cards the way nvidia-smi and NVML do (gpu_device is an NVML index).
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
@@ -235,6 +235,19 @@ def pipeline_stages(cfg: "Config") -> "list[Stage]":
 
 # The stages `fukikae run` with several episodes overlaps with the next episode's GPU stages.
 CPU_TAIL = ("timefit", "mix")
+# `fukikae run`'s exit code when a `[review]` gate stopped an episode (and nothing failed).
+EXIT_REVIEW = 3
+
+
+def _review_stop(workspace: Path, e: "ReviewRequired") -> None:
+    """Print why a `[review]` gate stopped the episode and the command that fixes it."""
+    from fukikae.studio.gate import GATE_STAGES
+
+    key = GATE_STAGES.get(e.stage, e.stage)
+    typer.echo(f"{e.episode}: stopped before {e.stage} by [review] {key}:", err=True)
+    for reason in e.reasons:
+        typer.echo(f"  {reason}", err=True)
+    typer.echo(f"  review them in the studio: fukikae studio {workspace}", err=True)
 
 
 @app.command()
@@ -249,9 +262,12 @@ def run(
     to_stage: str | None = typer.Option(None, "--to", help="Stop after this stage."),
     no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
 ) -> None:
-    """Run the pipeline stages for one episode, or several in order."""
+    """Run the pipeline stages for one episode, or several in order. With `[review] identity`
+    or `voices` on, an episode whose main characters need the studio stops before translate
+    or tts (exit code 3, naming them and `fukikae studio <ws>`); the other episodes go on."""
     from fukikae import job, progress, runctx
     from fukikae.errors import user_errors
+    from fukikae.studio.gate import gates_for
     from fukikae.workspace import Workspace
 
     runctx.vram_timeout_s = 0 if no_wait else None
@@ -259,16 +275,18 @@ def run(
     ws = Workspace(workspace)
     if len(episodes) > 1:
         try:
+            cfg = ws.config
             eps = [ws.find_episode(e) for e in episodes]
             with progress.run(ws.root, [ep.id for ep in eps]):
                 results = job.run_episodes(
-                    eps, ws.config, pipeline_stages(ws.config), tail=CPU_TAIL,
-                    from_stage=from_stage, to_stage=to_stage,
+                    eps, cfg, pipeline_stages(cfg), tail=CPU_TAIL,
+                    from_stage=from_stage, to_stage=to_stage, gates=gates_for(cfg),
                 )  # fmt: skip
         except user_errors() as e:
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(1) from e
         failed = False
+        stopped = False
         bug: BaseException | None = None
         for ep in eps:
             res = results.get(ep.id)
@@ -278,7 +296,10 @@ def run(
             if res.ran or res.error is None:
                 ran = ", ".join(res.ran) if res.ran else "nothing (up to date)"
                 typer.echo(f"{ep.id}: ran {ran}")
-            if res.error is not None:
+            if isinstance(res.error, job.ReviewRequired):
+                stopped = True
+                _review_stop(ws.root, res.error)
+            elif res.error is not None:
                 failed = True
                 if isinstance(res.error, user_errors()):
                     typer.echo(f"error: {ep.id}: {res.error}", err=True)
@@ -289,17 +310,28 @@ def run(
             raise bug
         if failed:
             raise typer.Exit(1)
+        if stopped:
+            raise typer.Exit(EXIT_REVIEW)
         return
     try:
+        cfg = ws.config
         ep = ws.find_episode(episodes[0])
-        stages = pipeline_stages(ws.config)
+        stages = pipeline_stages(cfg)
         with progress.run(ws.root, [ep.id]):
             try:
-                ran = job.run_stages(ep, ws.config, stages, from_stage, to_stage)
+                ran = job.run_stages(ep, cfg, stages, from_stage, to_stage, gates=gates_for(cfg))
+            except job.ReviewRequired:
+                progress.episode(ep.id, "stopped for review")
+                raise
             except BaseException:
                 progress.episode(ep.id, "failed")
                 raise
             progress.episode(ep.id, "done")
+    except job.ReviewRequired as e:
+        if e.ran:
+            typer.echo(f"{ep.id}: ran {', '.join(e.ran)}")
+        _review_stop(ws.root, e)
+        raise typer.Exit(EXIT_REVIEW) from e
     except user_errors() as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e

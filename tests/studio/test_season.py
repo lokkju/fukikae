@@ -555,3 +555,36 @@ def test_queue_ranks_an_operator_gender_contradiction_first():
 
     entries = [entry(1, 900.0, ["thin"]), entry(2, 5.0, ["gender"]), entry(3, 50.0, ["stale"])]
     assert order_queue(entries) == [2, 1, 3]
+
+
+def test_run_gates_read_the_same_speech_and_splits_as_the_index(ws):
+    """The `[review]` gates (Task 21) on this workspace's real pitch: main characters by
+    their seconds, the bimodal S2 named as a note and never a reason to stop."""
+    from fukikae.registry.invalidate import episode
+    from fukikae.studio import gate
+
+    (ws.root / "fukikae.toml").write_text(
+        'source_language = "ja"\ntarget_language = "en"\n[review]\nidentity = true\n'
+        "voices = true\nmin_seconds = 10\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(ws.root, user_config=None)
+    ep = episode(ws, E1)
+    assert gate.episode_seconds(ep) == pytest.approx({1: 16.0, 2: 8.0, 3: 16.0})
+    with Registry(ws.registry_path) as reg:
+        assert gate.main_characters(ep, reg, cfg) == [1, 3]  # Natsu's 8 s hold nothing
+        got = gate.needs_identity(ep, cfg, reg)
+    assert got[:2] == [
+        "character 1 (Lucy): never reviewed",
+        "character 3 (unnamed): never reviewed",
+    ]
+    assert len(got) == 3 and got[2].startswith(
+        f"note: {E1} S2 (character 3): 8.0 s low, 8.0 s high"
+    )
+    with Registry(ws.registry_path) as reg:
+        reg.mark_reviewed(1)
+        reg.mark_reviewed(3)
+        assert gate.needs_identity(ep, cfg, reg) == []
+        assert [r.split(":")[0] for r in gate.needs_voices(ep, cfg, reg)] == [
+            "character 1 (Lucy)", "character 3 (unnamed)",
+        ]  # fmt: skip

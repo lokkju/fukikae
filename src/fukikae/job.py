@@ -5,7 +5,7 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -32,6 +32,26 @@ class Stage(Protocol):
     def outputs(self, ep: Episode) -> list[Path]: ...
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]: ...
     def run(self, ep: Episode, cfg: Config) -> None: ...
+
+
+# A gate (`fukikae.studio.gate`): the reasons the episode must stop before the stage it is
+# registered for, or none.
+Gate = Callable[[Episode, Config], list[str]]
+
+
+class ReviewRequired(Exception):  # noqa: N818 - the plan's name; a stop, not an error
+    """An episode stopped before ``stage`` by a `[review]` gate, for ``reasons`` (Task 21):
+    not a failure of the stage, which never started. ``ran`` names the stages this call ran
+    before it."""
+
+    def __init__(
+        self, episode: str, stage: str, reasons: Sequence[str], ran: Sequence[str] = ()
+    ) -> None:
+        self.episode = episode
+        self.stage = stage
+        self.reasons = list(reasons)
+        self.ran = list(ran)
+        super().__init__(f"{episode}: stopped before {stage}: {'; '.join(self.reasons)}")
 
 
 def _prepare(stage: Stage, ep: Episode, cfg: Config) -> None:
@@ -223,7 +243,12 @@ def run_stages(
     stages: Sequence[Stage],
     from_stage: str | None = None,
     to_stage: str | None = None,
+    gates: Mapping[str, Gate] | None = None,
 ) -> list[str]:
+    """Run ``stages`` in order, each only when its record is missing, failed or keyed
+    otherwise, an output is missing, or ``from_stage`` forces it. A stage named in ``gates``
+    that is about to run asks its gate first, and a non-empty answer raises `ReviewRequired`
+    before the stage starts (an up-to-date stage runs nothing, so its gate is not asked)."""
     names = [s.name for s in stages]
     for label, value in (("from_stage", from_stage), ("to_stage", to_stage)):
         if value is not None and value not in names:
@@ -236,7 +261,7 @@ def run_stages(
     # refused while a run is in progress (only when the workspace has a studio directory).
     with run_lock(ep.workspace_root):
         refuse_unfinished_decisions(ep.workspace_root, names[:stop])
-        return _run_stages(ep, cfg, stages, start, stop, from_stage)
+        return _run_stages(ep, cfg, stages, start, stop, from_stage, gates or {})
 
 
 def _run_stages(
@@ -246,6 +271,7 @@ def _run_stages(
     start: int,
     stop: int,
     from_stage: str | None,
+    gates: Mapping[str, Gate],
 ) -> list[str]:
     cache = _HashCache(ep)
     ran: list[str] = []
@@ -265,6 +291,11 @@ def _run_stages(
             )
             if not stale:
                 continue
+            gate = gates.get(stage.name)
+            if gate is not None:
+                reasons = gate(ep, cfg)
+                if reasons:
+                    raise ReviewRequired(ep.id, stage.name, reasons, ran)
             started = datetime.now(UTC)
             try:
                 with progress.stage(ep.id, stage.name):
@@ -311,6 +342,7 @@ def run_episodes(
     tail: Sequence[str],
     from_stage: str | None = None,
     to_stage: str | None = None,
+    gates: Mapping[str, Gate] | None = None,
 ) -> dict[str, EpisodeResult]:
     """Run ``stages`` for several episodes, in order, overlapping each episode's CPU ``tail``
     (the trailing stages named there: timefit and mix) with the next episode's head (D26). One
@@ -319,7 +351,9 @@ def run_episodes(
     its episode's files, and every stage writes only its own episode's directory, so the
     outputs and manifests are those of running the episodes one after another. After a
     failure no further head starts; a tail already started finishes. ``from_stage`` and
-    ``to_stage`` apply to every episode as in ``run_stages``."""
+    ``to_stage`` apply to every episode as in ``run_stages``, and so do ``gates``: an episode
+    a gate stops (`ReviewRequired`, its result's error) goes no further, and the other
+    episodes go on."""
     names = [s.name for s in stages]
     for label, value in (("from_stage", from_stage), ("to_stage", to_stage)):
         if value is not None and value not in names:
@@ -349,8 +383,12 @@ def run_episodes(
     def run_tail(ep: Episode) -> None:
         try:
             progress.episode(ep.id, "tail")
-            results[ep.id].ran += run_stages(ep, cfg, rest, tail_from)
+            results[ep.id].ran += run_stages(ep, cfg, rest, tail_from, gates=gates)
             progress.episode(ep.id, "done")
+        except ReviewRequired as e:
+            results[ep.id].ran += e.ran
+            results[ep.id].error = e
+            progress.episode(ep.id, "stopped for review")
         except BaseException as e:
             results[ep.id].error = e
             failed.set()
@@ -365,7 +403,13 @@ def run_episodes(
             results[ep.id] = EpisodeResult()
             try:
                 progress.episode(ep.id, "head")
-                results[ep.id].ran += run_stages(ep, cfg, head, head_from) if head else []
+                if head:
+                    results[ep.id].ran += run_stages(ep, cfg, head, head_from, gates=gates)
+            except ReviewRequired as e:
+                results[ep.id].ran += e.ran
+                results[ep.id].error = e
+                progress.episode(ep.id, "stopped for review")
+                continue
             except BaseException as e:
                 results[ep.id].error = e
                 failed.set()

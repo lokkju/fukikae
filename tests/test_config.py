@@ -280,3 +280,43 @@ def test_profiles_set_no_tts_backend():
         tts = load_profile(name).get("tts", {})
         assert "backend" not in tts, name
         assert tts.get("clone_backend") == "indextts2", name
+
+
+# --- [review] (Task 21) ---------------------------------------------------------------------
+
+
+def test_review_defaults_are_off(tmp_path):
+    r = load_config(tmp_path, user_config=None).review
+    assert (r.identity, r.voices, r.min_seconds) == (False, False, 20.0)
+
+
+def test_review_table_needs_no_backend_and_merges_over_the_profile(tmp_path, monkeypatch):
+    from fukikae import config as cfgmod
+
+    real = cfgmod.load_profile
+
+    def profile(name):
+        return {**real(name), "review": {"voices": True, "min_seconds": 30}}
+
+    monkeypatch.setattr(cfgmod, "load_profile", profile)
+    (tmp_path / "fukikae.toml").write_text("[review]\nidentity = true\n")
+    r = load_config(tmp_path, user_config=None).review
+    assert (r.identity, r.voices, r.min_seconds) == (True, True, 30.0)
+
+
+def test_old_required_key_is_refused_with_a_pointer(tmp_path):
+    (tmp_path / "fukikae.toml").write_text("[review]\nrequired = true\n")
+    with pytest.raises(ConfigError) as e:
+        load_config(tmp_path, user_config=None)
+    assert "required" in str(e.value)
+    assert "identity" in str(e.value) and "voices" in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["identity = 1", 'voices = "yes"', "min_seconds = -1", "min_seconds = true", "speed = 2"],
+)
+def test_review_table_rejects_bad_values(tmp_path, body):
+    (tmp_path / "fukikae.toml").write_text(f"[review]\n{body}\n")
+    with pytest.raises(ConfigError, match=r"\[review\]"):
+        load_config(tmp_path, user_config=None)

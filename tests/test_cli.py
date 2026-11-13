@@ -231,8 +231,9 @@ def test_run_takes_several_episodes_and_overlaps_their_cpu_tails(tmp_path, monke
         (tmp_path / f"S01E0{n}.mkv").write_bytes(b"x")
     seen = {}
 
-    def fake(eps, _cfg, stages, *, tail, from_stage, to_stage):  # noqa: ARG001
-        seen.update(ids=[e.id for e in eps], tail=tuple(tail), names=[s.name for s in stages])
+    def fake(eps, _cfg, stages, *, tail, from_stage, to_stage, gates):  # noqa: ARG001
+        seen.update(ids=[e.id for e in eps], tail=tuple(tail), names=[s.name for s in stages],
+                    gates=gates)  # fmt: skip
         return {
             "S01E01": EpisodeResult(ran=["extract"]),
             "S01E02": EpisodeResult(error=ValueError("boom")),
@@ -243,6 +244,7 @@ def test_run_takes_several_episodes_and_overlaps_their_cpu_tails(tmp_path, monke
         app, ["run", str(ws), str(tmp_path / "S01E01.mkv"), str(tmp_path / "S01E02.mkv")]
     )
     assert seen["ids"] == ["S01E01", "S01E02"] and seen["tail"] == ("timefit", "mix")
+    assert seen["gates"] == {}  # [review] off: no gate
     assert "S01E01: ran extract" in r.output
     assert "error: S01E02: boom" in r.output and r.exit_code == 1
 
@@ -258,7 +260,7 @@ def test_run_reports_every_episode_before_raising_a_bug(tmp_path, monkeypatch):
     for n in (1, 2, 3):
         (tmp_path / f"S01E0{n}.mkv").write_bytes(b"x")
 
-    def fake(eps, _cfg, stages, *, tail, from_stage, to_stage):  # noqa: ARG001
+    def fake(eps, _cfg, stages, *, tail, from_stage, to_stage, gates):  # noqa: ARG001
         return {
             "S01E01": EpisodeResult(error=KeyError("a bug")),
             "S01E02": EpisodeResult(ran=["extract"]),

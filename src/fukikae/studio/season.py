@@ -443,27 +443,52 @@ def _gender(c: Character, tracks: dict[str, F0Track]) -> GenderInfo:
     )  # fmt: skip
 
 
-def _splits(
-    ws: Workspace, ep: _Episode, clusters: dict[str, list[Turn]], track: F0Track | None
-) -> tuple[list[Suggestion], list[Flag]]:
-    """A split suggestion and a ``bimodal`` flag for each of the character's clusters in the
-    episode whose turns are `pitch.bimodal`, each part with its seconds and longest turns."""
-    from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW, bimodal, turn_classes
+def register_turns(
+    track: F0Track, clusters: dict[str, list[Turn]]
+) -> dict[str, dict[str, list[Turn]]]:
+    """Cluster -> register class (``m``, ``u``, ``f``) -> its turns, ``track`` being the
+    track of every turn in ``clusters`` in time order (`_turn_track`)."""
+    from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW, turn_classes
 
-    if track is None:
-        return [], []
     classes = turn_classes(track, (MALE_BELOW, FEMALE_ABOVE))
     spans = [(cl, t) for cl, ts in clusters.items() for t in ts]
     spans.sort(key=lambda x: (x[1].start, x[1].end))  # the track's span order
     by: dict[str, dict[str, list[Turn]]] = defaultdict(lambda: defaultdict(list))
     for (cl, t), est in zip(spans, classes, strict=True):
         by[cl][est.gender].append(t)
-    sugg: list[Suggestion] = []
-    flags: list[Flag] = []
+    return by
+
+
+def bimodal_clusters(
+    track: F0Track,
+    clusters: dict[str, list[Turn]],
+    by: dict[str, dict[str, list[Turn]]] | None = None,
+) -> dict[str, dict[str, float]]:
+    """Cluster -> seconds per register class, for the clusters whose turns are
+    `pitch.bimodal` (a split suggestion), in cluster order. Shared with the run gates
+    (`fukikae.studio.gate`), which name them without cutting samples."""
+    from fukikae.pitch import bimodal
+
+    by = register_turns(track, clusters) if by is None else by
+    out: dict[str, dict[str, float]] = {}
     for cl in sorted(by):
         secs = {g: sum(t.end - t.start for t in by[cl].get(g, [])) for g in ("m", "u", "f")}
-        if not bimodal(secs):
-            continue
+        if bimodal(secs):
+            out[cl] = secs
+    return out
+
+
+def _splits(
+    ws: Workspace, ep: _Episode, clusters: dict[str, list[Turn]], track: F0Track | None
+) -> tuple[list[Suggestion], list[Flag]]:
+    """A split suggestion and a ``bimodal`` flag for each of the character's clusters in the
+    episode whose turns are `pitch.bimodal`, each part with its seconds and longest turns."""
+    if track is None:
+        return [], []
+    by = register_turns(track, clusters)
+    sugg: list[Suggestion] = []
+    flags: list[Flag] = []
+    for cl, secs in bimodal_clusters(track, clusters, by).items():
         parts: dict[str, Any] = {}
         for g in ("f", "m"):
             longest = sorted(by[cl][g], key=lambda t: (-(t.end - t.start), t.start))
@@ -884,6 +909,7 @@ def load_or_build(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Seaso
 __all__ = [
     "MERGE_SUGGEST_COS",
     "SEASON_VERSION",
+    "bimodal_clusters",
     "build_season",
     "config_digest",
     "cut_sample",
@@ -893,6 +919,7 @@ __all__ = [
     "order_queue",
     "prune_clips",
     "referenced_clips",
+    "register_turns",
     "registry_digest",
     "sample_name",
     "season_path",
