@@ -297,10 +297,13 @@ class Candidate(_Strict):
     ``song_like``, and ``scene``, False when a better-ranked eligible candidate of the episode
     starts within ``SCENE_GAP_S`` (the automatic fill takes one clip per scene first; it
     refuses nothing, so it is never a reason). ``reasons`` names each failed check (``repeat``:
-    a turn passing alone whose audio a joined candidate already holds). ``gender`` is the
-    band of ``median``. ``clip`` is the file name under ``<ws>/studio/audio/``, cut when
-    first fetched. ``source`` is ``cue`` for a character with no turn anywhere: its own spoken
-    cues' source spans, what the cue-thin tier clones it from."""
+    a turn passing alone whose audio a joined candidate already holds; ``split``: the part of a
+    joined acoustic candidate left outside the name-confirmed turns it overlapped, judged only
+    as part of that whole; ``excluded`` on a cue span: a theme song or tagged singing).
+    ``gender`` is the band of ``median``. ``clip`` is the file name under
+    ``<ws>/studio/audio/``, cut when first fetched. ``source`` is ``cue`` for a character with
+    no turn anywhere: its own spoken cues' source spans, what the cue-thin tier clones it
+    from."""
 
     episode: str
     start: float
@@ -340,8 +343,16 @@ class DraftVersion(_Strict):
     other checks refused that the operator chose anyway (``overrides``), the digest of the
     language's card assignment when it was made (`fukikae.studio.apply.row_digest`: what an
     accept of it carries), its tier (`fukikae.studio.drafts.floor_meter`) and its auditions.
-    ``unlisted`` counts the card's references with no origin span (only a version 1 opened
-    from a card can have them; they are kept in its card, and listed nowhere else)."""
+    ``unlisted`` counts the card's references with no origin span: a version 1 opened from a
+    card keeps the card's, and each later version carries the previous version's after its
+    own unless the operator removes them; they are in its card, and listed nowhere else.
+    ``thin_origin`` is the pipeline thin card whose references are exactly this version's
+    (`fukikae.studio.apply.thin_origin`): the one selection exempt from the clean rule, at
+    draft time and at accept. Version 1 (opened from a card or the automatic proposal) is
+    checked at open by accept's own rules but never refused: ``acceptable`` says whether
+    accept would take it and ``accept_problems`` gives accept's refusal reasons
+    (`fukikae.studio.drafts.accept_problems`); later versions are refused at draft time, so
+    they are always acceptable when made."""
 
     n: int = Field(ge=1)
     backend: str
@@ -354,6 +365,9 @@ class DraftVersion(_Strict):
     digest: str | None = None
     tier: Tier
     unlisted: int = Field(default=0, ge=0)
+    thin_origin: str | None = None
+    acceptable: bool = True
+    accept_problems: list[str] = []
 
 
 class Draft(_Strict):

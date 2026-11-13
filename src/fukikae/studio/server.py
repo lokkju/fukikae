@@ -44,7 +44,9 @@ Voice drafts (`fukikae.studio.drafts`): a character's reference candidates, its 
 target language and the draft's versions, and the clone backends with their voice keys. These
 routes never take the decisions lock, so a long candidate read never holds up a decision; they
 take their own lock, one draft request at a time. A candidate list is cached per character
-until the index's inputs change, and is served a page at a time (at most `MAX_CANDIDATES`).
+until the files it reads change (`fukikae.studio.drafts.candidates_digest`, a stat digest
+computed outside that lock), and is served a page at a time (at most `MAX_CANDIDATES`).
+HEAD on a draft only reads: it never opens or saves one.
 Candidate and draft clips are cut only when first fetched, by the server itself
 (`fukikae.studio.season.cut_sample`), and only a clip the server has cut joins the audio it
 serves; listing cuts nothing.
@@ -77,6 +79,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from fukikae.artifacts import ArtifactVersionError
 from fukikae.media import MediaError
 from fukikae.registry.store import RegistrySchemaError
 from fukikae.studio.apply import (
@@ -98,6 +101,7 @@ from fukikae.studio.drafts import (
     add_version,
     backends,
     candidates,
+    candidates_digest,
     floor_meter,
     language_of,
     load_draft,
@@ -123,7 +127,6 @@ from fukikae.studio.season import (
     SourceScanner,
     cut_sample,
     cut_video,
-    inputs_digest,
     load_or_build,
     referenced_clips,
     referenced_videos,
@@ -149,6 +152,7 @@ MAX_OFFERED = 20000  # clip names offered for lazy cutting, oldest forgotten fir
 MAX_CUTS = 2  # video clips cut at once (each ffmpeg uses every core)
 CUT_WAIT_S = 20.0  # how long a /video request waits for its name's cut or a cut slot: 503 after
 VIDEO_FAILURE_TTL_S = 300.0  # a failed cut answers 404 without ffmpeg for this long
+MAX_CUT = 2000  # clip names the server has cut and serves, oldest forgotten first
 
 # (method, path, what it does): the API as the placeholder page lists it
 ROUTES: tuple[tuple[str, str, str], ...] = (
@@ -199,6 +203,7 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
 _SEGMENT = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 _CHARACTER = re.compile(r"/api/characters/([0-9]{1,9})")
 _CANDIDATES = re.compile(r"/api/characters/([0-9]{1,9})/candidates")
+_NUMBER = re.compile(r"[0-9]{1,10}")  # ASCII digits only (str.isdigit takes any script's)
 _LANG = r"([A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8}){0,3})"
 _RANGE = re.compile(r"bytes=([0-9]{0,18})-([0-9]{0,18})")
 _DRAFT = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG)
@@ -297,7 +302,7 @@ class StudioServer(ThreadingHTTPServer):
         self._drafts_lock = threading.RLock()
         self._candidates: dict[int, tuple[str, list[Candidate]]] = {}
         self._offered: OrderedDict[str, tuple[str, float, float]] = OrderedDict()
-        self._cut: set[str] = set()
+        self._cut: OrderedDict[str, None] = OrderedDict()
         self._clip_lock = threading.Lock()
         # video: one cut per name at a time (name -> [its lock, requests holding or waiting
         # on it], dropped when none is), at most MAX_CUTS cuts at once, a request waiting at
@@ -384,7 +389,7 @@ class StudioServer(ThreadingHTTPServer):
         candidate and draft clips the server itself has cut."""
         names = referenced_clips(self._current())
         with self._clip_lock:
-            return names | self._cut
+            return names | set(self._cut)
 
     def video_names(self) -> dict[str, tuple[str, float, float]]:
         """The video names ``/video`` may serve, each with its sample's episode and span:
@@ -448,11 +453,11 @@ class StudioServer(ThreadingHTTPServer):
     # -- drafts -------------------------------------------------------------------------------
 
     def candidates(self, character_id: int) -> list[Candidate]:
-        """The character's candidates (`drafts.candidates`), read again only when the index's
-        inputs changed since; under the drafts lock, never the decisions lock."""
+        """The character's candidates (`drafts.candidates`), read again only when the files
+        they read changed since (`drafts.candidates_digest`, taken before the lock); under the
+        drafts lock, never the decisions lock."""
+        digest = candidates_digest(self.ws)
         with self._drafts_lock:
-            digest = inputs_digest(self.ws, self.cfg, clips=self.clips,
-                                   sources=self._sources.get(self.cfg.source))  # fmt: skip
             got = self._candidates.get(character_id)
             if got is None or got[0] != digest:
                 got = (digest, candidates(self.ws, self.cfg, character_id))
@@ -489,7 +494,10 @@ class StudioServer(ThreadingHTTPServer):
             if cut.name != name:  # the vocals changed since the span was offered
                 return
         with self._clip_lock:
-            self._cut.add(name)
+            self._cut[name] = None
+            self._cut.move_to_end(name)
+            while len(self._cut) > MAX_CUT:
+                self._cut.popitem(last=False)
 
     def character(self, character_id: int) -> CharacterEntry | None:
         return next((c for c in self.season().characters if c.id == character_id), None)
@@ -819,7 +827,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         def number(key: str, default: int, lo: int, hi: int) -> int:
             raw = q.get(key, [str(default)])[-1]
-            if not raw.isdigit() or not lo <= int(raw) <= hi:
+            if not _NUMBER.fullmatch(raw) or not lo <= int(raw) <= hi:
                 raise _Reply(400, "bad-query", f"{key} must be a whole number {lo} to {hi}")
             return int(raw)
 
@@ -863,12 +871,23 @@ class _Handler(BaseHTTPRequestHandler):
                 save_draft(s.ws, draft)
         except DraftError as e:
             raise self._draft_refusal(e) from None
-        except ValueError as e:  # a draft file that isn't one
+        except (ValueError, OSError, ArtifactVersionError) as e:  # not a draft, or unreadable
             raise _Reply(409, "draft-unreadable", f"the saved draft can't be read: {_why(e)}"
                          ) from None  # fmt: skip
         return draft
 
     def _draft(self, cid: int, lang: str) -> None:
+        if self.command == "HEAD":  # read-only: never opens or saves a draft
+            try:
+                draft = load_draft(self.server.ws, cid, language_of(lang))
+            except DraftError as e:
+                raise self._draft_refusal(e) from None
+            except (ValueError, OSError, ArtifactVersionError) as e:
+                raise _Reply(409, "draft-unreadable", _why(e)) from None
+            if draft is None:
+                raise _Reply(404, "not-found", "no draft yet (GET opens one)")
+            self._json(200, {"draft": draft.model_dump(mode="json")})
+            return
         with self.server._drafts_lock:
             draft = self._load_or_open(cid, lang)
         self._json(200, self._draft_body(draft))
@@ -887,7 +906,14 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 offered = s.candidates(cid)
                 draft, version = add_version(
-                    s.ws, s.cfg, draft, req.references, req.backend, req.params, offered=offered
+                    s.ws,
+                    s.cfg,
+                    draft,
+                    req.references,
+                    req.backend,
+                    req.params,
+                    offered=offered,
+                    keep_unlisted=req.keep_unlisted,
                 )
             except DraftError as e:
                 raise self._draft_refusal(e) from None
@@ -1007,6 +1033,7 @@ class _VersionRequest(BaseModel):
     references: list[RefSpan] = Field(min_length=1, max_length=MAX_REFERENCES)
     backend: str = Field(min_length=1, max_length=64)
     params: dict[str, Any] = {}
+    keep_unlisted: bool = True  # carry the previous version's origin-less references
 
 
 class _Unsatisfiable(Exception):  # noqa: N818

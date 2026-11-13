@@ -6,8 +6,13 @@ first) and every turn they refuse, with each check's verdict (`fukikae.cards.sel
 and the A1 gates, measured as `fukikae.cards.auto.character_candidates` measures them: the
 operator's gender beats the estimate, and name-confirmed turns are gated by class only). A
 character with no turn anywhere is offered its own spoken cues' source spans, what the
-cue-thin tier clones it from. Nothing else is ever offered: D41, every voice is a clone of
-the character's own speech.
+cue-thin tier clones it from (theme songs and tagged singing ranked last, as
+`fukikae.cards.auto.cue_references` leaves them out). Nothing else is ever offered: D41, every
+voice is a clone of the character's own speech. An episode whose turns are out of date for
+the character (`fukikae.studio.apply.unready_episodes`: its names or characters stage stale,
+or older than an applied studio decision on the character, or its names newer than its
+assignments) offers nothing, and a reference in it is refused until its characters stage
+reruns.
 
 A draft (`Draft`, ``<ws>/studio/drafts/<character>.<language>.json``, owner-only) is one
 character's tuning session for one target language. `open_draft` makes version 1 from the
@@ -20,6 +25,14 @@ clone_card_spans`), with the backend's own voice keys as parameters, and records
 references no eligible candidate covers as ``overrides`` (the operator chose a gated turn),
 the digest of the language's card assignment (`fukikae.studio.apply.row_digest`, what an
 accept carries) and the tier.
+
+Every reference must be the character's own clean speech (`check_own_speech`), the rule
+accept applies (`fukikae.studio.apply._own_speech`): inside its own turns and overlapping no
+other speaker, whatever its seconds. The one exemption is a version whose references are
+exactly those of a thin card the pipeline itself built for the character
+(`fukikae.studio.apply.thin_origin`); the version and its card record that card as
+``thin_origin``. The tier (floor, short or thin, by seconds) is a separate property: a
+version thin by its seconds is held to the clean rule like any other.
 
 Drafts never write the registry. Draft cards go into the content-addressed card store,
 because auditions render them and an accept assigns one from there; putting a card assigns
@@ -65,9 +78,10 @@ if TYPE_CHECKING:
 CHECKS = ("length", "overlap", "excluded", "foreign", "no_text", "sparse")
 # How far a reference may run past the character's speech (an origin's float rounding).
 SPAN_SLACK_S = 0.01
-# The most references a version may name, and the shortest one.
+# The most references a version may name, the shortest one and the longest one.
 MAX_REFERENCES = 12
 MIN_REFERENCE_S = 0.2
+MAX_REFERENCE_S = 12.0
 # The [voice] keys a draft's parameters may set, when the backend lists them in voice_keys.
 VOICE_PARAMS = (
     "seed", "temperature", "top_p", "rate", "pitch_semitones", "emotion_strength",
@@ -177,7 +191,68 @@ def ready_episodes(ws: Workspace | Path) -> list[str]:
     ]
 
 
+def unready(ws: Workspace | Path, character_id: int, episodes: Iterable[str]) -> dict[str, str]:
+    """The episodes of ``episodes`` whose turns are out of date for the character, each with
+    why and the command that brings it back (`fukikae.studio.apply.unready_episodes`)."""
+    from fukikae.studio.apply import LogUnreadable, unready_episodes
+
+    w = _workspace(ws)
+    eps = list(episodes)
+    if not eps:
+        return {}
+    try:
+        with _registry(w) as reg:
+            return unready_episodes(w, reg, eps, character_id)
+    except LogUnreadable as e:
+        raise DraftError(str(e)) from None
+
+
+def speech_episodes(ws: Workspace | Path, character_id: int) -> list[str]:
+    """The ready episodes (`ready_episodes`) whose turns are current for the character
+    (`unready`): the episodes candidates and proposals read."""
+    w = _workspace(ws)
+    eps = ready_episodes(w)
+    stale = unready(w, character_id, eps)
+    return [e for e in eps if e not in stale]
+
+
 # -- candidates -----------------------------------------------------------------------------
+
+
+def _candidate_inputs(ws: Workspace) -> list[Path]:
+    """Every file `candidates` reads, or reads to decide which episodes it reads."""
+    from fukikae.studio.apply import decisions_log
+    from fukikae.studio.season import episode_ids
+    from fukikae.transcripts import transcript_path
+
+    reg = ws.registry_path
+    paths = [ws.root / "fukikae.toml", reg, reg.with_name(reg.name + "-wal"), decisions_log(ws)]
+    for e in episode_ids(ws):
+        work = ws.work_dir(e)
+        sep, names = work / "01-separate", work / "04c-names"
+        paths += [
+            work / "manifest.json", work / "05-characters" / "assignments.json",
+            transcript_path(work), work / "04b-tag" / "tags.json", sep / "vocals.wav",
+            sep / "background.wav", sep / "vocals_16k.wav", names / "names.json",
+            names / "turns.json", *sorted((work / "06-translate").glob("cues.*.json")),
+        ]  # fmt: skip
+    return paths
+
+
+def candidates_digest(ws: Workspace | Path) -> str:
+    """A cheap digest of what `candidates` reads (each file's size and modification time:
+    the registry and decisions log, the config, and per episode its manifest, assignments,
+    transcript, tags, stems, names and cues), for a cache to compare. Reads no file."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for path in _candidate_inputs(_workspace(ws)):
+        try:
+            st = path.stat()
+            h.update(f"{path}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
+        except OSError:
+            h.update(f"{path}\0-\n".encode())
+    return h.hexdigest()
 
 
 def _band(median: float | None) -> Gender | None:
@@ -194,18 +269,47 @@ def _overlaps(start: float, end: float, spans: Iterable[tuple[float, float]]) ->
     return any(a < end and start < b for a, b in spans)
 
 
+def _subtract(
+    start: float, end: float, cut: Sequence[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    """``start``-``end`` less every span of ``cut``, as the pieces left."""
+    pieces = [(start, end)]
+    for a, b in sorted(cut):
+        nxt: list[tuple[float, float]] = []
+        for x, y in pieces:
+            if b <= x or a >= y:
+                nxt.append((x, y))
+                continue
+            if a > x:
+                nxt.append((x, a))
+            if b < y:
+                nxt.append((b, y))
+        pieces = nxt
+    return pieces
+
+
 def _report_items(
-    rep: CandidateReport, skip: Sequence[tuple[float, float]] = ()
+    rep: CandidateReport, skip: Sequence[tuple[float, float]] = (), transcript: Any = None
 ) -> list[tuple[Any, tuple[str, ...], tuple[str, ...], bool, bool]]:
     """(pick, pre-gate reasons, gates, eligible, confirmed) for a report's candidates and
-    refused turns, leaving out any overlapping ``skip`` (turns another report covers)."""
+    refused turns. A pick overlapping ``skip`` (the name-confirmed turns another report
+    covers) is split: the pieces outside ``skip`` stay, refused with ``split`` (they were
+    judged only as part of the whole), so no unconfirmed turn is lost."""
+    from fukikae.cards.select import RefPick, turn_text
+
     out: list[tuple[Any, tuple[str, ...], tuple[str, ...], bool, bool]] = []
-    for v in rep.verdicts:
-        if not _overlaps(v.pick.start, v.pick.end, skip):
-            out.append((v.pick, (), tuple(v.gates), v.passed, rep.confirmed))
-    for r in rep.refused:
-        if not _overlaps(r.pick.start, r.pick.end, skip):
-            out.append((r.pick, tuple(r.reasons), tuple(r.gates), False, rep.confirmed))
+    rows = [(v.pick, (), tuple(v.gates), v.passed) for v in rep.verdicts]
+    rows += [(r.pick, tuple(r.reasons), tuple(r.gates), False) for r in rep.refused]
+    for pick, reasons, gates, passed in rows:
+        if not _overlaps(pick.start, pick.end, skip):
+            out.append((pick, reasons, gates, passed, rep.confirmed))
+            continue
+        for a, b in _subtract(pick.start, pick.end, skip):
+            if b - a < MIN_REFERENCE_S:
+                continue
+            text = turn_text(transcript, a, b) if transcript is not None else ""
+            piece = RefPick(round(a, 3), round(b, 3), text, pick.snr_db)
+            out.append((piece, ("split", *reasons), (), False, rep.confirmed))
     return out
 
 
@@ -218,15 +322,17 @@ def candidates(
     as a reference candidate: the eligible ones first, in rank order, then the refused ones
     by episode and time (see the module notes). In an episode whose subtitle names were used,
     the name-confirmed turns are judged as the confirmed tier judges them and the character's
-    other turns as the acoustic tier does. Reads, never writes: the clips are named, not
-    cut."""
+    other turns as the acoustic tier does; an acoustic candidate that overlaps a confirmed
+    turn is split around it (`_report_items`). Episodes whose turns are out of date for the
+    character are left out (`speech_episodes`). Assigns nothing and cuts no clip (the clips are
+    named, not cut); only the reference selection's own caches (pitch tracks) may fill."""
     from fukikae.cards.auto import character_candidates
     from fukikae.cards.select import rank_key
     from fukikae.studio.season import sample_name
 
     w = _workspace(ws)
     gender, narrator = _character_state(w, character_id)
-    episodes = ready_episodes(w)
+    episodes = speech_episodes(w, character_id)
     order = {e: i for i, e in enumerate(episodes)}
     loaded: dict[str, Any] = {}
     exclusions: dict[str, list[tuple[float, float]]] = {}
@@ -247,7 +353,9 @@ def candidates(
             if first[e].confirmed:
                 mine = first[e].turn_spans
         if e in acoustic:
-            items += [(e, *x) for x in _report_items(acoustic[e], mine)]
+            art = loaded.get(e)
+            tr = art.transcript if art is not None else None
+            items += [(e, *x) for x in _report_items(acoustic[e], mine, tr)]
     eligible = sorted(
         (x for x in items if x[4]), key=lambda x: (not x[5], rank_key(x[1]), order[x[0]])
     )
@@ -294,41 +402,44 @@ def _cue_candidates(
     ws: Workspace, episodes: Sequence[str], character_id: int, sample_name: Any
 ) -> list[Candidate]:
     """For a character with no turn in any ready episode: its own spoken cues' source spans
-    (joined as accept joins them), longest first."""
+    (joined as accept joins them), longest first. A span over a theme song or tagged singing
+    (the episode's reference exclusions, what `fukikae.cards.auto.cue_references` leaves out)
+    is refused with ``excluded``, unless every span is: then all are offered, as the thin
+    tier falls back to them."""
     from fukikae.artifacts import read_json
+    from fukikae.cards.auto import _episode_exclusions
     from fukikae.cards.select import turn_text
-    from fukikae.models import Transcript
+    from fukikae.models import Tags, Transcript
     from fukikae.studio.apply import _cue_spans
     from fukikae.transcripts import transcript_path
 
-    spans: list[tuple[str, float, float, str]] = []
+    cache: dict[str, list[tuple[float, float]]] = {}
+    spans: list[tuple[str, float, float, str, bool]] = []
     for e in episodes:
         work = ws.work_dir(e)
         found = _cue_spans(work, character_id)
         if not found:
             continue
-        tr_path = transcript_path(work)
+        tr_path, tags_path = transcript_path(work), work / "04b-tag" / "tags.json"
         tr = read_json(tr_path, Transcript) if tr_path.exists() else None
-        spans += [(e, a, b, turn_text(tr, a, b) if tr else "") for a, b in found]
-    spans.sort(key=lambda s: (-(s[2] - s[1]), s[0], s[1]))
-    return [
-        Candidate(
-            episode=e,
-            start=a,
-            end=b,
-            seconds=round(b - a, 3),
-            transcript=text,
-            snr=None,
-            median=None,
-            gender=None,
-            rank=i,
-            verdicts={},
-            reasons=[],
-            clip=sample_name(ws, e, a, b),
+        tags = read_json(tags_path, Tags) if tags_path.exists() else None
+        theme = _episode_exclusions(ws, e, tags, cache)
+        spans += [
+            (e, a, b, turn_text(tr, a, b) if tr else "", _overlaps(a, b, theme)) for a, b in found
+        ]
+    if all(x[4] for x in spans):
+        spans = [(e, a, b, t, False) for e, a, b, t, _ in spans]
+    spans.sort(key=lambda s: (s[4], -(s[2] - s[1]), s[0], s[1]))
+    out: list[Candidate] = []
+    for i, (e, a, b, text, excluded) in enumerate(spans):
+        out.append(Candidate(
+            episode=e, start=a, end=b, seconds=round(b - a, 3), transcript=text, snr=None,
+            median=None, gender=None, rank=None if excluded else i,
+            verdicts={"excluded": False} if excluded else {},
+            reasons=["excluded"] if excluded else [], clip=sample_name(ws, e, a, b),
             source="cue",
-        )  # fmt: skip
-        for i, (e, a, b, text) in enumerate(spans)
-    ]
+        ))  # fmt: skip
+    return out
 
 
 def overrides(references: Sequence[RefSpan], offered: Sequence[Candidate]) -> list[RefSpan]:
@@ -440,9 +551,11 @@ def backends(cfg: Config) -> list[dict[str, Any]]:
 
 def check_params(cls: type[Synthesizer], params: Mapping[str, Any]) -> dict[str, Any]:
     """``params`` with each value in its [voice] type; DraftError for a key the backend
-    doesn't list in its ``voice_keys`` (or no draft parameter), or a value of the wrong type.
-    Ranges are checked when the card is built (the card parser's own bounds)."""
-    from fukikae.cards.card import MODE_FIELDS
+    doesn't list in its ``voice_keys`` (or no draft parameter), a value of the wrong type, or
+    one outside the card parser's own bounds (the seed's 32 bits, `cards.card.VOICE_RANGES`),
+    checked here so that nothing is cut for a version that would be refused."""
+    from fukikae.cards.card import MODE_FIELDS, SEED_MAX, VOICE_RANGES, CardError
+    from fukikae.cards.card import _float as card_float
 
     if not isinstance(params, Mapping):
         raise DraftError("params must be an object of voice keys")
@@ -456,6 +569,8 @@ def check_params(cls: type[Synthesizer], params: Mapping[str, Any]) -> dict[str,
         elif key == "seed":
             if isinstance(value, bool) or not isinstance(value, int):
                 raise DraftError(f"seed must be an integer, not {value!r}")
+            if not 0 <= value <= SEED_MAX:
+                raise DraftError(f"seed must be 0 to {SEED_MAX} (32 bits)")
             out[key] = value
         elif key in MODE_FIELDS:
             if value not in MODE_FIELDS[key]:
@@ -463,10 +578,17 @@ def check_params(cls: type[Synthesizer], params: Mapping[str, Any]) -> dict[str,
             out[key] = value
         else:
             if isinstance(value, bool) or not isinstance(value, int | float):
-                raise DraftError(f"{key} must be a number, not {value!r}")
-            if not math.isfinite(value):
+                raise DraftError(f"{key} must be a number, not {str(value)[:40]!r}")
+            try:
+                number = float(value)
+            except OverflowError:
+                raise DraftError(f"{key} is too large a number") from None
+            if not math.isfinite(number):
                 raise DraftError(f"{key} must be finite")
-            out[key] = float(value)
+            try:
+                out[key] = card_float(number, key, "[voice]", **VOICE_RANGES.get(key, {}))
+            except CardError as e:
+                raise DraftError(str(e)) from None
     return out
 
 
@@ -488,35 +610,87 @@ def _params_of(card: Card) -> dict[str, Any]:
 # -- own speech -----------------------------------------------------------------------------
 
 
-def check_own_speech(ws: Workspace | Path, character_id: int, refs: Sequence[RefSpan]) -> None:
-    """DraftError unless every reference lies inside the character's own turns in its episode
-    (joined as accept joins them, `fukikae.studio.apply._own_turns`) or its own spoken cues'
-    source spans there. Overlap with another speaker is allowed here (a gated pick, recorded
-    as an override); accept checks it again by the card's tier."""
+def _within(r: RefSpan, spans: Iterable[tuple[float, float]]) -> bool:
+    return any(a - SPAN_SLACK_S <= r.start and r.end <= b + SPAN_SLACK_S for a, b in spans)
+
+
+def check_own_speech(
+    ws: Workspace | Path, character_id: int, refs: Sequence[RefSpan], *, exempt: bool = False
+) -> None:
+    """DraftError unless every reference is the character's own clean speech, the rule
+    accept applies (`fukikae.studio.apply._own_speech`). Its episode must be current for the
+    character (`unready`: else "run `fukikae run <ws> <ep> --to characters` first"); it must
+    lie inside the character's own turns there (joined as accept joins them,
+    `fukikae.studio.apply._own_turns`) and overlap no other speaker's turn (the refusal names
+    the reference and the speaker), whatever its seconds. Only in an episode where the
+    character holds no turn do its own spoken cues' source spans count instead. ``exempt``
+    (the exact references of the pipeline's thin card, `fukikae.studio.apply.thin_origin`)
+    lifts the overlap rule alone."""
     from fukikae.artifacts import read_json
     from fukikae.models import Assignments
     from fukikae.studio.apply import _cue_spans, _own_turns
 
     w = _workspace(ws)
-    turns: dict[str, list[tuple[float, float]]] = {}
+    stale = unready(w, character_id, {r.episode for r in refs})
+    if stale:
+        raise DraftError(
+            f"not current for character {character_id}'s references: "
+            + "; ".join(stale[e] for e in sorted(stale))
+        )
+    seen: dict[str, tuple[list[tuple[float, float]], list[tuple[float, float, str]],
+                          list[tuple[float, float]]]] = {}  # fmt: skip
     bad: list[str] = []
+    dirty: list[str] = []
     for r in refs:
-        if r.episode not in turns:
+        if r.episode not in seen:
             path = w.work_dir(r.episode) / "05-characters" / "assignments.json"
             mine: list[tuple[float, float]] = []
+            others: list[tuple[float, float, str]] = []
             if path.is_file():
                 asg = read_json(path, Assignments)
                 if asg.turns is not None:
                     mine = _own_turns(asg, character_id)[0]
-            turns[r.episode] = mine + _cue_spans(w.work_dir(r.episode), character_id)
-        if not any(
-            a - SPAN_SLACK_S <= r.start and r.end <= b + SPAN_SLACK_S for a, b in turns[r.episode]
-        ):
+                    whose = {a.cluster: a for a in asg.clusters}
+                    own = {
+                        a.cluster for a in asg.clusters
+                        if a.character_id == character_id and a.status not in ("extra", "review")
+                    }  # fmt: skip
+                    for t in asg.turns:
+                        if t.speaker in own:
+                            continue
+                        a = whose.get(t.speaker)
+                        who = (
+                            f"character {a.character_id} ({t.speaker})"
+                            if a is not None and a.character_id is not None
+                            else f"cluster {t.speaker}"
+                        )
+                        others.append((float(t.start), float(t.end), who))
+            cues = [] if mine else _cue_spans(w.work_dir(r.episode), character_id)
+            seen[r.episode] = (mine, others, cues)
+        mine, others, cues = seen[r.episode]
+        if not mine:
+            if not _within(r, cues):
+                bad.append(r.label())
+            continue
+        if not _within(r, mine):
             bad.append(r.label())
+            continue
+        over = sorted({
+            who for a, b, who in others if a < r.end - SPAN_SLACK_S and r.start + SPAN_SLACK_S < b
+        })  # fmt: skip
+        if over and not exempt:
+            dirty.append(f"{r.label()} overlaps {', '.join(over)}")
     if bad:
         raise DraftError(
             f"not character {character_id}'s own speech (D41: a draft clones only the "
-            f"character's own turns or spoken cues): {', '.join(bad)}"
+            f"character's own turns, or its spoken cues in an episode where it holds no turn): "
+            f"{', '.join(bad)}"
+        )
+    if dirty:
+        raise DraftError(
+            f"not character {character_id}'s voice alone (D41: a reference overlaps no other "
+            "speaker, whatever its seconds; only the exact references of the pipeline's own "
+            f"thin card are exempt): {'; '.join(dirty)}"
         )
 
 
@@ -534,18 +708,99 @@ def _check_refs(ws: Workspace, refs: Sequence[RefSpan]) -> None:
             raise DraftError(f"not a span: {r.label()}")
         if r.end - r.start < MIN_REFERENCE_S:
             raise DraftError(f"{r.label()}: a reference is at least {MIN_REFERENCE_S:g} s")
+        if r.end - r.start > MAX_REFERENCE_S + 1e-9:
+            raise DraftError(
+                f"{r.label()}: a reference is at most {MAX_REFERENCE_S:g} s; choose a shorter "
+                "stretch of it"
+            )
         if r.episode not in ready:
             raise DraftError(f"{r.episode} has no assignments and vocals to cut a reference from")
+    if (problem := _duplicates(refs)) is not None:
+        raise DraftError(problem)
 
 
-def _thin_refs(draft: Draft, refs: Sequence[RefSpan]) -> bool:
-    """Whether ``refs`` are exactly the references of a thin-tier version of the draft (a
-    change of parameters only keeps the pipeline's thin tier, and accept's thin rule)."""
-    want = sorted((r.episode, r.start, r.end) for r in refs)
-    return any(
-        v.tier == "thin" and sorted((r.episode, r.start, r.end) for r in v.references) == want
-        for v in draft.versions
-    )
+def _duplicates(refs: Sequence[RefSpan]) -> str | None:
+    """Why ``refs`` count a piece of audio more than once, or None."""
+    ordered = sorted(refs, key=lambda r: (r.episode, r.start, r.end))
+    for a, b in zip(ordered, ordered[1:], strict=False):
+        if a.episode == b.episode and b.start < a.end - 1e-9:
+            return (
+                f"a version names the same audio more than once (duplicate, nested or "
+                f"overlapping references): {a.label()} and {b.label()}"
+            )
+    return None
+
+
+def accept_problems(
+    ws: Workspace | Path, character_id: int, card_id: str, refs: Sequence[RefSpan]
+) -> list[str]:
+    """What accept would refuse a version's card for, as accept says it
+    (`fukikae.studio.apply._own_speech`: strict own speech, the thin exemption, stale
+    episodes, the cue-span rule), and any audio its references name more than once; empty
+    when accept would take it. Changes nothing."""
+    from fukikae.cards.card import CardError
+    from fukikae.cards.store import CardStore
+    from fukikae.studio.apply import DecisionRefused, _own_speech
+
+    w = _workspace(ws)
+    out: list[str] = []
+    if (problem := _duplicates(refs)) is not None:
+        out.append(problem)
+    try:
+        card = CardStore(w.root).get(card_id)
+        with _registry(w) as reg:
+            _own_speech(w, reg, character_id, card_id, card)
+    except DecisionRefused as e:
+        out.append(str(e))
+    except CardError as e:
+        out.append(f"card {card_id} can't be read: {e}")
+    return out
+
+
+def _ref_set(refs: Sequence[RefSpan], carried: Sequence[Any]) -> frozenset[tuple[Any, ...]]:
+    """The references as `fukikae.studio.apply.reference_set` sees a card's."""
+    spans = {(r.episode, round(r.start, 3), round(r.end, 3)) for r in refs}
+    return frozenset(spans | {("clip", c.clip) for c in carried})
+
+
+def _thin_origin(ws: Workspace, character_id: int, refs: Sequence[RefSpan],
+                 carried: Sequence[Any] = ()) -> str | None:  # fmt: skip
+    """The pipeline thin card whose references are exactly these, or None."""
+    from fukikae.cards.store import CardStore
+    from fukikae.studio.apply import thin_origin
+
+    with _registry(ws) as reg:
+        return thin_origin(reg, CardStore(ws.root), character_id, _ref_set(refs, carried))
+
+
+def _carried(ws: Workspace, draft: Draft) -> list[Any]:
+    """The references with no origin span of the draft's latest version's card: carried into
+    the next version unless the operator removes them."""
+    from fukikae.cards.card import CardError
+    from fukikae.cards.store import CardStore
+
+    if not draft.versions:
+        return []
+    store = CardStore(ws.root)
+    cid = draft.versions[-1].card_id
+    if not store.has(cid):
+        return []
+    try:
+        card = store.get(cid)
+    except CardError:
+        return []
+    return [r for r in card.voice.references if not _has_origin(r)]
+
+
+def _has_origin(r: Any) -> bool:
+    o = r.origin or {}
+    try:
+        str(o["episode"])
+        float(o["start"])
+        float(o["end"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _build_card(
@@ -557,7 +812,12 @@ def _build_card(
     cls: type[Synthesizer],
     params: Mapping[str, Any],
     tier: Tier | None,
-) -> str:
+    *,
+    thin_origin: str | None = None,
+    carried: Sequence[Any] = (),
+) -> tuple[str, Tier]:
+    """The card for ``refs`` (and the ``carried`` origin-less references after them), put in
+    the store; its id and tier. The parameters are checked before anything is cut."""
     from fukikae.artifacts import read_json
     from fukikae.cards.card import CardError, dump_card, parse_card, validate_for_backend
     from fukikae.cards.select import RefPick, SpanPick, _emotion, clone_card_spans, turn_text
@@ -584,15 +844,46 @@ def _build_card(
                               "vocals.wav", lang))  # fmt: skip
     store = CardStore(ws.root)
     card = clone_card_spans(cls, items, store, language, tier)
+    meta: dict[str, Any] = {**card.meta, "character": character_id}
+    if thin_origin is not None:
+        meta["thin_origin"] = thin_origin
     card = replace(
-        card, voice=replace(card.voice, **norm), meta={**card.meta, "character": character_id}
+        card,
+        voice=replace(card.voice, references=(*card.voice.references, *carried), **norm),
+        meta=meta,
     )
     try:
         parse_card(dump_card(card))  # the card parser's bounds (seed bits, emotion 0 to 1, ...)
         validate_for_backend(card, cls)
     except CardError as e:
         raise DraftError(str(e)) from None
-    return store.put(card)
+    built = meta.get("reference_tier")
+    if built not in ("floor", "short", "thin"):
+        built = floor_meter(refs)["tier"]
+    return store.put(card), built
+
+
+def _draft(
+    w: Workspace,
+    cfg: Config,
+    draft: Draft,
+    references: Sequence[RefSpan],
+    backend: str,
+    params: Mapping[str, Any],
+    keep_unlisted: bool,
+) -> tuple[str, Tier, str | None, int]:
+    """(card id, tier, thin origin, carried origin-less references) for a new version."""
+    cls = clone_class(backend)
+    check_params(cls, params)
+    _check_refs(w, references)
+    carried = _carried(w, draft) if keep_unlisted else []
+    origin = _thin_origin(w, draft.character_id, references, carried)
+    check_own_speech(w, draft.character_id, references, exempt=origin is not None)
+    card_id, tier = _build_card(
+        w, cfg, draft.character_id, draft.language, references, cls, params,
+        "thin" if origin is not None else None, thin_origin=origin, carried=carried,
+    )  # fmt: skip
+    return card_id, tier, origin, len(carried)
 
 
 def draft_card(
@@ -602,21 +893,23 @@ def draft_card(
     references: Sequence[RefSpan],
     backend: str,
     params: Mapping[str, Any],
+    *,
+    keep_unlisted: bool = True,
 ) -> str:
     """The clone card for ``references`` with ``backend`` and ``params``, built as
     ``cards.auto._clone`` builds a clone (a 24 kHz sidecar per reference cut from its own
     episode's vocals, its ASR text and origin; seed 1234 and the defaults unless ``params``
     sets them), put in the card store; its id. ``params`` may set only the backend's
-    ``voice_keys``. Every reference must be the character's own speech (`check_own_speech`).
-    The tier is the references' own (`floor_meter`), except that the exact references of a
-    thin-tier version stay thin."""
+    ``voice_keys``, within the card's bounds, checked before anything is cut. The references
+    are distinct pieces of audio (no duplicate, nested or overlapping ones), each at most
+    `MAX_REFERENCE_S`, and every one is the character's own clean speech
+    (`check_own_speech`), unless they are exactly the references of the pipeline's own thin
+    card for the character, which only lifts the overlap rule and keeps that card's thin tier
+    (``[meta] thin_origin`` names it). Otherwise the tier is the references' own. The latest
+    version's origin-less references are carried after them unless ``keep_unlisted`` is
+    off."""
     w = _workspace(ws)
-    cls = clone_class(backend)
-    check_params(cls, params)
-    _check_refs(w, references)
-    check_own_speech(w, draft.character_id, references)
-    tier: Tier | None = "thin" if _thin_refs(draft, references) else None
-    return _build_card(w, cfg, draft.character_id, draft.language, references, cls, params, tier)
+    return _draft(w, cfg, draft, references, backend, params, keep_unlisted)[0]
 
 
 def _digest(ws: Workspace, character_id: int, language: str) -> str:
@@ -635,28 +928,23 @@ def add_version(
     params: Mapping[str, Any],
     *,
     offered: Sequence[Candidate] | None = None,
+    keep_unlisted: bool = True,
 ) -> tuple[Draft, DraftVersion]:
     """A new version of the draft from ``references``, ``backend`` and ``params``
     (`draft_card`), its gated picks recorded as overrides (against ``offered``, by default
-    `candidates`), saved; the updated draft and the version."""
+    `candidates`), its thin origin and carried origin-less references recorded, saved; the
+    updated draft and the version."""
     w = _workspace(ws)
     refs = list(references)
-    card_id = draft_card(w, cfg, draft, refs, backend, params)
+    card_id, tier, origin, unlisted = _draft(w, cfg, draft, refs, backend, params, keep_unlisted)
     cls = clone_class(backend)
     offered = candidates(w, cfg, draft.character_id) if offered is None else offered
-    from fukikae.cards.card import CardError
-    from fukikae.cards.store import CardStore
-
-    try:
-        tier = CardStore(w.root).get(card_id).meta.get("reference_tier")
-    except CardError:
-        tier = None
     version = DraftVersion(
         n=max((v.n for v in draft.versions), default=0) + 1, backend=backend, references=refs,
         params={**_defaults(cls), **check_params(cls, params)}, card_id=card_id,
         overrides=overrides(refs, offered), created=_now(),
-        digest=_digest(w, draft.character_id, draft.language),
-        tier=tier if tier in ("floor", "short", "thin") else floor_meter(refs)["tier"],
+        digest=_digest(w, draft.character_id, draft.language), tier=tier, unlisted=unlisted,
+        thin_origin=origin,
     )  # fmt: skip
     draft = draft.model_copy(update={"versions": [*draft.versions, version]})
     save_draft(w, draft)
@@ -700,14 +988,25 @@ def _spans_of(card: Card) -> tuple[list[RefSpan], int]:
     return refs, bare
 
 
+def _card_origin(ws: Workspace, character_id: int, card: Card) -> str | None:
+    """The pipeline thin card whose references are exactly ``card``'s, or None."""
+    from fukikae.cards.store import CardStore
+    from fukikae.studio.apply import reference_set, thin_origin
+
+    with _registry(ws) as reg:
+        return thin_origin(reg, CardStore(ws.root), character_id, reference_set(card))
+
+
 def _tier_of(card: Card, refs: Sequence[RefSpan]) -> Tier:
     t = card.meta.get("reference_tier")
     return t if t in ("floor", "short", "thin") else floor_meter(refs)["tier"]
 
 
-def _derive(store: Any, old: Card, old_id: str, language: str, character_id: int) -> str:
+def _derive(store: Any, old: Card, old_id: str, language: str, character_id: int,
+            thin_origin: str | None = None) -> str:  # fmt: skip
     """``fukikae voices derive``'s copy of a card for another target language (no
-    fingerprint, catchphrase renderings emptied, ``derived_from``), put in the store."""
+    fingerprint, catchphrase renderings emptied, ``derived_from``, and ``thin_origin`` when
+    its references are exactly the pipeline's thin card's), put in the store."""
     import datetime as dt
 
     from fukikae.cards.card import Card as CardT
@@ -720,7 +1019,8 @@ def _derive(store: Any, old: Card, old_id: str, language: str, character_id: int
     new = CardT(
         target_language=language, voice=replace(old.voice, fingerprint=None), style=style,
         meta={**old.meta, "derived_from": old_id, "created": dt.date.today(),
-              "character": character_id},
+              "character": character_id,
+              **({"thin_origin": thin_origin} if thin_origin is not None else {})},
     )  # fmt: skip
     return store.put(new)
 
@@ -757,7 +1057,7 @@ def _proposal(
     from fukikae.models import DubCues
 
     gender, narrator = _character_state(ws, character_id)
-    episodes = ready_episodes(ws)
+    episodes = speech_episodes(ws, character_id)
     found = find_references(
         ws, episodes, character_id, cfg.source_language, gender=gender, narrator=narrator
     )
@@ -793,7 +1093,9 @@ def open_draft(
 ) -> Draft:
     """A new draft for the character and target language, version 1 from its current clone
     card; else from an accepted card of another language (copied as ``voices derive`` does);
-    else from the automatic proposal (see the module notes). Not saved (`save_draft`); the
+    else from the automatic proposal (see the module notes). Version 1 is checked by accept's
+    rules and never refused: ``acceptable`` and ``accept_problems`` say what accept would
+    refuse (`accept_problems`). Not saved (`save_draft`); the
     registry is only read."""
     from fukikae.cards.auto import clone_backend
     from fukikae.cards.store import CardStore
@@ -810,13 +1112,17 @@ def open_draft(
                                                                     language)  # fmt: skip
     derived_from: str | None = None
     unlisted = 0
+    origin: str | None = None
     if card is not None and cur is not None and cur.card_id is not None:
         base, card_id = "card", cur.card_id
         refs, unlisted = _spans_of(card)
         backend, params, tier = card.voice.backend, _params_of(card), _tier_of(card, refs)
+        origin = _card_origin(w, character_id, card)
     elif other is not None:
         derived_from, old_id, old = other
-        base, card_id = "derived", _derive(store, old, old_id, language, character_id)
+        origin = _card_origin(w, character_id, old)
+        base = "derived"
+        card_id = _derive(store, old, old_id, language, character_id, origin)
         refs, unlisted = _spans_of(old)
         backend, params, tier = old.voice.backend, _params_of(old), _tier_of(old, refs)
     else:
@@ -832,12 +1138,16 @@ def open_draft(
         cls = clone_class(name)
         refs, tier = _proposal(w, cfg, character_id, language)
         base, backend, params = "proposed", name, _defaults(cls)
-        card_id = _build_card(w, cfg, character_id, language, refs, cls, {}, tier)
+        origin = _thin_origin(w, character_id, refs)
+        card_id, _ = _build_card(w, cfg, character_id, language, refs, cls, {}, tier,
+                                 thin_origin=origin)  # fmt: skip
     offered = candidates(w, cfg, character_id) if offered is None else offered
+    problems = accept_problems(w, character_id, card_id, refs)
     version = DraftVersion(
         n=1, backend=backend, references=refs, params=params, card_id=card_id,
         overrides=overrides(refs, offered), created=_now(),
         digest=_digest(w, character_id, language), tier=tier, unlisted=unlisted,
+        thin_origin=origin, acceptable=not problems, accept_problems=problems,
     )  # fmt: skip
     return Draft(
         character_id=character_id, language=language, base=base, derived_from=derived_from,
@@ -850,9 +1160,11 @@ __all__ = [
     "DraftError",
     "NoRegistry",
     "UnknownCharacter",
+    "accept_problems",
     "add_version",
     "backends",
     "candidates",
+    "candidates_digest",
     "check_own_speech",
     "check_params",
     "clone_class",
@@ -864,5 +1176,7 @@ __all__ = [
     "overrides",
     "ready_episodes",
     "save_draft",
+    "speech_episodes",
+    "unready",
     "voice_key_spec",
 ]

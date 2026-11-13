@@ -577,28 +577,182 @@ def _overlap_phrase(labels: list[str]) -> str:
     return "overlaps another speaker's turn: " + ", ".join(labels)
 
 
+# What an episode needs before its turns can give references again (`unready_episodes`).
+STALE_HINT = "run `fukikae run <ws> {episode} --to characters` first"
+_TURN_STAGES = ("names", "characters")
+type RefSet = frozenset[tuple[Any, ...]]
+
+
+def reference_set(card: Any) -> RefSet:
+    """A card's references as a set: each origin span (episode, start, end, to the
+    millisecond), or the clip of a reference with no origin. What the thin exemption
+    compares."""
+    out: set[tuple[Any, ...]] = set()
+    for r in card.voice.references:
+        o = r.origin or {}
+        try:
+            out.add((str(o["episode"]), round(float(o["start"]), 3), round(float(o["end"]), 3)))
+        except (KeyError, TypeError, ValueError):
+            out.add(("clip", r.clip))
+    return frozenset(out)
+
+
+def pipeline_thin_cards(reg: Registry, store: Any, character: int) -> dict[str, RefSet]:
+    """The thin cards the pipeline itself built for the character, with their reference
+    sets: every clone card its history (any target language) shows chosen automatically
+    (`fukikae.registry.store.AUTOMATIC_BY`) whose ``[meta] reference_tier`` is ``thin``."""
+    from fukikae.cards.auto import is_thin
+    from fukikae.cards.card import CardError
+    from fukikae.registry.store import AUTOMATIC_BY
+
+    out: dict[str, RefSet] = {}
+    for lang in sorted(reg.card_languages(character)):
+        for h in reg.card_history(character, lang):
+            cid = h.card_id
+            if cid is None or cid in out or h.chosen_by not in AUTOMATIC_BY or not store.has(cid):
+                continue
+            try:
+                card = store.get(cid)
+            except CardError:
+                continue
+            if card.voice.source == "clone" and is_thin(card):
+                out[cid] = reference_set(card)
+    return out
+
+
+def thin_origin(reg: Registry, store: Any, character: int, refs: RefSet) -> str | None:
+    """The pipeline thin card (`pipeline_thin_cards`) whose reference set is exactly
+    ``refs``, or None. Only that selection is exempt from the clean rule."""
+    found = sorted(c for c, s in pipeline_thin_cards(reg, store, character).items() if s == refs)
+    return found[0] if found else None
+
+
+def _card_thin_origin(reg: Registry, store: Any, character: int, card_id: str, card: Any
+                      ) -> str | None:  # fmt: skip
+    """The pipeline thin card a card is exempt as: the card itself when it is one, else the
+    card its ``[meta] thin_origin`` names, when that is one with exactly this card's
+    references. ``[meta] reference_tier`` alone exempts nothing."""
+    thin = pipeline_thin_cards(reg, store, character)
+    mine = reference_set(card)
+    if thin.get(card_id) == mine:
+        return card_id
+    claimed = card.meta.get("thin_origin") if isinstance(card.meta, dict) else None
+    if isinstance(claimed, str) and thin.get(claimed) == mine:
+        return claimed
+    return None
+
+
+def _decided_turn_stages(
+    ws: Workspace, reg: Registry, episodes: set[str], character: int
+) -> dict[tuple[str, str], datetime]:
+    """Per (episode, names or characters stage), the time of the latest applied decision on
+    the character that marked it stale (its ``invalidations``, its `decision_marks` row)."""
+    out: dict[tuple[str, str], datetime] = {}
+    for rec in _log_records(ws):
+        raw = rec.get("decision")
+        if not isinstance(raw, dict) or not rec.get("id"):
+            continue
+        try:
+            d = parse_decision(raw)
+            when = datetime.fromisoformat(str(rec.get("time")))
+        except (ValidationError, ValueError):
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        if character not in _targets(d)[0]:
+            continue
+        invs = [
+            (str(x[0]), str(x[1]))
+            for x in rec.get("invalidations") or []
+            if isinstance(x, list) and len(x) == 2 and x[1] in _TURN_STAGES and x[0] in episodes
+        ]
+        if not invs or not reg.decision_marked(str(rec["id"])):
+            continue
+        for key in invs:
+            out[key] = max(out.get(key, when), when)
+    return out
+
+
+def _unready(
+    ws: Workspace, ep: str, character: int, decided: dict[tuple[str, str], datetime]
+) -> str | None:
+    from fukikae.artifacts import read_json
+    from fukikae.cards.auto import checked_names
+    from fukikae.job import load_manifest
+    from fukikae.models import Assignments
+    from fukikae.registry.invalidate import episode as episode_of
+
+    manifest = load_manifest(episode_of(ws, ep))
+    for stage in _TURN_STAGES:
+        if stage in manifest.stale:
+            return f"its {stage} stage is stale"
+        when = decided.get((ep, stage))
+        rec = manifest.stages.get(stage)
+        started = None if rec is None or rec.status != "done" else rec.started
+        if started is not None and started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        if when is not None and (started is None or started < when):
+            return (
+                f"its {stage} stage ran before a studio decision on character {character} "
+                f"applied at {when.isoformat()}"
+            )
+    path = ws.work_dir(ep) / "05-characters" / "assignments.json"
+    if not path.is_file():
+        return None
+    try:
+        asg = read_json(path, Assignments)
+        return checked_names(ws.work_dir(ep), asg)[1]
+    except (OSError, ValueError) as e:
+        return f"its assignments or names can't be read ({type(e).__name__})"
+
+
+def unready_episodes(
+    ws: Workspace, reg: Registry, episodes: Iterable[str], character: int
+) -> dict[str, str]:
+    """The episodes of ``episodes`` whose turns can't give the character references until its
+    characters stage reruns, each with why and `STALE_HINT`: its names or characters stage is
+    marked stale in its manifest, or ran (``started``) before an applied studio decision on
+    the character that invalidated it, or its names were used and its assignments are older
+    than them (`fukikae.cards.auto.checked_names`, what candidate selection skips).
+    `LogUnreadable` when the decisions log can't be read."""
+    eps = set(episodes)
+    if not eps:
+        return {}
+    decided = _decided_turn_stages(ws, reg, eps, character)
+    out: dict[str, str] = {}
+    for ep in sorted(eps):
+        why = _unready(ws, ep, character, decided)
+        if why is not None:
+            out[ep] = f"{ep}: {why}; {STALE_HINT.format(episode=ep)}"
+    return out
+
+
 def _own_speech(
     ws: Workspace, reg: Registry, character: int, card_id: str, card: Any
 ) -> tuple[str, list[str]]:
     """Refuse a clone card whose references are not verifiably the character's own speech
     (D41), and say what was verified. A reference with an origin span (episode, start, end)
-    must lie inside one of the character's turns in that episode, read from the episode's
-    assignments (the registry keeps no exemplar spans), and overlap no other cluster's turn
-    (`select.clean_span`, the rule reference selection uses); or lie inside the source spans
-    of the character's own spoken cues there (`_cue_spans`, what the cue-thin tier clones a
-    character with no turns from). A reference with no origin (a sidecar only, such as a
-    `voices clone` clip) can't be checked against either; it is taken only when the card came
-    from this character's own clone path: the card's ``[meta] character`` names it, or the
-    character's card history already names the card.
+    must lie in an episode whose turns are current (`unready_episodes`), inside one of the
+    character's turns there, read from the episode's assignments (the registry keeps no
+    exemplar spans), and overlap no other cluster's turn (`select.clean_span`, the rule
+    reference selection uses). Only where the character holds no turn of its own in that
+    episode do the source spans of its own spoken cues count instead (`_cue_spans`, what the
+    cue-thin tier clones a character with no turns from). A reference with no origin (a
+    sidecar only, such as a `voices clone` clip) can't be checked against either; it is taken
+    only when the card came from this character's own clone path: the card's ``[meta]
+    character`` names it, or the character's card history already names the card.
 
-    A thin-tier card (``[meta] reference_tier = "thin"``), which the pipeline builds from the
-    character's turns whether or not another speaker overlaps them, is not held to the clean
-    rule: a reference inside the character's turns that overlaps another speaker is taken,
-    and returned among the overlapping labels for the accept line and note to list. Returns
-    the line saying what was verified and those labels."""
+    One selection is exempt from the clean rule: exactly the references of a thin card the
+    pipeline itself built for the character (`pipeline_thin_cards`), which takes the
+    character's turns whether or not another speaker overlaps them. The card is exempt when
+    it is that card, or when its ``[meta] thin_origin`` names that card and its references
+    are exactly that card's (`_card_thin_origin`); ``[meta] reference_tier = "thin"`` alone
+    exempts nothing. An exempt reference inside the character's turns that overlaps another
+    speaker is taken, and returned among the overlapping labels for the accept line and note
+    to list. Returns the line saying what was verified and those labels."""
     from fukikae.artifacts import read_json
-    from fukikae.cards.auto import is_thin
     from fukikae.cards.select import clean_span
+    from fukikae.cards.store import CardStore
     from fukikae.models import Assignments
 
     turns_of: dict[str, tuple[_Spans, _Spans] | None] = {}
@@ -626,33 +780,49 @@ def _own_speech(
     def within(start: float, end: float, spans: _Spans) -> bool:
         return any(a - _SPAN_SLACK_S <= start and end <= b + _SPAN_SLACK_S for a, b in spans)
 
-    thin = is_thin(card)
+    origin = _card_thin_origin(reg, CardStore(ws.root), character, card_id, card)
     refs = card.voice.references
-    refused: list[str] = []
-    overlapping: list[str] = []
-    verified = bare = 0
+    spans: list[tuple[str, float, float] | None] = []
     for r in refs:
         o = r.origin or {}
         try:
-            ep, start, end = str(o["episode"]), float(o["start"]), float(o["end"])
+            spans.append((str(o["episode"]), float(o["start"]), float(o["end"])))
         except (KeyError, TypeError, ValueError):
+            spans.append(None)
+    unready = unready_episodes(ws, reg, {s[0] for s in spans if s is not None}, character)
+    refused: list[str] = []
+    overlapping: list[str] = []
+    verified = bare = 0
+    for span in spans:
+        if span is None:
             bare += 1
             continue
+        ep, start, end = span
         label = f"{ep} {start:.2f}-{end:.2f}"
-        if within(start, end, cue_spans(ep)):
-            verified += 1
+        if ep in unready:
+            refused.append(f"{label} ({unready[ep]})")
             continue
         got = turns(ep)
-        if got is None:
-            refused.append(
-                f"{label} (no assignments with turns for {ep} to check it against, and not "
-                f"inside character {character}'s spoken cues there)"
-            )
+        mine, others = got if got is not None else ([], [])
+        if not mine:  # no turn of its own in the episode: its spoken cues count
+            if within(start, end, cue_spans(ep)):
+                verified += 1
+            elif got is None:
+                refused.append(
+                    f"{label} (no assignments with turns for {ep} to check it against, and not "
+                    f"inside character {character}'s spoken cues there)"
+                )
+            else:
+                refused.append(
+                    f"{label} (not inside character {character}'s turns or cues in {ep})"
+                )
             continue
-        mine, others = got
         if not within(start, end, mine):
-            refused.append(f"{label} (not inside character {character}'s turns or cues in {ep})")
-        elif not clean_span(start, end, others, slack=_SPAN_SLACK_S) and thin:
+            refused.append(
+                f"{label} (not inside character {character}'s turns in {ep}; its spoken cues "
+                "count only in an episode where it holds no turn)"
+            )
+        elif not clean_span(start, end, others, slack=_SPAN_SLACK_S) and origin is not None:
             verified += 1
             overlapping.append(label)
         elif not clean_span(start, end, others, slack=_SPAN_SLACK_S):
@@ -693,7 +863,10 @@ def _own_speech(
             f"card came from character {character}'s own clone path ({how})"
         )
     if overlapping:
-        line += f"; thin-tier card, taken though it {_overlap_phrase(overlapping)}"
+        line += (
+            f"; the exact references of the pipeline's thin card {origin}, taken though it "
+            f"{_overlap_phrase(overlapping)}"
+        )
     return line, overlapping
 
 
