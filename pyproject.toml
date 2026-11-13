@@ -157,6 +157,8 @@ flake8-bugbear.extend-immutable-calls = ["typer.Argument", "typer.Option"]
 "tests/*" = ["S603", "S607"]
 # Task 8 drivers, kept as run for reproducibility (docs/results/2026-11-09-live-action-ground-truth.md)
 "scripts/ground-truth/*" = ["S603", "S607", "E501", "E731", "B905", "SIM115", "N806", "E741"]
+# ZONOS3-Mini spike drivers (lokkju/fukikae#43), kept as run (docs/results/2026-11-13-zonos3-mini-spike.md)
+"scripts/zonos3-spike/*" = ["S311", "S603", "S607", "E402", "E501", "B007", "B905", "SIM115", "E741", "F841"]
 
 [tool.ruff.format]
 quote-style = "double"
