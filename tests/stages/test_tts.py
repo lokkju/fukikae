@@ -2027,3 +2027,29 @@ def test_the_gate_reads_operator_genders_from_the_workspace_it_is_given(ep, tmp_
     assert any((cache / ".fukikae" / "pitch-cache").iterdir())
     assert tts.gender_gate(ep.work, GATE_CUES, cache).voices["c0104"] == "u"  # no workspace
     assert tts.gender_gate(ep.work, GATE_CUES, cache, operator={1: "f"}).voices["c0104"] == "f"
+
+
+@pytest.mark.parametrize(("refs", "cloning"), [(None, None), ("f", "c")])
+def test_an_unmeasurable_gender_mismatch_builds_no_clone_source(ep, monkeypatch, refs, cloning):
+    """A gender mismatch whose references can't be measured is flagged, never re-picked on a
+    guess, so it costs no reference search; a measured one builds the clone source."""
+    from fukikae.cards.auto import GenderMismatch
+
+    first = CardStore(ep.workspace_root).put(parse_card(_stock("am_adam")))
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.assign_card(1, "en", first, by="auto", locked=False)
+    _assign(ep, 2, _stock("af_heart"))
+    seen: dict = {}
+    genders = {1: GenderMismatch(first, "m", refs)}
+    monkeypatch.setattr("fukikae.stages.tts.stale_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.below_floor", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.impure_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.stock_cards", lambda *_, **__: {})
+    monkeypatch.setattr("fukikae.stages.tts.gender_mismatches", lambda *_, **__: genders)
+    monkeypatch.setattr(
+        "fukikae.stages.tts.workspace_cloning", lambda *_, **__: seen.setdefault("cloning", "c")
+    )
+    monkeypatch.setattr("fukikae.stages.tts.ensure_assignments",
+                        lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
+    TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root))
+    assert seen["cloning"] == cloning and seen["genders"] == genders

@@ -73,7 +73,11 @@ Operator state (Part B). A character's operator gender (``gender_by = 'operator'
 `operator_genders`) replaces the pitch estimate's class in the A1 register gate
 (``select.operator_register``: in `character_candidates` and in `impure_cards`). Names vouch
 for identity, not register: name-confirmed turns, ungated otherwise, keep the gate with the
-operator's class when there is one, without the split flag (`_vouched`). It is a re-pick
+operator's class when there is one, on the class only (no estimate median: a turn between the
+bands is kept, one confidently in the other class refused) and without the split flag
+(`_vouched`); the acoustic tier keeps the estimate's median when it is the operator's class.
+A thin pick the operator's register forced (it refused gated candidates) is flagged on that
+run (`OPERATOR_THIN_WHY`). It is a re-pick
 reason of its own: an automatic clone card whose references are the other class
 (`gender_mismatches`, measured on their origin spans, else on the card's clips) is re-picked
 with the operator's class as the register, noted `GENDER_NOTE` only when the picks pass the
@@ -194,6 +198,11 @@ UNMET_WHY = (
     "re-picked for another reason, but no reference in the operator's register passes the "
     "gates, so the new picks are ungated"
 )
+# thin picks the operator's register forced: it refused candidates the gated tiers offered
+OPERATOR_THIN_WHY = (
+    "the operator's register (operator gender {gender}) refused {n} gated candidate(s), so the "
+    "picks are ungated"
+)
 GATE_WORDS = {"off_register": "off-register", "unvoiced": "unvoiced", "song_like": "song-like"}
 
 
@@ -218,6 +227,9 @@ class CharacterRefs:
     # episodes left out because their assignments are older than their names, in which the
     # character holds a cluster (its turns there wait for the characters stage to rerun)
     skipped: tuple[str, ...] = ()
+    # thin picks only: the candidates the operator's register refused in the gated tiers
+    # (each episode counted once, its larger tier), the reason those tiers came up short
+    refused: int = 0
 
 
 @dataclass(frozen=True)
@@ -369,7 +381,7 @@ def reference_gates(
     for gate 3. ``operator``, the character's operator gender, is the register's class
     (``select.operator_register``). Names vouch for identity, not register: a name-confirmed
     span gates no pitch unless the character has an operator gender, which then gates it
-    with the operator's class (and no split, `_vouched`). The rule `impure_cards` applies,
+    on the operator's class only (no median, no split, `_vouched`). The rule `impure_cards` applies,
     and ``eval gender``'s reference purity."""
     from fukikae.cards.select import (
         Register,
@@ -406,12 +418,14 @@ def reference_gates(
 def _vouched(register: Register) -> Register:
     """The register for name-confirmed turns: names vouch for identity, not register (the
     controller's ruling). With the operator's class (``register.operator``) the gate still
-    runs on them, without the split flag (the names say the turns are the character's);
-    without one, no gate and no split flag."""
+    runs on them, on the class only (``vouched``: no estimate median, so a turn between the
+    bands is kept and only one confidently in the other class is refused) and without the
+    split flag (the names say the turns are the character's); without one, no gate and no
+    split flag."""
     from fukikae.cards.select import Register
 
     if register.operator:
-        return register._replace(bimodal=False, even=False)
+        return register._replace(median=None, bimodal=False, even=False, vouched=True)
     return Register("u", register.median)
 
 
@@ -892,7 +906,9 @@ def ensure_assignments(
     whose references can't be measured (``refs`` None). With another reason it is one
     re-pick, every reason in the note; `GENDER_NOTE` is among them only when the picks passed
     the gates (a stale or stock re-pick that falls to the ungated thin tier is noted for its
-    own reason and the gender mismatch is flagged beside it)."""
+    own reason and the gender mismatch is flagged beside it). Any card made from thin picks
+    the operator's register forced (``refused``: it refused candidates of the gated tiers)
+    has that reason in its thin flag (`OPERATOR_THIN_WHY`), new card or re-pick alike."""
     language = cfg.target_language
     usable = cloning is not None and cloning.unavailable is None
     todo = []
@@ -1056,6 +1072,11 @@ def ensure_assignments(
             continue  # the best picks there are: kept, flagged (never a stock voice)
         below: str | None = None
         thin: str | None = None
+        thin_why: str | None = None  # the operator's register forced the thin tier
+        if found.tier == "thin" and found.refused and unmet is None:
+            thin_why = OPERATOR_THIN_WHY.format(
+                gender=operator_genders(reg).get(cid, "?"), n=found.refused
+            )
         own_lines = found is not None and found.from_cues
         if found.picks:
             new, note = _clone(cloning, found, store, language)
@@ -1111,7 +1132,7 @@ def ensure_assignments(
             elif cid in regender:
                 flag(cid, _gender_flag(reg, cid, regender[cid], again))
             if cid not in repick and thin is not None:
-                flag(cid, _thin_flag(reg, cid, new, thin, own=found))
+                flag(cid, _thin_flag(reg, cid, new, thin, thin_why, own=found))
             elif cid not in repick and below is not None:
                 flag(cid, _floor_flag(reg, cid, new, below, again))
             continue
@@ -1138,7 +1159,7 @@ def ensure_assignments(
         if below is not None:
             flag(cid, _floor_flag(reg, cid, new, below))
         if thin is not None:
-            flag(cid, _thin_flag(reg, cid, new, thin, own=found))
+            flag(cid, _thin_flag(reg, cid, new, thin, thin_why, own=found))
     return done()
 
 
@@ -1701,12 +1722,14 @@ def character_candidates(
     and singing excluded), ranked. ``exclusions`` caches each episode's excluded spans and
     ``loaded`` its artifacts, so a caller asking for many characters reads each file once.
 
-    The A1 gates run on every episode's candidates. The register gate runs only in the
-    acoustic tier (no names, or ``acoustic``): a name-confirmed turn is the character's by its
-    subtitle name, and a wide-ranging character's confirmed speech has a majority register
-    that refuses its calmer turns (Fairy Tail E13: Erza's 143 to 179 Hz alto against a
-    shouted 261 Hz register left her no reference at all). There the register is the
-    character's majority register over the turns searched in that episode
+    The A1 gates run on every episode's candidates. The register gate with the estimate's
+    median runs only in the acoustic tier (no names, or ``acoustic``): a name-confirmed turn
+    is the character's by its subtitle name, and a wide-ranging character's confirmed speech
+    has a majority register that refuses its calmer turns (Fairy Tail E13: Erza's 143 to
+    179 Hz alto against a shouted 261 Hz register left her no reference at all), so
+    name-confirmed turns get a register gate only from an operator gender, and then on the
+    class alone (below). In the acoustic tier the register is the character's majority
+    register over the turns searched in that episode
     (``select.speaker_register``, on ``fukikae.pitch``'s bands, not
     `gender_thresholds`: a profile band tuned on the old estimator, such as the anime
     profile's 300 Hz pending D44, would keep only the turns above it and push the register
@@ -1715,11 +1738,13 @@ def character_candidates(
     sung-ness, and its accepted song spans (``select.song_spans``), and the pitch tracks go
     through the workspace's pitch cache. ``gated`` receives each episode's `Gated` counts
     (``split`` when the register is bimodal, ``even`` when no register gate ran for it).
-    ``gender``, the character's operator gender, is the register's class there
+    ``gender``, the character's operator gender, is the register's class in both tiers
     (``select.operator_register``: the operator's call beats the estimate, and picks the
-    character's part of a mixed cluster), name-confirmed turns included: names vouch for
-    identity, not register, so those keep the gate with the operator's class and lose only
-    the split flag (`_vouched`); without an operator gender they stay ungated.
+    character's part of a mixed cluster). Names vouch for identity, not register, so
+    name-confirmed turns keep a gate with the operator's class, on the class only: no
+    estimate median (a turn between the bands passes, one a full ``CONFIDENCE_ST`` inside the
+    other band is refused) and no split flag (`_vouched`); without an operator gender they
+    stay ungated.
 
     In an episode whose names were used (``owner`` answers keys, the workspace's registry by
     default), the candidates are the character's name-confirmed turns (`confirmed_labels`),
@@ -2359,11 +2384,17 @@ def find_references(
             return CharacterRefs(seconds=round(seconds, 3), names_used=bool(named), skipped=skipped)
         e, picks = thin
         arts = loaded.get(e)
+        refused: dict[str, int] = {}
+        for counts in (gated, acoustic_gated):
+            for ep, g in counts.items():
+                if g.operator:
+                    refused[ep] = max(refused.get(ep, 0), g.off_register)
         return CharacterRefs(
             round(sum(p.seconds for p in picks), 3), picks, e,
             ws.work_dir(e) / "01-separate" / "vocals.wav",
-            (arts.transcript.language if arts else None) or fallback, False,
-            names_used=bool(named), tier="thin",
+            (arts.transcript.language if arts else None) or fallback,
+            _thin_confirmed(ws, arts, cid, picks), names_used=bool(named), tier="thin",
+            refused=sum(refused.values()) if gender in ("f", "m") else 0,
         )  # fmt: skip
     e, picks, confirmed = best
     pool = candidates if confirmed else tiers[-1]
@@ -2376,6 +2407,30 @@ def find_references(
         gated=(gated if confirmed else acoustic_gated).get(e),
         tier="floor" if meets_floor(picks) else "short",
     )  # fmt: skip
+
+
+def _thin_confirmed(
+    ws: Workspace, arts: EpisodeArtifacts | None, cid: int, picks: Sequence[RefPick]
+) -> bool:
+    """Whether every thin pick lies in the character's name-confirmed turns of a names-used
+    episode as far as it lies in its own turns (the rule `reference_gates` vouches by)."""
+    from fukikae.cards.select import share_inside
+
+    if arts is None or arts.names is None or not picks:
+        return False
+    labels = confirmed_labels(arts.assignments, cid, _workspace_owner(ws))
+    own = {
+        c.cluster
+        for c in arts.assignments.clusters
+        if c.character_id == cid and c.status not in ("extra", "review")
+    }
+    turns = arts.assignments.turns or []
+    named = [(t.start, t.end) for t in turns if t.speaker in labels]
+    mine = [(t.start, t.end) for t in turns if t.speaker in own]
+    return bool(named) and all(
+        share_inside(p.start, p.end, named) >= share_inside(p.start, p.end, mine) - 1e-6 > 0
+        for p in picks
+    )
 
 
 def floor_lines(
@@ -2685,7 +2740,13 @@ def card_status_lines(
             out.append(f"{head}; kept{f': {refusal}' if refusal else ''}: {fix}")
             continue
         found = _search(ws, _all_episodes(ws), cid, loaded, exclusions, operator, narrating)
-        gated = bool(found.picks) and found.tier != "thin"
+        # gated picks re-pick for impurity or a measured gender mismatch only (an unmeasurable
+        # one is flagged, never re-picked on a guess); the floor needs picks that beat the card
+        gated = (
+            bool(found.picks)
+            and found.tier != "thin"
+            and (imp is not None or (mm is not None and mm.refs is not None))
+        )
         repicks = bool(refs and found.picks) or gated or (sf is not None and _better(found, sf))
         if not repicks:
             out.append(f"{head}; no better reference pick exists; flagged: {fix}")

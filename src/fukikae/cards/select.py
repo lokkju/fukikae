@@ -43,7 +43,10 @@ in the register's own band is never refused, however far from the register's med
 ``u`` register gates no pitch. A bimodal register (``pitch.bimodal``: a cluster with two
 voices) is flagged as needing a split; it still gates pitch when its majority class has at
 least ``pitch.BIMODAL_GATE_RATIO`` (2x) the minority's seconds, and gates none when the two
-are near even (``pitch.even_bimodal``). A candidate under ``REF_VOICED_MIN`` (0.35) of its loud
+are near even (``pitch.even_bimodal``). A vouched register (name-confirmed turns of a
+character with an operator gender) reads the class only: it refuses a candidate only a full
+``CONFIDENCE_ST`` inside the other band, and keeps one between the bands whatever the
+estimate's median. A candidate under ``REF_VOICED_MIN`` (0.35) of its loud
 frames voiced is ``unvoiced`` (whispers, effects, processed voices). With ``song_like`` (the
 song detector's per-second mask, ``songs.song_like_seconds``), a candidate with
 ``REF_SONG_SHARE`` (half) or more of its seconds song-like whose frames are sung
@@ -353,8 +356,10 @@ type RegisterLike = Register | tuple[Gender, float | None]
 class Register(NamedTuple):
     """A speaker's register in an episode: the majority class, the median of that class's
     turns, whether the turns are bimodal (two voices: flagged for a split), whether the
-    two are near even (``pitch.even_bimodal``: no pitch gate) and whether the class is the
-    operator's stored gender rather than the estimate's (`operator_register`). A plain
+    two are near even (``pitch.even_bimodal``: no pitch gate), whether the class is the
+    operator's stored gender rather than the estimate's (`operator_register`) and whether the
+    turns are name-confirmed (``vouched``: the gate reads the class only, refusing a candidate
+    only when it is a full ``CONFIDENCE_ST`` inside the other band, never by a median). A plain
     ``(gender, median)`` pair is accepted wherever a register is."""
 
     gender: Gender
@@ -362,6 +367,7 @@ class Register(NamedTuple):
     bimodal: bool = False
     even: bool = False
     operator: bool = False
+    vouched: bool = False
 
 
 @dataclass(frozen=True)
@@ -551,6 +557,8 @@ def _cross_class(m: Measured, register: Register, bands: Bands) -> bool:
         return False
     s = F0Summary(m.median, m.median, m.median, m.median, m.voiced_s, m.voiced_s, 1.0, 1.0)
     own = classify(s, bands[0], bands[1], LINE_MIN_VOICED_S)
+    if register.vouched:  # name-confirmed turns: class only, and only a confident other class
+        return own.gender not in ("u", register.gender) and own.confidence >= 1.0
     if own.gender not in ("u", register.gender):
         return True
     if own.gender == "u" and own.voiced_s >= LINE_MIN_VOICED_S and register.median is not None:

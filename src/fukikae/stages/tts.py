@@ -1719,14 +1719,17 @@ class TtsStage:
                 for cid in impure
                 if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
             ]
-            # clone cards whose references are the other class from the operator's gender
+            # clone cards whose references are the other class from the operator's gender; one
+            # whose references can't be measured is only flagged, so it costs no search
             genders = gender_mismatches(
                 Workspace(ep.workspace_root), reg, store, language, speaking
             )
             regender = [
                 cid
-                for cid in genders
-                if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
+                for cid, mm in genders.items()
+                if mm.refs is not None
+                and (a := current.get(cid)) is not None
+                and replace_refusal(a, "auto") is None
             ]
             work = bool(todo or restock or stale or repickable or repurify or regender)
             cloning = workspace_cloning(ep.workspace_root, cfg, ep.id, cues=cues) if work else None
