@@ -19,6 +19,13 @@ into this tab's session storage and clears it from the address bar; every
 played from a blob URL. There is no cookie and no token in a query string. This page and
 <code>/static/</code> need no token and hold no data. POST bodies are JSON (1 MB at
 most).</p>
+<p>A hand-written <code>cast.toml</code> in the workspace (<code>[[cast]]</code> entries
+with <code>name</code>, <code>gender</code>, <code>external_id</code> and
+<code>aliases</code>) arrives in the season index as suggestions only: the cast list
+(<code>cast</code>, or <code>cast_error</code> when the file can't be read) for the name
+field and the queue header, and per character the entry it matches (<code>cast</code>),
+whose <code>gender</code>, when offered, is one <code>gender</code> decision away. Nothing
+from it is applied without that decision.</p>
 <h2>Routes</h2>
 <ul>
 <li><code>GET /</code>: this page (no token needed).</li>

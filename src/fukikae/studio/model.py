@@ -224,6 +224,34 @@ class EpisodeSpeech(_Strict):
     cues: int
 
 
+class CastEntry(_Strict):
+    """A speaking role from the operator's hand-written ``<ws>/cast.toml``
+    (`fukikae.studio.cast.read_cast`): a name, its voice register, an external id and other
+    spellings of the name. ``line`` is the line of its ``[[cast]]`` header (None for an inline
+    array). Suggestions only: nothing here is applied without the operator's click, its
+    aliases only match it to a character and are never registry aliases (names evidence), and
+    it names no voice (D41)."""
+
+    name: str
+    gender: Literal["f", "m"] | None = None
+    external_id: str | None = None
+    aliases: list[str] = []
+    line: int | None = None
+
+
+class CastMatch(_Strict):
+    """The cast entry a character matches (``entry``: its index in `SeasonDoc.cast`), ``by``
+    its external id, its name or one of the entry's aliases (keyed as names keys a subtitle
+    Name). ``gender`` is the cast gender the page may offer as a one-click gender decision:
+    None when the entry has none, the character already stores it, or the operator stored a
+    gender (operator state beats the cast). ``source`` says where it came from."""
+
+    entry: int
+    by: Literal["external_id", "name", "alias"]
+    gender: Literal["f", "m"] | None
+    source: str
+
+
 class CharacterEntry(_Strict):
     id: int
     actor_id: int
@@ -245,6 +273,7 @@ class CharacterEntry(_Strict):
     suggestions: list[Suggestion]
     names: list[str]  # names evidence (D27): key decisions, named lines, disagreements
     flags: list[Flag]
+    cast: CastMatch | None = None  # a suggestion from cast.toml, never applied by itself
 
 
 class ExtraEntry(_Strict):
@@ -283,6 +312,8 @@ class SeasonDoc(_Strict):
     characters: list[CharacterEntry]
     extras: list[ExtraEntry]
     queue: list[int]  # character ids, the review order (`fukikae.studio.season.order_queue`)
+    cast: list[CastEntry] = []  # <ws>/cast.toml's speaking roles, offered in the name field
+    cast_error: str | None = None  # why cast.toml couldn't be read (the cast is then empty)
 
 
 # -- voice drafts (`fukikae.studio.drafts`, ``<ws>/studio/drafts/<character>.<language>.json``)
@@ -395,6 +426,8 @@ __all__ = [
     "Draft",
     "DraftVersion",
     "CardInfo",
+    "CastEntry",
+    "CastMatch",
     "CharacterEntry",
     "Decision",
     "Decisions",
