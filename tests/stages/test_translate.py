@@ -1073,12 +1073,18 @@ def test_renumbered_cues_still_hit_the_cache(ep):
 
 
 @pytest.mark.usefixtures("fake")
-def test_wrong_language_answers_are_never_cached(ep):
-    FakeTranslator.SCRIPT = [chinese, chinese]
+def test_a_rerun_after_a_strict_retry_makes_no_request(ep):
+    """The wrong-language answer and its strict retry are both cached: greedy sampling would
+    give the same wrong answer again, so a rerun reproduces the outcome without the server."""
+    FakeTranslator.SCRIPT = [chinese]
     TranslateStage().run(ep, CFG)
+    path = ep.work / "06-translate" / "cues.en.json"
+    first = path.read_bytes()
     FakeTranslator.REQUESTS.clear()
+    FakeTranslator.LOG.clear()
     TranslateStage().run(ep, CFG)
-    assert len(FakeTranslator.REQUESTS) == 1
+    assert FakeTranslator.REQUESTS == [] and FakeTranslator.LOG == []
+    assert path.read_bytes() == first
     assert [c.text for c in _out(ep).cues] == ["ok c0001", "ok c0002"]
 
 

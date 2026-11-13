@@ -8,8 +8,8 @@ window, so a line added earlier in the episode, which renumbers every cue after 
 only the windows whose content or context changed. Entries live in
 ``<workspace>/.fukikae/translate-cache/<key>.json`` as the window's renderings in order.
 
-Only answers that passed validation and the language check are stored (the stage decides);
-an unreadable entry counts as a miss.
+Only answers that passed validation are stored (a format or backend error never reaches the
+cache); an unreadable entry counts as a miss.
 """
 
 from __future__ import annotations

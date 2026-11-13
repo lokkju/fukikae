@@ -30,7 +30,8 @@ the wrong language gets ``error = "translate: wrong language: ..."`` and no ``te
 never speaks it, and a window with a failed line is never the next window's context. An
 over-budget retry in the wrong language is ignored.
 
-Answers are cached by request content (`fukikae.translate_cache`, #41) and the backend starts
+Every validated answer is cached by request content (`fukikae.translate_cache`, #41), the
+wrong-language ones and their strict retries included, and the backend starts
 only on the first request the cache can't answer, so a rerun with unchanged inputs makes no
 request, starts no server and writes the same cues byte for byte; a changed line re-requests
 its own window, and the next one only if the changed window's rendering changed. Windows cut
@@ -714,15 +715,15 @@ class TranslateStage:
         )
 
     def _call(self, backend: Translator, req: TranslateRequest) -> dict[str, Rendering]:
-        """The cached answer to ``req``, else the backend's; an answer is cached only when
-        every rendering is in the target language (#38), so a bad one is asked again on the
-        next run."""
+        """The cached answer to ``req``, else the backend's, cached. An answer in the wrong
+        language is cached too: sampling is greedy, so asking again on the next run would get
+        it again, and its strict retry is cached beside it, so an unchanged rerun reaches the
+        same outcome with no request at all."""
         got = self._cache.get(req)
         if got is not None:
             return got
         got = backend.translate(req)
-        if not any(script_problem(r.text, req.target_language) for r in got.values()):
-            self._cache.put(req, got)
+        self._cache.put(req, got)
         return got
 
     def _ask(self, backend: Translator, req: TranslateRequest) -> dict[str, Rendering]:
