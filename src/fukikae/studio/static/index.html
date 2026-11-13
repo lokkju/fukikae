@@ -4,28 +4,35 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fukikae studio</title>
+<script type="module" src="/static/token.js"></script>
 </head>
 <body>
 <main>
 <h1>fukikae studio</h1>
 <p>The studio page is pending: its design waits on the operator's pick (D47). The server, the
 JSON API and audio serving are running; this placeholder lists the API.</p>
-<p>Every request needs the token printed at start-up. Opening the start-up URL once
-(<code>/?t=&lt;token&gt;</code>) sets a cookie that authorizes reads in this browser; every
-POST also needs the <code>X-Fukikae-Token</code> header, and its body is JSON (1 MB at
+<p>The token printed at start-up rides in this page's address after <code>#t=</code>, a
+part of the URL a browser never sends to a server. <code>/static/token.js</code> moves it
+into this tab's session storage and clears it from the address bar; every
+<code>/api</code> and <code>/audio</code> request then sends it as the
+<code>X-Fukikae-Token</code> header, and audio is fetched with that header and played from
+a blob URL. There is no cookie and no token in a query string. This page and
+<code>/static/</code> need no token and hold no data. POST bodies are JSON (1 MB at
 most).</p>
 <h2>Routes</h2>
 <ul>
-<li><code>GET /</code>: this page.</li>
-<li><code>GET /static/&lt;file&gt;</code>: the page's files, from the package only.</li>
+<li><code>GET /</code>: this page (no token needed).</li>
+<li><code>GET /static/&lt;file&gt;</code>: the page's files, from the package only (no token
+needed).</li>
 <li><code>GET /api/season</code>: the season index (<code>SeasonDoc</code>), rebuilt when
 its inputs changed.</li>
 <li><code>GET /api/characters/&lt;id&gt;</code>: one character's entry
 (<code>CharacterEntry</code>).</li>
 <li><code>GET /audio/&lt;sha256&gt;.wav</code>: a clip the index refers to (a sample's
 <code>clip</code>).</li>
-<li><code>POST /api/decisions/preview</code>: what an identity decision would rerun, and
-whether its digest is stale; writes nothing.</li>
+<li><code>POST /api/decisions/preview</code>: a dry run of an identity decision: what it
+would rerun, whether its digest is stale or missing, and the decision with its digest
+filled in (<code>decision</code>), to post as previewed; writes nothing.</li>
 <li><code>POST /api/decisions</code>: apply an identity decision (every op but
 <code>accept</code>); returns the rebuilt character. 409 when stale or unfinished, 422 when
 refused or carrying no digest, 423 while a run or another writer holds the studio lock.</li>

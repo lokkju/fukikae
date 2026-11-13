@@ -1,22 +1,31 @@
 """The studio's HTTP server: a loopback `ThreadingHTTPServer` with a token-guarded JSON API.
 
 `StudioServer` binds 127.0.0.1 only unless the caller passes ``allow_non_loopback`` (the
-command's ``--allow-non-loopback``), and then only an IPv4 literal. Every request needs the
-server's per-run random token: the page load ``GET /?t=<token>`` trades it for an
-``HttpOnly``, ``SameSite=Strict`` cookie scoped by port and redirects to ``/`` so the token
-leaves the address bar; reads (the page, static files, ``/api`` GETs, ``/audio``) take the
-cookie or the ``X-Fukikae-Token`` header; writes (every POST) take only the header, so a
-form or a link on another site can't make one even with the cookie in the jar. ``Host``
-must be ``127.0.0.1:<port>`` or ``localhost:<port>`` (DNS rebinding), an ``Origin``, when
-sent, must be this server's, POST bodies must be JSON and at most `MAX_BODY` bytes, and the
-request log never prints a query string (the token rides in one once).
+command's ``--allow-non-loopback``), and then only one IPv4 interface address (never
+0.0.0.0). The per-run random token reaches the page in the start-up URL's fragment
+(``/#t=<token>``), which a browser never sends to a server; the page (``static/token.js``)
+moves it into ``sessionStorage``, clears the fragment, and sends it as the
+``X-Fukikae-Token`` header on every request, audio included (fetched into a blob URL). There
+is no cookie and no ``?t=``: every ``/api`` and ``/audio`` request needs the header
+(compared in constant time), so a link, form or media element on another site can't make
+one. ``GET /`` and ``/static/*`` serve only the shipped shell, which holds no data, without
+the token. ``Host`` must be the bound address (or ``localhost``) with the port (DNS
+rebinding), an ``Origin``, when sent, must be this server's, POST bodies must be JSON and at
+most `MAX_BODY` bytes, and the request log never prints a query string.
+
+Each connection gets `StudioServer.request_timeout` seconds per read (30), so a client that
+stops sending (a body shorter than its Content-Length, headers that never end) is dropped,
+and at most `MAX_HANDLERS` connections are handled at once; past that a connection gets a
+prompt 503. A handler that fails unexpectedly answers 500 ``{"error": "internal"}`` and
+prints the traceback to stderr only.
 
 The API reads the season index (`fukikae.studio.season.load_or_build`, rebuilt when its
 inputs change; a decision changes them) and writes only through
-`fukikae.studio.apply.apply_decision`, the studio's one writer. Audio is served only for
-the clips the current index refers to (`referenced_clips`), as bare ``<sha256>.wav`` names
-under ``<ws>/studio/audio``, opened without following symlinks. Static files come only from
-the package's ``static/`` directory.
+`fukikae.studio.apply.apply_decision`, the studio's one writer; a preview is its dry run.
+Audio is served only for the clips the current index refers to (`referenced_clips`), as bare
+``<sha256>.wav`` names under ``<ws>/studio/audio``, each directory and the file opened
+without following symlinks, the file non-blocking and only when it is a regular file. Static
+files come only from the package's ``static/`` directory, opened the same way.
 
 The page itself waits on the design pick (D47); ``static/index.html`` is a placeholder that
 lists `ROUTES`.
@@ -33,18 +42,18 @@ import secrets
 import socket
 import sqlite3
 import stat
+import sys
 import threading
+import traceback
 from http import HTTPStatus
-from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
-from fukikae.registry.store import Registry
+from fukikae.registry.store import RegistrySchemaError
 from fukikae.studio.apply import (
     DecisionError,
-    DecisionRefused,
     IncompleteDecision,
     LogUnreadable,
     RegistryUnreadable,
@@ -53,8 +62,6 @@ from fukikae.studio.apply import (
     UncheckedDecision,
     UnfinishedRecords,
     apply_decision,
-    check_digest,
-    plan_decision,
 )
 from fukikae.studio.model import (
     IDENTITY_OPS,
@@ -75,12 +82,14 @@ DEFAULT_PORT = 8765
 MAX_BODY = 1024 * 1024  # bytes; a larger POST body is 413
 _DRAIN_MAX = 8 * MAX_BODY  # a too-large body up to this is read and dropped before the 413
 TOKEN_HEADER = "X-Fukikae-Token"  # noqa: S105 (a header name)
+REQUEST_TIMEOUT = 30.0  # seconds a connection may wait between reads
+MAX_HANDLERS = 16  # connections handled at once; past that, a prompt 503
 STATIC_DIR = Path(__file__).parent / "static"
 
 # (method, path, what it does): the API as the placeholder page lists it
 ROUTES: tuple[tuple[str, str, str], ...] = (
-    ("GET", "/", "the page; ?t=<token> once sets the session cookie and redirects here"),
-    ("GET", "/static/<file>", "the page's files, from the package only"),
+    ("GET", "/", "the page shell (no data); needs no token"),
+    ("GET", "/static/<file>", "the page's files, from the package only; need no token"),
     ("GET", "/api/season", "the season index (SeasonDoc), rebuilt when its inputs changed"),
     ("GET", "/api/characters/<id>", "one character's entry (CharacterEntry) from the index"),
     ("GET", "/audio/<sha256>.wav", "a clip the index refers to (a sample's clip field)"),
@@ -115,28 +124,41 @@ _CSP = (
 
 
 def check_bind(host: str, *, allow_non_loopback: bool) -> str:
-    """The IPv4 address to bind for ``host``: ``localhost`` or a loopback address always;
-    any other IPv4 literal only with ``allow_non_loopback``. ValueError otherwise."""
-    if host == "localhost":
+    """The IPv4 address to bind for ``host``. Loopback is 127.0.0.1 (or ``localhost``)
+    only; with ``allow_non_loopback``, one specific IPv4 interface address (not 0.0.0.0, a
+    broadcast or multicast address, or another loopback one). ValueError otherwise."""
+    if host in ("localhost", "127.0.0.1"):
         return "127.0.0.1"
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         ip = None
-    if ip is not None and ip.version == 4 and ip.is_loopback:
-        return str(ip)
+    if ip is not None and ip.is_loopback:
+        raise ValueError(
+            f"the studio's loopback address is 127.0.0.1, not {host!r}: it binds 127.0.0.1 "
+            "and nothing else on loopback"
+        )
     if not allow_non_loopback:
         raise ValueError(
             f"the studio binds a loopback address only (127.0.0.1), not {host!r}: reach it "
             "over `ssh -L`; binding another address needs --allow-non-loopback"
         )
-    if ip is None or ip.version != 4:
+    if not isinstance(ip, ipaddress.IPv4Address):
         raise ValueError(f"the studio binds an IPv4 address; {host!r} is not one")
+    if ip.is_unspecified or ip.is_multicast or ip == ipaddress.IPv4Address("255.255.255.255"):
+        raise ValueError(
+            f"--allow-non-loopback needs one interface address of this machine, not {host}"
+        )
     return str(ip)
 
 
 def _loopback(host: str) -> bool:
     return ipaddress.ip_address(host).is_loopback
+
+
+_BUSY_REPLY = json.dumps(
+    {"error": "busy", "message": f"the studio is handling {MAX_HANDLERS} requests; try again"}
+).encode()
 
 
 class StudioServer(ThreadingHTTPServer):
@@ -145,6 +167,7 @@ class StudioServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    request_timeout = REQUEST_TIMEOUT
 
     def __init__(
         self,
@@ -156,6 +179,8 @@ class StudioServer(ThreadingHTTPServer):
         token: str | None = None,
         clips: int = 6,
         allow_non_loopback: bool = False,
+        request_timeout: float | None = None,
+        max_handlers: int = MAX_HANDLERS,
     ) -> None:
         bind = check_bind(host, allow_non_loopback=allow_non_loopback)
         self.ws = ws if isinstance(ws, Workspace) else Workspace(Path(ws))
@@ -164,12 +189,46 @@ class StudioServer(ThreadingHTTPServer):
         self.token = token or secrets.token_urlsafe(32)
         self._lock = threading.RLock()  # the index and every decision, one at a time
         self._doc: SeasonDoc | None = None
+        if request_timeout is not None:
+            self.request_timeout = request_timeout
+        self._slots = threading.BoundedSemaphore(max_handlers)
         super().__init__((bind, port), _Handler)
         p = self.server_address[1]
-        names = ["127.0.0.1", "localhost"] + ([] if _loopback(bind) else [bind])
+        names = ["127.0.0.1", "localhost"] if _loopback(bind) else [bind]
         self.allowed_hosts = frozenset(f"{n}:{p}" for n in names)
         self.allowed_origins = frozenset(f"http://{h}" for h in self.allowed_hosts)
-        self.cookie_name = f"fukikae_studio_{p}"  # cookies ignore ports; the name doesn't
+
+    # -- the handler cap ----------------------------------------------------------------------
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._slots.acquire(blocking=False):
+            self._refuse_busy(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def _refuse_busy(self, request: Any) -> None:
+        try:
+            request.settimeout(1.0)
+            request.sendall(
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Content-Type: application/json; charset=utf-8\r\n"
+                b"Content-Length: " + str(len(_BUSY_REPLY)).encode() + b"\r\n"
+                b"Retry-After: 1\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+                + _BUSY_REPLY
+            )
+        except OSError:
+            pass
+        self.shutdown_request(request)
 
     @property
     def port(self) -> int:
@@ -180,7 +239,8 @@ class StudioServer(ThreadingHTTPServer):
         return _loopback(str(self.server_address[0]))
 
     def url(self) -> str:
-        return f"http://{self.server_address[0]}:{self.port}/?t={self.token}"
+        """The start-up URL: the token rides in the fragment, which no browser sends."""
+        return f"http://{self.server_address[0]}:{self.port}/#t={self.token}"
 
     def tunnel(self) -> str:
         return f"ssh -L {self.port}:127.0.0.1:{self.port} {socket.gethostname()}"
@@ -213,12 +273,25 @@ class _Reply(Exception):  # noqa: N818
         self.body = {"error": error, "message": message, **extra}
 
 
+_PATHS = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\s'\"\\/:]+)+[\\/]?")
+
+
+def _why(e: BaseException) -> str:
+    """An exception for a client: its type and message, any filesystem path replaced."""
+    return f"{type(e).__name__}: {_PATHS.sub('<path>', str(e))}"
+
+
 class _Handler(BaseHTTPRequestHandler):
     server: StudioServer
     server_version = "fukikae-studio"
     sys_version = ""
+    timeout = REQUEST_TIMEOUT  # the server's request_timeout replaces it per connection
 
-    # -- logging: never the query string (the token rides in one on the page load) ----------
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(self.server.request_timeout)
+
+    # -- logging: never the query string ------------------------------------------------------
 
     def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
         if isinstance(code, HTTPStatus):
@@ -248,11 +321,18 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, method: str) -> None:
         try:
-            self._route(method)
-        except _Reply as r:
-            self._json(r.status, r.body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+            try:
+                self._route(method)
+            except _Reply as r:
+                self._json(r.status, r.body)
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                raise
+            except Exception:  # noqa: BLE001 (the client gets a generic 500, stderr the rest)
+                traceback.print_exc(file=sys.stderr)
+                self.close_connection = True
+                self._json(500, {"error": "internal"})
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True  # the client went away; nothing to tell it
 
     # -- guards -----------------------------------------------------------------------------
 
@@ -264,37 +344,19 @@ class _Handler(BaseHTTPRequestHandler):
         if origin is not None and origin not in self.server.allowed_origins:
             raise _Reply(403, "forbidden", "this request's Origin is not the studio's")
 
-    def _token_ok(self, value: str | None) -> bool:
+    def _authorized(self) -> bool:
+        value = self.headers.get(TOKEN_HEADER)
         return value is not None and hmac.compare_digest(
             value.encode("utf-8", "replace"), self.server.token.encode()
         )
-
-    def _cookie(self) -> str | None:
-        try:
-            jar = SimpleCookie(self.headers.get("Cookie", ""))
-        except CookieError:
-            return None
-        morsel = jar.get(self.server.cookie_name)
-        return morsel.value if morsel is not None else None
-
-    def _authorized(self, method: str) -> bool:
-        if self._token_ok(self.headers.get(TOKEN_HEADER)):
-            return True
-        return method in ("GET", "HEAD") and self._token_ok(self._cookie())
 
     # -- routing ----------------------------------------------------------------------------
 
     def _route(self, method: str) -> None:
         self._guard()
-        split = urlsplit(self.path)
-        path = split.path
-        if method == "GET" and path == "/" and "t" in parse_qs(split.query):
-            given = parse_qs(split.query)["t"][0]
-            if not self._token_ok(given):
-                raise _Reply(403, "forbidden", "wrong token")
-            self._login()
-            return
-        if not self._authorized(method):
+        path = urlsplit(self.path).path
+        guarded = path == "/api" or path.startswith(("/api/", "/audio/"))
+        if guarded and not self._authorized():
             raise _Reply(403, "forbidden", f"no valid studio token (send {TOKEN_HEADER})")
         get = method in ("GET", "HEAD")
         if path == "/":
@@ -305,10 +367,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._static(path[len("/static/") :])
         elif path == "/api/season":
             self._need(method, get, "GET")
-            self._json(200, self.server.season().model_dump(mode="json"))
+            self._json(200, self._season().model_dump(mode="json"))
         elif m := _CHARACTER.fullmatch(path):
             self._need(method, get, "GET")
-            entry = self.server.character(int(m.group(1)))
+            cid = int(m.group(1))
+            entry = next((c for c in self._season().characters if c.id == cid), None)
             if entry is None:
                 raise _Reply(404, "not-found", f"no character {m.group(1)} in the index")
             self._json(200, entry.model_dump(mode="json"))
@@ -328,16 +391,22 @@ class _Handler(BaseHTTPRequestHandler):
         if not ok:
             raise _Reply(405, "method", f"{method} is not allowed here; {allow} is", allow=allow)
 
-    def _login(self) -> None:
-        s = self.server
-        self.send_response(303)
-        self.send_header("Location", "/")
-        self.send_header(
-            "Set-Cookie", f"{s.cookie_name}={s.token}; HttpOnly; SameSite=Strict; Path=/"
-        )
-        self.send_header("Content-Length", "0")
-        self._common_headers()
-        self.end_headers()
+    def _season(self) -> SeasonDoc:
+        """The index, its known failures as clear errors: a registry from a newer fukikae or
+        one that isn't a database is 409, a locked one 503."""
+        try:
+            return self.server.season()
+        except RegistrySchemaError as e:
+            raise _Reply(409, "registry-schema", str(e)) from None
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                raise _Reply(
+                    503, "busy", f"the registry is locked ({e}): a run or another writer has "
+                    "it; try again",
+                ) from None  # fmt: skip
+            raise _Reply(409, "registry-unreadable", f"the registry can't be read: {e}") from None
+        except sqlite3.DatabaseError as e:
+            raise _Reply(409, "registry-unreadable", f"the registry can't be read: {e}") from None
 
     # -- bodies -----------------------------------------------------------------------------
 
@@ -351,6 +420,13 @@ class _Handler(BaseHTTPRequestHandler):
             raise _Reply(400, "length", "Content-Length is not a number") from None
         if n < 0:
             raise _Reply(400, "length", "Content-Length is negative")
+        try:
+            return self._read_body(n)
+        except TimeoutError:
+            self.close_connection = True
+            raise _Reply(408, "timeout", "the request body stopped short of its length") from None
+
+    def _read_body(self, n: int) -> bytes:
         if n > MAX_BODY:
             if n <= _DRAIN_MAX:  # read it, so the client sees the 413 and not a reset
                 left = n
@@ -362,6 +438,9 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             raise _Reply(413, "too-large", f"request bodies are at most {MAX_BODY} bytes")
         body = self.rfile.read(n)
+        if len(body) < n:
+            self.close_connection = True
+            raise _Reply(400, "length", "the request body is shorter than its Content-Length")
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if ctype != "application/json":
             raise _Reply(415, "media-type", "POST bodies are application/json")
@@ -389,48 +468,65 @@ class _Handler(BaseHTTPRequestHandler):
     # -- decisions --------------------------------------------------------------------------
 
     def _preview(self, d: Decision) -> None:
+        """`apply_decision`'s dry run (never creates or migrates a registry; write-time
+        refusals included). A stale or digest-less decision is previewed as it would apply
+        with the check skipped, and says so; ``decision`` is what to post to apply it."""
         s = self.server
         if not s.ws.registry_path.is_file():
             raise _Reply(409, "no-registry", f"{s.ws.root} has no registry yet")
         stale: str | None = None
         unchecked = False
-        try:
-            with s._lock, Registry(s.ws.registry_path) as reg:
-                lines, invs = plan_decision(reg, s.ws, d)
+        with s._lock:
+            try:
                 try:
-                    check_digest(reg, d)
+                    result = apply_decision(s.ws, d, dry_run=True)
                 except StaleDecision as e:
                     stale = str(e)
+                    result = apply_decision(s.ws, d, dry_run=True, force=True)
                 except UncheckedDecision:
                     unchecked = True
-        except DecisionRefused as e:
-            raise _Reply(422, "refused", str(e)) from None
-        except sqlite3.OperationalError as e:
-            raise _Reply(423, "busy", f"the registry is busy ({e}); try again") from None
+                    result = apply_decision(s.ws, d, dry_run=True, force=True)
+            except DecisionError as e:
+                raise self._refusal(e) from None
+        stamped = result.decision if result.decision is not None else d
         self._json(200, {
-            "lines": lines,
-            "invalidations": [{"episode": i.episode, "stage": i.stage} for i in invs],
+            "lines": result.lines,
+            "invalidations": [{"episode": i.episode, "stage": i.stage}
+                              for i in result.invalidations],
             "stale": stale,
             "unchecked": unchecked,
+            "decision": stamped.model_dump(mode="json"),
         })  # fmt: skip
 
     def _apply(self, d: Decision) -> None:
         s = self.server
+        warning: str | None = None
         with s._lock:
             try:
                 result = apply_decision(s.ws, d)
             except DecisionError as e:
                 raise self._refusal(e) from None
-            doc = s.season()  # rebuilt: the registry changed
+            try:
+                doc: SeasonDoc | None = s.season()  # rebuilt: the registry changed
+            except Exception as e:  # noqa: BLE001 (the decision landed; say so either way)
+                traceback.print_exc(file=sys.stderr)
+                doc = None
+                warning = (
+                    "the decision landed, but the season index couldn't be rebuilt "
+                    f"({_why(e)}); reload the page to try again"
+                )
         cid = d.keep if isinstance(d, MergeDecision) else d.character
-        entry = next((c for c in doc.characters if c.id == cid), None)
-        self._json(200, {
+        entry = None if doc is None else next((c for c in doc.characters if c.id == cid), None)
+        body: dict[str, Any] = {
             "lines": result.lines,
             "invalidations": [{"episode": i.episode, "stage": i.stage}
                               for i in result.invalidations],
             "character": entry.model_dump(mode="json") if entry is not None else None,
-            "queue": doc.queue,
-        })  # fmt: skip
+            "queue": doc.queue if doc is not None else None,
+        }  # fmt: skip
+        if warning is not None:
+            body["warning"] = warning
+        self._json(200, body)
 
     def _refusal(self, e: DecisionError) -> _Reply:
         s = self.server
@@ -458,40 +554,32 @@ class _Handler(BaseHTTPRequestHandler):
         parts = rel.split("/")
         if not rel or not all(_SEGMENT.fullmatch(p) for p in parts):
             raise _Reply(404, "not-found", "no such file")
-        path = STATIC_DIR
-        for p in parts:
-            path = path / p
-            try:
-                st = os.lstat(path)
-            except OSError:
-                raise _Reply(404, "not-found", "no such file") from None
-            if stat.S_ISLNK(st.st_mode):
-                raise _Reply(404, "not-found", "no such file")
-        if not stat.S_ISREG(st.st_mode):
+        try:
+            dfd = os.open(STATIC_DIR, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            raise _Reply(404, "not-found", "no such file") from None
+        try:
+            data = _read_regular(dfd, parts)
+        finally:
+            os.close(dfd)
+        if data is None:
             raise _Reply(404, "not-found", "no such file")
-        ctype = _CONTENT_TYPES.get(path.suffix, "application/octet-stream")
-        self._bytes(200, ctype, path.read_bytes(), csp=page or ctype.startswith("text/html"))
+        ctype = _CONTENT_TYPES.get(Path(parts[-1]).suffix, "application/octet-stream")
+        self._bytes(200, ctype, data, csp=page or ctype.startswith("text/html"))
 
     def _audio(self, name: str) -> None:
         if not CLIP_NAME.fullmatch(name) or name not in self.server.audio_names():
             raise _Reply(404, "not-found", "no such clip in the index")
-        studio = self.server.ws.root / "studio"
         try:
-            if stat.S_ISLNK(os.lstat(studio).st_mode):
-                raise _Reply(404, "not-found", "no such clip")
-            dfd = os.open(studio / "audio", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            dfd = os.open(self.server.ws.root, os.O_RDONLY | os.O_DIRECTORY)
         except OSError:
             raise _Reply(404, "not-found", "no such clip") from None
         try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
-        except OSError:
-            raise _Reply(404, "not-found", "no such clip") from None
+            data = _read_regular(dfd, ["studio", "audio", name])
         finally:
             os.close(dfd)
-        with os.fdopen(fd, "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                raise _Reply(404, "not-found", "no such clip")
-            data = f.read()
+        if data is None:
+            raise _Reply(404, "not-found", "no such clip")
         self._bytes(200, "audio/wav", data)
 
     # -- responses --------------------------------------------------------------------------
@@ -518,4 +606,36 @@ class _Handler(BaseHTTPRequestHandler):
         self._bytes(status, "application/json; charset=utf-8", data)
 
 
-__all__ = ["DEFAULT_PORT", "MAX_BODY", "ROUTES", "StudioServer", "check_bind"]
+def _read_regular(dfd: int, parts: list[str]) -> bytes | None:
+    """The bytes of ``parts`` under the directory ``dfd``, each directory opened relative to
+    the last with ``O_NOFOLLOW | O_DIRECTORY`` and the file with ``O_NOFOLLOW | O_NONBLOCK``
+    (a FIFO doesn't block the open), read only when ``fstat`` says it is a regular file. None
+    for a symlink anywhere, a missing part, or anything but a regular file."""
+    fds: list[int] = []
+    try:
+        cur = dfd
+        for p in parts[:-1]:
+            cur = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur)
+            fds.append(cur)
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=cur)
+        fds.append(fd)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(os.dup(fd), "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+__all__ = [
+    "DEFAULT_PORT",
+    "MAX_BODY",
+    "MAX_HANDLERS",
+    "REQUEST_TIMEOUT",
+    "ROUTES",
+    "StudioServer",
+    "check_bind",
+]

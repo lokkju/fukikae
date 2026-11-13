@@ -124,6 +124,9 @@ class ApplyResult:
     unchecked: bool = False  # applied with force: the digest was not checked
     undigested: bool = False  # it carried no digest
     skipped: bool = False  # a replayed log record whose decision had already landed
+    # a single dry run: the decision as checked, its missing digest, key and external id
+    # filled from the registry (`fill`); what a page posts to apply exactly what it previewed
+    decision: Decision | None = None
 
 
 class _DryRun(Exception):  # noqa: N818
@@ -227,6 +230,14 @@ def stamp(reg: Registry, d: Decision) -> Decision:
     key = alias_key(c.name) if c is not None and c.name else None
     ext = c.external_id if c is not None else None
     return d.model_copy(update={"digest": decision_digest(reg, d), "key": key, "external_id": ext})
+
+
+def fill(reg: Registry, d: Decision) -> Decision:
+    """`stamp`, but only for what ``d`` leaves out: a digest it carries is kept (a stale one
+    stays stale), and so are its key and external id."""
+    s = stamp(reg, d)
+    keep = ("digest", "key", "external_id")
+    return d.model_copy(update={k: getattr(s, k) for k in keep if getattr(d, k) is None})
 
 
 def _describe(reg: Registry, character_id: int, language: str | None) -> str:
@@ -1369,17 +1380,19 @@ def apply_decision(
     and the completion record (`IncompleteDecision` when one of those fails). ``dry_run`` runs
     the same checks and writes, rolls them back, and returns the preview lines. ``replays``
     is the id of the log record a replay applies again; the new write-ahead record names it,
-    so that record counts as applied from then on (`_replay_state`)."""
+    so that record counts as applied from then on (`_replay_state`). A dry run's result
+    carries the decision as checked, filled in (`fill`)."""
     w = _workspace(ws)
     if dry_run:
         _refuse_if_incomplete_readonly(w)
         with _session(w, dry_run=True) as reg:
+            filled = fill(reg, d)
             try:
                 with reg.transaction():
                     lines, invs, _ = _stage(reg, w, d, force)
                     raise _DryRun
             except _DryRun:
-                return _preview(d, lines, invs, force)
+                return replace(_preview(d, lines, invs, force), decision=filled)
     _require_registry(w)  # before the lock, which would create studio/
     base: dict[str, Any] = {"decision": d.model_dump(mode="json"), "forced": force}
     if replays is not None:

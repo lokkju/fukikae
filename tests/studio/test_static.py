@@ -34,3 +34,17 @@ def test_placeholder_page_lists_every_route():
     assert "pending" in page.lower()
     for method, path, _ in ROUTES:
         assert f"{method} {path}" in page, (method, path)
+
+
+def test_the_token_helper_ships_and_the_page_has_no_inline_script():
+    js = (STATIC / "token.js").read_text(encoding="utf-8")
+    for needed in ("location.hash", "sessionStorage", "history.replaceState",
+                   "X-Fukikae-Token", "export async function api", "export async function audioUrl",
+                   "URL.createObjectURL"):  # fmt: skip
+        assert needed in js, needed
+    assert "?t=" not in js and "cookie" not in js.lower()
+    page = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert re.search(r'<script type="module" src="/static/token\.js"></script>', page)
+    assert not re.search(r"<script(?![^>]*\bsrc=)[^>]*>", page)  # every script is a file
+    assert "document.cookie" not in page and "?t=" not in page
+    assert "#t=" in html.unescape(page)

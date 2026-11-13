@@ -3,6 +3,7 @@ the season index and decisions, and audio serving (Task 17, server half)."""
 
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import os
@@ -112,7 +113,10 @@ def test_binds_loopback_only(studio):
     assert studio.server.server_address[0] == "127.0.0.1"
 
 
-@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.30.201", "example.com", "::"])  # noqa: S104
+@pytest.mark.parametrize(
+    "host",
+    ["0.0.0.0", "192.168.30.201", "example.com", "::", "::1", "127.0.0.2", "127.1"],  # noqa: S104
+)
 def test_non_loopback_bind_is_refused_without_the_flag(ws, host):  # noqa: F811
     from fukikae.studio.server import StudioServer, check_bind
 
@@ -132,6 +136,51 @@ def test_non_loopback_ipv4_needs_the_explicit_flag():
         check_bind("example.com", allow_non_loopback=True)
 
 
+@pytest.mark.parametrize("host", ["127.0.0.2", "127.255.255.254"])
+def test_loopback_means_127_0_0_1_only(host):
+    from fukikae.studio.server import check_bind
+
+    for flag in (False, True):
+        with pytest.raises(ValueError, match="127.0.0.1"):
+            check_bind(host, allow_non_loopback=flag)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "255.255.255.255", "224.0.0.1", "::"])  # noqa: S104
+def test_non_loopback_needs_one_interface_address(host):
+    from fukikae.studio.server import check_bind
+
+    with pytest.raises(ValueError, match="interface|IPv4"):
+        check_bind(host, allow_non_loopback=True)
+
+
+def _local_ipv4() -> str | None:
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))  # no packet is sent
+            addr = s.getsockname()[0]
+    except OSError:
+        return None
+    return None if addr.startswith("127.") else addr
+
+
+def test_a_non_loopback_bind_allows_its_own_host_and_prints_its_url(ws):  # noqa: F811
+    from fukikae.studio.server import StudioServer
+
+    addr = _local_ipv4()
+    if addr is None:
+        pytest.skip("no non-loopback IPv4 address here")
+    s = StudioServer(ws, load_config(ws.root, user_config=None), host=addr, port=0,
+                     token=TOKEN, allow_non_loopback=True)  # fmt: skip
+    try:
+        assert f"{addr}:{s.port}" in s.allowed_hosts
+        assert f"127.0.0.1:{s.port}" not in s.allowed_hosts
+        assert s.url() == f"http://{addr}:{s.port}/#t={TOKEN}"
+    finally:
+        s.server_close()
+
+
 def test_a_fresh_token_per_server(ws):  # noqa: F811
     from fukikae.studio.server import StudioServer
 
@@ -140,8 +189,7 @@ def test_a_fresh_token_per_server(ws):  # noqa: F811
     b = StudioServer(ws, cfg, port=0)
     try:
         assert a.token != b.token and len(a.token) >= 32
-        assert a.url().startswith(f"http://127.0.0.1:{a.server_address[1]}/?t=")
-        assert a.url().endswith(a.token)
+        assert a.url() == f"http://127.0.0.1:{a.server_address[1]}/#t={a.token}"
     finally:
         a.server_close()
         b.server_close()
@@ -150,42 +198,78 @@ def test_a_fresh_token_per_server(ws):  # noqa: F811
 # --- the token and host guards -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", ["/", "/api/season", "/api/characters/1", "/static/index.html"])
-def test_requests_without_the_token_are_refused(studio, path):
+@pytest.mark.parametrize("path", ["/api/season", "/api/characters/1", "/api/nothing"])
+def test_api_requests_without_the_token_header_are_refused(studio, path):
     assert studio.request("GET", path, token=None)[0] == 403
     assert studio.request("GET", path, token="wrong")[0] == 403  # noqa: S106
 
 
-def test_page_load_with_the_token_sets_a_strict_cookie_and_drops_it_from_the_url(studio):
-    status, headers, _ = studio.request("GET", f"/?t={TOKEN}", token=None)
-    assert status == 303 and headers["location"] == "/"
-    cookie = headers["set-cookie"]
-    name = f"fukikae_studio_{studio.port}"
-    assert cookie.startswith(f"{name}={TOKEN}")
-    assert "HttpOnly" in cookie and "SameSite=Strict" in cookie and "Path=/" in cookie
-    status, headers, page = studio.request("GET", "/", token=None, cookie=f"{name}={TOKEN}")
-    assert status == 200 and headers["content-type"].startswith("text/html")
-    assert b"/api/season" in page
-    assert "default-src 'self'" in headers["content-security-policy"]
+def test_audio_without_the_token_header_is_refused(studio):
+    clip = _a_clip(_season(studio))
+    assert studio.request("GET", f"/audio/{clip}", token=None)[0] == 403
+    assert studio.request("GET", "/audio/nothing.wav", token=None)[0] == 403
 
 
-def test_cookie_authorizes_reads_but_not_writes(studio):
-    cookie = f"fukikae_studio_{studio.port}={TOKEN}"
-    assert studio.request("GET", "/api/season", token=None, cookie=cookie)[0] == 200
+def test_the_static_shell_needs_no_token_and_holds_no_data(studio, ws):  # noqa: F811
     doc = _season(studio)
+    for path in ("/", "/static/index.html", "/static/token.js"):
+        status, headers, body = studio.request("GET", path, token=None)
+        assert status == 200, path
+        assert "set-cookie" not in headers
+        assert TOKEN.encode() not in body and str(ws.root).encode() not in body
+        for c in doc["characters"]:
+            if c["name"]:
+                assert c["name"].encode() not in body, (path, c["name"])
+    status, headers, page = studio.request("GET", "/", token=None)
+    assert headers["content-type"].startswith("text/html")
+    assert "default-src 'self'" in headers["content-security-policy"]
+    assert b"/api/season" in page and b"/static/token.js" in page
+    assert b"<script>" not in page  # no inline script: the CSP allows none
+
+
+def test_no_response_ever_sets_a_cookie(studio):
+    doc = _season(studio)
+    clip = _a_clip(doc)
+    for method, path, body in [
+        ("GET", "/", None), ("GET", f"/?t={TOKEN}", None), ("GET", "/static/index.html", None),
+        ("GET", "/api/season", None), ("GET", "/api/characters/1", None),
+        ("GET", f"/audio/{clip}", None), ("GET", "/api/nothing", None),
+        ("POST", "/api/decisions/preview", _name(doc, 1, "Lucia")),
+    ]:  # fmt: skip
+        for token in (TOKEN, None):
+            _, headers, _ = studio.request(method, path, body, token=token)
+            assert "set-cookie" not in headers, (method, path, token)
+
+
+def test_a_cookie_alone_authorizes_nothing(studio):
+    doc = _season(studio)
+    clip = _a_clip(doc)
+    cookie = f"fukikae_studio_{studio.port}={TOKEN}"
+    assert studio.request("GET", "/api/season", token=None, cookie=cookie)[0] == 403
+    assert studio.request("GET", f"/audio/{clip}", token=None, cookie=cookie)[0] == 403
     status, _ = studio.json(
         "POST", "/api/decisions", _name(doc, 3, "Erza"), token=None, cookie=cookie
     )
     assert status == 403
+    status, _, _ = studio.request("POST", "/api/decisions", "{}", token=None, cookie=cookie,
+                                  content_type="text/plain")  # fmt: skip
+    assert status == 403
 
 
-def test_token_in_the_query_is_only_taken_on_the_page_load(studio):
+def test_a_token_in_the_query_is_ignored(studio):
+    clip = _a_clip(_season(studio))
     assert studio.request("GET", f"/api/season?t={TOKEN}", token=None)[0] == 403
+    assert studio.request("GET", f"/audio/{clip}?t={TOKEN}", token=None)[0] == 403
+    status, headers, _ = studio.request("GET", f"/?t={TOKEN}", token=None)
+    assert status == 200 and "location" not in headers  # the shell, no login redirect
 
 
-def test_another_ports_cookie_is_refused(studio):
-    cookie = f"fukikae_studio_{studio.port + 1}={TOKEN}"
-    assert studio.request("GET", "/api/season", token=None, cookie=cookie)[0] == 403
+def test_the_token_header_authorizes_api_reads_and_audio(studio, ws):  # noqa: F811
+    clip = _a_clip(_season(studio))
+    assert studio.request("GET", "/api/season")[0] == 200
+    assert studio.request("GET", "/api/characters/1")[0] == 200
+    status, headers, data = studio.request("GET", f"/audio/{clip}")
+    assert status == 200 and data == (ws.root / "studio" / "audio" / clip).read_bytes()
 
 
 @pytest.mark.parametrize("host", ["evil.example:{port}", "127.0.0.1:1", "", "192.168.1.5:{port}"])
@@ -213,7 +297,8 @@ def test_foreign_origin_is_refused(studio):
 
 
 def test_request_log_never_prints_the_token(studio, capsys):
-    studio.request("GET", f"/?t={TOKEN}", token=None)
+    studio.request("GET", f"/api/season?t={TOKEN}", token=None)
+    studio.request("GET", "/api/season")
     assert TOKEN not in capsys.readouterr().err
 
 
@@ -382,8 +467,6 @@ def test_referenced_clip_is_served(studio, ws):  # noqa: F811
     status, headers, data = studio.request("GET", f"/audio/{clip}")
     assert status == 200 and headers["content-type"] == "audio/wav"
     assert data == (ws.root / "studio" / "audio" / clip).read_bytes()
-    cookie = f"fukikae_studio_{studio.port}={TOKEN}"  # what an <audio> element sends
-    assert studio.request("GET", f"/audio/{clip}", token=None, cookie=cookie)[0] == 200
     assert studio.request("GET", f"/audio/{clip}", token=None)[0] == 403
 
 
@@ -446,11 +529,12 @@ def test_studio_ws_starts_the_server_and_prints_the_url_and_tunnel(ws, monkeypat
     from fukikae.cli import app
 
     started = _no_serve(monkeypatch)
-    r = CliRunner().invoke(app, ["studio", str(ws.root), "--port", "0", "--no-open"])
+    r = CliRunner().invoke(app, ["studio", str(ws.root), "--port", "0"])
     assert r.exit_code == 0, r.output
     assert started and started[0][0] == "127.0.0.1"
     port = started[0][1]
-    assert f"http://127.0.0.1:{port}/?t=" in r.output
+    assert f"http://127.0.0.1:{port}/#t=" in r.output
+    assert "?t=" not in r.output
     assert f"ssh -L {port}:127.0.0.1:{port} " in r.output
     assert (ws.root / "studio" / "season.json").is_file()
 
@@ -459,7 +543,7 @@ def test_studio_serve_is_the_same_command(ws, monkeypatch):  # noqa: F811
     from fukikae.cli import app
 
     started = _no_serve(monkeypatch)
-    r = CliRunner().invoke(app, ["studio", "serve", str(ws.root), "--port", "0", "--no-open"])
+    r = CliRunner().invoke(app, ["studio", "serve", str(ws.root), "--port", "0"])
     assert r.exit_code == 0, r.output and started
 
 
@@ -476,12 +560,385 @@ def test_studio_refuses_a_non_loopback_host_without_the_flag(ws, monkeypatch):  
     from fukikae.cli import app
 
     started = _no_serve(monkeypatch)
-    r = CliRunner().invoke(app, ["studio", str(ws.root), "--host", "0.0.0.0", "--no-open"])  # noqa: S104
+    r = CliRunner().invoke(app, ["studio", str(ws.root), "--host", "0.0.0.0"])  # noqa: S104
     assert r.exit_code != 0 and "loopback" in r.output and not started
 
 
 def test_studio_on_a_missing_workspace_fails_cleanly(tmp_path: Path):
     from fukikae.cli import app
 
-    r = CliRunner().invoke(app, ["studio", str(tmp_path / "nope"), "--no-open"])
+    r = CliRunner().invoke(app, ["studio", str(tmp_path / "nope")])
     assert r.exit_code != 0 and "Traceback" not in r.output
+
+
+# --- failures the handler didn't expect -----------------------------------------------------
+
+
+def test_an_uncaught_exception_is_a_generic_500_with_the_traceback_on_stderr(
+    studio, monkeypatch, capsys
+):
+    import fukikae.studio.server as srv
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("boom /secret/path")
+
+    monkeypatch.setattr(srv, "load_or_build", boom)
+    status, headers, body = studio.request("GET", "/api/season")
+    assert status == 500 and json.loads(body) == {"error": "internal"}
+    assert b"secret" not in body
+    err = capsys.readouterr().err
+    assert "Traceback" in err and "boom /secret/path" in err
+
+
+@pytest.mark.parametrize(
+    ("exc", "status", "error"),
+    [
+        ("schema", 409, "registry-schema"),
+        ("locked", 503, "busy"),
+        ("corrupt", 409, "registry-unreadable"),
+    ],
+)
+def test_season_failures_are_clear_errors(studio, monkeypatch, exc, status, error):
+    import sqlite3
+
+    import fukikae.studio.server as srv
+    from fukikae.registry.store import RegistrySchemaError
+
+    errors = {
+        "schema": RegistrySchemaError("registry schema 9 is newer than this fukikae (5)"),
+        "locked": sqlite3.OperationalError("database is locked"),
+        "corrupt": sqlite3.DatabaseError("file is not a database"),
+    }
+
+    def fail(*_a, **_kw):
+        raise errors[exc]
+
+    monkeypatch.setattr(srv, "load_or_build", fail)
+    for path in ("/api/season", "/api/characters/1"):
+        got, body = studio.json("GET", path)
+        assert got == status and body["error"] == error, (path, body)
+        assert body["message"]
+
+
+def test_a_decision_that_lands_when_the_index_rebuild_fails_is_200_with_a_warning(
+    studio,
+    ws,  # noqa: F811
+    monkeypatch,
+):
+    import fukikae.studio.server as srv
+
+    doc = _season(studio)
+
+    def boom(*_a, **_kw):
+        raise ValueError(f"can't write {ws.root}/studio/season.json")
+
+    monkeypatch.setattr(srv, "load_or_build", boom)
+    status, body = studio.json("POST", "/api/decisions", _name(doc, 3, "Erza"))
+    assert status == 200, body
+    assert body["character"] is None and body["lines"]
+    assert isinstance(body["invalidations"], list)
+    assert "landed" in body["warning"] and "index" in body["warning"]
+    assert "ValueError" in body["warning"] and str(ws.root) not in body["warning"]
+    with Registry(ws.registry_path) as reg:
+        assert _reg_name(reg, 3) == "Erza"
+
+
+def test_a_broken_pipe_while_sending_an_error_is_quiet(studio, monkeypatch, capsys):
+    import fukikae.studio.server as srv
+
+    def gone(_self, *_a, **_kw):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(srv._Handler, "_bytes", gone)
+    with contextlib.suppress(http.client.HTTPException, OSError):
+        studio.request("GET", "/api/nothing")
+    import time
+
+    time.sleep(0.2)
+    err = capsys.readouterr().err
+    assert "Traceback" not in err and "BrokenPipe" not in err
+
+
+# --- timeouts and limits ------------------------------------------------------------------
+
+
+def _serve(ws, **kw):  # noqa: F811
+    from fukikae.studio.server import StudioServer
+
+    server = StudioServer(ws, load_config(ws.root, user_config=None), port=0, token=TOKEN, **kw)
+    t = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+    t.start()
+    return server, t
+
+
+def _stop(server, t) -> None:
+    server.shutdown()
+    server.server_close()
+    t.join(5)
+
+
+def _raw(port: int, data: bytes, timeout: float = 5) -> bytes:
+    import socket
+
+    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    s.sendall(data)
+    out = b""
+    try:
+        while chunk := s.recv(65536):
+            out += chunk
+    except TimeoutError:
+        out += b"<<TIMEOUT>>"
+    s.close()
+    return out
+
+
+def test_handlers_time_out_after_30_seconds():
+    from fukikae.studio.server import StudioServer, _Handler
+
+    assert _Handler.timeout == 30
+    assert StudioServer.request_timeout == 30
+
+
+def test_a_body_shorter_than_its_content_length_times_out(ws):  # noqa: F811
+    import time
+
+    server, t = _serve(ws, request_timeout=0.5)
+    try:
+        p = server.port
+        req = (
+            f"POST /api/decisions HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\nX-Fukikae-Token: {TOKEN}"
+            "\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{}"
+        ).encode()
+        t0 = time.monotonic()
+        out = _raw(p, req, timeout=5)
+        assert time.monotonic() - t0 < 4
+        assert b"<<TIMEOUT>>" not in out
+        assert out.startswith(b"HTTP/1.0 408") or out == b"", out[:200]
+    finally:
+        _stop(server, t)
+
+
+def test_handlers_over_the_cap_get_a_prompt_503(ws):  # noqa: F811
+    import socket
+    import time
+
+    server, t = _serve(ws, max_handlers=4)
+    socks = []
+    try:
+        p = server.port
+        for _ in range(4):  # four handlers, each waiting on headers that never finish
+            s = socket.create_connection(("127.0.0.1", p))
+            s.sendall(b"GET / HTTP/1.1\r\n")
+            socks.append(s)
+        time.sleep(0.3)
+        t0 = time.monotonic()
+        out = _raw(p, f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n\r\n".encode(), timeout=3)
+        assert time.monotonic() - t0 < 2
+        assert out.startswith(b"HTTP/1.1 503"), out[:200]
+        assert b'"busy"' in out
+        for s in socks:
+            s.close()
+        socks.clear()
+        time.sleep(0.3)  # the slots free as their handlers end
+        out = _raw(p, f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n\r\n".encode(), timeout=3)
+        assert out.startswith(b"HTTP/1.0 200"), out[:200]
+    finally:
+        for s in socks:
+            s.close()
+        _stop(server, t)
+
+
+def test_the_default_cap_is_16():
+    from fukikae.studio.server import MAX_HANDLERS
+
+    assert MAX_HANDLERS == 16
+
+
+# --- opening files safely -----------------------------------------------------------------
+
+
+def test_a_fifo_in_place_of_a_clip_is_refused_without_blocking(studio, ws):  # noqa: F811
+    import time
+
+    clip = _a_clip(_season(studio))
+    f = ws.root / "studio" / "audio" / clip
+    f.unlink()
+    os.mkfifo(f)
+    p = studio.port
+    t0 = time.monotonic()
+    out = _raw(p, (f"GET /audio/{clip} HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n"
+                   f"X-Fukikae-Token: {TOKEN}\r\n\r\n").encode(), timeout=3)  # fmt: skip
+    assert time.monotonic() - t0 < 2
+    assert out.startswith(b"HTTP/1.0 404"), out[:200]
+
+
+def test_a_symlinked_studio_directory_is_not_followed(studio, ws, tmp_path):  # noqa: F811
+    clip = _a_clip(_season(studio))
+    studio_dir = ws.root / "studio"
+    moved = tmp_path / "studio-elsewhere"
+    studio_dir.rename(moved)
+    os.symlink(moved, studio_dir)
+    assert studio.request("GET", f"/audio/{clip}")[0] == 404
+
+
+def test_static_files_are_opened_without_following_links(studio, monkeypatch, tmp_path):
+    import fukikae.studio.server as srv
+
+    root = tmp_path / "static"
+    (root / "sub").mkdir(parents=True)
+    (root / "ok.txt").write_text("ok")
+    (root / "sub" / "ok.txt").write_text("deep")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret")
+    os.symlink(outside / "secret.txt", root / "link.txt")
+    os.symlink(outside, root / "linkdir")
+    os.mkfifo(root / "fifo.txt")
+    monkeypatch.setattr(srv, "STATIC_DIR", root)
+    assert studio.request("GET", "/static/ok.txt", token=None)[2] == b"ok"
+    assert studio.request("GET", "/static/sub/ok.txt", token=None)[2] == b"deep"
+    for path in ("/static/link.txt", "/static/linkdir/secret.txt", "/static/fifo.txt",
+                 "/static/sub", "/static/missing.txt"):  # fmt: skip
+        assert studio.request("GET", path, token=None)[0] == 404, path
+
+
+# --- the preview is a dry run -------------------------------------------------------------
+
+
+def test_preview_returns_the_stamped_decision_to_post(studio, ws):  # noqa: F811
+    doc = _season(studio)
+    bare = {"op": "name", "character": 3, "name": "Erza"}
+    status, body = studio.json("POST", "/api/decisions/preview", bare)
+    assert status == 200, body
+    assert body["unchecked"] is True and body["stale"] is None
+    d = body["decision"]
+    assert d["digest"] == _entry(doc, 3)["digest"] and d["op"] == "name" and d["name"] == "Erza"
+    status, applied = studio.json("POST", "/api/decisions", d)  # exactly what it previewed
+    assert status == 200, applied
+    with Registry(ws.registry_path) as reg:
+        assert _reg_name(reg, 3) == "Erza"
+
+
+def test_preview_keeps_a_stale_digest_as_sent(studio, ws):  # noqa: F811
+    doc = _season(studio)
+    sent = _name(doc, 3, "Erza")
+    with Registry(ws.registry_path) as reg:
+        reg.rename_character(3, "Someone")
+    status, body = studio.json("POST", "/api/decisions/preview", sent)
+    assert status == 200 and body["stale"] and body["decision"]["digest"] == sent["digest"]
+    assert studio.json("POST", "/api/decisions", body["decision"])[0] == 409
+
+
+def test_preview_of_a_merge_stamps_both_characters(studio, ws):  # noqa: F811
+    from fukikae.studio.apply import decision_digest
+    from fukikae.studio.model import parse_decision
+
+    status, body = studio.json("POST", "/api/decisions/preview",
+                               {"op": "merge", "keep": 1, "drop": 2})  # fmt: skip
+    assert status == 200, body
+    d = body["decision"]
+    assert d["op"] == "merge" and d["keep"] == 1 and d["drop"] == 2
+    with Registry(ws.registry_path) as reg:
+        assert d["digest"] == decision_digest(
+            reg, parse_decision({"op": "merge", "keep": 1, "drop": 2})
+        )
+    assert set(body) >= {"lines", "invalidations", "stale", "unchecked", "decision"}
+
+
+def test_preview_runs_the_write_time_refusals(studio):
+    status, body = studio.json("POST", "/api/decisions/preview",
+                               {"op": "merge", "keep": 1, "drop": 1})  # fmt: skip
+    assert status == 422 and body["error"] == "refused"
+
+
+def test_preview_never_migrates_or_creates_a_registry(studio, ws):  # noqa: F811
+    doc = _season(studio)
+    sent = _name(doc, 3, "Erza")
+    ws.registry_path.unlink()
+    ws.registry_path.write_bytes(b"")
+    status, body = studio.json("POST", "/api/decisions/preview", sent)
+    assert status in (409, 422) and body["error"] != "internal", body
+    assert ws.registry_path.read_bytes() == b""
+    ws.registry_path.unlink()
+    status, body = studio.json("POST", "/api/decisions/preview", sent)
+    assert status == 409 and not ws.registry_path.exists()
+
+
+def test_preview_does_not_open_the_registry_directly():
+    import inspect
+
+    import fukikae.studio.server as srv
+
+    assert "Registry(" not in inspect.getsource(srv._Handler)
+
+
+# --- the command, continued -------------------------------------------------------------------
+
+
+def test_studio_options_before_the_workspace_go_to_serve(ws, monkeypatch):  # noqa: F811
+    from fukikae.cli import app
+
+    started = _no_serve(monkeypatch)
+    r = CliRunner().invoke(app, ["studio", "--port", "0", str(ws.root)])
+    assert r.exit_code == 0, r.output
+    assert started and f"http://127.0.0.1:{started[0][1]}/#t=" in r.output
+
+
+def test_studio_help_and_subcommands_still_work():
+    from fukikae.cli import app
+
+    r = CliRunner().invoke(app, ["studio", "--help"])
+    assert r.exit_code == 0 and "apply" in r.output and "resume" in r.output
+    for sub in ("serve", "apply", "resume"):
+        r = CliRunner().invoke(app, ["studio", sub, "--help"])
+        assert r.exit_code == 0, (sub, r.output)
+    r = CliRunner().invoke(app, ["studio", "serve", "--help"])
+    assert "--no-open" not in r.output
+
+
+def test_studio_never_opens_a_browser(ws, monkeypatch):  # noqa: F811
+    import webbrowser
+
+    from fukikae.cli import app
+
+    opened: list = []
+    monkeypatch.setattr(webbrowser, "open", lambda *a, **_k: opened.append(a))
+    monkeypatch.setenv("DISPLAY", ":0")
+    _no_serve(monkeypatch)
+    r = CliRunner().invoke(app, ["studio", str(ws.root), "--port", "0"])
+    assert r.exit_code == 0, r.output and not opened
+    assert not opened
+    r = CliRunner().invoke(app, ["studio", str(ws.root), "--port", "0", "--no-open"])
+    assert r.exit_code != 0  # the option is gone
+
+
+def test_studio_refuses_another_loopback_address(ws, monkeypatch):  # noqa: F811
+    from fukikae.cli import app
+
+    started = _no_serve(monkeypatch)
+    r = CliRunner().invoke(app, ["studio", str(ws.root), "--host", "127.0.0.2"])
+    assert r.exit_code != 0 and "127.0.0.1" in r.output and not started
+
+
+@pytest.mark.parametrize("which", ["schema", "corrupt"])
+def test_studio_startup_reports_index_failures_in_one_line(ws, monkeypatch, which):  # noqa: F811
+    import sqlite3
+
+    import fukikae.studio.server as srv
+    from fukikae.cli import app
+    from fukikae.registry.store import RegistrySchemaError
+
+    exc = (RegistrySchemaError("registry schema 9 is newer than this fukikae") if which == "schema"
+           else sqlite3.DatabaseError("file is not a database"))  # fmt: skip
+
+    def fail(*_a, **_kw):
+        raise exc
+
+    monkeypatch.setattr(srv, "load_or_build", fail)
+    started = _no_serve(monkeypatch)
+    r = CliRunner().invoke(app, ["studio", str(ws.root), "--port", "0"])
+    assert r.exit_code == 1 and not started
+    assert "Traceback" not in r.output
+    assert r.exception is None or isinstance(r.exception, SystemExit)
+    errs = [ln for ln in r.output.splitlines() if ln.startswith("error:")]
+    assert len(errs) == 1 and str(exc) in errs[0]

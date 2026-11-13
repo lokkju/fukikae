@@ -187,7 +187,7 @@ No regression on Fairy Tail, the D27 names arm (E11 to E14, E14 held out as befo
 
 `fukikae studio <ws>` serves a local web app for one workspace, which in practice is a show or a season of one. It is a Python process with three parts:
 
-- a JSON API over stdlib `http.server` (`ThreadingHTTPServer`), bound to 127.0.0.1 only, with a random per-run token printed in the URL and required on every request (another local user, or a web page in the operator's browser, can't drive it);
+- a JSON API over stdlib `http.server` (`ThreadingHTTPServer`), bound to 127.0.0.1 only, with a random per-run token required on every API and audio request (another local user, or a web page in the operator's browser, can't drive it). The printed URL carries the token in its fragment (`/#t=<token>`), which a browser never sends to a server; the page keeps it in `sessionStorage`, clears the fragment, and sends it as the `X-Fukikae-Token` header, audio included (fetched into a blob URL). There is no cookie, no token in a query string, and no browser opened at start; the page shell and its static files hold no data and need no token;
 - one page, shipped as package data, that is the API's first client: Preact and htm vendored into the package as ES modules with their versions and hashes recorded, no build step and no network at any point (CD24's no-fetch rule covers the browser too: no CDN, no fonts, no external URL in the page). Open decision 6;
 - an audition worker: the draft card's clone backend through the same `WorkerSynthesizer` the tts stage uses, loaded on the first audition and holding `gpu_lock` for its card (CD15) while loaded, unloaded after `AUDITION_IDLE_S` (300 s) without an audition or when the operator presses "release GPU".
 

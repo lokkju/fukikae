@@ -1,6 +1,6 @@
 """`fukikae studio` commands."""
 
-import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +10,12 @@ from typer.core import TyperGroup
 
 class _ServeByDefault(TyperGroup):
     """`fukikae studio <ws>` is `fukikae studio serve <ws>`: a first argument that names no
-    subcommand (and is no option) is a workspace. A workspace directory literally named like
-    a subcommand is reached as ``./apply``."""
+    subcommand and isn't ``--help`` goes to ``serve``, options included (``fukikae studio
+    --port 0 <ws>``). A workspace directory literally named like a subcommand is reached as
+    ``./apply``."""
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:  # typer's vendored click
-        if args and args[0] not in self.commands and not args[0].startswith("-"):
+        if args and args[0] not in self.commands and args[0] not in ctx.help_option_names:
             args = ["serve", *args]
         return super().parse_args(ctx, args)
 
@@ -41,13 +42,12 @@ def serve(
         help="Allow --host to name a non-loopback IPv4 address. Anyone who can reach it and "
         "has the token can change the registry.",
     ),
-    no_open: bool = typer.Option(
-        False, "--no-open", help="Don't open a browser (only tried when a display is set)."
-    ),
 ) -> None:
     """Serve the season studio for WORKSPACE on 127.0.0.1: builds or loads the season index,
-    prints the URL with this run's token and the `ssh -L` line that reaches it from your
-    machine, and serves until Ctrl-C. Every request needs the token."""
+    prints the URL (this run's token after `#t=`, which the browser keeps to itself) and the
+    `ssh -L` line that reaches it from your machine, and serves until Ctrl-C. It opens no
+    browser. Every API and audio request needs the token."""
+    from fukikae.registry.store import RegistrySchemaError
     from fukikae.studio.server import StudioServer
     from fukikae.workspace import Workspace
 
@@ -70,7 +70,7 @@ def serve(
         typer.echo("loading the season index ...")
         try:
             doc = server.season()
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, RegistrySchemaError, sqlite3.DatabaseError) as e:
             typer.echo(f"error: the season index: {e}", err=True)
             raise typer.Exit(1) from e
         ready = sum(e.ready for e in doc.episodes)
@@ -81,10 +81,6 @@ def serve(
         if server.loopback:
             typer.echo(f"from your machine: {server.tunnel()}")
         typer.echo("Ctrl-C stops it.")
-        if not no_open and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-            import webbrowser
-
-            webbrowser.open(server.url())
         try:
             server.serve_forever()
         except KeyboardInterrupt:
