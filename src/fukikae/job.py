@@ -388,7 +388,7 @@ def run_episodes(
         except ReviewRequired as e:
             results[ep.id].ran += e.ran
             results[ep.id].error = e
-            progress.episode(ep.id, "stopped for review")
+            progress.episode(ep.id, progress.STOPPED)
         except BaseException as e:
             results[ep.id].error = e
             failed.set()
@@ -408,7 +408,7 @@ def run_episodes(
             except ReviewRequired as e:
                 results[ep.id].ran += e.ran
                 results[ep.id].error = e
-                progress.episode(ep.id, "stopped for review")
+                progress.episode(ep.id, progress.STOPPED)
                 continue
             except BaseException as e:
                 results[ep.id].error = e

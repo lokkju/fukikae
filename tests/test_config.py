@@ -287,7 +287,7 @@ def test_profiles_set_no_tts_backend():
 
 def test_review_defaults_are_off(tmp_path):
     r = load_config(tmp_path, user_config=None).review
-    assert (r.identity, r.voices, r.min_seconds) == (False, False, 20.0)
+    assert (r.identity, r.voices, r.min_seconds) == (False, False, 30.0)
 
 
 def test_review_table_needs_no_backend_and_merges_over_the_profile(tmp_path, monkeypatch):
@@ -314,7 +314,15 @@ def test_old_required_key_is_refused_with_a_pointer(tmp_path):
 
 @pytest.mark.parametrize(
     "body",
-    ["identity = 1", 'voices = "yes"', "min_seconds = -1", "min_seconds = true", "speed = 2"],
+    [
+        "identity = 1",
+        'voices = "yes"',
+        "min_seconds = -1",
+        "min_seconds = true",
+        "speed = 2",
+        "min_seconds = nan",
+        "min_seconds = inf",
+    ],
 )
 def test_review_table_rejects_bad_values(tmp_path, body):
     (tmp_path / "fukikae.toml").write_text(f"[review]\n{body}\n")

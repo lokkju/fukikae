@@ -138,6 +138,26 @@ class KeyDecision(BaseModel):
     locked: dict[str, int | None] = Field(default_factory=dict)
 
 
+class DisagreeWith(BaseModel):
+    """One other character the acoustics give some of a key's sub-clusters to, and how."""
+
+    character_id: int
+    how: str  # the acoustic path: the parent's pin, the label's own pin or a match
+    labels: list[str]  # sorted
+    seconds: float
+
+
+class KeyDisagreement(BaseModel):
+    """A key whose named sub-clusters went to ``character_id`` by name while the acoustics
+    give some of them to other characters (`against`): the data behind one "acoustics
+    disagree" report line."""
+
+    key: str
+    character_id: int
+    seconds: float  # the disagreeing seconds
+    against: list[DisagreeWith]
+
+
 class NamesReport(BaseModel):
     """`05-characters/names-report.json`: what the characters stage did with an episode's
     names, for `fukikae names show`. Written beside `assignments.json` only when names were
@@ -148,3 +168,6 @@ class NamesReport(BaseModel):
     episode: str
     keys: list[KeyDecision]
     lines: list[str]  # the stage's report lines: locks, renames, disagreements, ambiguous keys
+    # the disagreement lines as data, in the same order; None: a report written before the
+    # field existed (its disagreements are only in `lines`)
+    disagreements: list[KeyDisagreement] | None = None

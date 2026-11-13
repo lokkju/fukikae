@@ -239,15 +239,36 @@ CPU_TAIL = ("timefit", "mix")
 EXIT_REVIEW = 3
 
 
-def _review_stop(workspace: Path, e: "ReviewRequired") -> None:
-    """Print why a `[review]` gate stopped the episode and the command that fixes it."""
+def _review_stop(e: "ReviewRequired") -> None:
+    """Print why a `[review]` gate stopped the episode."""
     from fukikae.studio.gate import GATE_STAGES
 
     key = GATE_STAGES.get(e.stage, e.stage)
     typer.echo(f"{e.episode}: stopped before {e.stage} by [review] {key}:", err=True)
     for reason in e.reasons:
         typer.echo(f"  {reason}", err=True)
-    typer.echo(f"  review them in the studio: fukikae studio {workspace}", err=True)
+
+
+def _studio_hint(workspace: Path, stops: "list[ReviewRequired]") -> None:
+    """Print, once per run, the commands that settle what the gates stopped for: the studio,
+    and until its page is ready, decisions applied from a file."""
+    typer.echo(f"review them in the studio: fukikae studio {workspace}", err=True)
+    typer.echo(
+        f"or write decisions to a file and apply them: fukikae studio apply {workspace} FILE "
+        "(one JSON object per line; a hand-written decision carries no digest, so add "
+        "--force; see `fukikae studio apply --help`)",
+        err=True,
+    )
+    if any(e.stage == "translate" for e in stops):
+        typer.echo(
+            '  {"op": "reviewed", "character": N} marks a character\'s identity reviewed '
+            "(a name, alias, gender, kind, lock, merge or split decision marks it too)",
+            err=True,
+        )
+    if any(e.stage == "tts" for e in stops):
+        typer.echo(
+            '  {"op": "accept", ...} accepts a voice for a character (a studio draft)', err=True
+        )
 
 
 @app.command()
@@ -264,7 +285,8 @@ def run(
 ) -> None:
     """Run the pipeline stages for one episode, or several in order. With `[review] identity`
     or `voices` on, an episode whose main characters need the studio stops before translate
-    or tts (exit code 3, naming them and `fukikae studio <ws>`); the other episodes go on."""
+    or tts (exit code 3, naming them, then once `fukikae studio <ws>` and `fukikae studio
+    apply`); the other episodes go on."""
     from fukikae import job, progress, runctx
     from fukikae.errors import user_errors
     from fukikae.studio.gate import gates_for
@@ -286,7 +308,7 @@ def run(
             typer.echo(f"error: {e}", err=True)
             raise typer.Exit(1) from e
         failed = False
-        stopped = False
+        stops: list[job.ReviewRequired] = []
         bug: BaseException | None = None
         for ep in eps:
             res = results.get(ep.id)
@@ -297,8 +319,8 @@ def run(
                 ran = ", ".join(res.ran) if res.ran else "nothing (up to date)"
                 typer.echo(f"{ep.id}: ran {ran}")
             if isinstance(res.error, job.ReviewRequired):
-                stopped = True
-                _review_stop(ws.root, res.error)
+                stops.append(res.error)
+                _review_stop(res.error)
             elif res.error is not None:
                 failed = True
                 if isinstance(res.error, user_errors()):
@@ -306,11 +328,13 @@ def run(
                 else:  # a bug: every episode is reported first, then its traceback
                     typer.echo(f"error: {ep.id}: {type(res.error).__name__}: {res.error}", err=True)
                     bug = bug or res.error
+        if stops:
+            _studio_hint(ws.root, stops)
         if bug is not None:
             raise bug
         if failed:
             raise typer.Exit(1)
-        if stopped:
+        if stops:
             raise typer.Exit(EXIT_REVIEW)
         return
     try:
@@ -321,7 +345,7 @@ def run(
             try:
                 ran = job.run_stages(ep, cfg, stages, from_stage, to_stage, gates=gates_for(cfg))
             except job.ReviewRequired:
-                progress.episode(ep.id, "stopped for review")
+                progress.episode(ep.id, progress.STOPPED)
                 raise
             except BaseException:
                 progress.episode(ep.id, "failed")
@@ -330,7 +354,8 @@ def run(
     except job.ReviewRequired as e:
         if e.ran:
             typer.echo(f"{ep.id}: ran {', '.join(e.ran)}")
-        _review_stop(ws.root, e)
+        _review_stop(e)
+        _studio_hint(ws.root, [e])
         raise typer.Exit(EXIT_REVIEW) from e
     except user_errors() as e:
         typer.echo(f"error: {e}", err=True)

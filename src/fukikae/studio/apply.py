@@ -778,8 +778,53 @@ def _write(ws: Workspace, reg: Registry, d: Decision, lines: list[str]) -> list[
         lines.append(_accept(ws, reg, d))
     assert (d.op in IDENTITY_OPS) == bool(reviewed)
     for cid in reviewed:
-        _call(op, reg.mark_reviewed, cid)
+        _call(op, reg.mark_reviewed, cid, digests=_review_digests(ws, reg, cid, after))
     return after
+
+
+def _remap_args(s: dict[str, Any]) -> dict[str, Any]:
+    """A logged remap step's arguments to `remap_assignments` (or `remapped`)."""
+    character = s.get("character")
+    return {
+        "actor_map": {int(a): int(b) for a, b in s["actor_map"]},
+        "only_cluster": s.get("only_cluster"),
+        "character": (int(character[0]), int(character[1])) if character else None,
+        "character_map": {int(a): int(b) for a, b in s.get("character_map") or []} or None,
+    }
+
+
+def _review_digests(
+    ws: Workspace, reg: Registry, character_id: int, after: list[dict[str, Any]]
+) -> dict[str, str]:
+    """Episode -> the digest of the character's names flags there as the review sees them
+    (`names_flag_digest`), for each episode where it has any: the evidence the identity gate
+    compares (`fukikae.studio.gate`). Read inside the decision's transaction, so the registry
+    is the decision's; an episode a remap step of this decision rewrites is read remapped,
+    as it will be once the step runs."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments
+    from fukikae.names.flags import names_flag_digest
+    from fukikae.registry.invalidate import remapped
+    from fukikae.studio.season import episode_ids
+
+    out: dict[str, str] = {}
+    for e in episode_ids(ws):
+        asg = None
+        steps = [s for s in after if s["do"] == "remap" and s["episode"] == e]
+        path = ws.work_dir(e) / "05-characters" / "assignments.json"
+        try:
+            if steps and path.exists():
+                asg = read_json(path, Assignments)
+                for s in steps:
+                    asg = remapped(asg, **_remap_args(s))
+            digest = names_flag_digest(ws, e, reg, character_id, asg)
+        except (OSError, ValueError):
+            # an episode whose files don't read records nothing: the gate then stops for its
+            # names flags until a review sees them, never passes them unseen
+            continue
+        if digest is not None:
+            out[e] = digest
+    return out
 
 
 def _write_split(
@@ -826,15 +871,7 @@ def _run_step(ws: Workspace, s: dict[str, Any]) -> str | None:
     if s["do"] == "stale":
         return mark_stale(ws, s["episodes"], s["stage"])
     if s["do"] == "remap":
-        character = s.get("character")
-        remap_assignments(
-            ws,
-            s["episode"],
-            {int(a): int(b) for a, b in s["actor_map"]},
-            only_cluster=s.get("only_cluster"),
-            character=(int(character[0]), int(character[1])) if character else None,
-            character_map={int(a): int(b) for a, b in s.get("character_map") or []} or None,
-        )
+        remap_assignments(ws, s["episode"], **_remap_args(s))
         return None
     assert s["do"] == "split", s
     _write_split(

@@ -1013,6 +1013,24 @@ def test_disagreement_report_reproduces_on_rerun(tmp_path, caplog):
     assert len(first) == 3 and second == first
 
 
+def test_disagreements_are_written_structured_beside_their_lines(tmp_path):
+    """The names report carries each disagreement as data (key, character, and per other
+    character the how and labels) beside its text line, for the gate's evidence digest."""
+    from fukikae.artifacts import read_json
+    from fukikae.names.models import NamesReport
+
+    ep, _ = _below_rename(tmp_path)
+    CharactersStage().run(ep, NAMES_CFG)
+    rep = read_json(CharactersStage().report_path(ep), NamesReport)
+    lines = [ln for ln in rep.lines if "acoustics disagree" in ln]
+    assert rep.disagreements is not None and len(rep.disagreements) == len(lines) == 3
+    for d, line in zip(rep.disagreements, lines, strict=True):
+        assert line.startswith(f"{d.key!r} -> character {d.character_id} ")
+        assert d.against and all(w.labels == sorted(w.labels) for w in d.against)
+        for w in d.against:
+            assert f"character {w.character_id}" in line and f"by {w.how}" in line
+
+
 def test_operator_rename_takes_a_key_from_a_subtitle_character(tmp_path):
     ep = make_ep(tmp_path)
     write_diarize(ep, {"SPEAKER_12": ([WENDY, NATSU], 40.0)}, [(0, 40, "SPEAKER_12")])

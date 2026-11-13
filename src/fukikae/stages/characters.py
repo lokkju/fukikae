@@ -97,7 +97,14 @@ from fukikae.artifacts import read_json, write_json
 from fukikae.config import BackendConfig, Config, ConfigError
 from fukikae.models import Assignments, ClusterAssignment, Diarization
 from fukikae.names.inputs import identity_inputs, names_path, names_report_path
-from fukikae.names.models import KeyDecision, KeyHow, NamesReport, NamesResult
+from fukikae.names.models import (
+    DisagreeWith,
+    KeyDecision,
+    KeyDisagreement,
+    KeyHow,
+    NamesReport,
+    NamesResult,
+)
 from fukikae.registry.matching import (
     ClusterEvidence,
     centroid_tops,
@@ -218,6 +225,7 @@ def resolve_names(
     own_pins: dict[str, ClusterAssignment] | None = None,
     decisions: list[KeyDecision] | None = None,
     locked_pins: dict[str, ClusterAssignment] | None = None,
+    disagreements: list[KeyDisagreement] | None = None,
 ) -> tuple[dict[str, ClusterAssignment], list[str]]:
     """Characters for every named sub-cluster of a names-used episode, in the order the module
     docstring gives, and the report lines (locks kept, disagreements with acoustics, ambiguous
@@ -235,7 +243,8 @@ def resolve_names(
     sub-cluster is kept on the next run.
 
     ``decisions`` (when given) gets one `KeyDecision` per key, most named speech first: how
-    the key went, for `fukikae names show`."""
+    the key went, for `fukikae names show`, and ``disagreements`` (when given) one
+    `KeyDisagreement` per disagreement line, in the same order."""
     threshold = cfg.registry.match_threshold
     min_new = cfg.names.min_new_seconds
     language = (result.source or {}).get("language")
@@ -439,6 +448,13 @@ def resolve_names(
             f"{k!r} -> {describe(cid)}; acoustics disagree on {total:.1f} s of its "
             f"{key_seconds[k]:.1f} s: {listed}"
         )
+        if disagreements is not None and cid is not None:
+            disagreements.append(KeyDisagreement(
+                key=k, character_id=cid, seconds=round(total, 3),
+                against=[DisagreeWith(character_id=other, how=how, labels=sorted(lbs),
+                                      seconds=round(sum(seconds[lb] for lb in lbs), 3))
+                         for (other, how), lbs in parts],
+            ))  # fmt: skip
     if decisions is not None:
         for k in order:
             locked = {
@@ -564,6 +580,7 @@ class CharactersStage:
         report_path = self.report_path(ep)
         report_path.unlink(missing_ok=True)  # only a run that used names writes one
         decisions: list[KeyDecision] = []
+        disagreements: list[KeyDisagreement] = []
         report: list[str] = []
         voice_lines: list[str] = []  # what a pitch split's voice parts got, logged
         turns = read_json(turns_path, Diarization)
@@ -716,6 +733,7 @@ class CharactersStage:
                     own_pins={k: v for k, v in pinned.items() if k in named},
                     locked_pins={k: v for k, v in any_pins.items() if k in named},
                     decisions=decisions,
+                    disagreements=disagreements,
                 )
                 for line in report:
                     log.info("characters %s: %s", ep.id, line)
@@ -906,4 +924,5 @@ class CharactersStage:
             ),
         )
         if names is not None:
-            write_json(report_path, NamesReport(episode=ep.id, keys=decisions, lines=report))
+            write_json(report_path, NamesReport(episode=ep.id, keys=decisions, lines=report,
+                                                disagreements=disagreements))  # fmt: skip

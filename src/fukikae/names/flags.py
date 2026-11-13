@@ -6,9 +6,11 @@ for a nameless leftover, and the flagged clone cards. Each check has one impleme
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -38,37 +40,131 @@ def label_seconds(asg: Assignments) -> dict[str, float]:
     return out
 
 
-def stale_decision(
-    d: KeyDecision, asg: Assignments, reg: Registry | None, ws: Workspace, episode: str
-) -> str | None:
-    """Why a `names-report.json` entry no longer describes the episode, or None: its character
-    is gone from the registry, or the current assignments give its sub-clusters (or its
-    lock-kept ones) to another character, as after a `registry merge` or `split`."""
+@dataclass(frozen=True)
+class StaleMoves:
+    """Why a `names-report.json` entry no longer describes the episode, as data: the
+    characters it names that are gone from the registry, and each of its sub-clusters the
+    current assignments give to another character (``(label, character now)``, by label;
+    None: nobody)."""
+
+    gone: tuple[int, ...]
+    moved: tuple[tuple[str, int | None], ...]
+
+
+def stale_moves(d: KeyDecision, asg: Assignments, reg: Registry | None) -> StaleMoves | None:
+    """`StaleMoves` for a key decision, or None while it still describes the episode: its
+    character is gone from the registry, or the current assignments give its sub-clusters (or
+    its lock-kept ones) to another character, as after a `registry merge` or `split`."""
     clusters = {c.cluster: c for c in asg.clusters}
-    why: list[str] = []
     known = {c.id for c in reg.characters()} if reg is not None else None
     wanted = {lb: d.character_id for lb in d.labels if lb not in d.locked}
     wanted.update(d.locked)
+    gone: list[int] = []
     if known is not None:
         gone = sorted({c for c in wanted.values() if c is not None and c not in known})
-        why += [f"character {c} is gone from the registry" for c in gone]
-    moved: dict[int | None, list[str]] = defaultdict(list)
+    moved: list[tuple[str, int | None]] = []
     for lb, cid in sorted(wanted.items()):
-        a = clusters.get(lb)
         if d.how in ("extra", "ambiguous") and lb not in d.locked:
             continue
+        a = clusters.get(lb)
         now = a.character_id if a is not None else None
         if now != cid:
-            moved[now].append(lb)
-    for now, labels in sorted(moved.items(), key=lambda kv: (kv[0] is None, kv[0] or 0)):
+            moved.append((lb, now))
+    if not gone and not moved:
+        return None
+    return StaleMoves(tuple(gone), tuple(moved))
+
+
+def stale_line(m: StaleMoves, ws: Workspace, episode: str) -> str:
+    """`stale_moves`' finding as the line `names show` and the season index print."""
+    why = [f"character {c} is gone from the registry" for c in m.gone]
+    by_now: dict[int | None, list[str]] = defaultdict(list)
+    for lb, now in m.moved:
+        by_now[now].append(lb)
+    for now, labels in sorted(by_now.items(), key=lambda kv: (kv[0] is None, kv[0] or 0)):
         who = f"character {now}" if now is not None else "nobody"
         why.append(f"the assignments give {', '.join(labels)} to {who}")
-    if not why:
-        return None
     return (
         f"stale: {'; '.join(why)}; rerun the characters stage "
         f"(`fukikae run {ws.root} {episode} --from characters`)"
     )
+
+
+def stale_decision(
+    d: KeyDecision, asg: Assignments, reg: Registry | None, ws: Workspace, episode: str
+) -> str | None:
+    """Why a `names-report.json` entry no longer describes the episode (`stale_moves`, as
+    `stale_line` words it), or None."""
+    m = stale_moves(d, asg, reg)
+    return None if m is None else stale_line(m, ws, episode)
+
+
+def names_flag_identities(
+    ws: Workspace, episode: str, reg: Registry, asg: Assignments | None = None
+) -> dict[int, list[list[Any]]]:
+    """Character -> what each of its ``names`` flags on the episode is, with no text in it
+    (names, seconds and wording change on a rerun; these don't): a stale key decision is
+    ``["stale", key, [[label, character now], ...], [gone character, ...]]`` for each
+    character holding the key (as the season index assigns it), a disagreement
+    ``["disagree", key, character, [[other character, how, labels], ...]]``. A report from
+    before structured disagreements gives its "acoustics disagree" lines as
+    ``["disagree-line", line]``. Empty unless the episode used names and has its names report
+    and assignments; ``asg`` stands in for the assignments on disk (a merge's remap, before it
+    is written)."""
+    from fukikae.artifacts import read_json
+    from fukikae.cards.auto import used_names
+    from fukikae.models import Assignments
+    from fukikae.names.inputs import names_report_path
+    from fukikae.names.models import NamesReport
+
+    work = ws.work_dir(episode)
+    rpath = names_report_path(work)
+    apath = work / "05-characters" / "assignments.json"
+    if used_names(work) is None or not rpath.exists():
+        return {}
+    if asg is None:
+        if not apath.exists():
+            return {}
+        asg = read_json(apath, Assignments)
+    report = read_json(rpath, NamesReport)
+    out: dict[int, list[list[Any]]] = defaultdict(list)
+    for d in report.keys:
+        m = stale_moves(d, asg, reg)
+        if m is None:
+            continue
+        holders = {d.character_id} if d.how not in ("extra", "ambiguous") else set()
+        holders |= set(d.locked.values())
+        item: list[Any] = ["stale", d.key, [list(p) for p in m.moved], list(m.gone)]
+        for cid in sorted(h for h in holders if h is not None):
+            out[cid].append(item)
+    if report.disagreements is None:
+        for line in report.lines:
+            if "acoustics disagree" not in line:
+                continue
+            for d in report.keys:
+                if d.character_id is not None and line.startswith(f"{d.key!r} -> "):
+                    out[d.character_id].append(["disagree-line", line])
+    else:
+        for x in report.disagreements:
+            against = sorted([w.character_id, w.how, sorted(w.labels)] for w in x.against)
+            out[x.character_id].append(["disagree", x.key, x.character_id, against])
+    return dict(out)
+
+
+def flags_digest(items: list[list[Any]]) -> str:
+    """sha256 of a character's flag identities (`names_flag_identities`), in any order."""
+    canon = sorted(json.dumps(i, sort_keys=True) for i in items)
+    return hashlib.sha256(json.dumps(canon).encode()).hexdigest()
+
+
+def names_flag_digest(
+    ws: Workspace, episode: str, reg: Registry, character_id: int, asg: Assignments | None = None
+) -> str | None:
+    """The digest of the character's names flags on the episode (`flags_digest`), or None
+    when it has none there: what `studio apply` records with a review and the identity gate
+    compares (`fukikae.studio.gate`)."""
+    items = names_flag_identities(ws, episode, reg, asg).get(character_id)
+    return flags_digest(items) if items else None
 
 
 @dataclass(frozen=True)

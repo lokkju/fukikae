@@ -1026,10 +1026,10 @@ git -C $REPO commit -m "feat(studio): compare versions, accept a curated card, s
 - Test: `tests/studio/test_gate.py`, `tests/test_config.py`, `tests/test_job.py`
 
 **Interfaces:**
-- `@dataclass(frozen=True) class ReviewSettings: identity: bool = False; voices: bool = False; min_seconds: float = 20.0`; `review_settings(table)` rejects unknown keys (the first draft's `required` included, with a message naming `identity` and `voices`); merged profile then workspace; `[review]` exempt from R3. No profile turns either gate on (open decision 2).
+- `@dataclass(frozen=True) class ReviewSettings: identity: bool = False; voices: bool = False; min_seconds: float = 30.0` (the spec's main-character rule; finite, 0 or more); `review_settings(table)` rejects unknown keys (the first draft's `required` included, with a message naming `identity` and `voices`); merged profile then workspace; `[review]` exempt from R3. No profile turns either gate on (open decision 2).
 - `main_characters(ep, reg, cfg) -> list[int]`: kind `character` or `narrator`, `min_seconds` or more in the episode.
-- `needs_identity(ep, cfg, reg) -> list[str]`: a main character with `reviewed` NULL, or a bimodal split suggestion, impure card or names disagreement newer than its `reviewed`.
-- `needs_voices(ep, cfg, reg) -> list[str]`: a main character without a curated, imported or locked card for `cfg.target_language` (`replace_refusal(a, "auto") is not None`).
+- `needs_identity(ep, cfg, reg) -> list[str]`: a main character with `reviewed` NULL, names flags whose digest (`names.flags.names_flag_digest`) differs from the one its review recorded in `review_evidence` (or none recorded), or an impure automatic card assigned after its `reviewed`; split suggestions are notes only.
+- `needs_voices(ep, cfg, reg) -> list[str]`: a main character without a curated, imported or locked card for `cfg.target_language` (`replace_refusal(a, "auto") is not None`) that names a card and is not a stock voice (D41).
 - `job.run_stages(..., gates: Mapping[str, Callable[[Episode, Config], list[str]]] = {})`: before running a stage named in `gates`, a non-empty result raises `ReviewRequired(episode, stage, reasons)`; `run_episodes` stops only that episode.
 - `fukikae run` registers `needs_identity` before `translate` and `needs_voices` before `tts` when enabled; exits 3 printing each reason and `fukikae studio <ws>`.
 

@@ -14,7 +14,7 @@ import logging
 import re
 import sqlite3
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -139,6 +139,14 @@ CREATE TABLE IF NOT EXISTS decision_marks (
     id TEXT PRIMARY KEY, -- the decisions.jsonl record id
     op TEXT NOT NULL,
     applied TEXT NOT NULL
+);
+-- schema 5: what each character's last identity review saw, per episode: the digest of its
+-- names flags there (`fukikae.names.flags.names_flag_digest`), written with `reviewed`
+CREATE TABLE IF NOT EXISTS review_evidence (
+    character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    episode TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    PRIMARY KEY (character_id, episode)
 );
 CREATE INDEX IF NOT EXISTS character_aliases_character ON character_aliases(character_id);
 CREATE INDEX IF NOT EXISTS card_history_character ON card_history(character_id, target_language);
@@ -1293,10 +1301,19 @@ class Registry:
             )
         }
 
-    def mark_reviewed(self, character_id: int, when: str | None = None) -> None:
+    def mark_reviewed(
+        self,
+        character_id: int,
+        when: str | None = None,
+        digests: Mapping[str, str] | None = None,
+    ) -> None:
         """Record that the operator reviewed the character's identity, at ``when`` (ISO 8601
         with a timezone offset, stored in UTC as `_now` writes it) or now. ValueError when
-        ``when`` doesn't parse or has no offset."""
+        ``when`` doesn't parse or has no offset.
+
+        ``digests`` (episode -> the digest of the character's names flags there, as the review
+        saw them) replaces the character's review evidence in the same transaction; None
+        leaves the evidence as it was."""
         if when is None:
             stamp = _now()
         else:
@@ -1310,6 +1327,23 @@ class Registry:
             )
             if cur.rowcount == 0:
                 raise KeyError(character_id)
+            if digests is not None:
+                con.execute("DELETE FROM review_evidence WHERE character_id = ?", (character_id,))
+                con.executemany(
+                    "INSERT INTO review_evidence(character_id, episode, digest) VALUES (?, ?, ?)",
+                    [(character_id, e, d) for e, d in sorted(digests.items())],
+                )
+
+    def review_evidence(self, character_id: int) -> dict[str, str]:
+        """Episode -> the digest of the character's names flags its last review saw there
+        (`mark_reviewed`); empty when none was recorded."""
+        return dict(
+            self._con.execute(
+                "SELECT episode, digest FROM review_evidence WHERE character_id = ?"
+                " ORDER BY episode",
+                (character_id,),
+            ).fetchall()
+        )
 
     def _require_character(self, con: sqlite3.Connection, character_id: int) -> None:
         if con.execute("SELECT 1 FROM characters WHERE id = ?", (character_id,)).fetchone() is None:

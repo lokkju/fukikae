@@ -23,7 +23,7 @@ migrates it, as every command does), and no stock voice is ever proposed (D41).
 `load_or_build` rebuilds it when its inputs' digest changes: each episode's assignments,
 turns, transcripts, names files, cues, tts plan and run, dropped hallucinations and manifest,
 the vocals' size and time, the resolved config (profile, user config and ``fukikae.toml``,
-`config_digest`) and the registry's contents.
+`config_digest`, without ``[review]``) and the registry's contents.
 """
 
 from __future__ import annotations
@@ -395,8 +395,18 @@ def _episode_files(work: Path) -> list[Path]:
 def config_digest(cfg: Config, ws: Workspace) -> str:
     """sha256 of the resolved configuration the index reads: ``cfg`` (the profile merged with
     the user config and ``fukikae.toml``) and the workspace's own `Workspace.config`, which
-    the names evidence and card flags read."""
-    payload = {"cfg": asdict(cfg), "workspace": asdict(ws.config)}
+    the names evidence and card flags read. ``[review]`` is left out of both: only `fukikae
+    run`'s gates read it, so editing it rebuilds nothing."""
+
+    def read(c: Config) -> dict[str, Any]:
+        out = asdict(c)
+        out.pop("review", None)
+        for raw in ("raw", "profile_raw"):  # the tables as read, `[review]` among them
+            if isinstance(out.get(raw), dict):
+                out[raw] = {k: v for k, v in out[raw].items() if k != "review"}
+        return out
+
+    payload = {"cfg": read(cfg), "workspace": read(ws.config)}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 

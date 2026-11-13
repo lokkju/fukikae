@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -196,13 +197,14 @@ class ReviewSettings:
 
     identity: bool = False
     voices: bool = False
-    min_seconds: float = 20.0
+    # the spec's main character: 30 s or more of speech (the gender calibration's rule)
+    min_seconds: float = 30.0
 
 
 def review_settings(table: Any) -> ReviewSettings:
     """`[review]` checked: unknown keys (the first draft's ``required`` with a pointer to the
-    two gates that replaced it), wrong types and a negative ``min_seconds`` are a
-    ConfigError."""
+    two gates that replaced it), wrong types and a negative or non-finite ``min_seconds`` are
+    a ConfigError."""
     if table is None:
         return ReviewSettings()
     if not isinstance(table, dict):
@@ -227,8 +229,9 @@ def review_settings(table: Any) -> ReviewSettings:
             raise ConfigError(f"[review] {key} must be true or false, not {value!r}")
         flags[key] = value
     secs = table.get("min_seconds", ReviewSettings.min_seconds)
-    if isinstance(secs, bool) or not isinstance(secs, int | float) or secs < 0:
-        raise ConfigError(f"[review] min_seconds must be a number from 0, not {secs!r}")
+    if (isinstance(secs, bool) or not isinstance(secs, int | float) or not math.isfinite(secs)
+            or secs < 0):  # fmt: skip
+        raise ConfigError(f"[review] min_seconds must be a finite number from 0, not {secs!r}")
     return ReviewSettings(identity=flags["identity"], voices=flags["voices"],
                           min_seconds=float(secs))  # fmt: skip
 

@@ -1360,6 +1360,41 @@ def test_mark_reviewed(reg: Registry):
         reg.mark_reviewed(99)
 
 
+def test_mark_reviewed_records_review_evidence(reg: Registry):
+    """The names flags' digests the operator saw, per episode, written with the review."""
+    a = _char(reg)
+    b = _char(reg)
+    assert reg.review_evidence(a) == {}
+    reg.mark_reviewed(a, digests={"e1": "d1", "e2": "d2"})
+    assert reg.review_evidence(a) == {"e1": "d1", "e2": "d2"}
+    reg.mark_reviewed(a, digests={"e2": "d3"})  # a new review replaces what the last saw
+    assert reg.review_evidence(a) == {"e2": "d3"}
+    reg.mark_reviewed(a)  # no digests given: the evidence stays
+    assert reg.review_evidence(a) == {"e2": "d3"}
+    assert reg.review_evidence(b) == {}
+    with pytest.raises(KeyError):
+        reg.mark_reviewed(99, digests={"e1": "d1"})
+
+
+def test_review_evidence_lands_with_the_review_or_not_at_all(reg: Registry):
+    a = _char(reg)
+    with pytest.raises(RuntimeError), reg.transaction():
+        reg.mark_reviewed(a, digests={"e1": "d1"})
+        raise RuntimeError
+    assert reg.review_evidence(a) == {} and reg.characters()[0].reviewed is None
+
+
+def test_merge_keeps_keeps_review_evidence_and_drops_drops(reg: Registry):
+    a1, c1, a2, c2 = _two_actors(reg)
+    reg.mark_reviewed(c1, digests={"e1": "keep"})
+    reg.mark_reviewed(c2, digests={"e1": "drop", "e2": "drop"})
+    reg.merge_actors(a1, a2)
+    assert reg.review_evidence(c1) == {"e1": "keep"}
+    assert reg.review_evidence(c2) == {}
+    n = reg._con.execute("SELECT COUNT(*) FROM review_evidence").fetchone()[0]  # noqa: SLF001
+    assert n == 1
+
+
 def _two_actors(reg: Registry) -> tuple[int, int, int, int]:
     a1, c1 = reg.create_actor_with_character(unit(1, 0))
     a2, c2 = reg.create_actor_with_character(unit(0, 1))

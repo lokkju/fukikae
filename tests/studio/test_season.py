@@ -482,6 +482,20 @@ def test_config_values_the_index_reads_change_its_digest(ws, tmp_path):
     assert inputs_digest(ws, load_config(ws.root, user_config=None)) == base
 
 
+def test_review_settings_never_change_the_index_digest(ws):
+    """`[review]` is read by `fukikae run`'s gates only: editing it rebuilds nothing."""
+    from fukikae.studio.season import inputs_digest
+    from fukikae.workspace import Workspace
+
+    toml = ws.root / "fukikae.toml"
+    before = toml.read_text(encoding="utf-8") if toml.exists() else ""
+    base = inputs_digest(Workspace(ws.root), load_config(ws.root, user_config=None))
+    toml.write_text(before + "\n[review]\nidentity = true\nmin_seconds = 5\n", encoding="utf-8")
+    cfg = load_config(ws.root, user_config=None)
+    assert cfg.review.identity and cfg.review.min_seconds == 5.0
+    assert inputs_digest(Workspace(ws.root), cfg) == base
+
+
 def test_a_rebuild_prunes_clips_no_longer_referenced(ws, tmp_path):
     first = _build(ws, clips=6)
     audio = ws.root / "studio" / "audio"

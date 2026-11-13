@@ -14,6 +14,8 @@ from fukikae.workspace import Episode, Workspace
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from fukikae.models import Assignments
+
 
 class Invalidation(NamedTuple):
     """One stage of one episode that reruns on the next `fukikae run`."""
@@ -124,6 +126,17 @@ def remap_assignments(
     if not path.exists():
         return
     a = read_json(path, Assignments)
+    write_json(path, remapped(a, actor_map, only_cluster, character, character_map))
+
+
+def remapped(
+    a: Assignments,
+    actor_map: dict[int, int],
+    only_cluster: str | None = None,
+    character: tuple[int, int] | None = None,
+    character_map: dict[int, int] | None = None,
+) -> Assignments:
+    """``a`` as `remap_assignments` rewrites it, in memory."""
     out = []
     for c in a.clusters:
         if only_cluster is not None and c.cluster != only_cluster:
@@ -141,4 +154,4 @@ def remap_assignments(
         out.append(c.model_copy(update=upd))
     from fukikae.registry.voice_parts import settle_split_markers
 
-    write_json(path, a.model_copy(update={"clusters": settle_split_markers(out)}))
+    return a.model_copy(update={"clusters": settle_split_markers(out)})
