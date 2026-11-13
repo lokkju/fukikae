@@ -277,6 +277,19 @@ def share_inside(start: float, end: float, spans: Sequence[tuple[float, float]])
     return covered / (end - start) if end > start else 1.0
 
 
+def clean_span(
+    start: float,
+    end: float,
+    others: Sequence[tuple[float, float]],
+    exclude: Sequence[tuple[float, float]] = (),
+    slack: float = 0.0,
+) -> bool:
+    """Whether ``start``-``end`` overlaps no other speaker's turn (``others``) and nothing in
+    ``exclude``: what makes a turn clean for a reference. ``slack`` forgives that much overlap
+    at either edge (an origin's float rounding)."""
+    return not any(a < end - slack and start + slack < b for a, b in (*others, *exclude))
+
+
 def _chains(
     clean: Sequence[tuple[float, float]], blockers: Sequence[tuple[float, float]], gap: float
 ) -> list[list[tuple[float, float]]]:
@@ -717,10 +730,10 @@ def eligible_references(
         snr = snr_db(_samples(data, rate, start, end), rate)
         return RefPick(start, end, text, round(snr, 2), _emotion(tags, start, end))
 
+    other_spans = [(o.start, o.end) for o in others]
+
     def clean(s: float, e: float) -> bool:
-        return not any(o.start < e and s < o.end for o in others) and not any(
-            a < e and s < b for a, b in exclude
-        )
+        return clean_span(s, e, other_spans, exclude)
 
     spans = [(round(t.start, 3), round(t.end, 3)) for t in own]
     good = [sp for sp in spans if clean(*sp)]

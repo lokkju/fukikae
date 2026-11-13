@@ -1,11 +1,13 @@
 """Manifest, cache keys and the resumable stage runner."""
 
+import fcntl
 import hashlib
 import json
 import logging
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,6 +52,9 @@ class StageRecord(BaseModel):
 
 class Manifest(BaseModel):
     stages: dict[str, StageRecord] = Field(default_factory=dict)
+    # When each stage was last marked stale (`mark_stale`) and not run since: a run that
+    # started the stage before the mark doesn't record it done.
+    stale: dict[str, datetime] = Field(default_factory=dict)
 
 
 def _manifest_path(ep: Episode) -> Path:
@@ -73,6 +78,39 @@ def load_manifest(ep: Episode) -> Manifest:
 def save_manifest(ep: Episode, manifest: Manifest) -> None:
     ep.work.mkdir(parents=True, exist_ok=True)
     write_json(_manifest_path(ep), manifest)
+
+
+@contextmanager
+def _manifest_lock(ep: Episode) -> Iterator[None]:
+    """An exclusive lock for one read-modify-write of an episode's manifest
+    (``<ws>/.fukikae/manifest-locks/<episode>.lock``), so a stage record saved by a run and a
+    stale mark made meanwhile can't lose each other."""
+    path = ep.workspace_root / ".fukikae" / "manifest-locks" / f"{ep.id}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _record_stage(ep: Episode, name: str, record: StageRecord) -> None:
+    """Save one stage's record into the manifest as it is on disk now, leaving every other
+    stage's record as it is there, so a stale mark made while the stage ran stays made. A
+    ``done`` record for a stage marked stale after it started is not saved: it ran on what
+    the mark says changed, so the next run redoes it."""
+    with _manifest_lock(ep):
+        manifest = load_manifest(ep)
+        marked = manifest.stale.get(name)
+        if record.status == "done" and marked is not None and marked >= record.started:
+            log.warning(
+                "%s: %s was marked stale while it ran; it reruns on the next run", ep.id, name
+            )
+            return
+        manifest.stages[name] = record
+        manifest.stale.pop(name, None)
+        save_manifest(ep, manifest)
 
 
 class _HashCache:
@@ -192,16 +230,31 @@ def run_stages(
             raise ValueError(f"unknown {label} {value!r}; stages are {names}")
     start = names.index(from_stage) if from_stage else 0
     stop = names.index(to_stage) + 1 if to_stage else len(stages)
-    refuse_unfinished_decisions(ep.workspace_root, names[:stop])
+    from fukikae.studio.apply import run_lock
 
-    manifest = load_manifest(ep)
+    # Held shared for the whole call: studio and registry writers take it exclusively and are
+    # refused while a run is in progress (only when the workspace has a studio directory).
+    with run_lock(ep.workspace_root):
+        refuse_unfinished_decisions(ep.workspace_root, names[:stop])
+        return _run_stages(ep, cfg, stages, start, stop, from_stage)
+
+
+def _run_stages(
+    ep: Episode,
+    cfg: Config,
+    stages: Sequence[Stage],
+    start: int,
+    stop: int,
+    from_stage: str | None,
+) -> list[str]:
     cache = _HashCache(ep)
     ran: list[str] = []
     try:
         for i, stage in enumerate(stages[:stop]):
             _prepare(stage, ep, cfg)
             key = _cache_key(stage, ep, cfg, cache)
-            record = manifest.stages.get(stage.name)
+            # read now, not once at the start: a stale mark made since must count
+            record = load_manifest(ep).stages.get(stage.name)
             stale = (
                 i >= start
                 and from_stage is not None
@@ -217,20 +270,24 @@ def run_stages(
                 with progress.stage(ep.id, stage.name):
                     stage.run(ep, cfg)
             except BaseException as e:
-                manifest.stages[stage.name] = StageRecord(
-                    key=key,
-                    status="failed",
-                    started=started,
-                    finished=datetime.now(UTC),
-                    error=f"{type(e).__name__}: {e}",
+                _record_stage(
+                    ep,
+                    stage.name,
+                    StageRecord(
+                        key=key,
+                        status="failed",
+                        started=started,
+                        finished=datetime.now(UTC),
+                        error=f"{type(e).__name__}: {e}",
+                    ),
                 )
-                save_manifest(ep, manifest)
                 raise
             # Outputs changed; hash them fresh for later stages' keys.
-            manifest.stages[stage.name] = StageRecord(
-                key=key, status="done", started=started, finished=datetime.now(UTC)
+            _record_stage(
+                ep,
+                stage.name,
+                StageRecord(key=key, status="done", started=started, finished=datetime.now(UTC)),
             )
-            save_manifest(ep, manifest)
             ran.append(stage.name)
     finally:
         cache.save()
@@ -330,8 +387,11 @@ def run_episodes(
 
 def mark_stale(ep: Episode, stage: str) -> bool:
     """Forget a stage's manifest record so the next run redoes it; True if there was one."""
-    manifest = load_manifest(ep)
-    if manifest.stages.pop(stage, None) is None:
-        return False
-    save_manifest(ep, manifest)
-    return True
+    with _manifest_lock(ep):
+        if not _manifest_path(ep).exists():
+            return False
+        manifest = load_manifest(ep)
+        had = manifest.stages.pop(stage, None) is not None
+        manifest.stale[stage] = datetime.now(UTC)
+        save_manifest(ep, manifest)
+    return had

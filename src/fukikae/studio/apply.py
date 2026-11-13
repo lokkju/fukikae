@@ -19,7 +19,10 @@ interrupted (`IncompleteDecision` says the registry part landed). Every step is 
 so `resume_incomplete` (`fukikae studio resume`) redoes only what is left; a pending record
 whose commit never landed is logged as aborted, with nothing to redo. Until every record is
 finished, `apply_decision`, `fukikae registry merge` (`apply_registry_change`, the same
-records) and `fukikae run` (`unfinished_message`) refuse to start.
+records) and `fukikae run` (`unfinished_message`) refuse to start. Writers hold
+``studio/.lock`` exclusively and `job.run_stages` holds it shared (`run_lock`), so neither
+runs beside the other. A replay skips what the registry's `decision_marks` say landed
+(`_replay_state`), never what the log alone says.
 """
 
 from __future__ import annotations
@@ -27,11 +30,12 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -86,6 +90,20 @@ class UncheckedDecision(DecisionError):  # noqa: N818
 
 class DecisionRefused(DecisionError):  # noqa: N818
     """The registry (or the card checks) refused the decision; the message is theirs."""
+
+
+class StudioBusy(DecisionRefused):  # noqa: N818
+    """Another process holds ``studio/.lock``: a writer (named when it said who it is) or a
+    `fukikae run`. Nothing changed."""
+
+
+class LogUnreadable(DecisionRefused):  # noqa: N818
+    """A line of ``studio/decisions.jsonl`` is not a record; nothing proceeds until the
+    operator looks at it."""
+
+
+class RegistryUnreadable(DecisionRefused):  # noqa: N818
+    """The registry can't be read to tell which logged decisions landed."""
 
 
 class IncompleteDecision(DecisionError):  # noqa: N818
@@ -416,13 +434,18 @@ def _accept(ws: Workspace, reg: Registry, d: AcceptDecision) -> str:
 
 # How far a reference may run past the character's turns (the origin's float rounding).
 _SPAN_SLACK_S = 0.01
+_Spans = list[tuple[float, float]]
 
 
-def _own_turns(asg: Any, character: int) -> list[tuple[float, float]]:
-    """The character's turns in an episode (the diarize turns of its clusters, extras and
-    review clusters left out, as `cards.auto.character_spans` reads them), adjacent ones
-    joined across a gap of at most `select.JOIN_GAP_S` that no other speaker's turn falls in,
-    as reference selection joins them."""
+def _own_turns(
+    asg: Any, character: int
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """The character's turns in an episode and every other turn. Its turns are the diarize
+    turns of its clusters (extras and review clusters left out, as `cards.auto.character_spans`
+    reads them), adjacent ones joined across a gap of at most `select.JOIN_GAP_S` that no
+    other turn falls in, as reference selection joins them; the others are every other
+    cluster's turns (its own extra or review clusters' included), which a reference may not
+    overlap (`select.clean_span`)."""
     from fukikae.cards.select import JOIN_GAP_S
 
     own = {
@@ -442,6 +465,36 @@ def _own_turns(asg: Any, character: int) -> list[tuple[float, float]]:
                 out[-1] = (pa, max(pb, b))
                 continue
         out.append((a, b))
+    return out, others
+
+
+def _cue_spans(work: Path, character: int) -> list[tuple[float, float]]:
+    """The source spans (``delivery.reference``) of the character's own spoken cues in the
+    episode, from every ``06-translate/cues.<target>.json``, joined where at most
+    `select.JOIN_GAP_S` apart: what the cue-thin tier (`cards.auto.cue_references`) clones a
+    character with no turns from. The subtitle names put the character on these lines."""
+    from fukikae.artifacts import read_json
+    from fukikae.cards.auto import _spoken
+    from fukikae.cards.select import JOIN_GAP_S
+    from fukikae.models import DubCues
+
+    spans: set[tuple[float, float]] = set()
+    for path in sorted((work / "06-translate").glob("cues.*.json")):
+        try:
+            cues = read_json(path, DubCues).cues
+        except (OSError, ValueError):
+            continue
+        spans |= {
+            (float(c.delivery.reference[0]), float(c.delivery.reference[1]))
+            for c in cues
+            if c.character_id == character and _spoken(c)
+        }
+    out: list[tuple[float, float]] = []
+    for a, b in sorted(spans):
+        if out and a - out[-1][1] <= JOIN_GAP_S:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
     return out
 
 
@@ -449,16 +502,21 @@ def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card
     """Refuse a clone card whose references are not verifiably the character's own speech
     (D41), and say what was verified. A reference with an origin span (episode, start, end)
     must lie inside one of the character's turns in that episode, read from the episode's
-    assignments (the registry keeps no exemplar spans). A reference with no origin (a
-    sidecar only, such as a `voices clone` clip) can't be checked against turns; it is taken
-    only when the card came from this character's own clone path: the card's ``[meta]
-    character`` names it, or the character's card history already names the card."""
+    assignments (the registry keeps no exemplar spans), and overlap no other cluster's turn
+    (`select.clean_span`, the rule reference selection uses); or lie inside the source spans
+    of the character's own spoken cues there (`_cue_spans`, what the cue-thin tier clones a
+    character with no turns from). A reference with no origin (a sidecar only, such as a
+    `voices clone` clip) can't be checked against either; it is taken only when the card came
+    from this character's own clone path: the card's ``[meta] character`` names it, or the
+    character's card history already names the card."""
     from fukikae.artifacts import read_json
+    from fukikae.cards.select import clean_span
     from fukikae.models import Assignments
 
-    turns_of: dict[str, list[tuple[float, float]] | None] = {}
+    turns_of: dict[str, tuple[_Spans, _Spans] | None] = {}
+    cues_of: dict[str, _Spans] = {}
 
-    def turns(ep: str) -> list[tuple[float, float]] | None:
+    def turns(ep: str) -> tuple[_Spans, _Spans] | None:
         if ep not in turns_of:
             path = ws.work_dir(ep) / "05-characters" / "assignments.json"
             got = None
@@ -472,6 +530,14 @@ def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card
             turns_of[ep] = got
         return turns_of[ep]
 
+    def cue_spans(ep: str) -> _Spans:
+        if ep not in cues_of:
+            cues_of[ep] = _cue_spans(ws.work_dir(ep), character)
+        return cues_of[ep]
+
+    def within(start: float, end: float, spans: _Spans) -> bool:
+        return any(a - _SPAN_SLACK_S <= start and end <= b + _SPAN_SLACK_S for a, b in spans)
+
     refs = card.voice.references
     refused: list[str] = []
     verified = bare = 0
@@ -483,11 +549,24 @@ def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card
             bare += 1
             continue
         label = f"{ep} {start:.2f}-{end:.2f}"
-        mine = turns(ep)
-        if mine is None:
-            refused.append(f"{label} (no assignments with turns for {ep} to check it against)")
-        elif not any(a - _SPAN_SLACK_S <= start and end <= b + _SPAN_SLACK_S for a, b in mine):
-            refused.append(f"{label} (not inside character {character}'s turns in {ep})")
+        if within(start, end, cue_spans(ep)):
+            verified += 1
+            continue
+        got = turns(ep)
+        if got is None:
+            refused.append(
+                f"{label} (no assignments with turns for {ep} to check it against, and not "
+                f"inside character {character}'s spoken cues there)"
+            )
+            continue
+        mine, others = got
+        if not within(start, end, mine):
+            refused.append(f"{label} (not inside character {character}'s turns or cues in {ep})")
+        elif not clean_span(start, end, others, slack=_SPAN_SLACK_S):
+            refused.append(
+                f"{label} (inside character {character}'s turns, but it overlaps another "
+                f"speaker's turn in {ep}, so it is not the character's voice alone)"
+            )
         else:
             verified += 1
     if bare:
@@ -508,10 +587,13 @@ def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card
         raise DecisionRefused(
             f"character {character}: card {card_id} is not verifiably the character's own "
             f"speech (D41: only a clone of the speaker's own speech): {verified} of "
-            f"{len(refs)} reference(s) verified inside its turns; could not verify "
-            + "; ".join(refused)
+            f"{len(refs)} reference(s) verified as its own (inside its clean turns or its "
+            "spoken cues); could not verify " + "; ".join(refused)
         )
-    line = f"{verified} of {len(refs)} references verified inside its own turns"
+    line = (
+        f"{verified} of {len(refs)} references verified as its own speech (inside its clean "
+        "turns or its spoken cues)"
+    )
     if bare:
         line += (
             f"; {bare} with no origin span not verified against its turns, taken because the "
@@ -707,17 +789,32 @@ def _stale_steps(invs: list[Invalidation]) -> list[dict[str, Any]]:
 
 
 def _log_records(ws: Workspace) -> list[dict[str, Any]]:
+    """Every record of the log, oldest first. A line that is not a JSON object (half a record
+    from a write cut short by a crash) is `LogUnreadable`, never skipped: it might be the
+    record that says a decision is unfinished."""
     path = decisions_log(ws)
     if not path.is_file():
         return []
     out = []
-    for ln in path.read_text(encoding="utf-8").splitlines():
+    for n, ln in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if not ln.strip():
+            continue
         try:
             rec = json.loads(ln)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(rec, dict):
-            out.append(rec)
+            why = None if isinstance(rec, dict) else f"a JSON {type(rec).__name__}, not a record"
+        except json.JSONDecodeError as e:
+            why = f"not JSON: {e}"
+        if why is not None:
+            raise LogUnreadable(
+                f"line {n} of {path} is not a decisions record ({why}; it begins "
+                f"{ln[:60]!r}), so nothing can tell whether a decision is unfinished; nothing "
+                "proceeds until it is dealt with. Half a record is what a crash mid-write "
+                "leaves, and it is safe to delete: a write-ahead record is complete on disk "
+                "before its commit, and whatever a later record would have closed is redone "
+                f"by `fukikae studio resume {ws.root}`. Delete or repair the line, then try "
+                "again"
+            )
+        out.append(rec)
     return out
 
 
@@ -741,29 +838,33 @@ def _is_pending(rec: dict[str, Any]) -> bool:
     return bool((rec.get("incomplete") or {}).get("pending"))
 
 
-def _landed(ws: Workspace, record_id: str) -> bool:
-    """Whether the write-ahead record's transaction committed: its `decision_marks` row."""
+def _marks(ws: Workspace, what: str) -> set[str]:
+    """The ids in the registry's `decision_marks` (read-only; none without a registry or the
+    table). `RegistryUnreadable` when it can't be read; ``what`` says what was being asked."""
     path = ws.registry_path
     if not path.is_file():
-        return False
+        return set()
     con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
-        row = con.execute("SELECT 1 FROM decision_marks WHERE id = ?", (record_id,)).fetchone()
+        return {r[0] for r in con.execute("SELECT id FROM decision_marks")}
     except sqlite3.OperationalError as e:
         if "no such table" in str(e).lower():
-            return False
-        raise DecisionRefused(
-            f"can't tell whether the decision logged as {record_id} landed: the registry "
-            f"{path} can't be read ({e}); try again"
+            return set()
+        raise RegistryUnreadable(
+            f"can't tell {what}: the registry {path} can't be read ({e}); try again"
         ) from e
     except sqlite3.DatabaseError as e:
-        raise DecisionRefused(
-            f"can't tell whether the decision logged as {record_id} landed: {path} is not a "
-            f"readable registry ({e})"
+        raise RegistryUnreadable(
+            f"can't tell {what}: {path} is not a readable registry ({e}); restore it, or check "
+            "the file"
         ) from e
     finally:
         con.close()
-    return row is not None
+
+
+def _landed(ws: Workspace, record_id: str) -> bool:
+    """Whether the write-ahead record's transaction committed: its `decision_marks` row."""
+    return record_id in _marks(ws, f"whether the decision logged as {record_id} landed")
 
 
 def _classify(ws: Workspace) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -779,22 +880,113 @@ def _classify(ws: Workspace) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
     return todo, aborted
 
 
+def _lock_path(ws: Workspace | Path) -> Path:
+    root = ws.root if isinstance(ws, Workspace) else Path(ws)
+    return root / "studio" / ".lock"
+
+
+def _holder(path: Path) -> str | None:
+    """Who holds ``studio/.lock`` exclusively, as the writer wrote it there."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _lock_refusal(ws: Workspace, path: Path, f: Any) -> StudioBusy:
+    """The refusal when ``studio/.lock`` can't be had exclusively: shared means `fukikae run`
+    (only runs take it shared), exclusive another writer, named when it said who it is."""
+    try:
+        fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        who = _holder(path) or "another `fukikae studio` or `fukikae registry` command"
+        return StudioBusy(
+            f"{who} is applying decisions to {ws.root} ({path} is held); nothing changed, try "
+            "again when it is done"
+        )
+    fcntl.flock(f, fcntl.LOCK_UN)
+    return StudioBusy(
+        f"a `fukikae run` is in progress on this workspace ({ws.root}; it holds {path}), and "
+        "its stages read the assignments and manifests a decision changes; nothing changed, "
+        "try again when it is done"
+    )
+
+
 @contextmanager
-def _studio_lock(ws: Workspace) -> Iterator[None]:
+def _studio_lock(ws: Workspace, holder: str) -> Iterator[None]:
     """``studio/.lock``, held exclusively by a writer from before its write-ahead record to
-    after its completion record. Taken without waiting: another writer is a refusal."""
-    path = studio_dir(ws) / ".lock"
+    after its completion record, with ``holder`` (and the pid) written in it so a refusal can
+    name it. Taken without waiting: another writer, or a `fukikae run` (which holds it
+    shared), is `StudioBusy`."""
+    path = _lock_path(ws)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as f:
+    with path.open("a", encoding="utf-8") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as e:
-            raise DecisionRefused(
-                f"another `fukikae studio` or `fukikae registry merge` is applying decisions to "
-                f"{ws.root} ({path} is held); nothing changed, try again when it is done"
-            ) from e
+            raise _lock_refusal(ws, path, f) from e
+        try:
+            f.truncate(0)
+            f.write(f"{holder} (pid {os.getpid()})\n")
+            f.flush()
+            yield
+        finally:
+            with suppress(OSError):
+                f.truncate(0)
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+@contextmanager
+def studio_lock(ws: Workspace | Path, holder: str) -> Iterator[None]:
+    """`_studio_lock` for the `fukikae registry` commands that change identity outside a
+    recorded decision (rename, alias, lock, kind, gender): their registry write and stale
+    marks never run beside a decision or a `fukikae run`."""
+    with _studio_lock(_workspace(ws), holder):
+        yield
+
+
+@contextmanager
+def _no_writer(ws: Workspace) -> Iterator[None]:
+    """``studio/.lock`` held shared, for reading the log: no writer is live while it is held,
+    so a pending record is never one being written. A `fukikae run` holds it shared too."""
+    path = _lock_path(ws)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            who = _holder(path) or "another `fukikae studio` or `fukikae registry` command"
+            raise StudioBusy(f"{who} is applying decisions to {ws.root} ({path} is held)") from e
         try:
             yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+@contextmanager
+def run_lock(root: Path) -> Iterator[bool]:
+    """``studio/.lock`` held shared for one `job.run_stages` call, so no studio or registry
+    writer changes assignments, manifests or the registry under a run (they take it
+    exclusively, without waiting, and are refused). Only when ``<root>/studio`` exists: a run
+    creates the lock file at most, never the studio. ValueError, naming the writer, while one
+    holds it. Yields whether it is held."""
+    path = _lock_path(root)
+    if not path.parent.is_dir():
+        yield False
+        return
+    with path.open("a", encoding="utf-8") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            who = _holder(path) or "a `fukikae studio` or `fukikae registry` command"
+            raise ValueError(
+                f"{who} is applying a decision to {root} ({path} is held); its registry change "
+                "and the stale marks and file changes after it must finish before a run "
+                "starts; try again when it is done"
+            ) from e
+        try:
+            yield True
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
 
@@ -803,26 +995,30 @@ def incomplete_records(ws: Workspace | Path) -> list[dict[str, Any]]:
     """The log's records whose steps are still to do, oldest first: pending write-ahead
     records whose commit landed (every step left) and completion or resume records that left
     steps. A pending record whose commit never landed is aborted, so it is not among them
-    (the next writer logs that). Read-only; `DecisionRefused` while another writer holds the
-    studio lock and a pending record might be its own."""
+    (the next writer logs that). Read-only. `StudioBusy` while a writer holds the studio
+    lock and a pending record might be its own; `LogUnreadable` for a line that is no record;
+    `RegistryUnreadable` when the registry can't say whether a pending record landed."""
     w = _workspace(ws)
     recs = _open_records(w)
     if not any(_is_pending(r) for r in recs):
         return recs
-    with _studio_lock(w):
+    with _no_writer(w):
         return _classify(w)[0]
 
 
 def unfinished_message(ws: Workspace | Path) -> str | None:
     """Why stages that read assignments must not start now (a decision whose steps are left,
-    or one being applied), or None. What `fukikae run` checks."""
+    one being applied, a log line that is no record, a registry that can't say whether a
+    decision landed), or None. What `fukikae run` checks."""
     w = _workspace(ws)
     if not decisions_log(w).is_file():
         return None
     try:
         recs = incomplete_records(w)
-    except DecisionRefused as e:
+    except StudioBusy as e:
         return f"{e}; assignments may be mid-change"
+    except DecisionRefused as e:
+        return str(e)
     if not recs:
         return None
     return (
@@ -843,12 +1039,40 @@ def _why(rec: dict[str, Any]) -> str:
     return "interrupted after its registry part committed, before its steps finished"
 
 
+_fsync = os.fsync  # a seam for the tests' failing disk
+
+
 def _append_log(ws: Workspace, rec: dict[str, Any]) -> None:
+    """Append one record as one line, on disk (fsync) before returning. A file that doesn't end
+    in a newline (half a line from a crash) gets one first, so the record is a line of its
+    own. On OSError the file is cut back to its size before the append, so a failed write
+    leaves no half record behind."""
     path = decisions_log(ws)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        f.flush()
+    data = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
+    created = not path.exists()
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        size = os.fstat(fd).st_size
+        try:
+            if size and os.pread(fd, 1, size - 1) != b"\n":
+                data = b"\n" + data
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+            _fsync(fd)
+            if created:
+                dfd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    _fsync(dfd)
+                finally:
+                    os.close(dfd)
+        except OSError:
+            with suppress(OSError):
+                os.ftruncate(fd, size)
+            raise
+    finally:
+        os.close(fd)
 
 
 def _new_record(ws: Workspace) -> dict[str, Any]:
@@ -972,7 +1196,7 @@ def resume_incomplete(ws: Workspace | Path) -> list[ApplyResult]:
     what is left, so a later resume picks it up)."""
     w = _workspace(ws)
     out: list[ApplyResult] = []
-    with _studio_lock(w):
+    with _studio_lock(w, "`fukikae studio resume`"):
         for rec in _settle(w):
             p = _Progress(rec["incomplete"]["left"])
             new = _new_record(w) | {"resumes": rec["id"], "op": _record_op(rec)}
@@ -1096,14 +1320,21 @@ def _preview(d: Decision, lines: list[str], invs: list[Invalidation], force: boo
 
 
 def apply_decision(
-    ws: Workspace | Path, d: Decision, *, dry_run: bool = False, force: bool = False
+    ws: Workspace | Path,
+    d: Decision,
+    *,
+    dry_run: bool = False,
+    force: bool = False,
+    replays: str | None = None,
 ) -> ApplyResult:
     """Apply one decision: digest check (`StaleDecision`, or `UncheckedDecision` with no
     digest, unless ``force``), the registry writes, the review mark, the decision's mark row
     and its write-ahead log record in one transaction (`DecisionRefused` on a registry
     refusal, nothing changed), then ``job.mark_stale`` for each invalidation, the file changes
     and the completion record (`IncompleteDecision` when one of those fails). ``dry_run`` runs
-    the same checks and writes, rolls them back, and returns the preview lines."""
+    the same checks and writes, rolls them back, and returns the preview lines. ``replays``
+    is the id of the log record a replay applies again; the new write-ahead record names it,
+    so that record counts as applied from then on (`_replay_state`)."""
     w = _workspace(ws)
     if dry_run:
         _refuse_if_incomplete_readonly(w)
@@ -1115,11 +1346,14 @@ def apply_decision(
             except _DryRun:
                 return _preview(d, lines, invs, force)
     _require_registry(w)  # before the lock, which would create studio/
-    with _studio_lock(w):
+    base: dict[str, Any] = {"decision": d.model_dump(mode="json"), "forced": force}
+    if replays is not None:
+        base["replays"] = replays
+    with _studio_lock(w, f"a studio {d.op} decision"):
         _refuse_if_incomplete(w)
         with _session(w, dry_run=False) as reg:
             rec, lines, invs, steps = _commit_recorded(
-                w, reg, d.op, {"decision": d.model_dump(mode="json"), "forced": force},
+                w, reg, d.op, base,
                 lambda: _stage(reg, w, d, force),
             )  # fmt: skip
         done, left, errors = _after_commit(w, rec, d.op, steps)
@@ -1141,7 +1375,7 @@ def apply_registry_change(
     `DecisionRefused` for a refusal) and returns lines, invalidations and steps."""
     w = _workspace(ws)
     _require_registry(w)  # before the lock, which would create studio/
-    with _studio_lock(w):
+    with _studio_lock(w, f"`fukikae registry {op}`"):
         _refuse_if_incomplete(w)
         with _session(w, dry_run=False) as reg:
             rec, lines, invs, steps = _commit_recorded(
@@ -1153,16 +1387,26 @@ def apply_registry_change(
     return ApplyResult(lines + done, invs)
 
 
-def _applied_ids(ws: Workspace) -> set[str]:
-    """Ids of logged decisions whose registry part landed: those a completion record closed,
-    and records from before write-ahead records (logged after their commit)."""
-    out: set[str] = set()
-    for rec in _log_records(ws):
-        if rec.get("completes"):
-            out.add(rec["completes"])
-        elif rec.get("decision") and rec.get("id") and not _is_pending(rec):
-            out.add(rec["id"])
-    return out
+def _replay_state(ws: Workspace) -> tuple[set[str], set[str]]:
+    """What a replay skips, decided by the registry, never by the log alone: ``landed``, the
+    ids of logged records whose registry part is in the registry (their own `decision_marks`
+    row, or the row of a later record that replays them, however each was closed: a
+    completion, a resume, or nothing yet); and ``unmarked``, records the log closes (completes
+    or resumes) whose mark the registry lacks, as after a registry restored from a backup.
+    Those are applied again, and the result says so."""
+    recs = _log_records(ws)
+    marks = _marks(ws, "which logged decisions are in the registry")
+    landed = {r["id"] for r in recs if r.get("id") in marks}
+    replayed = [(r["id"], r["replays"]) for r in recs if r.get("id") and r.get("replays")]
+    grew = True
+    while grew:
+        grew = False
+        for rid, orig in replayed:
+            if rid in landed and orig not in landed:
+                landed.add(orig)
+                grew = True
+    closed = {r[k] for r in recs for k in ("completes", "resumes") if r.get(k)}
+    return landed, closed - landed
 
 
 def _read_entries(w: Workspace, path: Path) -> list[tuple[Decision, dict[str, Any] | None]]:
@@ -1212,6 +1456,14 @@ def read_decisions(ws: Workspace | Path, path: Path) -> list[Decision]:
     return [d for d, _ in _read_entries(_workspace(ws), path)]
 
 
+def _unmarked(i: int, d: Decision, rec: dict[str, Any], r: ApplyResult) -> ApplyResult:
+    note = (
+        f"decision {i + 1} ({d.op}): logged {rec['id'][:8]} at {rec.get('time')} as applied, but "
+        "the registry has no mark of it (a registry restored from a backup?); applying it again"
+    )
+    return replace(r, lines=[note, *r.lines])
+
+
 def _already(i: int, d: Decision, rec: dict[str, Any]) -> ApplyResult:
     return ApplyResult(
         [f"decision {i + 1} ({d.op}): already applied (logged {rec['id'][:8]} at "
@@ -1224,14 +1476,15 @@ def apply_file(
     ws: Workspace | Path, path: Path, *, dry_run: bool = False, force: bool = False
 ) -> list[ApplyResult]:
     """Apply a file's decisions in order, each in its own transaction. A log record whose
-    decision already landed (a completion record closed it) is skipped and says so. The first
-    refusal stops the file (decisions before it stay applied); its error says how many were,
-    and carries their results (``results``). A dry run checks them all in one transaction,
-    rolled back at the end, so a decision that depends on an earlier one is checked as it
-    will apply."""
+    decision is in the registry (its `decision_marks` row, `_replay_state`) is skipped and
+    says so; one the log calls applied but the registry lacks is applied again, and says so.
+    The first refusal stops the file (decisions before it stay applied); its error says how
+    many were, and carries their results (``results``). A dry run checks them all in one
+    transaction, rolled back at the end, so a decision that depends on an earlier one is
+    checked as it will apply."""
     w = _workspace(ws)
     entries = _read_entries(w, path)
-    applied = _applied_ids(w)
+    applied, unmarked = _replay_state(w)
     n = len(entries)
     out: list[ApplyResult] = []
     if dry_run:
@@ -1251,7 +1504,10 @@ def apply_file(
                             )
                             err.results = out
                             raise err from e
-                        out.append(_preview(d, lines, invs, force))
+                        r = _preview(d, lines, invs, force)
+                        if rec is not None and rec.get("id") in unmarked:
+                            r = _unmarked(i, d, rec, r)
+                        out.append(r)
                     raise _DryRun
             except _DryRun:
                 return out
@@ -1259,11 +1515,13 @@ def apply_file(
         if rec is not None and rec.get("id") in applied:
             out.append(_already(i, d, rec))
             continue
+        rid = rec.get("id") if rec is not None else None
         try:
-            out.append(apply_decision(w, d, force=force))
+            r = apply_decision(w, d, force=force, replays=rid)
         except DecisionError as e:
             done = sum(not r.skipped for r in out) + isinstance(e, IncompleteDecision)
             err = type(e)(f"decision {i + 1} ({d.op}): {e}; {done} of {n} decisions applied")
             err.results = out
             raise err from e
+        out.append(_unmarked(i, d, rec, r) if rec is not None and rid in unmarked else r)
     return out
