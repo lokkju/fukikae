@@ -514,7 +514,7 @@ def measure(
         confirmed_labels,
         reference_gates,
     )
-    from fukikae.cards.select import reference_gating, speaker_register
+    from fukikae.cards.select import operator_register, reference_gating, speaker_register
     from fukikae.stages import tts
     from fukikae.stages.mix import mix_settings
     from fukikae.workspace import Workspace
@@ -550,10 +550,10 @@ def measure(
                 cards[cid] = None
         return cards[cid]
 
-    # the operator's genders as the tts stage reads them, from a scratch copy of the registry
-    gate = tts.gender_gate(
-        work, cues, cache, operator=_operator_genders(root, pitch.cache_dir(cache) / "registry")
-    )
+    # the operator's genders as the pipeline reads them, from a scratch copy of the registry,
+    # read once: the line gate and the reference purity register both take them
+    operator = _operator_genders(root, pitch.cache_dir(cache) / "registry")
+    gate = tts.gender_gate(work, cues, cache, operator=operator)
 
     # -- per cue ---------------------------------------------------------------------------
     renders: dict[str, Path] = {}
@@ -661,6 +661,8 @@ def measure(
         cid = int(label.split()[1]) if label.startswith("character ") else None
         own = char_spans.get(cid, []) if cid is not None else spans
         register = speaker_register(vocals, own, bands, cache) if own and vocals.exists() else None
+        if register is not None and cid is not None:  # the operator's call, as impure_cards
+            register = operator_register(register, operator.get(cid))
         confirmed: list[tuple[float, float]] = []
         if cid is not None and names is not None and asg is not None:
             labels = confirmed_labels(asg, cid, owner)
@@ -703,6 +705,7 @@ def measure(
                     vocals, (float(o["start"]), float(o["end"])), own_spans=own,
                     confirmed_spans=confirmed, register=register, song_like=song_mask,
                     song_spans=songs, bands=bands, pitch_root=cache,
+                    operator=operator.get(cid) if cid is not None else None,
                 )  # fmt: skip
                 gates = list(refused)
             loud = round(s.loud_voiced_fraction, 3)

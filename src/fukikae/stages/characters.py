@@ -119,16 +119,15 @@ def mark_ignored(
     clusters: list[ClusterAssignment], ignored: set[int] | frozenset[int]
 ) -> list[ClusterAssignment]:
     """The clusters with ``status = "ignored"`` for each one whose character is in ``ignored``
-    (the characters the operator made ``kind = 'ignored'``), and ``matched`` again for one
-    marked ignored whose character no longer is; every other cluster unchanged."""
-    out = []
-    for c in clusters:
-        if c.character_id is not None and c.character_id in ignored:
-            c = c.model_copy(update={"status": "ignored"}) if c.status != "ignored" else c
-        elif c.status == "ignored":
-            c = c.model_copy(update={"status": "matched"})
-        out.append(c)
-    return out
+    (the characters the operator made ``kind = 'ignored'``); every other cluster unchanged.
+    Matching writes every status afresh, so a character the operator un-ignores comes back
+    with the status matching gives it (``pinned`` through its pin), never a guessed one."""
+    return [
+        c.model_copy(update={"status": "ignored"})
+        if c.character_id is not None and c.character_id in ignored and c.status != "ignored"
+        else c
+        for c in clusters
+    ]
 
 
 def ignored_characters(reg: Registry) -> set[int]:

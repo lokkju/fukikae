@@ -1927,7 +1927,7 @@ def test_operator_gender_wins_over_the_estimate_in_the_line_gate(ep, monkeypatch
     with Registry(Workspace(ep.workspace_root).registry_path) as reg:
         reg.set_character_gender(1, "m")
         reg.set_character_gender(2, "f")
-    gate = tts.gender_gate(ep.work, GATE_CUES, ep.workspace_root)
+    gate = tts.gender_gate(ep.work, GATE_CUES, ep.workspace_root, workspace=ep.workspace_root)
     assert gate.voices["c0104"] == "m" and gate.voices["c0101"] == "f"
     TtsStage(GATE_CFG).run(ep, GATE_CFG)
     plan = {c.cue_id: c for c in _plan(ep).cues}
@@ -1981,3 +1981,49 @@ def test_ignored_cues_are_never_rendered(ep):
     plan = {c.cue_id: c for c in _plan(ep).cues}
     assert plan[cues[0].id].skipped == "skip: ignored"
     assert cues[0].text is None and CUES[0].text not in {t for t, _, _ in FakeSynth.CALLS}
+
+
+# ---- Task 13 review fixes ----------------------------------------------------------------------
+
+
+def test_operator_state_counts_only_speaking_characters(ep):
+    """M4: a character whose cues are all skipped is not in the key, as `_assign` leaves it."""
+    _two_cards(ep)
+    _write_cues(ep, [c for c in CUES if c.id != "c0002"])  # Lucy keeps only her song cue
+    before = TtsStage(CFG).config_key(CFG, ep)
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.set_character_gender(2, "f")
+        reg.set_character_kind(2, "narrator")
+    assert TtsStage(CFG).config_key(CFG, ep) == before
+
+
+def test_an_ignored_character_with_no_card_needs_no_clone_backend(ep):
+    """An ignored character's cues (skip "ignored", even with text left on them) are never
+    voiced: with no card and no clone backend the stage neither refuses nor clones."""
+    _assign(ep, 1, _stock("am_adam"))
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.set_character_kind(2, "ignored")
+    cues = [c for c in CUES if c.character_id == 1]
+    cues.append(_cue(2, 2, "lucy one", skip="ignored"))
+    _write_cues(ep, cues)
+    cfg = Config(raw={"tts": {"backend": "fake"}})
+    TtsStage(cfg).run(ep, cfg)
+    assert sorted(_run(ep).rendered) == ["c0001", "c0003"]
+    assert {c.cue_id: c.skipped for c in _plan(ep).cues}["c0002"] == "skip: ignored"
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        assert reg.card_for(2, "en") is None
+    assert "lucy one" not in {t for t, _, _ in FakeSynth.CALLS}
+
+
+def test_the_gate_reads_operator_genders_from_the_workspace_it_is_given(ep, tmp_path):
+    """M7: the pitch cache root and the workspace are separate parameters; a pitch cache
+    elsewhere never stands in for the workspace's registry."""
+    _gendered(ep)
+    with Registry(Workspace(ep.workspace_root).registry_path) as reg:
+        reg.set_character_gender(1, "m")
+    cache = tmp_path / "pitch"
+    gate = tts.gender_gate(ep.work, GATE_CUES, cache, workspace=ep.workspace_root)
+    assert gate.voices["c0104"] == "m"
+    assert any((cache / ".fukikae" / "pitch-cache").iterdir())
+    assert tts.gender_gate(ep.work, GATE_CUES, cache).voices["c0104"] == "u"  # no workspace
+    assert tts.gender_gate(ep.work, GATE_CUES, cache, operator={1: "f"}).voices["c0104"] == "f"

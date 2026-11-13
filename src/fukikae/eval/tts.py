@@ -846,7 +846,12 @@ def _render(
         "emotion_audio" in cls.capabilities_for(card.voice.source) for card, cls in checked.values()
     )
     gates = {
-        e: gender_gate(ws.work_dir(e), _cues(ws, [e], cfg.target_language)[e].cues, ws.root)
+        e: gender_gate(
+            ws.work_dir(e),
+            _cues(ws, [e], cfg.target_language)[e].cues,
+            ws.root,
+            workspace=ws.root,
+        )
         if takes_audio
         else GenderGate({}, {})
         for e in episodes

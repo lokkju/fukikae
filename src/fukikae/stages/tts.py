@@ -840,13 +840,16 @@ def established_gender(
 def gender_gate(
     work: Path,
     cues: Sequence[DubCue],
-    root: Path,
+    pitch_root: Path,
     bands: tuple[float, float] = GATE_BANDS,
+    *,
     operator: Mapping[int, Gender] | None = None,
+    workspace: Path | None = None,
 ) -> GenderGate:
-    """The line gate's inputs for an episode (``work``) and its cues: every spoken cue's line
-    class, and its speaker's `established_gender`: a character's operator gender (``operator``,
-    by default read from the registry of the workspace at ``root``), else from its own turns in
+    """The line gate's inputs for an episode (``work``) and its cues, pitch tracks through the
+    pitch cache under ``pitch_root``: every spoken cue's line class, and its speaker's
+    `established_gender`: a character's operator gender (``operator``, else read from the
+    registry of the workspace at ``workspace``; with neither, none), else from its own turns in
     ``05-characters/assignments.json`` (extras and review clusters left out), an extras
     cluster's from that cluster's turns, either from its own cues' source spans when it has no
     turn there; a cluster-less line's is ``u`` (its clone is the line itself)."""
@@ -859,7 +862,7 @@ def gender_gate(
     turns = list(asg.turns or []) if asg is not None else []
     chars = character_spans(asg) if asg is not None else {}
     if operator is None:
-        operator = TtsStage.operator_state(root)[0]
+        operator = TtsStage.operator_state(workspace)[0] if workspace is not None else {}
 
     def own_lines(same: Any) -> list[tuple[float, float]]:
         return [
@@ -893,9 +896,9 @@ def gender_gate(
         speaker[c.id] = key
     established: dict[str | None, Gender] = {None: "u"}
     for k, v in spans.items():
-        established[k] = established_gender(vocals, v, root, bands, stored.get(k))
+        established[k] = established_gender(vocals, v, pitch_root, bands, stored.get(k))
     voices: dict[str, Gender] = {cue_id: established[k] for cue_id, k in speaker.items()}
-    return GenderGate(line_genders(vocals, spoken, root, bands), voices)
+    return GenderGate(line_genders(vocals, spoken, pitch_root, bands), voices)
 
 
 def delivery_passed(
@@ -1395,11 +1398,14 @@ class TtsStage:
 
     @classmethod
     def _operator_key(cls, ep: Episode, cues: list[DubCue]) -> dict[str, Any]:
-        """``{"operator": {character: {gender, kind}}}`` for the speaking characters with an
-        operator gender or the narrator kind (the line gate reads both), or nothing at all when
-        none has, so a workspace without operator state keeps the key it had."""
+        """``{"operator": {character: {gender, kind}}}`` for the speaking characters (a cue to
+        speak, as `_assign` counts them) with an operator gender or the narrator kind (the line
+        gate reads both), or nothing at all when none has, so a workspace without operator
+        state keeps the key it had."""
         genders, narrating = cls.operator_state(ep.workspace_root)
-        speaking = {c.character_id for c in cues if c.character_id is not None}
+        speaking = {
+            c.character_id for c in cues if c.character_id is not None and cls._skipped(c) is None
+        }
         out: dict[str, dict[str, str]] = {}
         for cid in sorted(speaking):
             entry: dict[str, str] = {}

@@ -568,3 +568,40 @@ def test_a_named_pitch_cache_leaves_the_workspace_untouched(e, tmp_path, monkeyp
     assert _tree(root) == snap
     assert any(cache.rglob("*.npz"))
     assert any(cache.rglob("16k-*/*.wav")) == similarity
+
+
+def test_eval_and_impure_cards_agree_on_an_operator_gender(e):
+    """I2: a near-even bimodal cluster gates no pitch on the estimate; the operator's m makes
+    the register m in eval's reference purity exactly as in impure_cards."""
+    from fukikae.cards.auto import impure_cards
+    from fukikae.eval.gender import measure
+    from fukikae.models import Transcript
+    from fukikae.registry.store import Registry
+    from fukikae.workspace import Workspace
+
+    _gated_char(e, [(40.0, 46.0, 120), (47.0, 53.0, 120)])  # 12 s m against 12 s f
+    card = e.clone([_voice(250, 3.0, 1), _voice(120, 3.0, 2)],
+                   origins=[(2.0, 5.0), (40.0, 43.0)])  # fmt: skip
+    e.say(20.0, 250, 2.0, seed=7)
+    e.line("c0001", 1, (20.0, 22.0), card, _voice(250, 2.0, 11))
+    root = e.write()
+    (e.work / "03-asr").mkdir(parents=True, exist_ok=True)
+    write_json(
+        e.work / "03-asr" / "transcript.json",  # impure_cards reads the episode's files
+        Transcript(language="ja", backend="x", word_timing=False, segments=[]),
+    )
+    ws = Workspace(root)
+    with Registry(ws.registry_path) as reg:
+        _, cid = reg.create_actor_with_character(np.ones(4, np.float32))
+        assert cid == 1
+        reg.assign_card(cid, "en", card, by="auto", locked=False)
+        assert impure_cards(ws, reg, e.store, "en") == {}
+    assert measure(root, EP).purity == {1: (2, 2)}
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_gender(1, "m")
+        found = impure_cards(ws, reg, e.store, "en")
+    assert [(r["start"], r["gates"]) for r in found[1].refs] == [(2.0, ["off_register"])]
+    r = measure(root, EP)
+    ref = {x.speaker: x for x in r.references}["character 1"]
+    assert [v.gates for v in ref.clips] == [["off_register"], []]
+    assert r.purity == {1: (1, 2)}

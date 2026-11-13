@@ -1085,7 +1085,7 @@ class _LineGate:
         if "emotion_audio" not in cls.capabilities_for(card.voice.source):
             return {}
         if self.gate is None:
-            self.gate = tts.gender_gate(self.work, self.cues, self.root)
+            self.gate = tts.gender_gate(self.work, self.cues, self.root, workspace=self.root)
         return {"line": self.gate.line(cue.id), "voice": self.gate.voice(cue.id)}
 
 

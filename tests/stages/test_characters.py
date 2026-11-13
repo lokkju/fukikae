@@ -1414,5 +1414,7 @@ def test_mark_ignored_sets_and_clears_the_status():
     ]  # fmt: skip
     got = mark_ignored(c, {2})
     assert [x.status for x in got] == ["matched", "ignored", "extra"]
-    assert mark_ignored(got, set())[1].status == "matched"  # no longer ignored
+    assert mark_ignored(got, {2}) == got
     assert mark_ignored(c, set()) == c
+    # un-ignoring is matching's: it writes every status afresh, and the pin brings back
+    # "pinned" (test_ignored_character_clusters_get_status_ignored)

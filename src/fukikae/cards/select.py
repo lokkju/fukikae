@@ -352,14 +352,16 @@ type RegisterLike = Register | tuple[Gender, float | None]
 
 class Register(NamedTuple):
     """A speaker's register in an episode: the majority class, the median of that class's
-    turns, whether the turns are bimodal (two voices: flagged for a split) and whether the
-    two are near even (``pitch.even_bimodal``: no pitch gate). A plain ``(gender, median)``
-    pair is accepted wherever a register is."""
+    turns, whether the turns are bimodal (two voices: flagged for a split), whether the
+    two are near even (``pitch.even_bimodal``: no pitch gate) and whether the class is the
+    operator's stored gender rather than the estimate's (`operator_register`). A plain
+    ``(gender, median)`` pair is accepted wherever a register is."""
 
     gender: Gender
     median: float | None
     bimodal: bool = False
     even: bool = False
+    operator: bool = False
 
 
 @dataclass(frozen=True)
@@ -380,8 +382,9 @@ class RefVerdict:
 class Gated:
     """How many candidates each gate refused (a candidate refused by several counts under
     each), ``top``: how many refused candidates would have ranked in the first three,
-    ``split``: the speaker's turns are bimodal, so it needs a split, and ``even``: the two
-    registers are near even, so no pitch gate ran."""
+    ``split``: the speaker's turns are bimodal, so it needs a split, ``even``: the two
+    registers are near even, so no pitch gate ran, and ``operator``: the register gate read
+    the operator's stored gender."""
 
     off_register: int = 0
     unvoiced: int = 0
@@ -389,6 +392,7 @@ class Gated:
     top: int = 0
     split: bool = False
     even: bool = False
+    operator: bool = False
 
     def phrase(self) -> str:
         parts = [
@@ -418,13 +422,17 @@ def operator_register(estimate: Register, gender: Gender | None) -> Register:
     if gender not in ("f", "m"):
         return estimate
     median = estimate.median if estimate.gender == gender else None
-    return Register(gender, median, estimate.bimodal, False)
+    return Register(gender, median, estimate.bimodal, False, True)
 
 
 SPLIT_NOTE = "needs a split: the speaker's turns are in both registers, so no register gate ran"
 SPLIT_GATED_NOTE = (
     "needs a split: the speaker's turns are in both registers; the register gate read the "
     "larger part's"
+)
+SPLIT_OPERATOR_NOTE = (
+    "needs a split: the speaker's turns are in both registers; the register gate read the "
+    "operator's gender"
 )
 
 
@@ -611,7 +619,9 @@ def gate_candidates(
     return out
 
 
-def count_gated(verdicts: Sequence[RefVerdict], split: bool = False, even: bool = False) -> Gated:
+def count_gated(
+    verdicts: Sequence[RefVerdict], split: bool = False, even: bool = False, operator: bool = False
+) -> Gated:
     """`Gated` of these verdicts; ``top`` counts refused ones ranked in the first three."""
     refused = [v for v in verdicts if not v.passed]
     return Gated(
@@ -621,6 +631,7 @@ def count_gated(verdicts: Sequence[RefVerdict], split: bool = False, even: bool 
         top=sum(v.rank < 3 for v in refused),
         split=split,
         even=even,
+        operator=operator,
     )
 
 
@@ -723,7 +734,8 @@ def eligible_references(
     if gated is not None:
         reg = None if register is None else as_register(register)
         gated.append(count_gated(judged, reg is not None and reg.bimodal,
-                                 reg is not None and reg.bimodal and reg.even))  # fmt: skip
+                                 reg is not None and reg.bimodal and reg.even,
+                                 reg is not None and reg.operator))  # fmt: skip
     if verdicts is not None:
         verdicts += judged
     return [v.pick for v in judged if v.passed]
@@ -1099,14 +1111,18 @@ def song_spans(work: Path, settings: Any = None) -> list[tuple[float, float]]:
 def reference_report(picks: list[RefPick], gated: Gated | None = None) -> list[str]:
     """The CD5 warning for chosen references a scored source calls non-neutral, if any, the
     A1 line when a gate refused a candidate that would have ranked in the first three, and
-    when the speaker's turns are bimodal `SPLIT_NOTE` (near even: no register gate ran) or
-    `SPLIT_GATED_NOTE` (the gate read the larger part's register)."""
+    when the speaker's turns are bimodal `SPLIT_NOTE` (near even: no register gate ran),
+    `SPLIT_OPERATOR_NOTE` (the gate read the operator's stored gender) or `SPLIT_GATED_NOTE`
+    (the gate read the larger part's register)."""
     labels = sorted({p.emotion for p in picks if p.emotion})
     out = [f"references may carry emotion: {', '.join(labels)}"] if labels else []
     if gated is not None and gated.top > 0:
         out.append(f"gated: {gated.phrase()}")
     if gated is not None and gated.split:
-        out.append(SPLIT_NOTE if gated.even else SPLIT_GATED_NOTE)
+        if gated.even:
+            out.append(SPLIT_NOTE)
+        else:
+            out.append(SPLIT_OPERATOR_NOTE if gated.operator else SPLIT_GATED_NOTE)
     return out
 
 
