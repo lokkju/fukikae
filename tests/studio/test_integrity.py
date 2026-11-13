@@ -352,3 +352,44 @@ def test_a_stage_marked_stale_while_it_runs_is_not_recorded_done(ws):
     assert job.run_stages(ep, ws.config, [_Stage("characters")]) == ["characters"]
     assert "characters" in stages_left(ws, "S01E01")
     assert job.load_manifest(ep).stale == {}
+
+
+def _tier_card(ws: Workspace, tmp_path: Path, origin: tuple[str, float, float], tier: str,
+               seed: int) -> str:  # fmt: skip
+    """A clone card whose ``[meta] reference_tier`` is ``tier``, as `select.clone_card`
+    writes it."""
+    from dataclasses import replace
+
+    from fukikae.cards.store import CardStore
+
+    cid = _card(ws, tmp_path, [origin], seed=seed)
+    store = CardStore(ws.root)
+    card = store.get(cid)
+    return store.put(replace(card, meta={**card.meta, "reference_tier": tier}))
+
+
+@pytest.mark.usefixtures("fake_backends")
+def test_accept_takes_a_thin_cards_overlapping_own_turn_reference_with_a_warning(ws, tmp_path):
+    _turns(ws, "S01E01", [("S0", 0.0, 10.0), ("S2", 2.0, 8.0)])
+    thin = _tier_card(ws, tmp_path, ("S01E01", 3.0, 7.0), "thin", seed=1)
+    with reg_of(ws) as reg:
+        reg.assign_card(1, "en", thin, "auto", False)
+    r = apply_decision(ws, accept(ws, thin))
+    warning = "overlaps another speaker's turn: S01E01 3.00-7.00"
+    assert any(warning in ln for ln in r.lines)
+    with reg_of(ws) as reg:
+        a = reg.card_for(1, "en")
+        assert a is not None
+        assert a.card_id == thin and a.note is not None and warning in a.note
+    outside = _tier_card(ws, tmp_path, ("S01E01", 10.5, 11.5), "thin", seed=2)
+    with pytest.raises(DecisionRefused, match="not inside"):
+        apply_decision(ws, accept(ws, outside))
+
+
+@pytest.mark.usefixtures("fake_backends")
+@pytest.mark.parametrize("tier", ["floor", "short"])
+def test_accept_refuses_an_overlapping_reference_on_a_card_that_is_not_thin(ws, tmp_path, tier):
+    _turns(ws, "S01E01", [("S0", 0.0, 10.0), ("S2", 2.0, 8.0)])
+    cid = _tier_card(ws, tmp_path, ("S01E01", 3.0, 7.0), tier, seed=3)
+    with pytest.raises(DecisionRefused, match="overlaps another speaker"):
+        apply_decision(ws, accept(ws, cid))

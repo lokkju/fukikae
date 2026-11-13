@@ -422,10 +422,12 @@ def _accept(ws: Workspace, reg: Registry, d: AcceptDecision) -> str:
             f"{who}: card {d.card_id} names sidecar(s) missing from {store.root}: "
             f"{', '.join(missing)}"
         )
-    own = _own_speech(ws, reg, d.character, d.card_id, card)
+    own, overlapping = _own_speech(ws, reg, d.character, d.card_id, card)
     note = f"studio: draft {d.draft} version {d.version}, {d.auditions} auditions; references " + (
         ", ".join(_ref_label(r) for r in card.voice.references) or "none"
     )
+    if overlapping:
+        note += "; " + _overlap_phrase(overlapping)
     if d.overrides:
         note += "; gated override: " + ", ".join(r.label() for r in d.overrides)
     _call(d.op, reg.assign_card, d.character, language, d.card_id, "studio", True, note=note)
@@ -498,7 +500,13 @@ def _cue_spans(work: Path, character: int) -> list[tuple[float, float]]:
     return out
 
 
-def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card: Any) -> str:
+def _overlap_phrase(labels: list[str]) -> str:
+    return "overlaps another speaker's turn: " + ", ".join(labels)
+
+
+def _own_speech(
+    ws: Workspace, reg: Registry, character: int, card_id: str, card: Any
+) -> tuple[str, list[str]]:
     """Refuse a clone card whose references are not verifiably the character's own speech
     (D41), and say what was verified. A reference with an origin span (episode, start, end)
     must lie inside one of the character's turns in that episode, read from the episode's
@@ -508,8 +516,15 @@ def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card
     character with no turns from). A reference with no origin (a sidecar only, such as a
     `voices clone` clip) can't be checked against either; it is taken only when the card came
     from this character's own clone path: the card's ``[meta] character`` names it, or the
-    character's card history already names the card."""
+    character's card history already names the card.
+
+    A thin-tier card (``[meta] reference_tier = "thin"``), which the pipeline builds from the
+    character's turns whether or not another speaker overlaps them, is not held to the clean
+    rule: a reference inside the character's turns that overlaps another speaker is taken,
+    and returned among the overlapping labels for the accept line and note to list. Returns
+    the line saying what was verified and those labels."""
     from fukikae.artifacts import read_json
+    from fukikae.cards.auto import is_thin
     from fukikae.cards.select import clean_span
     from fukikae.models import Assignments
 
@@ -538,8 +553,10 @@ def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card
     def within(start: float, end: float, spans: _Spans) -> bool:
         return any(a - _SPAN_SLACK_S <= start and end <= b + _SPAN_SLACK_S for a, b in spans)
 
+    thin = is_thin(card)
     refs = card.voice.references
     refused: list[str] = []
+    overlapping: list[str] = []
     verified = bare = 0
     for r in refs:
         o = r.origin or {}
@@ -562,6 +579,9 @@ def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card
         mine, others = got
         if not within(start, end, mine):
             refused.append(f"{label} (not inside character {character}'s turns or cues in {ep})")
+        elif not clean_span(start, end, others, slack=_SPAN_SLACK_S) and thin:
+            verified += 1
+            overlapping.append(label)
         elif not clean_span(start, end, others, slack=_SPAN_SLACK_S):
             refused.append(
                 f"{label} (inside character {character}'s turns, but it overlaps another "
@@ -599,7 +619,9 @@ def _own_speech(ws: Workspace, reg: Registry, character: int, card_id: str, card
             f"; {bare} with no origin span not verified against its turns, taken because the "
             f"card came from character {character}'s own clone path ({how})"
         )
-    return line
+    if overlapping:
+        line += f"; thin-tier card, taken though it {_overlap_phrase(overlapping)}"
+    return line, overlapping
 
 
 def _write(ws: Workspace, reg: Registry, d: Decision, lines: list[str]) -> list[dict[str, Any]]:
