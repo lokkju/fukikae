@@ -9,8 +9,10 @@ per episode beside the stored one, its current card per target language, merge s
 from registry centroids (`MERGE_SUGGEST_COS`, narrators never paired with dialogue
 characters, an ignored character never paired), split suggestions for a bimodal episode
 cluster (`pitch.bimodal`), names evidence (`fukikae.names.flags`, shared with `names show`)
-and flags. Extras clusters are listed per episode with their tier and samples. ``queue``
-orders the characters for review (`order_queue`).
+and flags, among them a pitch split's new character needing an identity (``identity``, until
+it is reviewed) and an operator split the names stage skipped because the diarize cluster
+changed since it was decided (``split``). Extras clusters are listed per episode with their
+tier and samples. ``queue`` orders the characters for review (`order_queue`).
 
 An episode without its vocals stem is still listed, with a note, and gives no samples or pitch.
 
@@ -57,12 +59,12 @@ from fukikae.workspace import Workspace
 if TYPE_CHECKING:
     from fukikae.cards.store import CardStore
     from fukikae.config import Config
-    from fukikae.names.models import NamesReport, NamesResult
+    from fukikae.names.models import NamesReport, NamesResult, VoiceSplit
     from fukikae.pitch import F0Track
     from fukikae.registry.store import Character, Registry
 
 # Bumped when the index built from the same inputs changes shape or content.
-SEASON_VERSION = 2
+SEASON_VERSION = 3
 # Registry centroid cosine at or over which two characters are suggested as one (spec, Part B).
 MERGE_SUGGEST_COS = 0.5
 MERGE_NEAREST = 3  # merge suggestions per character, nearest first
@@ -71,8 +73,13 @@ PART_SAMPLES = 2  # samples per part of a split suggestion
 EXTRA_CLIPS = 2  # samples per extras cluster
 # flag kinds by severity for the queue (an operator gender the card contradicts first, by
 # ruling; then the spec's thin, stock kept, impure, bimodal, gated lines, names disagreements,
-# below the floor); other kinds rank after these, unflagged last
-SEVERITY = ("gender", "thin", "stock", "impure", "bimodal", "gated", "names", "floor")
+# below the floor, with a pitch split the names stage skipped (its fingerprint changed) and a
+# split's new character needing an identity after bimodal); other kinds rank after these,
+# unflagged last
+SEVERITY = (
+    "gender", "thin", "stock", "impure", "bimodal", "split", "identity", "gated", "names",
+    "floor",
+)  # fmt: skip
 # the stages `fukikae run` goes through, in order, for an episode's last stage done
 STAGE_ORDER = (
     "extract", "separate", "language", "asr", "asrclean", "diarize", "names", "characters",
@@ -233,6 +240,7 @@ class _Episode:
     dropped: list[dict[str, Any]]
     names: NamesResult | None  # used names only
     report: NamesReport | None
+    voice_splits: dict[str, VoiceSplit] = field(default_factory=dict)  # names.json's, any
     clean: set[tuple[float, float]] = field(default_factory=set)
     # character -> cluster -> its turns
     speech: dict[int, dict[str, list[Turn]]] = field(default_factory=dict)
@@ -255,8 +263,8 @@ def _clean_turns(turns: Sequence[Turn]) -> set[tuple[float, float]]:
 def _load(ws: Workspace, cfg: Config, episode: str) -> _Episode:
     from fukikae.artifacts import read_json
     from fukikae.cards.auto import used_names
-    from fukikae.names.inputs import names_report_path
-    from fukikae.names.models import NamesReport
+    from fukikae.names.inputs import names_path, names_report_path
+    from fukikae.names.models import NamesReport, NamesResult
     from fukikae.transcripts import transcript_path
 
     work = ws.work_dir(episode)
@@ -271,6 +279,11 @@ def _load(ws: Workspace, cfg: Config, episode: str) -> _Episode:
         dropped = []
     names = used_names(work)
     rpath = names_report_path(work)
+    npath = names_path(work)
+    try:
+        voice_splits = read_json(npath, NamesResult).voice_splits if npath.exists() else {}
+    except ValueError:
+        voice_splits = {}
     ep = _Episode(
         id=episode,
         asg=asg,
@@ -282,6 +295,7 @@ def _load(ws: Workspace, cfg: Config, episode: str) -> _Episode:
         dropped=dropped if isinstance(dropped, list) else [],
         names=names,
         report=read_json(rpath, NamesReport) if names is not None and rpath.exists() else None,
+        voice_splits=voice_splits,
     )
     turns = asg.turns or []
     ep.clean = _clean_turns(turns)
@@ -479,6 +493,28 @@ def _splits(
                  "in the high one; a pitch split may separate two voices",
         ))  # fmt: skip
     return sugg, flags
+
+
+def _voice_split_flags(ep: _Episode, c: Character, clusters: dict[str, list[Turn]]) -> list[Flag]:
+    """An ``identity`` flag for each cluster of the character that is a pitch split's new part
+    (``split = "new"``) while the character is unreviewed, and a ``split`` flag for each of its
+    clusters whose operator split the names stage skipped (the fingerprint changed)."""
+    by = {a.cluster: a for a in ep.asg.clusters}
+    out: list[Flag] = []
+    for cl in sorted(clusters):
+        a = by.get(cl)
+        if a is not None and a.split == "new" and c.reviewed is None:
+            out.append(Flag(
+                kind="identity", episode=ep.id,
+                text=f"{ep.id} {cl}: a new character from the pitch split of "
+                     f"{cl.split('~', 1)[0]}; give it an identity (a name, a merge, narrator "
+                     "or not a character)",
+            ))  # fmt: skip
+        v = ep.voice_splits.get(cl)
+        if v is not None and v.check == "changed":
+            out.append(Flag(kind="split", episode=ep.id,
+                            text=f"{ep.id} {cl}: pitch split skipped: {v.reason}"))  # fmt: skip
+    return out
 
 
 def _pairable(a: str | None, b: str | None) -> bool:
@@ -788,6 +824,7 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
                     for got in (_gated(ep, cid), _dropped(ep, turns)):
                         if got is not None:
                             flags.append(got)
+                    flags += _voice_split_flags(ep, c, clusters)
                 ev = names.get(cid, _Names())
                 merged = {s.other for s in suggestions if s.kind == "merge"}
                 other_kind = {h.other: getattr(chars.get(h.other or 0), "kind", None)

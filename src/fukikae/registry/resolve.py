@@ -38,6 +38,12 @@ seeded one group per diarization cluster. Against an existing registry:
   current refined clusters (the same turns, every label covered); otherwise (names reran
   after characters, or characters never ran) resolve refuses: run the characters stage
   first.
+- An operator pitch split's voice parts (``<cluster>~voice-f`` and ``~voice-m``) follow
+  `fukikae.registry.voice_parts`: the character the grouping gives them (an anchor first,
+  the actor with most of the parts' seconds; else a new group; a rowless part proposes its
+  parent's match) goes to one keeper, by the character's stored gender or else the longer
+  part, and every other part is a new character: a new group of its own when the grouping
+  made one, else a new actor, rowless or not, never an extra.
 - A final group holding an anchor maps to that actor (status ``matched``, the actor's
   lowest-id character); a group without one becomes a new actor with a new character when
   its clusters total at least `min_new_seconds` of clean speech (``new``), else its clusters
@@ -72,6 +78,7 @@ from fukikae.registry.matching import load_clusters, mean_embedding
 from fukikae.registry.siblings import has_named_siblings, sibling_verdict
 from fukikae.registry.store import Registry
 from fukikae.registry.usage import actors_in_use
+from fukikae.registry.voice_parts import label_seconds, voice_keeper, voice_parts
 from fukikae.workspace import Episode, Workspace
 
 ANCHORS = "@registry"  # the pseudo-episode holding existing actors' rows
@@ -301,6 +308,10 @@ def resolve_episodes(
             names_e = inputs[e][2]
             infos = names_e.labels if names_e is not None and e in parents else {}
             followers: list[str] = []
+            voice = voice_parts(infos, {ev.cluster for ev in evs})
+            voice_of = {lb: p for p, parts in voice.items() for lb in parts}
+            # what the grouping proposes for each voice part: (status, actor, score, group)
+            proposals: dict[str, tuple[str, int | None, float | None, int | None]] = {}
             for ev in evs:
                 kept = decided[e].get(ev.cluster)
                 if kept is not None:  # a name or lock decision, as the characters stage made it
@@ -320,6 +331,19 @@ def resolve_episodes(
                 gid = group_of.get((e, ev.cluster))
                 status, aid, cid, score = "extra", None, None, None
                 rowless = gid is None and not len(rows[ev.cluster])
+                if ev.cluster in voice_of:  # settled once every part has its proposal
+                    if rowless:
+                        top = _parent_match(ev.cluster, parents[e], rows, stored_mean)
+                        if top is not None and top[1] >= threshold:
+                            proposals[ev.cluster] = ("matched", top[0], top[1], None)
+                    elif gid is not None and gid in anchor_of_group:
+                        a_id = anchor_of_group[gid]
+                        proposals[ev.cluster] = (
+                            "matched", a_id, _cosine(anchor_mean[a_id], ev.embedding), None,
+                        )  # fmt: skip
+                    elif gid is not None and group_secs[gid] >= min_new:
+                        proposals[ev.cluster] = ("new", None, None, gid)
+                    continue
                 if (
                     rowless
                     and ev.cluster in infos
@@ -361,6 +385,93 @@ def resolve_episodes(
                     clean_seconds=ev.clean_seconds,
                     status=status,  # type: ignore[arg-type]
                 )
+            if voice:
+                secs_v = label_seconds(turns[e].turns)
+                ev_of = {ev.cluster: ev for ev in evs}
+
+                def group_char(gid: int) -> tuple[int, int]:
+                    if gid not in created:
+                        members = [
+                            loaded[e2][1][c2]
+                            for (e2, c2), g2 in group_of.items()
+                            if g2 == gid and e2 != ANCHORS
+                        ]
+                        centroid = mean_embedding(np.vstack(members))
+                        assert centroid is not None
+                        created[gid] = reg.create_actor_with_character(centroid)
+                        new_actors.append(created[gid][0])
+                    return created[gid]
+
+                for parent, parts in voice.items():
+                    weight: dict[tuple[str, int], float] = {}
+                    for lb in parts:
+                        prop = proposals.get(lb)
+                        if prop is None:
+                            continue
+                        k = ("a", prop[1]) if prop[0] == "matched" else ("g", prop[3])
+                        weight[k] = weight.get(k, 0.0) + secs_v.get(lb, 0.0)  # type: ignore[index]
+                    # an existing character first, then a new group; most seconds, then id
+                    best = sorted(weight, key=lambda k: (k[0] != "a", -weight[k], k[1]))
+                    keeper: str | None = None
+                    if best:
+                        kind, ident = best[0]
+                        gender = None
+                        if kind == "a":
+                            c0 = chars.get(first_char.get(ident, -1))
+                            gender = c0.gender if c0 is not None else None
+                        keeper = voice_keeper(parent, parts, gender, secs_v)
+                        if keeper is not None:
+                            ev = ev_of[keeper]
+                            if kind == "a":
+                                prop = proposals.get(keeper)
+                                aid, cid, status = ident, first_char.get(ident), "matched"
+                                score = (
+                                    prop[2]
+                                    if prop is not None and prop[1] == ident
+                                    else _cosine(anchor_mean.get(ident), ev.embedding)
+                                )
+                                claimed.add(aid)
+                            else:
+                                (aid, cid), status, score = group_char(ident), "new", None
+                            result[e][keeper] = ClusterAssignment(
+                                cluster=keeper, actor_id=aid, character_id=cid, score=score,
+                                clean_seconds=ev.clean_seconds, status=status,  # type: ignore[arg-type]
+                                split="kept",
+                            )  # fmt: skip
+                    for lb in parts:
+                        if lb == keeper:
+                            continue
+                        ev, prop = ev_of[lb], proposals.get(lb)
+                        if (
+                            prop is not None
+                            and prop[0] == "new"
+                            and prop[3] is not None
+                            and (not best or best[0] != ("g", prop[3]))
+                        ):
+                            aid, cid = group_char(prop[3])  # a new group of its own
+                        else:
+                            emb = rows[lb]
+                            aid, cid = reg.create_actor_with_character(
+                                mean_embedding(emb) if len(emb) else None
+                            )
+                            new_actors.append(aid)
+                        result[e][lb] = ClusterAssignment(
+                            cluster=lb, actor_id=aid, character_id=cid, score=None,
+                            clean_seconds=ev.clean_seconds, status="new", split="new",
+                        )  # fmt: skip
+                    for lb in parts:
+                        a = result[e][lb]
+                        if a.actor_id is not None and len(rows[lb]):
+                            reg.add_exemplars(a.actor_id, e, lb, rows[lb], ev_of[lb].clean_seconds)
+                            touched.add(a.actor_id)
+                    notes.append(
+                        f"{e} pitch split {parent}: "
+                        + ", ".join(
+                            f"{lb} {'keeps' if result[e][lb].split == 'kept' else 'new'} "
+                            f"character {result[e][lb].character_id}"
+                            for lb in parts
+                        )
+                    )
             if followers:  # Task 11 ruling: a rowless remainder follows its named siblings
                 secs: dict[str, float] = {}
                 for t in turns[e].turns:

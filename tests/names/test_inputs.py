@@ -105,3 +105,27 @@ def test_verdict_none_says_it_read_the_subtitles_not_their_names(tmp_path: Path)
         check_held_out(work, "S01E14")
     assert "read its subtitles (verdict none)" in str(e.value)
     assert "subtitle names" not in str(e.value)
+
+
+def test_a_pitch_split_is_refused_as_a_split_not_as_names(tmp_path: Path):
+    """A held-out episode an operator pitch split: still refused (it is graded on diarize's
+    clusters), and the message names the split, not subtitle names."""
+    refined = [
+        Turn(start=0.0, end=2.0, speaker="S0~voice-f"),
+        Turn(start=2.0, end=4.0, speaker="S0~voice-m"),
+        DIARIZE[1],
+    ]
+    work = _work(
+        tmp_path,
+        [
+            {"cluster": "S0~voice-f", "split": "kept"},
+            {"cluster": "S0~voice-m", "split": "new"},
+            {"cluster": "S1"},
+        ],
+        turns=refined,
+    )
+    with pytest.raises(HeldOutNamesError) as e:
+        check_held_out(work, "S01E14")
+    msg = str(e.value)
+    assert "pitch split" in msg and "S0" in msg and "studio/splits" in msg
+    assert "subtitle" not in msg and "names stage's refined turns" not in msg

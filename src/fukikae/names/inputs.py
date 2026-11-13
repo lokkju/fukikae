@@ -7,11 +7,16 @@
 import hashlib
 import json
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from fukikae.artifacts import read_json
 from fukikae.names.models import NamesResult
+
+if TYPE_CHECKING:
+    from fukikae.models import Turn
 
 NAMES_DIR = "04c-names"
 DIARIZE_DIR = "04-diarize"
@@ -42,14 +47,38 @@ def identity_inputs(work: Path) -> tuple[Path, Path, NamesResult | None]:
 
 def splits_path(workspace_root: Path, episode: str) -> Path:
     """``<ws>/studio/splits/<episode>.json``: ``{cluster: {"by": "pitch", "male_below": Hz,
-    "female_above": Hz}}``."""
+    "female_above": Hz, "fingerprint": {...}}}``, the fingerprint (`cluster_fingerprint`) of
+    the diarize cluster the decision split; files written before it existed have none."""
     return Path(workspace_root) / "studio" / "splits" / f"{episode}.json"
+
+
+FINGERPRINT_KEYS = frozenset({"turns", "seconds", "sha256"})
+
+
+def cluster_fingerprint(turns: "Iterable[Turn]", cluster: str) -> dict[str, Any] | None:
+    """What a pitch split was decided on: the cluster's turn count, seconds and the sha256 of
+    its turn spans (start order, millisecond precision) in a diarization; None when the
+    cluster has no turn there. A diarize rerun that relabels or reshapes the cluster changes
+    it, so an old split never lands on a different cluster."""
+    spans = sorted((round(t.start, 3), round(t.end, 3)) for t in turns if t.speaker == cluster)
+    if not spans:
+        return None
+    digest = hashlib.sha256(json.dumps([list(sp) for sp in spans]).encode()).hexdigest()
+    seconds = round(sum(e - s for s, e in spans), 3)
+    return {"turns": len(spans), "seconds": seconds, "sha256": digest}
+
+
+def describe_fingerprint(fp: dict[str, Any] | None) -> str:
+    if fp is None:
+        return "no turns"
+    return f"{fp['turns']} turns, {fp['seconds']:g} s"
 
 
 @dataclass(frozen=True)
 class PitchSplit:
     male_below: float
     female_above: float
+    fingerprint: dict[str, Any] | None = None  # None: a split file from before fingerprints
 
 
 class SplitFileError(ValueError):
@@ -95,8 +124,30 @@ def operator_splits(workspace_root: Path, episode: str) -> dict[str, PitchSplit]
                 f"{path}: {cluster} male_below {bands[0]:g} Hz is above female_above "
                 f"{bands[1]:g} Hz"
             )
-        out[cluster] = PitchSplit(*bands)
+        fp = body.get("fingerprint")
+        if fp is not None and not _fingerprint_ok(fp):
+            raise SplitFileError(
+                f"{path}: {cluster} fingerprint must be an object of turns, seconds and "
+                f"sha256, not {fp!r}"
+            )
+        out[cluster] = PitchSplit(*bands, fingerprint=fp)
     return out
+
+
+def _fingerprint_ok(fp: Any) -> bool:
+    if not isinstance(fp, dict) or set(fp) != FINGERPRINT_KEYS:
+        return False
+    n, secs, digest = fp["turns"], fp["seconds"], fp["sha256"]
+    return (
+        isinstance(n, int)
+        and not isinstance(n, bool)
+        and n > 0
+        and isinstance(secs, int | float)
+        and not isinstance(secs, bool)
+        and math.isfinite(secs)
+        and isinstance(digest, str)
+        and len(digest) == 64
+    )
 
 
 # What a held-out episode's names.json may say: it read no names (`holdout`), or names were
@@ -117,7 +168,8 @@ def check_held_out(work: Path, episode: str) -> None:
       one whose source is a name), since the characters run behind it read names whatever
       `names.json` says now;
     - those assignments record other turns than `04-diarize/turns.json` (the names stage's
-      refined turns).
+      refined turns: subtitle names, or an operator pitch split's voice parts, which the
+      message names as such; either way the grade would not be the diarizer's clusters).
 
     A missing `names.json` passes the first test, because it means one of two things this
     guard can't tell apart: the names stage never ran (a workspace from before it), so
@@ -154,6 +206,21 @@ def check_held_out(work: Path, episode: str) -> None:
         )
     diar = Path(work) / DIARIZE_DIR / "turns.json"
     if asg.turns is not None and diar.exists() and asg.turns != read_json(diar, Diarization).turns:
+        from fukikae.names.align import VOICE_PREFIX
+
+        split = sorted(
+            {t.speaker.split("~", 1)[0] for t in asg.turns if f"~{VOICE_PREFIX}" in t.speaker}
+        )
+        named = [
+            t.speaker for t in asg.turns if "~" in t.speaker and f"~{VOICE_PREFIX}" not in t.speaker
+        ]
+        if split and not named:  # the refined turns are an operator split's, not names'
+            raise HeldOutNamesError(
+                f"held-out episode {episode}'s assignments record an operator pitch split of "
+                f"{', '.join(split)} (studio/splits/{episode}.json), not "
+                f"{DIARIZE_DIR}/turns.json: a held-out grade reads the diarizer's own clusters; "
+                f"remove the split and {rerun}, or score it as a tuning episode"
+            )
         raise HeldOutNamesError(
             f"held-out episode {episode}'s assignments record other turns than "
             f"{DIARIZE_DIR}/turns.json (the names stage's refined turns); {rerun}"

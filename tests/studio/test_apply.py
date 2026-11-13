@@ -16,7 +16,8 @@ from fukikae.cards.card import parse_card
 from fukikae.cards.store import CardStore
 from fukikae.cli import app
 from fukikae.job import Manifest, StageRecord, load_manifest, save_manifest
-from fukikae.models import Assignments, ClusterAssignment, Turn
+from fukikae.models import Assignments, ClusterAssignment, Diarization, Turn
+from fukikae.names.inputs import cluster_fingerprint
 from fukikae.registry.invalidate import Invalidation
 from fukikae.registry.store import Registry
 from fukikae.studio.apply import (
@@ -80,6 +81,8 @@ def ws(tmp_path: Path) -> Workspace:
             work / "05-characters" / "assignments.json",
             Assignments(episode=ep, threshold=0.5, clusters=clusters, turns=turns),
         )
+        (work / "04-diarize").mkdir(parents=True)  # what a pitch split's fingerprint reads
+        write_json(work / "04-diarize" / "turns.json", Diarization(backend="x", turns=turns))
     return w
 
 
@@ -238,7 +241,14 @@ def test_pitch_split_writes_the_split_file(ws):
     d = decision_for(ws, "split", character=3, episode="S01E01", cluster="S2", by="pitch")
     r = apply_decision(ws, d)
     split = json.loads((ws.root / "studio" / "splits" / "S01E01.json").read_text())
-    assert split == {"S2": {"by": "pitch", "male_below": 165.0, "female_above": 200.0}}
+    assert split == {
+        "S2": {
+            "by": "pitch",
+            "male_below": 165.0,
+            "female_above": 200.0,
+            "fingerprint": cluster_fingerprint([Turn(start=10.0, end=20.0, speaker="S2")], "S2"),
+        }
+    }
     assert r.invalidations == [Invalidation("S01E01", "names")]
     assert "names" not in stages_left(ws, "S01E01")
     with reg_of(ws) as reg:  # no registry change but the review mark
@@ -248,6 +258,100 @@ def test_pitch_split_writes_the_split_file(ws):
                                     by="pitch"))  # fmt: skip
     split = json.loads((ws.root / "studio" / "splits" / "S01E01.json").read_text())
     assert sorted(split) == ["S0", "S2"]
+
+
+def test_pitch_split_fingerprint_names_the_clusters_turns():
+    fp = cluster_fingerprint([Turn(start=10.0, end=20.0, speaker="S2")], "S2")
+    assert fp is not None and fp["turns"] == 1 and fp["seconds"] == 10.0
+    assert len(fp["sha256"]) == 64
+    other = cluster_fingerprint([Turn(start=10.0, end=20.5, speaker="S2")], "S2")
+    assert other != fp
+    assert cluster_fingerprint([Turn(start=0.0, end=1.0, speaker="S0")], "S2") is None
+
+
+def test_pitch_split_without_the_diarization_is_refused(ws):
+    (ws.work_dir("S01E01") / "04-diarize" / "turns.json").unlink()
+    d = decision_for(ws, "split", character=3, episode="S01E01", cluster="S2", by="pitch")
+    with pytest.raises(DecisionRefused, match="04-diarize"):
+        apply_decision(ws, d)
+    assert not (ws.root / "studio" / "splits" / "S01E01.json").exists()
+
+
+def test_pitch_split_of_a_sub_cluster_is_refused(ws):
+    for label in ("S2~voice-f", "S2~natsu"):
+        d = decision_for(ws, "split", character=3, episode="S01E01", cluster=label, by="pitch")
+        with pytest.raises(DecisionRefused, match="sub-cluster"):
+            apply_decision(ws, d)
+    assert not (ws.root / "studio" / "splits" / "S01E01.json").exists()
+
+
+def _split_episode(ws: Workspace) -> None:
+    """S01E01 after a pitch split of S2: names.json's voice parts, the assignments (char 3
+    kept the high part, char 4 is the low part's new character) and their exemplars."""
+    from fukikae.names.models import LabelInfo, NamesResult
+
+    work = ws.work_dir("S01E01")
+    labels = {
+        lb: LabelInfo(parent="S2", key=None, display=None, cls="voice")
+        for lb in ("S2~voice-f", "S2~voice-m")
+    }
+    labels["S0"] = LabelInfo(parent="S0", key=None, display=None, cls="remainder")
+    (work / "04c-names").mkdir(parents=True, exist_ok=True)
+    write_json(
+        work / "04c-names" / "names.json",
+        NamesResult(
+            episode="S01E01", used=False, verdict="none", reason="no named track", source=None,
+            offset_s=0.0, coverage={}, lines=[], hidden=[], pieces=[], labels=labels,
+            unvoiced=[], excluded=[], dropped_row_seconds=0.0, suggestions=[],
+        ),
+    )  # fmt: skip
+    with reg_of(ws) as reg:
+        reg.delete_episode("S01E01")
+        v = np.zeros(4, dtype=np.float32)
+        v[1] = 1.0
+        reg.add_exemplars(1, "S01E01", "S0", v[None, :], 20.0)
+        v3 = np.zeros(4, dtype=np.float32)
+        v3[3] = 1.0
+        reg.add_exemplars(3, "S01E01", "S2~voice-f", v3[None, :], 6.0)
+        aid, cid = reg.create_actor_with_character(v3)
+        assert (aid, cid) == (4, 4)
+        reg.add_exemplars(4, "S01E01", "S2~voice-m", v3[None, :], 4.0)
+    turns = [
+        Turn(start=0.0, end=10.0, speaker="S0"),
+        Turn(start=10.0, end=16.0, speaker="S2~voice-f"),
+        Turn(start=16.0, end=20.0, speaker="S2~voice-m"),
+    ]
+    clusters = [
+        ClusterAssignment(cluster="S0", actor_id=1, character_id=1, score=0.9,
+                          clean_seconds=20.0, status="pinned"),
+        ClusterAssignment(cluster="S2~voice-f", actor_id=3, character_id=3, score=None,
+                          clean_seconds=6.0, status="pinned", split="kept"),
+        ClusterAssignment(cluster="S2~voice-m", actor_id=4, character_id=4, score=None,
+                          clean_seconds=4.0, status="new", split="new"),
+    ]  # fmt: skip
+    write_json(
+        work / "05-characters" / "assignments.json",
+        Assignments(episode="S01E01", threshold=0.5, clusters=clusters, turns=turns),
+    )
+
+
+@pytest.mark.parametrize("character", [3, 4])
+def test_a_resplit_resolves_its_holder_through_the_voice_parts(ws, character):
+    _split_episode(ws)
+    apply_decision(ws, decision_for(ws, "split", character=3, episode="S01E01", cluster="S2",
+                                    by="pitch"))  # fmt: skip
+    d = decision_for(ws, "split", character=character, episode="S01E01", cluster="S2",
+                     by="pitch", male_below=150.0, female_above=210.0)  # fmt: skip
+    apply_decision(ws, d)
+    split = json.loads((ws.root / "studio" / "splits" / "S01E01.json").read_text())
+    assert split["S2"]["male_below"] == 150.0 and split["S2"]["female_above"] == 210.0
+
+
+def test_a_resplit_by_a_character_holding_no_part_is_refused(ws):
+    _split_episode(ws)
+    d = decision_for(ws, "split", character=1, episode="S01E01", cluster="S2", by="pitch")
+    with pytest.raises(DecisionRefused, match="S2"):
+        apply_decision(ws, d)
 
 
 # --- accept --------------------------------------------------------------------------------

@@ -591,3 +591,13 @@ def test_label_infos_describe_voice_parts():
         "A~voice-m": ("A", None, "voice"),
         "A~voice-f": ("A", None, "voice"),
     }
+
+
+def test_unknown_pieces_join_f_on_an_even_split():
+    from fukikae.names.align import split_voices
+
+    pieces = [_piece(0, 2, "A", turn=0), _piece(3, 5, "A", turn=1), _piece(6, 7, "A", turn=2)]
+    out, info = split_voices(pieces, {"A": (165.0, 200.0)}, {0: "m", 1: "f", 2: "u"})
+    assert info["A"].seconds == {"f": 2.0, "m": 2.0, "u": 1.0}
+    assert info["A"].larger == "f"
+    assert [p.label for p in out] == ["A~voice-m", "A~voice-f", "A~voice-f"]

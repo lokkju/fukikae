@@ -555,3 +555,43 @@ def test_queue_ranks_an_operator_gender_contradiction_first():
 
     entries = [entry(1, 900.0, ["thin"]), entry(2, 5.0, ["gender"]), entry(3, 50.0, ["stale"])]
     assert order_queue(entries) == [2, 1, 3]
+
+
+def _rewrite_assignments(ws: Workspace, ep: str, **by_cluster: dict) -> None:
+    from fukikae.artifacts import read_json
+
+    path = ws.work_dir(ep) / "05-characters" / "assignments.json"
+    a = read_json(path, Assignments)
+    clusters = [c.model_copy(update=by_cluster.get(c.cluster, {})) for c in a.clusters]
+    write_json(path, a.model_copy(update={"clusters": clusters}))
+
+
+def test_a_new_character_from_a_pitch_split_is_flagged_until_reviewed(ws):
+    _rewrite_assignments(ws, E1, S2={"split": "new", "status": "new"})
+    doc = _build(ws)
+    flags = [f for f in _entry(doc, 3).flags if f.kind == "identity"]
+    assert len(flags) == 1 and flags[0].episode == E1 and "S2" in flags[0].text
+    assert not [f for f in _entry(doc, 1).flags if f.kind == "identity"]
+    with Registry(ws.registry_path) as reg:
+        reg.mark_reviewed(3)
+    assert not [f for f in _entry(_build(ws), 3).flags if f.kind == "identity"]
+
+
+def test_a_split_skipped_by_its_fingerprint_flags_the_clusters_character(ws):
+    from fukikae.names.models import NamesResult, VoiceSplit
+
+    d = ws.work_dir(E1) / "04c-names"
+    d.mkdir(parents=True, exist_ok=True)
+    split = VoiceSplit(
+        male_below=165.0, female_above=200.0, seconds={"f": 0.0, "m": 0.0, "u": 0.0},
+        larger=None, labels=[], reason="the split was decided on S0 with 3 turns, 9 s",
+        check="changed",
+    )  # fmt: skip
+    write_json(d / "names.json", NamesResult(
+        episode=E1, used=False, verdict="none", reason="no named track", source=None,
+        offset_s=0.0, coverage={}, lines=[], hidden=[], pieces=[], labels={}, unvoiced=[],
+        excluded=[], dropped_row_seconds=0.0, suggestions=[], voice_splits={"S0": split},
+    ))  # fmt: skip
+    doc = _build(ws)
+    flags = [f for f in _entry(doc, 1).flags if f.kind == "split"]
+    assert len(flags) == 1 and flags[0].episode == E1 and "decided on S0" in flags[0].text
