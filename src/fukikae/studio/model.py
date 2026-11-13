@@ -13,6 +13,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
+from fukikae.cards.select import Tier
 from fukikae.pitch import FEMALE_ABOVE, MALE_BELOW
 
 
@@ -136,12 +137,157 @@ class Decisions(_Strict):
     decisions: list[Decision]
 
 
+# -- the season index (`fukikae.studio.season`, ``<ws>/studio/season.json``) -----------------
+#
+# Derived from the workspace and rebuilt when its inputs change; never edited. The page and
+# later tools read it (`GET /api/season`); ``schema_version`` versions it.
+
+
+class Sample(_Strict):
+    """A clip of a character's (or an extras cluster's) speech: ``clip`` is the file name
+    under ``<ws>/studio/audio/`` (`fukikae.studio.season.cut_sample`)."""
+
+    episode: str
+    start: float
+    end: float
+    transcript: str
+    clip: str
+
+
+class GenderInfo(_Strict):
+    """A0's estimate over the season (class, confidence, median), seconds of turns per class
+    (``m``, ``u``, ``f``), the class per episode, and the gender the operator stored."""
+
+    estimate: Literal["f", "m", "u"]
+    confidence: float
+    median: float | None
+    seconds: dict[str, float]
+    per_episode: dict[str, str]
+    stored: str | None
+    stored_by: str | None
+
+
+class CardInfo(_Strict):
+    """A character's current card for one target language. ``source`` is the card's voice
+    source (``clone``; ``stock`` only for a card D41 retired); ``flags`` names each reason
+    the card is flagged (``thin``, ``floor``, ``impure``, ``stock``, ``stale``, ``gender``).
+    ``digest`` is `fukikae.studio.apply.row_digest` for the language: what an accept made
+    against this assignment carries."""
+
+    language: str
+    card_id: str | None
+    source: str | None
+    chosen_by: str
+    locked: bool
+    tier: Tier | None
+    flags: list[str]
+    digest: str | None = None
+
+
+class Suggestion(_Strict):
+    """A merge (``other``: the other character, ``cosine`` of their registry centroids; or
+    None from a names hint, with its ``episode``) or a pitch split of one episode's cluster
+    (``parts``: per class its seconds and sample spans)."""
+
+    kind: Literal["merge", "split"]
+    other: int | None = None
+    cosine: float | None = None
+    episode: str | None = None
+    cluster: str | None = None
+    parts: dict[str, Any] | None = None
+
+
+class Flag(_Strict):
+    """Something for the operator to look at: ``kind`` one of ``thin``, ``stock``,
+    ``impure``, ``bimodal``, ``gated``, ``names``, ``floor``, ``stale``, ``gender``,
+    ``dropped``; ``episode`` when it belongs to one."""
+
+    kind: str
+    text: str
+    episode: str | None = None
+
+
+class EpisodeSpeech(_Strict):
+    """A character's speech in one episode: its clusters, seconds of turns, the clusters'
+    clean seconds, turns and translated cues."""
+
+    clusters: list[str]
+    seconds: float
+    clean_seconds: float
+    turns: int
+    cues: int
+
+
+class CharacterEntry(_Strict):
+    id: int
+    actor_id: int
+    name: str | None
+    key: str | None
+    external_id: str | None
+    kind: str
+    locked: bool
+    reviewed: str | None
+    digest: str  # row_digest of the character: what an identity decision carries
+    episodes: dict[str, EpisodeSpeech]
+    seconds: float
+    clean_seconds: float
+    turns: int
+    cues: int
+    samples: list[Sample]
+    gender: GenderInfo
+    cards: list[CardInfo]
+    suggestions: list[Suggestion]
+    names: list[str]  # names evidence (D27): key decisions, named lines, disagreements
+    flags: list[Flag]
+
+
+class ExtraEntry(_Strict):
+    """An extras cluster of one episode: its seconds of turns, and its episode-local clone
+    card and tier from the episode's last tts run (None before one)."""
+
+    episode: str
+    label: str
+    seconds: float
+    tier: Tier | None
+    card_id: str | None
+    samples: list[Sample]
+
+
+class EpisodeEntry(_Strict):
+    """An episode with a work dir: the last stage its manifest records done, whether the
+    studio can use it (its characters stage has written assignments), and the command that
+    brings it in when not."""
+
+    id: str
+    last_stage: str | None
+    ready: bool
+    command: str | None
+
+
+class SeasonDoc(_Strict):
+    schema_version: Literal[1] = 1
+    workspace: str
+    built: str  # ISO 8601, UTC
+    inputs_digest: str
+    episodes: list[EpisodeEntry]
+    characters: list[CharacterEntry]
+    extras: list[ExtraEntry]
+    queue: list[int]  # character ids, the review order (`fukikae.studio.season.order_queue`)
+
+
 __all__ = [
     "AcceptDecision",
     "AliasDecision",
+    "CardInfo",
+    "CharacterEntry",
     "Decision",
     "Decisions",
+    "EpisodeEntry",
+    "EpisodeSpeech",
+    "ExtraEntry",
+    "Flag",
     "GenderDecision",
+    "GenderInfo",
     "IDENTITY_OPS",
     "KindDecision",
     "LockDecision",
@@ -149,7 +295,10 @@ __all__ = [
     "NameDecision",
     "RefSpan",
     "ReviewedDecision",
+    "Sample",
+    "SeasonDoc",
     "SplitDecision",
+    "Suggestion",
     "ValidationError",
     "parse_decision",
 ]
