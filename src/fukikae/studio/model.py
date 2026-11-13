@@ -200,7 +200,9 @@ class Suggestion(_Strict):
 class Flag(_Strict):
     """Something for the operator to look at: ``kind`` one of ``thin``, ``stock``,
     ``impure``, ``bimodal``, ``gated``, ``names``, ``floor``, ``stale``, ``gender``,
-    ``dropped``; ``episode`` when it belongs to one."""
+    ``dropped``, ``split`` (an operator pitch split the names stage skipped because the
+    cluster changed since), ``identity`` (a pitch split's new character, unreviewed);
+    ``episode`` when it belongs to one."""
 
     kind: str
     text: str

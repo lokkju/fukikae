@@ -843,9 +843,23 @@ def _where(refs: Sequence[dict]) -> str:
     """The stale references as a report phrase: episode, span and the names said over it."""
     parts = []
     for r in refs:
-        said = ", ".join(r.get("names") or []) or "no name"
+        if r.get("split"):
+            said = f"pitch split: {r['split']}, another character's part"
+        else:
+            said = ", ".join(r.get("names") or []) or "no name"
         parts.append(f"{r['episode']} {r['start']:.2f}-{r['end']:.2f} ({said})")
     return "; ".join(parts)
+
+
+def _otherwise(refs: Sequence[dict]) -> str:
+    """What makes the references someone else's: subtitle names, a pitch split, or both."""
+    split = any(r.get("split") for r in refs)
+    named = any(not r.get("split") for r in refs)
+    if split and named:
+        return "the subtitles name otherwise or a pitch split now gives another character"
+    if split:
+        return "a pitch split now gives another character"
+    return "the subtitles now name otherwise"
 
 
 def ensure_assignments(
@@ -969,8 +983,8 @@ def ensure_assignments(
                 flag(
                     cid,
                     f"character {_label(reg, cid)}'s card {a.card_id} ({a.chosen_by}"
-                    f"{', locked' if a.locked else ''}) was cloned from turns the subtitles "
-                    f"now name otherwise: {where}; `fukikae voices clone` replaces it{also}",
+                    f"{', locked' if a.locked else ''}) was cloned from turns "
+                    f"{_otherwise(refs)}: {where}; `fukikae voices clone` replaces it{also}",
                 )
             elif usable:
                 todo.append((cid, spans))
@@ -978,8 +992,8 @@ def ensure_assignments(
             elif cloning is None:
                 flag(
                     cid,
-                    f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns the "
-                    f"subtitles now name otherwise ({where}); kept, because no [tts] "
+                    f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns "
+                    f"{_otherwise(refs)} ({where}); kept, because no [tts] "
                     "clone_backend is set to re-pick it with: set one, or replace it with "
                     f"`fukikae voices clone` or `fukikae voices assign`{also}",
                 )
@@ -987,8 +1001,8 @@ def ensure_assignments(
                 name = cloning.backend.name
                 flag(
                     cid,
-                    f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns the "
-                    f"subtitles now name otherwise ({where}); kept until the clone backend "
+                    f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns "
+                    f"{_otherwise(refs)} ({where}); kept until the clone backend "
                     f"{name} can run ({cloning.unavailable}; `fukikae backends setup {name}`), "
                     f"and the next tts run then re-picks it{also}",
                 )
@@ -1121,8 +1135,8 @@ def ensure_assignments(
             if cid in repick:
                 flag(
                     cid,
-                    f"character {_label(reg, cid)}: card {new} is cloned from turns the "
-                    f"subtitles now name otherwise ({_where((stale or {})[cid])}); {again}: "
+                    f"character {_label(reg, cid)}: card {new} is cloned from turns "
+                    f"{_otherwise((stale or {})[cid])} ({_where((stale or {})[cid])}); {again}: "
                     f"`fukikae voices clone` replaces it{_shortfall_suffix(below, thin)}",
                 )
             if cid in purity:
@@ -2104,6 +2118,61 @@ def stale_references(
     return out
 
 
+def _split_assignments(
+    ws: Workspace, episode: str, read: Assignments | None = None
+) -> Assignments | None:
+    """The episode's assignments (``read`` when the caller has them) when they hold a pitch
+    split's voice part, else None."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments
+    from fukikae.names.align import VOICE_PREFIX
+
+    asg = read
+    if asg is None:
+        path = ws.work_dir(episode) / "05-characters" / "assignments.json"
+        if not path.exists():
+            return None
+        asg = read_json(path, Assignments)
+    return asg if any(f"~{VOICE_PREFIX}" in c.cluster for c in asg.clusters) else None
+
+
+def split_foreign_spans(asg: Assignments, cid: int) -> list[tuple[float, float, str]]:
+    """The turns of the voice parts another character holds in each pitch split one of whose
+    parts ``cid`` holds (the other part of a split it kept, or was given), with their label."""
+    from fukikae.names.align import VOICE_PREFIX
+
+    def parent(label: str) -> str | None:
+        head, sep, _ = label.partition(f"~{VOICE_PREFIX}")
+        return head if sep else None
+
+    mine = {parent(c.cluster) for c in asg.clusters if c.character_id == cid} - {None}
+    theirs = {
+        c.cluster for c in asg.clusters if c.character_id != cid and parent(c.cluster) in mine
+    }
+    return [(t.start, t.end, t.speaker) for t in asg.turns or [] if t.speaker in theirs]
+
+
+def split_stale_references(card: Card, split: Mapping[str, Assignments], cid: int) -> list[dict]:
+    """The card's reference origins with `STALE_OVERLAP` or more of them in the turns of a
+    pitch split's other part (`split_foreign_spans`), each as ``{episode, start, end, overlap,
+    names: [], split: <that part's label>}``: after a split, the keeper's automatic card
+    re-picks from its own turns, the same share D29 uses for subtitle names."""
+    out: list[dict] = []
+    for ref in card.voice.references:
+        o = ref.origin or {}
+        e, start, end = o.get("episode"), o.get("start"), o.get("end")
+        if not isinstance(e, str) or e not in split or start is None or end is None:
+            continue
+        spans = split_foreign_spans(split[e], cid)
+        share = _inside(float(start), float(end), [(a, b) for a, b, _ in spans])
+        if share >= STALE_OVERLAP:
+            a0, b0 = float(start), float(end)
+            label = max(spans, key=lambda s: min(s[1], b0) - max(s[0], a0))[2]
+            out.append({"episode": e, "start": a0, "end": b0, "overlap": round(share, 3),
+                        "names": [], "split": label})  # fmt: skip
+    return out
+
+
 def _names_over(
     names: NamesResult, start: float, end: float, answers: Callable[[str], bool]
 ) -> list[str]:
@@ -2135,13 +2204,17 @@ def stale_cards(
 
     cache: NamesCache = {}
     named: list[str] = []
+    split: dict[str, Assignments] = {}  # episodes whose assignments hold pitch-split parts
     for e in _all_episodes(ws):
-        _, names, why = _episode_names(ws, e, cache)
+        read, names, why = _episode_names(ws, e, cache)
         if why is not None and notes is not None:
             notes.append(f"{e}: {why}; {SKIP_HINT.format(episode=e)}")
         if names is not None:
             named.append(e)
-    if not named:
+        asg = _split_assignments(ws, e, read)
+        if asg is not None:
+            split[e] = asg
+    if not named and not split:
         return {}
     owner = key_owner(reg)
     out: dict[int, list[dict]] = {}
@@ -2170,6 +2243,10 @@ def stale_cards(
             asg, names, _ = cache[r["episode"]]
             assert asg is not None and names is not None
             r["names"] = _names_over(names, r["start"], r["end"], _answers(asg, cid, owner))
+        seen = {(r["episode"], r["start"], r["end"]) for r in refs}
+        for r in split_stale_references(card, split, cid):
+            if (r["episode"], r["start"], r["end"]) not in seen:
+                refs.append(r)
         if refs:
             out[cid] = refs
     return out
@@ -2851,7 +2928,13 @@ def _silent_lines(
 
 def _now_named(refs: Sequence[dict]) -> str:
     said = sorted({k for r in refs for k in r.get("names") or []})
-    return f"now named {', '.join(k.upper() for k in said) or 'otherwise'}"
+    split = sorted({r["split"] for r in refs if r.get("split")})
+    out = []
+    if said or not split:
+        out.append(f"now named {', '.join(k.upper() for k in said) or 'otherwise'}")
+    if split:
+        out.append(f"now another character's part of a pitch split ({', '.join(split)})")
+    return " and ".join(out)
 
 
 def _stale_line(

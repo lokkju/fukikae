@@ -364,6 +364,11 @@ def show_episode(ws: Workspace, ref: str) -> list[str]:
                 + ", ".join(v.labels)
             )
         )
+        if v.check == "unchecked" and v.labels:
+            out.append(
+                f"  unchecked: the split file records no fingerprint of {cluster}, so a diarize "
+                "rerun that changed the cluster would not be caught; re-split it to record one"
+            )
     if not result.used:
         return out
     cov = result.coverage

@@ -588,3 +588,67 @@ def test_run_gates_read_the_same_speech_and_splits_as_the_index(ws):
         assert [r.split(":")[0] for r in gate.needs_voices(ep, cfg, reg)] == [
             "character 1 (Lucy)", "character 3 (unnamed)",
         ]  # fmt: skip
+
+
+def _rewrite_assignments(ws: Workspace, ep: str, **by_cluster: dict) -> None:
+    from fukikae.artifacts import read_json
+
+    path = ws.work_dir(ep) / "05-characters" / "assignments.json"
+    a = read_json(path, Assignments)
+    clusters = [c.model_copy(update=by_cluster.get(c.cluster, {})) for c in a.clusters]
+    write_json(path, a.model_copy(update={"clusters": clusters}))
+
+
+def test_a_new_character_from_a_pitch_split_is_flagged_until_reviewed(ws):
+    _rewrite_assignments(ws, E1, S2={"split": "new", "status": "new"})
+    doc = _build(ws)
+    flags = [f for f in _entry(doc, 3).flags if f.kind == "identity"]
+    assert len(flags) == 1 and flags[0].episode == E1 and "S2" in flags[0].text
+    assert not [f for f in _entry(doc, 1).flags if f.kind == "identity"]
+    with Registry(ws.registry_path) as reg:
+        reg.mark_reviewed(3)
+    assert not [f for f in _entry(_build(ws), 3).flags if f.kind == "identity"]
+
+
+def test_a_split_skipped_by_its_fingerprint_flags_the_clusters_character(ws):
+    from fukikae.names.models import NamesResult, VoiceSplit
+
+    d = ws.work_dir(E1) / "04c-names"
+    d.mkdir(parents=True, exist_ok=True)
+    split = VoiceSplit(
+        male_below=165.0, female_above=200.0, seconds={"f": 0.0, "m": 0.0, "u": 0.0},
+        larger=None, labels=[], reason="the split was decided on S0 with 3 turns, 9 s",
+        check="changed",
+    )  # fmt: skip
+    write_json(d / "names.json", NamesResult(
+        episode=E1, used=False, verdict="none", reason="no named track", source=None,
+        offset_s=0.0, coverage={}, lines=[], hidden=[], pieces=[], labels={}, unvoiced=[],
+        excluded=[], dropped_row_seconds=0.0, suggestions=[], voice_splits={"S0": split},
+    ))  # fmt: skip
+    doc = _build(ws)
+    flags = [f for f in _entry(doc, 1).flags if f.kind == "split"]
+    assert len(flags) == 1 and flags[0].episode == E1 and "decided on S0" in flags[0].text
+
+
+def test_a_voice_part_against_its_characters_stored_gender_raises_a_gender_flag(ws):
+    """A stored gender set after a split never moves the keeper; the index flags it."""
+    from fukikae.artifacts import read_json
+
+    path = ws.work_dir(E1) / "05-characters" / "assignments.json"
+    a = read_json(path, Assignments)
+    ren = {"S0": "S0~voice-m"}
+    turns = [t.model_copy(update={"speaker": ren.get(t.speaker, t.speaker)}) for t in a.turns or []]
+    clusters = [
+        c.model_copy(update={"cluster": ren[c.cluster], "split": "kept"}) if c.cluster in ren
+        else c
+        for c in a.clusters
+    ]  # fmt: skip
+    write_json(path, a.model_copy(update={"clusters": clusters, "turns": turns}))
+    assert not [f for f in _entry(_build(ws), 1).flags if f.kind == "gender"]
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_gender(1, "f")
+    flags = [f for f in _entry(_build(ws), 1).flags if f.kind == "gender"]
+    assert len(flags) == 1 and flags[0].episode == E1 and "S0~voice-m" in flags[0].text
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_gender(1, "m")
+    assert not [f for f in _entry(_build(ws), 1).flags if f.kind == "gender"]

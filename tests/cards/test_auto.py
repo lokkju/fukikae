@@ -2937,3 +2937,76 @@ def test_card_status_lines_promise_no_repick_for_an_unmeasurable_mismatch(
     assert "can't be measured" in line and "below the clone floor" in line
     assert "re-picks" not in line and "no better reference pick exists" in line
     reg.close()
+
+
+# ---- a pitch split: the keeper's card from the other part's turns (Task 15 re-review) ----
+
+SPLIT_TURNS = [
+    (0.0, 5.0, "S0~voice-m", 0.02),
+    (10.0, 15.0, "S0~voice-m", 0.02),
+    (20.0, 25.0, "S0~voice-f", 0.001),  # the other part: loudest, never the keeper's now
+    (30.0, 35.0, "S0~voice-f", 0.02),
+    (50.0, 55.0, "S0~voice-m", 0.03),
+]
+SPLIT_CLUSTERS = [
+    {"cluster": "S0~voice-m", "character_id": 1, "split": "kept"},
+    {"cluster": "S0~voice-f", "character_id": 2, "split": "new"},
+]
+
+
+def _ws_split(tmp_path: Path) -> tuple[Registry, Any]:
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 3)
+    _named_episode(tmp_path / "ws", NAMED_EP, SPLIT_TURNS, SPLIT_CLUSTERS)
+    return reg, Workspace(tmp_path / "ws")
+
+
+def test_the_keepers_auto_card_from_the_other_parts_turns_is_repicked(tmp_path: Path):
+    from fukikae.cards.auto import stale_cards
+
+    reg, ws = _ws_split(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 20.0, 25.0), (NAMED_EP, 1.0, 4.0)])
+    stale = stale_cards(ws, reg, store, [1, 2], "en")
+    assert [(r["start"], r["split"]) for r in stale[1]] == [(20.0, "S0~voice-f")]
+    assert 2 not in stale
+    ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]},
+                       cloning=_cloning_ws(ws), stale=stale)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old and cur.by == "auto"
+    assert "pitch split" in (cur.note or "")
+    origins = [r.origin for r in store.get(cur.card_id or "").voice.references]
+    assert all(_inside_o(o, [(0, 5), (10, 15), (50, 55)]) for o in origins)
+    assert stale_cards(ws, reg, store, [1], "en") == {}
+    reg.close()
+
+
+def test_a_reference_under_10_percent_in_the_other_part_is_not_stale(tmp_path: Path):
+    from fukikae.cards.auto import stale_cards
+
+    reg, ws = _ws_split(tmp_path)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(NAMED_EP, 15.0, 20.4)])  # 0.4 of 5.4 s: 7%
+    assert stale_cards(ws, reg, store, [1], "en") == {}
+    reg.close()
+
+
+@pytest.mark.parametrize("by", ["assign", "import:Pack", "auto-locked"])
+def test_a_curated_keeper_card_from_the_other_part_is_only_flagged(tmp_path, by):
+    from fukikae.cards.auto import stale_cards
+
+    reg, ws = _ws_split(tmp_path)
+    store = CardStore(ws.root)
+    locked = by == "auto-locked"
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)],
+                      by="auto" if locked else by, locked=locked)  # fmt: skip
+    stale = stale_cards(ws, reg, store, [1], "en")
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]},
+                               cloning=_cloning_ws(ws), stale=stale, flags=flags)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id == old and lines == []
+    (line,) = flags
+    assert "pitch split" in line and "S0~voice-f" in line and "voices clone" in line
+    reg.close()

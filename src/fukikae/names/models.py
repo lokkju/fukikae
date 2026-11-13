@@ -65,6 +65,10 @@ class VoiceSplit(BaseModel):
     larger: Literal["f", "m"] | None  # where the u turns went
     labels: list[str]  # the voice labels written, sorted
     reason: str | None = None  # why the cluster was left as it was
+    # the split file's fingerprint of the diarize cluster against this run's diarization:
+    # ``matched``, ``changed`` (the split skipped: the cluster is not the one split), or
+    # ``unchecked`` (a split file from before fingerprints)
+    check: Literal["matched", "changed", "unchecked"] = "unchecked"
 
 
 class NamesResult(BaseModel):

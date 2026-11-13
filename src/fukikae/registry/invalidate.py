@@ -113,7 +113,9 @@ def remap_assignments(
     Pinning copies actor and character ids from it, so stale ids would survive a rerun. A
     split (``character``) also makes the split label a voice decision (``source = "voice"``,
     no ``name``): the operator has overruled whatever name put it there, and the label's pin
-    to the new actor and character then carries over like any acoustic one.
+    to the new actor and character then carries over like any acoustic one. A pitch split's
+    new part that the change puts on its keeper's character loses its ``split`` marker
+    (`settle_split_markers`): the operator merged it back, and nothing splits it again.
     """
     from fukikae.artifacts import read_json, write_json
     from fukikae.models import Assignments
@@ -137,4 +139,6 @@ def remap_assignments(
         if character_map and c.character_id in character_map:
             upd["character_id"] = character_map[c.character_id]
         out.append(c.model_copy(update=upd))
-    write_json(path, a.model_copy(update={"clusters": out}))
+    from fukikae.registry.voice_parts import settle_split_markers
+
+    write_json(path, a.model_copy(update={"clusters": settle_split_markers(out)}))

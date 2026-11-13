@@ -73,7 +73,7 @@ from fukikae.names.inputs import (
     splits_digest,
     splits_path,
 )
-from fukikae.names.models import NamedLine, NamesResult, Piece
+from fukikae.names.models import NamedLine, NamesResult, Piece, VoiceSplit
 from fukikae.names.normalize import suggest_aliases
 from fukikae.workspace import Episode, Workspace
 
@@ -414,7 +414,32 @@ class NamesStage:
                 for i, t in enumerate(diar.turns)
             ]
         )
-        bands = {c: (sp.male_below, sp.female_above) for c, sp in splits.items()}
+        from fukikae.names.inputs import cluster_fingerprint, describe_fingerprint
+
+        # The fingerprint guard: a split recorded against another shape of the cluster (a
+        # diarize rerun relabelled or reshaped it) is skipped, never applied to what the
+        # label now names; a split file from before fingerprints is applied unchecked.
+        checks: dict[str, str] = {}
+        skipped: dict[str, VoiceSplit] = {}
+        for c, sp in splits.items():
+            if sp.fingerprint is None:
+                checks[c] = "unchecked"
+                continue
+            now = cluster_fingerprint(diar.turns, c)
+            if now == sp.fingerprint:
+                checks[c] = "matched"
+                continue
+            skipped[c] = VoiceSplit(
+                male_below=sp.male_below, female_above=sp.female_above,
+                seconds={"f": 0.0, "m": 0.0, "u": 0.0}, larger=None, labels=[],
+                reason=f"the split was decided on {c} with "
+                f"{describe_fingerprint(sp.fingerprint)}, and the diarization now gives it "
+                f"{describe_fingerprint(now)}: skipped; re-split it in the studio",
+                check="changed",
+            )  # fmt: skip
+        bands = {
+            c: (sp.male_below, sp.female_above) for c, sp in splits.items() if c not in skipped
+        }
         by_cluster: dict[str, list[int]] = defaultdict(list)
         for i in voice_candidates(base, bands):
             by_cluster[base[i].cluster].append(i)
@@ -429,6 +454,8 @@ class NamesStage:
             for k, i in enumerate(idx):
                 genders[i] = classify(summarize(track, k), lo, hi, LINE_MIN_VOICED_S).gender
         pieces, info = split_voices(base, bands, genders)
+        info = {c: v.model_copy(update={"check": checks[c]}) for c, v in info.items()}
+        info = dict(sorted({**info, **skipped}.items()))
         update: dict[str, Any] = {"voice_splits": info}
         for cluster, v in info.items():
             log.info(

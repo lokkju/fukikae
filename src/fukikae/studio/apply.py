@@ -304,11 +304,59 @@ def _inv(episodes: Iterable[str], stage: str) -> list[Invalidation]:
     return [Invalidation(e, stage) for e in sorted(set(episodes))]
 
 
+def _voice_parts_of(ws: Workspace, episode: str, cluster: str) -> list[str]:
+    """The voice parts an earlier pitch split made of ``cluster`` in the episode, by its
+    ``names.json`` labels (`LabelInfo.parent`); empty when it has none."""
+    from fukikae.artifacts import read_json
+    from fukikae.names.inputs import names_path
+    from fukikae.names.models import NamesResult
+
+    path = names_path(ws.work_dir(episode))
+    if not path.is_file():
+        return []
+    labels = read_json(path, NamesResult).labels
+    return sorted(lb for lb, i in labels.items() if i.cls == "voice" and i.parent == cluster)
+
+
+def _split_fingerprint(ws: Workspace, d: SplitDecision) -> dict[str, Any]:
+    """The diarize cluster's `cluster_fingerprint`, which the split file records so the names
+    stage never applies the split to a different cluster; refused without one."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Diarization
+    from fukikae.names.inputs import DIARIZE_DIR, cluster_fingerprint
+
+    path = ws.work_dir(d.episode) / DIARIZE_DIR / "turns.json"
+    if not path.is_file():
+        raise DecisionRefused(
+            f"{d.episode} has no {DIARIZE_DIR}/turns.json: a pitch split is recorded against "
+            "the diarization it splits; run diarize first"
+        )
+    fp = cluster_fingerprint(read_json(path, Diarization).turns, d.cluster)
+    if fp is None:
+        raise DecisionRefused(
+            f"{d.episode} {DIARIZE_DIR}/turns.json has no turns of {d.cluster}; a pitch split "
+            "takes a diarize cluster"
+        )
+    return fp
+
+
 def _cluster_holder(ws: Workspace, reg: Registry, d: SplitDecision, c: Character) -> None:
     """Refuse a split of a cluster that isn't the character's (by its exemplars, or for a
-    pitch split by the episode's assignments)."""
-    holders = reg.cluster_actors(d.episode, d.cluster)
-    if holders == [c.actor_id]:
+    pitch split by the episode's assignments). A pitch split takes a diarize cluster, never a
+    sub-cluster (a label with ``~``); one split before is the character's when it holds one of
+    its voice parts, and the new bands replace the old ones."""
+    if d.by == "pitch" and "~" in d.cluster:
+        raise DecisionRefused(
+            f"{d.episode} {d.cluster} is a sub-cluster; a pitch split takes the diarize cluster "
+            f"({d.cluster.split('~', 1)[0]}), and splitting it again replaces its bands"
+        )
+    labels = [d.cluster]
+    if d.by == "pitch":
+        labels += _voice_parts_of(ws, d.episode, d.cluster)
+    holders = sorted({h for lb in labels for h in reg.cluster_actors(d.episode, lb)})
+    if c.actor_id in holders and (d.by == "pitch" or holders == [c.actor_id]):
+        if d.by == "pitch":
+            _split_fingerprint(ws, d)
         return
     if d.by == "pitch" and not holders:
         from fukikae.artifacts import read_json
@@ -317,7 +365,8 @@ def _cluster_holder(ws: Workspace, reg: Registry, d: SplitDecision, c: Character
         path = ws.work_dir(d.episode) / "05-characters" / "assignments.json"
         if path.is_file():
             a = read_json(path, Assignments)
-            if any(x.cluster == d.cluster and x.character_id == c.id for x in a.clusters):
+            if any(x.cluster in labels and x.character_id == c.id for x in a.clusters):
+                _split_fingerprint(ws, d)
                 return
     found = ", ".join(f"actor {h}" for h in holders) or "nobody"
     raise DecisionRefused(
@@ -711,6 +760,7 @@ def _write(ws: Workspace, reg: Registry, d: Decision, lines: list[str]) -> list[
             after.append({
                 "do": "split", "episode": d.episode, "cluster": d.cluster,
                 "male_below": d.male_below, "female_above": d.female_above,
+                "fingerprint": _split_fingerprint(ws, d),
             })  # fmt: skip
     elif isinstance(d, KindDecision):
         _call(op, reg.set_character_kind, d.character, d.kind)
@@ -733,10 +783,17 @@ def _write(ws: Workspace, reg: Registry, d: Decision, lines: list[str]) -> list[
 
 
 def _write_split(
-    ws: Workspace, episode: str, cluster: str, male_below: float, female_above: float
+    ws: Workspace,
+    episode: str,
+    cluster: str,
+    male_below: float,
+    female_above: float,
+    fingerprint: dict[str, Any] | None = None,
 ) -> None:
     """Add one cluster's pitch split to the episode's split file, the read-modify-write under
-    an exclusive lock on ``studio/splits/.lock`` so two writers can't lose each other's."""
+    an exclusive lock on ``studio/splits/.lock`` so two writers can't lose each other's. The
+    fingerprint is the diarize cluster's when the decision was made (None only for a step
+    logged before fingerprints, which the names stage then records as unchecked)."""
     from fukikae.artifacts import atomic_path
 
     path = split_path(ws, episode)
@@ -745,6 +802,8 @@ def _write_split(
         fcntl.flock(lock, fcntl.LOCK_EX)
         splits: dict[str, Any] = json.loads(path.read_text()) if path.is_file() else {}
         splits[cluster] = {"by": "pitch", "male_below": male_below, "female_above": female_above}
+        if fingerprint is not None:
+            splits[cluster]["fingerprint"] = fingerprint
         with atomic_path(path) as tmp:
             tmp.write_text(json.dumps(splits, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -778,7 +837,9 @@ def _run_step(ws: Workspace, s: dict[str, Any]) -> str | None:
         )
         return None
     assert s["do"] == "split", s
-    _write_split(ws, s["episode"], s["cluster"], s["male_below"], s["female_above"])
+    _write_split(
+        ws, s["episode"], s["cluster"], s["male_below"], s["female_above"], s.get("fingerprint")
+    )
     return None
 
 
