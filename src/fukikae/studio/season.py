@@ -12,12 +12,16 @@ cluster (`pitch.bimodal`), names evidence (`fukikae.names.flags`, shared with `n
 and flags. Extras clusters are listed per episode with their tier and samples. ``queue``
 orders the characters for review (`order_queue`).
 
+An episode without its vocals stem is still listed, with a note, and gives no samples or pitch.
+
 The index detects nothing on its own and writes nothing but ``season.json``, the sample clips
-under ``<ws>/studio/audio/`` and the pitch cache: the registry is only read, and no stock
-voice is ever proposed (D41). `load_or_build` rebuilds it when its inputs' digest changes:
-each episode's assignments, turns, transcripts, names files, cues, tts plan and run, dropped
-hallucinations and manifest, the vocals' size and time, the workspace config and the
-registry's contents.
+under ``<ws>/studio/audio/`` (a build deletes the clips its document no longer refers to,
+`prune_clips`) and the pitch cache: the registry is only read (opening an older one
+migrates it, as every command does), and no stock voice is ever proposed (D41).
+`load_or_build` rebuilds it when its inputs' digest changes: each episode's assignments,
+turns, transcripts, names files, cues, tts plan and run, dropped hallucinations and manifest,
+the vocals' size and time, the resolved config (profile, user config and ``fukikae.toml``,
+`config_digest`) and the registry's contents.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
@@ -57,22 +62,25 @@ if TYPE_CHECKING:
     from fukikae.registry.store import Character, Registry
 
 # Bumped when the index built from the same inputs changes shape or content.
-SEASON_VERSION = 1
+SEASON_VERSION = 2
 # Registry centroid cosine at or over which two characters are suggested as one (spec, Part B).
 MERGE_SUGGEST_COS = 0.5
 MERGE_NEAREST = 3  # merge suggestions per character, nearest first
 SAMPLE_MAX_S = 12.0  # a sample clip is the turn's first this many seconds
 PART_SAMPLES = 2  # samples per part of a split suggestion
 EXTRA_CLIPS = 2  # samples per extras cluster
-# flag kinds by severity for the queue (spec: thin, stock kept, impure, bimodal, gated lines,
-# names disagreements, below the floor); other kinds rank after these, unflagged last
-SEVERITY = ("thin", "stock", "impure", "bimodal", "gated", "names", "floor")
+# flag kinds by severity for the queue (an operator gender the card contradicts first, by
+# ruling; then the spec's thin, stock kept, impure, bimodal, gated lines, names disagreements,
+# below the floor); other kinds rank after these, unflagged last
+SEVERITY = ("gender", "thin", "stock", "impure", "bimodal", "gated", "names", "floor")
 # the stages `fukikae run` goes through, in order, for an episode's last stage done
 STAGE_ORDER = (
     "extract", "separate", "language", "asr", "asrclean", "diarize", "names", "characters",
     "tag", "translate", "tts", "timefit", "mix",
 )  # fmt: skip
 TIERS = ("floor", "short", "thin")
+# a sample clip's file name under studio/audio (`sample_name`); pruning touches only these
+CLIP_NAME = re.compile(r"[0-9a-f]{64}\.wav")
 EXTRA_STATUSES = ("extra", "review")  # clusters with no character: their cues are extras
 
 
@@ -145,9 +153,13 @@ def cut_sample(ws: Workspace | Path, episode: str, start: float, end: float) -> 
     return dest
 
 
-def _sample(ep: _Episode, ws: Workspace, start: float, end: float) -> Sample:
+def _sample(ep: _Episode, ws: Workspace, start: float, end: float) -> Sample | None:
+    """A sample clip of ``[start, end]`` (its first `SAMPLE_MAX_S`); None when the episode has
+    no vocals stem to cut it from."""
     from fukikae.cards.select import turn_text
 
+    if not ep.vocals.is_file():
+        return None
     end = min(end, start + SAMPLE_MAX_S)
     text = turn_text(ep.transcript, start, end) if ep.transcript is not None else ""
     clip = cut_sample(ws, ep.id, start, end).name
@@ -189,14 +201,21 @@ def _allocate(capacity: Sequence[int], n: int) -> list[int]:
 def _spread_samples(
     ws: Workspace, eps: dict[str, _Episode], turns: dict[str, list[Turn]], n: int
 ) -> list[Sample]:
-    """``n`` samples of one speaker spread over its episodes and over each episode's turns."""
-    order = [e for e in sorted(turns) if turns[e]]
+    """``n`` samples of one speaker spread over its episodes and over each episode's turns;
+    an episode without its vocals stem gives none."""
+    order = [e for e in sorted(turns) if turns[e] and eps[e].vocals.is_file()]
     counts = _allocate([len(turns[e]) for e in order], n)
     out: list[Sample] = []
     for e, k in zip(order, counts, strict=True):
         if k:
-            out += [_sample(eps[e], ws, t.start, t.end) for t in _pick(turns[e], k, eps[e].clean)]
+            out += _samples(eps[e], ws, _pick(turns[e], k, eps[e].clean))
     return out
+
+
+def _samples(ep: _Episode, ws: Workspace, turns: Iterable[Turn]) -> list[Sample]:
+    """A sample per turn; none when the episode has no vocals stem."""
+    got = [_sample(ep, ws, t.start, t.end) for t in turns]
+    return [s for s in got if s is not None]
 
 
 # -- one episode's files --------------------------------------------------------------------
@@ -359,6 +378,14 @@ def _episode_files(work: Path) -> list[Path]:
     return [work / f for f in fixed] + cues
 
 
+def config_digest(cfg: Config, ws: Workspace) -> str:
+    """sha256 of the resolved configuration the index reads: ``cfg`` (the profile merged with
+    the user config and ``fukikae.toml``) and the workspace's own `Workspace.config`, which
+    the names evidence and card flags read."""
+    payload = {"cfg": asdict(cfg), "workspace": asdict(ws.config)}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def inputs_digest(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> str:
     """The digest `load_or_build` compares: every input the index reads (the module
     docstring), the target language, the clip count and `SEASON_VERSION`."""
@@ -386,7 +413,7 @@ def inputs_digest(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> str:
         "version": SEASON_VERSION,
         "pitch": PITCH_VERSION,
         "workspace": str(w.root),
-        "config": _file_sha(w.root / "fukikae.toml"),
+        "config": config_digest(cfg, w),
         "target_language": cfg.target_language,
         "clips": clips,
         "episodes": episodes,
@@ -442,8 +469,7 @@ def _splits(
             longest = sorted(by[cl][g], key=lambda t: (-(t.end - t.start), t.start))
             parts[g] = {
                 "seconds": round(secs[g], 3),
-                "samples": [_sample(ep, ws, t.start, t.end).model_dump()
-                            for t in longest[:PART_SAMPLES]],
+                "samples": [x.model_dump() for x in _samples(ep, ws, longest[:PART_SAMPLES])],
             }  # fmt: skip
         parts["u"] = {"seconds": round(secs["u"], 3)}
         sugg.append(Suggestion(kind="split", episode=ep.id, cluster=cl, parts=parts))
@@ -453,6 +479,14 @@ def _splits(
                  "in the high one; a pitch split may separate two voices",
         ))  # fmt: skip
     return sugg, flags
+
+
+def _pairable(a: str | None, b: str | None) -> bool:
+    """Whether characters of kinds ``a`` and ``b`` may be suggested as one: neither ignored
+    nor unknown, and a narrator only with a narrator."""
+    if a is None or b is None or "ignored" in (a, b):
+        return False
+    return (a == "narrator") == (b == "narrator")
 
 
 def _merges(entries: dict[int, Character], reg: Registry) -> dict[int, list[Suggestion]]:
@@ -466,9 +500,7 @@ def _merges(entries: dict[int, Character], reg: Registry) -> dict[int, list[Sugg
         x = cen[c.actor_id]
         got: list[tuple[float, int]] = []
         for d in usable:
-            if d.id == c.id or d.actor_id == c.actor_id:
-                continue
-            if (c.kind == "narrator") != (d.kind == "narrator"):
+            if d.id == c.id or d.actor_id == c.actor_id or not _pairable(c.kind, d.kind):
                 continue
             y = cen[d.actor_id]
             denom = float(np.linalg.norm(x) * np.linalg.norm(y))
@@ -496,6 +528,7 @@ def _names_evidence(ws: Workspace, eps: dict[str, _Episode], reg: Registry) -> d
     the names merge hints (`fukikae.names.flags.merge_hints`) as merge suggestions."""
     from fukikae.names import flags as nflags
 
+    kind = {c.id: c.kind for c in reg.characters()}
     out: dict[int, _Names] = defaultdict(_Names)
     for e, ep in sorted(eps.items()):
         if ep.names is None:
@@ -534,7 +567,8 @@ def _names_evidence(ws: Workspace, eps: dict[str, _Episode], reg: Registry) -> d
                 "other-episode centroid"
             )
         for h in nflags.merge_hints(ws, ep.names, ep.asg, reg):
-            out[h.drop].hints.append(Suggestion(kind="merge", other=h.keep, episode=e))
+            if _pairable(kind.get(h.drop), kind.get(h.keep)):
+                out[h.drop].hints.append(Suggestion(kind="merge", other=h.keep, episode=e))
     return out
 
 
@@ -657,14 +691,15 @@ def _extras(ws: Workspace, ep: _Episode) -> list[ExtraEntry]:
         mine = turns.get(label, [])
         if mine:
             seconds = sum(t.end - t.start for t in mine)
-            samples = [_sample(ep, ws, t.start, t.end) for t in _pick(mine, EXTRA_CLIPS, ep.clean)]
+            samples = _samples(ep, ws, _pick(mine, EXTRA_CLIPS, ep.clean))
         else:
             seconds = float(info.get("seconds") or 0.0)
             cue = cues.get(label.split("~", 1)[1]) if "~" in label else None
             samples = []
-            if cue is not None and ep.vocals.exists():
+            if cue is not None:
                 a, b = cue.delivery.reference
-                samples = [_sample(ep, ws, float(a), float(b))]
+                got = _sample(ep, ws, float(a), float(b))
+                samples = [got] if got is not None else []
         out.append(ExtraEntry(
             episode=ep.id, label=label, seconds=round(seconds, 3), tier=tier,
             card_id=info.get("card"), samples=samples,
@@ -701,9 +736,13 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
     eps: dict[str, _Episode] = {}
     for e in episode_ids(w):
         ready = _assignments_path(w, e).exists()
+        note = None
+        if ready and not _vocals(w, e).is_file():
+            note = (f"no {_vocals(w, e).relative_to(w.work_dir(e))}, so no samples or pitch; "
+                    f"fukikae run {w.root} {e} --to separate brings it back")  # fmt: skip
         episodes.append(EpisodeEntry(
             id=e, last_stage=_last_stage(w, e), ready=ready,
-            command=None if ready else f"fukikae run {w.root} {e} --to characters",
+            command=None if ready else f"fukikae run {w.root} {e} --to characters", note=note,
         ))  # fmt: skip
         if ready:
             eps[e] = _load(w, cfg, e)
@@ -751,7 +790,10 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
                             flags.append(got)
                 ev = names.get(cid, _Names())
                 merged = {s.other for s in suggestions if s.kind == "merge"}
-                suggestions += [h for h in ev.hints if h.other not in merged]
+                other_kind = {h.other: getattr(chars.get(h.other or 0), "kind", None)
+                              for h in ev.hints}  # fmt: skip
+                suggestions += [h for h in ev.hints if h.other not in merged
+                                and _pairable(c.kind, other_kind[h.other])]  # fmt: skip
                 flags = card_flags.get(cid, []) + flags + ev.flags
                 characters.append(CharacterEntry(
                     id=cid, actor_id=c.actor_id, name=c.name,
@@ -766,7 +808,7 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
                     gender=_gender(c, tracks), cards=cards.get(cid, []),
                     suggestions=suggestions, names=ev.lines, flags=flags,
                 ))  # fmt: skip
-    return SeasonDoc(
+    doc = SeasonDoc(
         workspace=str(w.root),
         built=datetime.now(UTC).isoformat(timespec="seconds"),
         inputs_digest=digest,
@@ -775,6 +817,42 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
         extras=extras,
         queue=order_queue(characters),
     )
+    prune_clips(w, doc)
+    return doc
+
+
+def _clips(doc: SeasonDoc) -> set[str]:
+    """The clip names the document refers to: character, extras and split-part samples."""
+    out = {s.clip for c in doc.characters for s in c.samples}
+    out |= {s.clip for x in doc.extras for s in x.samples}
+    for c in doc.characters:
+        for sugg in c.suggestions:
+            for part in (sugg.parts or {}).values():
+                out |= {str(x["clip"]) for x in part.get("samples", []) if "clip" in x}
+    return out
+
+
+def prune_clips(ws: Workspace | Path, doc: SeasonDoc) -> list[str]:
+    """Delete the clips under ``<ws>/studio/audio`` that ``doc`` no longer refers to: only
+    regular files named like `sample_name` (``<sha>.wav``) directly in that directory, never
+    a symlink, a subdirectory or anything else. Returns the names deleted."""
+    d = _workspace(ws).root / "studio" / "audio"
+    if d.is_symlink() or not d.is_dir():
+        return []
+    keep = _clips(doc)
+    gone: list[str] = []
+    with os.scandir(d) as it:
+        for entry in it:
+            if entry.name in keep or not CLIP_NAME.fullmatch(entry.name):
+                continue
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                continue
+            try:
+                os.unlink(os.path.join(d, entry.name))
+            except FileNotFoundError:
+                continue
+            gone.append(entry.name)
+    return sorted(gone)
 
 
 def load_or_build(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> SeasonDoc:
@@ -801,11 +879,13 @@ __all__ = [
     "MERGE_SUGGEST_COS",
     "SEASON_VERSION",
     "build_season",
+    "config_digest",
     "cut_sample",
     "episode_ids",
     "inputs_digest",
     "load_or_build",
     "order_queue",
+    "prune_clips",
     "registry_digest",
     "sample_name",
     "season_path",

@@ -255,13 +255,15 @@ class ExtraEntry(_Strict):
 
 class EpisodeEntry(_Strict):
     """An episode with a work dir: the last stage its manifest records done, whether the
-    studio can use it (its characters stage has written assignments), and the command that
-    brings it in when not."""
+    studio can use it (its characters stage has written assignments), the command that
+    brings it in when not, and a ``note`` on what the studio can't show for it (no vocals
+    stem: no samples or pitch)."""
 
     id: str
     last_stage: str | None
     ready: bool
     command: str | None
+    note: str | None = None
 
 
 class SeasonDoc(_Strict):

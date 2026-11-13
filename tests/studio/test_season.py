@@ -381,3 +381,177 @@ def test_building_the_index_writes_nothing_to_the_registry(ws):
     before = dump()
     _build(ws)
     assert dump() == before
+
+
+def _names_used(monkeypatch, hints: list) -> None:
+    """Every ready episode's names stage used names, and `merge_hints` answers ``hints``."""
+    from fukikae.cards import auto
+    from fukikae.names import flags as nflags
+
+    class Used:
+        used = True
+
+        def visible_lines(self) -> list:
+            return []
+
+    monkeypatch.setattr(auto, "used_names", lambda _work: Used())
+    monkeypatch.setattr(nflags, "disagreement_rows", lambda *_a: [])
+    monkeypatch.setattr(nflags, "merge_hints", lambda *_a: list(hints))
+
+
+def _hint(keep: int, drop: int):
+    from fukikae.names.flags import MergeHint
+
+    return MergeHint(keep, drop, keep, drop, "S2", 8.0, 8.0, 10.0)
+
+
+def _merge_others(doc, cid: int) -> set[int]:
+    return {s.other for s in _entry(doc, cid).suggestions if s.kind == "merge"}
+
+
+def test_names_hints_suggest_a_merge(ws, monkeypatch):
+    _names_used(monkeypatch, [_hint(keep=2, drop=3)])
+    doc = _build(ws)
+    assert 2 in _merge_others(doc, 3)
+
+
+def test_names_hint_never_suggests_merging_an_ignored_character(ws, monkeypatch):
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_kind(3, "ignored")
+    _names_used(monkeypatch, [_hint(keep=1, drop=3)])
+    doc = _build(ws)
+    assert _merge_others(doc, 3) == set()
+
+
+def test_names_hint_never_targets_an_ignored_character(ws, monkeypatch):
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_kind(2, "ignored")
+    _names_used(monkeypatch, [_hint(keep=2, drop=3)])
+    doc = _build(ws)
+    assert all(2 not in _merge_others(doc, c.id) for c in doc.characters)
+
+
+def test_names_hint_never_pairs_a_narrator_with_a_dialogue_character(ws, monkeypatch):
+    _names_used(monkeypatch, [_hint(keep=4, drop=3), _hint(keep=1, drop=4)])
+    doc = _build(ws)
+    assert 4 not in _merge_others(doc, 3)
+    assert _merge_others(doc, 4) == set()
+
+
+def test_missing_vocals_skip_that_episodes_samples(ws):
+    (ws.work_dir(E2) / "01-separate" / "vocals.wav").unlink()
+    doc = _build(ws, clips=4)
+    eps = {e.id: e for e in doc.episodes}
+    note = eps[E2].note
+    assert eps[E2].ready and note is not None and "vocals" in note
+    assert eps[E1].note is None
+    lucy = _entry(doc, 1)
+    assert E2 in lucy.episodes
+    assert lucy.samples and {s.episode for s in lucy.samples} == {E1}
+    assert len(lucy.samples) == 4
+    assert all(s.episode != E2 for x in doc.extras for s in x.samples)
+
+
+def test_missing_vocals_skip_an_extras_cue_sample(ws):
+    from fukikae.models import TtsRun
+
+    asg_path = ws.work_dir(E2) / "05-characters" / "assignments.json"
+    asg = json.loads(asg_path.read_text(encoding="utf-8"))
+    for row in asg["clusters"]:
+        if row["cluster"] == "S5":
+            row["status"] = "extra"
+            row["character_id"] = None
+    asg_path.write_text(json.dumps(asg), encoding="utf-8")
+    (ws.work_dir(E2) / "01-separate" / "vocals.wav").unlink()
+    write_json(ws.work_dir(E2) / "07-tts" / "run.json", TtsRun.model_validate({
+        "episode": E2, "finished": "2026-11-13T00:00:00+00:00", "renders": 0,
+        "rendered": [], "cached": [], "extras": {"x~c40": {"tier": "floor", "seconds": 6.0}},
+    }))  # fmt: skip
+    doc = _build(ws)
+    got = {x.label: x for x in doc.extras if x.episode == E2}
+    assert got["S5"].samples == [] and got["x~c40"].samples == []
+
+
+def test_config_values_the_index_reads_change_its_digest(ws, tmp_path):
+    from fukikae.studio.season import inputs_digest
+
+    base = inputs_digest(ws, load_config(ws.root, user_config=None))
+    user = tmp_path / "user.toml"
+    user.write_text("[names]\nmin_new_seconds = 9.0\n", encoding="utf-8")
+    assert inputs_digest(ws, load_config(ws.root, user_config=user)) != base
+    assert inputs_digest(ws, load_config(ws.root, user_config=None)) == base
+
+
+def test_a_rebuild_prunes_clips_no_longer_referenced(ws, tmp_path):
+    first = _build(ws, clips=6)
+    audio = ws.root / "studio" / "audio"
+    used = {s.clip for c in first.characters for s in c.samples}
+    stray = audio / ("0" * 64 + ".wav")
+    stray.write_bytes(b"old clip")
+    other = audio / "notes.txt"
+    other.write_text("keep", encoding="utf-8")
+    odd = audio / "keep.wav"
+    odd.write_bytes(b"not ours")
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"outside")
+    link = audio / ("1" * 64 + ".wav")
+    link.symlink_to(outside)
+    second = _build(ws, clips=2)
+    kept = {s.clip for c in second.characters for s in c.samples}
+    kept |= {s.clip for x in second.extras for s in x.samples}
+    kept |= {smp["clip"] for c in second.characters for s in c.suggestions if s.parts
+             for p in s.parts.values() for smp in p.get("samples", [])}  # fmt: skip
+    assert not stray.exists()
+    assert other.exists() and odd.exists() and link.is_symlink() and outside.exists()
+    names = {p.name for p in audio.iterdir()}
+    assert kept <= names
+    assert not (used - kept) & names
+
+
+def test_load_or_build_on_an_older_registry_migrates_it_and_writes_nothing_else(ws):
+    import hashlib
+
+    from fukikae.studio import season
+    from tests.registry.test_store import _downgrade_to_4
+
+    _downgrade_to_4(ws.registry_path)
+
+    def files() -> dict[str, str]:
+        return {
+            str(p.relative_to(ws.root)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in ws.root.rglob("*") if p.is_file()
+        }  # fmt: skip
+
+    before = files()
+    doc = season.load_or_build(ws, load_config(ws.root, user_config=None))
+    assert sorted(c.id for c in doc.characters) == [1, 2, 3, 4, 5]
+    con = sqlite3.connect(ws.registry_path)
+    try:
+        assert con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 5
+    finally:
+        con.close()
+    after = files()
+    changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+    reg = str(ws.registry_path.relative_to(ws.root))
+    allowed = ("studio/", ".fukikae/pitch-cache/", ".fukikae/song-cache/")
+    assert {k for k in changed if not k.startswith(allowed) and not k.startswith(reg)} == set()
+    assert all(before[k] == after[k] for k in before if not k.startswith((*allowed, reg)))
+
+
+def test_queue_ranks_an_operator_gender_contradiction_first():
+    from fukikae.studio.model import CharacterEntry, Flag, GenderInfo
+    from fukikae.studio.season import order_queue
+
+    def entry(cid: int, seconds: float, flags: list[str]) -> CharacterEntry:
+        return CharacterEntry(
+            id=cid, actor_id=cid, name=None, key=None, external_id=None, kind="character",
+            locked=False, reviewed=None, digest="0" * 64, episodes={}, seconds=seconds,
+            clean_seconds=seconds, turns=1, cues=0, samples=[],
+            gender=GenderInfo(estimate="u", confidence=0.0, median=None, seconds={},
+                              per_episode={}, stored=None, stored_by=None),
+            cards=[], suggestions=[], names=[],
+            flags=[Flag(kind=k, text=k, episode=None) for k in flags],
+        )  # fmt: skip
+
+    entries = [entry(1, 900.0, ["thin"]), entry(2, 5.0, ["gender"]), entry(3, 50.0, ["stale"])]
+    assert order_queue(entries) == [2, 1, 3]
