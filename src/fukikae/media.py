@@ -79,19 +79,23 @@ def _tail(text: str, lines: int = 20) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+def _run(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd``; `MediaError` when it fails, or when it outlives ``timeout`` seconds (it is
+    killed first)."""
     try:
         proc = subprocess.run(  # noqa: S603 - argument list, no shell
-            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL
+            cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=timeout
         )
     except FileNotFoundError as e:
         raise MediaError(f"{cmd[0]} not found on PATH") from e
+    except subprocess.TimeoutExpired as e:  # subprocess.run has killed and reaped it
+        raise MediaError(f"{cmd[0]} timed out after {timeout:g} s") from e
     if proc.returncode != 0:
         raise MediaError(f"{cmd[0]} exited {proc.returncode}:\n{_tail(proc.stderr)}")
     return proc
 
 
-def probe(path: Path) -> ProbeResult:
+def probe(path: Path, *, timeout: float | None = None) -> ProbeResult:
     proc = _run(
         [
             "ffprobe", "-v", "error",
@@ -101,7 +105,8 @@ def probe(path: Path) -> ProbeResult:
             ":stream_disposition=default,forced,hearing_impaired",
             "-of", "json",
             str(Path(path).resolve()),
-        ]
+        ],
+        timeout=timeout,
     )  # fmt: skip
     return parse_probe(json.loads(proc.stdout))
 
@@ -110,30 +115,48 @@ def probe(path: Path) -> ProbeResult:
 class VideoStream:
     index: int
     codec: str
-    interlaced: bool  # ffprobe's field_order names a field order (tt, bb, tb, bt)
+    interlaced: bool  # `is_interlaced`
 
 
 INTERLACED_ORDERS = frozenset({"tt", "bb", "tb", "bt"})
+# codecs whose streams are taken as interlaced when ffprobe names no field order: DVD and
+# broadcast MPEG-2 rarely flag it in the stream header, and yadif on a progressive frame
+# costs only a little sharpness
+UNFLAGGED_INTERLACED_CODECS = frozenset({"mpeg2video"})
 
 
-def probe_video(path: Path) -> VideoStream | None:
-    """The source's first picture stream (cover art, an attached picture, skipped), or None
-    when it has none."""
+def is_interlaced(codec: str | None, field_order: str | None) -> bool:
+    """Whether a picture stream gets deinterlaced: ffprobe's ``field_order`` names a field
+    order (tt, bb, tb, bt), or it is absent or ``unknown`` on an MPEG-2 stream
+    (`UNFLAGGED_INTERLACED_CODECS`). ``progressive`` is trusted."""
+    if field_order in INTERLACED_ORDERS:
+        return True
+    return field_order in (None, "", "unknown") and codec in UNFLAGGED_INTERLACED_CODECS
+
+
+def parse_video_streams(data: dict[str, Any]) -> VideoStream | None:
+    """The first picture stream in ffprobe's JSON (cover art, an attached picture, skipped),
+    or None when there is none."""
+    for s in data.get("streams", []):
+        if (s.get("disposition") or {}).get("attached_pic"):
+            continue
+        codec = s.get("codec_name", "")
+        return VideoStream(int(s["index"]), codec, is_interlaced(codec, s.get("field_order")))
+    return None
+
+
+def probe_video(path: Path, *, timeout: float | None = None) -> VideoStream | None:
+    """The source's first picture stream (`parse_video_streams`), or None when it has none."""
     proc = _run(
         [
             "ffprobe", "-v", "error", "-select_streams", "v",
             "-show_entries", "stream=index,codec_name,field_order:stream_disposition=attached_pic",
             "-of", "json",
             str(Path(path).resolve()),
-        ]
+        ],
+        timeout=timeout,
     )  # fmt: skip
-    for s in json.loads(proc.stdout).get("streams", []):
-        if (s.get("disposition") or {}).get("attached_pic"):
-            continue
-        return VideoStream(
-            int(s["index"]), s.get("codec_name", ""), s.get("field_order") in INTERLACED_ORDERS
-        )
-    return None
+    return parse_video_streams(json.loads(proc.stdout))
 
 
 def _count(tags: dict[str, Any]) -> int | None:
@@ -221,8 +244,8 @@ def choose_audio_track(
     return tracks[0]
 
 
-def run_ffmpeg(args: list[str]) -> None:
-    _run(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y", *args])
+def run_ffmpeg(args: list[str], *, timeout: float | None = None) -> None:
+    _run(["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y", *args], timeout=timeout)
 
 
 # Subtitle codecs ffmpeg can turn into text; image subtitles (PGS, VobSub, DVB) need OCR.

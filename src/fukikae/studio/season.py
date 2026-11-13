@@ -18,14 +18,17 @@ An episode without its vocals stem is still listed, with a note, and gives no sa
 
 Every sample also names a video clip (``video``): the same span with 0.3 s either side, from
 the episode's source file (found under the ``source`` setting as `fukikae run` finds it),
-picture scaled to `VIDEO_WIDTH` px (deinterlaced when the source is interlaced) with the
+picture scaled to `VIDEO_WIDTH` px (deinterlaced when `fukikae.media.is_interlaced` says
+so) with the
 source-language audio track the extract stage takes, H.264 and AAC in a faststart MP4. Its
 name hashes the span, the source file's size and time, both stream indexes and the encode
 settings, so a replaced source never serves an old clip. The build only names it; the studio
 server cuts it when the page first fetches it (`cut_video`), so a build costs one probe per
 episode and the operator pays about a second per clip actually watched. An episode whose
-source can't be found or has no picture stream gives samples without video and a
-``video_note``; the build never fails for it.
+source can't be found, has no picture stream or isn't the file its extract stage read
+(`_check_extracted`) gives samples without video and a ``video_note``; the build never fails
+for it. Every probe of a source and every cut has a timeout (`PROBE_TIMEOUT_S`,
+`CUT_TIMEOUT_MIN_S`).
 
 The index detects nothing on its own and writes nothing but ``season.json``, the sample clips
 under ``<ws>/studio/audio/`` and ``<ws>/studio/video/`` (a build deletes the clips its
@@ -44,8 +47,10 @@ import hashlib
 import json
 import os
 import re
+import threading
+import time
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -108,6 +113,15 @@ VIDEO_PRESET = "medium"  # as small as slow at CRF 28 on Sol Bianca, and faster
 VIDEO_AUDIO = "96k"  # AAC stereo
 VIDEO_PAD_S = 0.3  # seconds of picture either side of the span
 VIDEO_VERSION = 1  # bumped when the encode changes; part of every video clip's name
+# a cut's ffmpeg is killed after the larger of these: a minute, or this many seconds per
+# second of clip (a cut runs about 0.4 s for a 3 s clip, so either is far past a healthy one)
+CUT_TIMEOUT_MIN_S = 60.0
+CUT_TIMEOUT_PER_S = 10.0
+PROBE_TIMEOUT_S = 30.0  # each ffprobe of a source file (a stalled share must not hang a build)
+SOURCE_SCAN_TIMEOUT_S = 10.0  # how long a request waits for the source tree scan
+# a temp file a cut left (`fukikae.artifacts.atomic_path`): ``.<sha>.<uuid hex>.tmp.mp4``
+VIDEO_TEMP_NAME = re.compile(r"\.[0-9a-f]{64}\.[0-9a-f]{32}\.tmp\.mp4")
+VIDEO_TEMP_MAX_AGE_S = 3600.0  # older temp files are a killed cut's, and pruned
 EXTRA_STATUSES = ("extra", "review")  # clusters with no character: their cues are extras
 
 
@@ -203,42 +217,173 @@ class VideoSource:
 
 def source_files(cfg: Config) -> dict[str, Path]:
     """Episode id -> source file under the ``source`` setting, matched the way
-    `Workspace.find_episode` matches (the first file in path order wins)."""
+    `Workspace.find_episode` matches (the first file in path order wins). Walks the tree on
+    every call; the studio server keeps a `SourceScanner` instead."""
     root = cfg.source
     if root is None or not root.is_dir():
         return {}
+    return _walk_sources(root)[0]
+
+
+@dataclass(frozen=True)
+class SourceFiles:
+    """A scan of the ``source`` tree: episode id -> file, and a ``note`` when the scan didn't
+    finish in time (the files are then empty, and an episode's ``video_note`` says so)."""
+
+    files: dict[str, Path]
+    note: str | None = None
+
+
+def _walk_sources(root: Path) -> tuple[dict[str, Path], tuple[tuple[str, int], ...]]:
+    """`source_files` under ``root``, and the mtime of ``root`` and every directory under it
+    (the scan's `_signature`)."""
     out: dict[str, Path] = {}
+    dirs = [root]
     for p in sorted(root.rglob("*")):
-        if p.suffix.lower() in VIDEO_SUFFIXES and p.is_file():
+        if p.is_dir():
+            dirs.append(p)
+        elif p.suffix.lower() in VIDEO_SUFFIXES and p.is_file():
             out.setdefault(episode_id(p), p)
-    return out
+    return out, _signature(dirs)
+
+
+def _signature(dirs: Iterable[Path | str]) -> tuple[tuple[str, int], ...]:
+    """Each directory with its mtime (-1 when gone): a file added, removed or renamed in any
+    of them changes it."""
+    sig = []
+    for d in dirs:
+        try:
+            sig.append((str(d), os.stat(d).st_mtime_ns))
+        except OSError:
+            sig.append((str(d), -1))
+    return tuple(sig)
+
+
+@dataclass
+class _Scan:
+    root: Path
+    started: float
+    done: threading.Event = field(default_factory=threading.Event)
+    result: SourceFiles | None = None
+
+
+class SourceScanner:
+    """`source_files` for a long-lived reader (the studio server), so a request never walks
+    the source tree (often an NFS share) itself. A scan runs in its own thread: the first
+    walks the tree, later ones only stat the directories the last walk saw and walk again
+    when one changed. `get` waits at most ``timeout`` seconds for it; a scan still running
+    past that answers with the last finished scan of the same root, or with no files and a
+    ``note`` when there is none, and the next `get` doesn't wait for it again."""
+
+    def __init__(self, timeout: float = SOURCE_SCAN_TIMEOUT_S) -> None:
+        self.timeout = timeout
+        self._lock = threading.Lock()
+        self._scan: _Scan | None = None  # the running (or last) scan
+        # root -> (files, signature) of the last finished walk
+        self._known: dict[Path, tuple[dict[str, Path], tuple[tuple[str, int], ...]]] = {}
+
+    def get(self, root: Path | None) -> SourceFiles:
+        if root is None:
+            return SourceFiles({})
+        root = Path(root)
+        with self._lock:
+            scan = self._scan
+            if scan is None or scan.root != root or scan.done.is_set():
+                scan = self._scan = _Scan(root, time.monotonic())
+                threading.Thread(target=self._run, args=(scan,), daemon=True,
+                                 name="fukikae-source-scan").start()  # fmt: skip
+        if scan.done.wait(max(0.0, scan.started + self.timeout - time.monotonic())):
+            assert scan.result is not None
+            return scan.result
+        with self._lock:
+            known = self._known.get(root)
+        if known is not None:
+            return SourceFiles(dict(known[0]))
+        return SourceFiles({}, note=(f"the source directory {root} didn't answer within "
+                                     f"{self.timeout:g} s; reload to try again"))  # fmt: skip
+
+    def _run(self, scan: _Scan) -> None:
+        try:
+            with self._lock:
+                known = self._known.get(scan.root)
+            if known is not None and _signature(d for d, _ in known[1]) == known[1]:
+                scan.result = SourceFiles(dict(known[0]))
+            elif not scan.root.is_dir():
+                scan.result = SourceFiles({})
+            else:
+                files, sig = _walk_sources(scan.root)
+                with self._lock:
+                    self._known[scan.root] = (files, sig)
+                scan.result = SourceFiles(dict(files))
+        except OSError as e:
+            scan.result = SourceFiles({}, note=f"the source directory {scan.root} can't be "
+                                               f"read: {e}")  # fmt: skip
+        finally:
+            if scan.result is None:
+                scan.result = SourceFiles({}, note=f"the source directory {scan.root} can't "
+                                                   "be scanned")  # fmt: skip
+            scan.done.set()
+
+
+def _sources(cfg: Config, sources: SourceFiles | None) -> SourceFiles:
+    return SourceFiles(source_files(cfg)) if sources is None else sources
 
 
 def video_source(
-    ws: Workspace | Path, cfg: Config, episode: str, files: dict[str, Path] | None = None
+    ws: Workspace | Path,
+    cfg: Config,
+    episode: str,
+    files: dict[str, Path] | None = None,
+    *,
+    note: str | None = None,
 ) -> VideoSource:
     """The episode's `VideoSource`; `NoVideo` when there is no ``source`` setting, no file
-    for the episode, no picture stream, or no audio track the extract stage would take."""
+    for the episode (``note``, from a `SourceFiles` scan that didn't finish, says why), no
+    picture stream, no audio track the extract stage would take, or when the file found
+    isn't the one the extract stage read (`_check_extracted`)."""
     from fukikae import media
     from fukikae.stages.extract import source_track
 
+    w = _workspace(ws)
     if cfg.source is None:
-        raise NoVideo(f"no `source` in {_workspace(ws).root / 'fukikae.toml'}, so no video")
+        raise NoVideo(f"no `source` in {w.root / 'fukikae.toml'}, so no video")
     path = (source_files(cfg) if files is None else files).get(episode)
     if path is None:
-        raise NoVideo(f"no source video for {episode} under {cfg.source}")
+        raise NoVideo(note or f"no source video for {episode} under {cfg.source}")
     try:
         st = path.stat()
-        stream = media.probe_video(path)
+        stream = media.probe_video(path, timeout=PROBE_TIMEOUT_S)
         if stream is None:
             raise NoVideo(f"{path.name} has no video stream")
-        audio = source_track(cfg, path).index
+        audio = source_track(cfg, path, timeout=PROBE_TIMEOUT_S).index
+        _check_extracted(w, cfg, episode, path, audio)
     except (OSError, media.MediaError) as e:
         raise NoVideo(f"{path.name} can't be read for video: {e}") from None
     return VideoSource(
         episode=episode, path=path, size=st.st_size, mtime_ns=st.st_mtime_ns,
         video=stream.index, audio=audio, interlaced=stream.interlaced,
     )  # fmt: skip
+
+
+def _check_extracted(w: Workspace, cfg: Config, episode: str, path: Path, track: int) -> None:
+    """`NoVideo` unless ``path`` is the file the episode's extract stage read: its manifest
+    records a finished extract run whose cache key (the file's resolved path, size and time,
+    and the audio track) is the key ``path`` gives now. A source found by name under
+    ``source`` can be another file than the one an episode was run from."""
+    from fukikae.job import cache_key, load_manifest
+    from fukikae.stages.extract import ExtractStage, extract_config
+    from fukikae.workspace import Episode
+
+    ep = Episode(source=path, id=episode, work=w.work_dir(episode), workspace_root=w.root)
+    record = load_manifest(ep).stages.get("extract")
+    if record is None or record.status != "done":
+        raise NoVideo(f"the manifest records no finished extract run to check {path.name} "
+                      "against")  # fmt: skip
+    key = cache_key(ExtractStage(), ep, cfg, save=False, config=extract_config(cfg, track))
+    if key != record.key:
+        raise NoVideo(f"{path.name} isn't the file the extract stage read (its path, size, "
+                      "time or audio track differ from the manifest's record); "
+                      f"fukikae run {w.root} {episode} --to extract reads it again")  # fmt: skip
 
 
 def video_filter(*, interlaced: bool) -> str:
@@ -288,6 +433,7 @@ def cut_video(ws: Workspace | Path, src: VideoSource, start: float, end: float) 
         raise NoVideo(f"{src.path.name} changed since the index named its clips")
     a = max(0.0, float(start) - VIDEO_PAD_S)
     b = float(end) + VIDEO_PAD_S
+    timeout = max(CUT_TIMEOUT_MIN_S, CUT_TIMEOUT_PER_S * (b - a))
     with atomic_path(dest) as tmp:
         media.run_ffmpeg([
             "-ss", f"{a:.3f}", "-i", str(src.path.resolve()), "-t", f"{b - a:.3f}",
@@ -297,7 +443,7 @@ def cut_video(ws: Workspace | Path, src: VideoSource, start: float, end: float) 
             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", VIDEO_AUDIO, "-ac", "2",
             "-map_metadata", "-1", "-map_chapters", "-1", "-sn", "-dn",
             "-movflags", "+faststart", str(tmp),
-        ])  # fmt: skip
+        ], timeout=timeout)  # fmt: skip
     return dest
 
 
@@ -553,7 +699,9 @@ def config_digest(cfg: Config, ws: Workspace) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def inputs_digest(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> str:
+def inputs_digest(
+    ws: Workspace | Path, cfg: Config, *, clips: int = 6, sources: SourceFiles | None = None
+) -> str:
     """The digest `load_or_build` compares: every input the index reads (the module
     docstring), the target language, the clip count and `SEASON_VERSION`."""
     from fukikae.pitch import VERSION as PITCH_VERSION
@@ -561,14 +709,14 @@ def inputs_digest(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> str:
 
     w = _workspace(ws)
     episodes: dict[str, Any] = {}
-    sources = source_files(cfg)
+    scan = _sources(cfg, sources)
     for e in episode_ids(w):
         work = w.work_dir(e)
         files = {str(p.relative_to(work)): _file_sha(p) for p in _episode_files(work)}
         v = _vocals(w, e)
         st = v.stat() if v.exists() else None
         split = w.root / "studio" / "splits" / f"{e}.json"
-        src = sources.get(e)
+        src = scan.files.get(e)
         try:
             sst = src.stat() if src is not None else None
         except OSError:
@@ -592,6 +740,7 @@ def inputs_digest(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> str:
         "clips": clips,
         "episodes": episodes,
         "registry": registry,
+        "source_scan": scan.note,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -958,7 +1107,9 @@ def order_queue(characters: Sequence[CharacterEntry]) -> list[int]:
     return [c.id for c in ordered]
 
 
-def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> SeasonDoc:
+def build_season(
+    ws: Workspace | Path, cfg: Config, *, clips: int = 6, sources: SourceFiles | None = None
+) -> SeasonDoc:
     """The season index of the workspace (the module docstring). Reads the registry without
     writing it; with no registry yet, no character is listed."""
     from fukikae.cards.store import CardStore
@@ -966,10 +1117,10 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
     from fukikae.studio.apply import row_digest
 
     w = _workspace(ws)
-    digest = inputs_digest(w, cfg, clips=clips)
+    scan = _sources(cfg, sources)
+    digest = inputs_digest(w, cfg, clips=clips, sources=scan)
     episodes: list[EpisodeEntry] = []
     eps: dict[str, _Episode] = {}
-    sources = source_files(cfg)
     for e in episode_ids(w):
         ready = _assignments_path(w, e).exists()
         note = video_note = None
@@ -979,7 +1130,7 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
                     f"fukikae run {w.root} {e} --to separate brings it back")  # fmt: skip
         if ready:
             try:
-                video = video_source(w, cfg, e, sources)
+                video = video_source(w, cfg, e, scan.files, note=scan.note)
             except NoVideo as exc:
                 video_note = f"{exc}; its samples have no video"
         episodes.append(EpisodeEntry(
@@ -1108,23 +1259,36 @@ def prune_clips(ws: Workspace | Path, doc: SeasonDoc) -> list[str]:
     """Delete the clips under ``<ws>/studio/audio`` and ``<ws>/studio/video`` that ``doc`` no
     longer refers to: only regular files named like `sample_name` (``<sha>.wav``) or
     `video_name` (``<sha>.mp4``) directly in those directories, never a symlink, a
-    subdirectory or anything else. Returns the names deleted."""
+    subdirectory or anything else, and the temp files a killed cut left in studio/video
+    (`VIDEO_TEMP_NAME`) once they are an hour old. Returns the names deleted."""
     root = _workspace(ws).root / "studio"
     gone = _prune(root / "audio", _clips(doc), CLIP_NAME)
     gone += _prune(root / "video", set(referenced_videos(doc)), VIDEO_NAME)
+    gone += _prune(root / "video", set(), VIDEO_TEMP_NAME, older_than=VIDEO_TEMP_MAX_AGE_S)
     return sorted(gone)
 
 
-def _prune(d: Path, keep: set[str], pattern: re.Pattern[str]) -> list[str]:
+def _prune(
+    d: Path, keep: set[str], pattern: re.Pattern[str], *, older_than: float | None = None
+) -> list[str]:
+    """Delete the regular files directly in ``d`` named like ``pattern`` and not in ``keep``
+    (with ``older_than``, only those last modified more than that many seconds ago)."""
     if d.is_symlink() or not d.is_dir():
         return []
     gone: list[str] = []
+    cutoff = None if older_than is None else time.time() - older_than
     with os.scandir(d) as it:
         for entry in it:
             if entry.name in keep or not pattern.fullmatch(entry.name):
                 continue
             if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
                 continue
+            if cutoff is not None:
+                try:
+                    if entry.stat(follow_symlinks=False).st_mtime > cutoff:
+                        continue
+                except FileNotFoundError:
+                    continue
             try:
                 os.unlink(os.path.join(d, entry.name))
             except FileNotFoundError:
@@ -1133,23 +1297,35 @@ def _prune(d: Path, keep: set[str], pattern: re.Pattern[str]) -> list[str]:
     return gone
 
 
-def load_or_build(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> SeasonDoc:
+def load_or_build(
+    ws: Workspace | Path,
+    cfg: Config,
+    *,
+    clips: int = 6,
+    sources: SourceFiles | None = None,
+    on_build: Callable[[SeasonDoc], None] | None = None,
+) -> SeasonDoc:
     """``season.json`` when its ``inputs_digest`` still matches the workspace, else a fresh
-    `build_season`, written there."""
+    `build_season`, written there (and passed to ``on_build``). ``sources`` is a scan of the
+    ``source`` tree to use (`SourceScanner`); without it the tree is walked."""
     from fukikae.artifacts import read_json, write_json
 
     w = _workspace(ws)
     path = season_path(w)
+    scan = _sources(cfg, sources)
     if path.exists():
         try:
             doc = read_json(path, SeasonDoc)
         except ValueError:
             doc = None
-        if doc is not None and doc.inputs_digest == inputs_digest(w, cfg, clips=clips):
+        if doc is not None and doc.inputs_digest == inputs_digest(w, cfg, clips=clips,
+                                                                  sources=scan):  # fmt: skip
             return doc
-    doc = build_season(w, cfg, clips=clips)
+    doc = build_season(w, cfg, clips=clips, sources=scan)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_json(path, doc)
+    if on_build is not None:
+        on_build(doc)
     return doc
 
 
@@ -1158,6 +1334,8 @@ __all__ = [
     "SEASON_VERSION",
     "VIDEO_NAME",
     "NoVideo",
+    "SourceFiles",
+    "SourceScanner",
     "VideoSource",
     "bimodal_clusters",
     "build_season",

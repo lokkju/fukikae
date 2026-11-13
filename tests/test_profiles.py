@@ -110,7 +110,7 @@ def test_extract_config_key_records_audio_title(tmp_path, monkeypatch):
         ],
         subtitles=[],
     )
-    monkeypatch.setattr(media, "probe", lambda _p: probe)
+    monkeypatch.setattr(media, "probe", lambda _p, **_k: probe)
     ep = type("E", (), {"source": tmp_path / "x.mkv"})()
     base = _ws(tmp_path, 'source_language="es"\n')
     titled = _ws(tmp_path, 'source_language="es"\n[extract]\naudio_title="Castilian"\n')

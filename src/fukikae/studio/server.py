@@ -30,11 +30,15 @@ is served the same way, only for the ``<sha256>.mp4`` names the current index re
 (`referenced_videos`), from ``<ws>/studio/video``; a named clip not yet on disk is cut on its
 first fetch (`fukikae.studio.season.cut_video`), at most `MAX_CUTS` at once and each name
 once, and only when the source still gives that name (a source replaced since the index was
-built gives a 404 until the page reloads the index). ``/audio`` and ``/video`` answer a
-single ``Range: bytes=`` range with 206 (416 when it starts past the end; any other Range
-form gets the whole file), after the same token check and allow-list as a whole fetch; the
-names are content hashes, so a clip never changes under a range. Static files come only
-from the package's ``static/`` directory, opened the same way.
+built gives a 404 until the page reloads the index). A request waits at most `CUT_WAIT_S` for
+its name's cut or a cut slot and then gets 503 ``busy``; a failed cut answers 404 without
+running ffmpeg again for `VIDEO_FAILURE_TTL_S` or until the index is rebuilt; HEAD never cuts.
+The ``source`` tree is scanned off the request path (`fukikae.studio.season.SourceScanner`),
+never under the index lock, so a stalled media share can't freeze the API. ``/audio`` and
+``/video`` answer a single ``Range: bytes=`` range with 206 (416 when it starts past the
+end; any other Range form gets the whole file), after the same token check and allow-list as
+a whole fetch; the names are content hashes, so a clip never changes under a range. Static
+files come only from the package's ``static/`` directory, opened the same way.
 
 Voice drafts (`fukikae.studio.drafts`): a character's reference candidates, its draft per
 target language and the draft's versions, and the clone backends with their voice keys. These
@@ -62,6 +66,7 @@ import sqlite3
 import stat
 import sys
 import threading
+import time
 import traceback
 from collections import OrderedDict
 from http import HTTPStatus
@@ -115,6 +120,7 @@ from fukikae.studio.season import (
     CLIP_NAME,
     VIDEO_NAME,
     NoVideo,
+    SourceScanner,
     cut_sample,
     cut_video,
     inputs_digest,
@@ -141,6 +147,8 @@ MAX_CANDIDATES = 200  # candidates per page at most
 DEFAULT_CANDIDATES = 50
 MAX_OFFERED = 20000  # clip names offered for lazy cutting, oldest forgotten first
 MAX_CUTS = 2  # video clips cut at once (each ffmpeg uses every core)
+CUT_WAIT_S = 20.0  # how long a /video request waits for its name's cut or a cut slot: 503 after
+VIDEO_FAILURE_TTL_S = 300.0  # a failed cut answers 404 without ffmpeg for this long
 
 # (method, path, what it does): the API as the placeholder page lists it
 ROUTES: tuple[tuple[str, str, str], ...] = (
@@ -269,6 +277,7 @@ class StudioServer(ThreadingHTTPServer):
         allow_non_loopback: bool = False,
         request_timeout: float | None = None,
         max_handlers: int = MAX_HANDLERS,
+        cut_wait: float = CUT_WAIT_S,
     ) -> None:
         bind = check_bind(host, allow_non_loopback=allow_non_loopback)
         self.ws = ws if isinstance(ws, Workspace) else Workspace(Path(ws))
@@ -277,6 +286,8 @@ class StudioServer(ThreadingHTTPServer):
         self.token = token or secrets.token_urlsafe(32)
         self._lock = threading.RLock()  # the index and every decision, one at a time
         self._doc: SeasonDoc | None = None
+        # the source tree, scanned off the request path and never under self._lock
+        self._sources = SourceScanner()
         if request_timeout is not None:
             self.request_timeout = request_timeout
         self._slots = threading.BoundedSemaphore(max_handlers)
@@ -288,9 +299,14 @@ class StudioServer(ThreadingHTTPServer):
         self._offered: OrderedDict[str, tuple[str, float, float]] = OrderedDict()
         self._cut: set[str] = set()
         self._clip_lock = threading.Lock()
-        # video: one cut per name at a time, at most MAX_CUTS cuts at once
-        self._video_locks: dict[str, threading.Lock] = {}
+        # video: one cut per name at a time (name -> [its lock, requests holding or waiting
+        # on it], dropped when none is), at most MAX_CUTS cuts at once, a request waiting at
+        # most cut_wait seconds for either, and failed cuts by name (time.monotonic()), all
+        # under _clip_lock; the failures are forgotten when the index is rebuilt
+        self._video_locks: dict[str, list[Any]] = {}
         self._cut_slots = threading.BoundedSemaphore(MAX_CUTS)
+        self.cut_wait = cut_wait
+        self._video_failed: dict[str, float] = {}
         super().__init__((bind, port), _Handler)
         p = self.server_address[1]
         names = ["127.0.0.1", "localhost"] if _loopback(bind) else [bind]
@@ -345,50 +361,89 @@ class StudioServer(ThreadingHTTPServer):
         return f"ssh -L {self.port}:127.0.0.1:{self.port} {socket.gethostname()}"
 
     def season(self) -> SeasonDoc:
-        """The index as it stands now: ``season.json``, or a rebuild when its inputs changed."""
+        """The index as it stands now: ``season.json``, or a rebuild when its inputs changed.
+        The source tree is scanned first (`SourceScanner`, bounded by its timeout), outside
+        the index lock; a rebuild forgets the failed video cuts."""
+        sources = self._sources.get(self.cfg.source)
         with self._lock:
-            self._doc = load_or_build(self.ws, self.cfg, clips=self.clips)
+            self._doc = load_or_build(self.ws, self.cfg, clips=self.clips, sources=sources,
+                                      on_build=self._rebuilt)  # fmt: skip
             return self._doc
+
+    def _rebuilt(self, _doc: SeasonDoc) -> None:
+        with self._clip_lock:
+            self._video_failed.clear()
+
+    def _current(self) -> SeasonDoc:
+        """The last index served, or the index now when none has been."""
+        doc = self._doc
+        return doc if doc is not None else self.season()
 
     def audio_names(self) -> set[str]:
         """The clip names ``/audio`` may serve: those the last index served refers to, and the
         candidate and draft clips the server itself has cut."""
-        with self._lock:
-            doc = self._doc or self.season()
-            names = referenced_clips(doc)
+        names = referenced_clips(self._current())
         with self._clip_lock:
             return names | self._cut
 
     def video_names(self) -> dict[str, tuple[str, float, float]]:
         """The video names ``/video`` may serve, each with its sample's episode and span:
         those the last index served refers to."""
-        with self._lock:
-            doc = self._doc or self.season()
-            return referenced_videos(doc)
+        return referenced_videos(self._current())
 
     def ensure_video(self, name: str, span: tuple[str, float, float]) -> None:
         """Cut a referenced video clip that isn't on disk; anything already at its path (a
         file, a symlink, a FIFO) is left for the read to judge. Cuts nothing when the source
-        is gone or now gives another name."""
+        is gone or now gives another name. One cut per name at a time: a request for a name
+        being cut waits for that cut and doesn't cut again. `_Reply` 503 ``busy`` when the
+        name's cut or a cut slot isn't free within ``cut_wait`` seconds, 404 ``cut-failed``
+        when the name's cut failed in the last `VIDEO_FAILURE_TTL_S` seconds (ffmpeg isn't
+        run again until then, or until the index is rebuilt)."""
         path = self.ws.root / "studio" / "video" / name
         if os.path.lexists(path):
             return
         with self._clip_lock:
-            lock = self._video_locks.setdefault(name, threading.Lock())
+            entry = self._video_locks.setdefault(name, [threading.Lock(), 0])
+            entry[1] += 1
         try:
-            with lock:
+            if not entry[0].acquire(timeout=self.cut_wait):
+                raise _busy("this clip is still being cut")
+            try:
                 if os.path.lexists(path):
                     return
-                with self._cut_slots:
-                    try:
-                        src = video_source(self.ws, self.cfg, span[0])
-                        if video_name(src, span[1], span[2]) == name:
-                            cut_video(self.ws, src, span[1], span[2])
-                    except (NoVideo, OSError, MediaError):
-                        traceback.print_exc(file=sys.stderr)
+                self._refuse_failed(name)
+                if not self._cut_slots.acquire(timeout=self.cut_wait):
+                    raise _busy(f"{MAX_CUTS} clips are being cut")
+                try:
+                    src = video_source(self.ws, self.cfg, span[0],
+                                       self._sources.get(self.cfg.source).files)  # fmt: skip
+                    if video_name(src, span[1], span[2]) == name:
+                        cut_video(self.ws, src, span[1], span[2])
+                except (NoVideo, OSError, MediaError):
+                    traceback.print_exc(file=sys.stderr)
+                    with self._clip_lock:
+                        self._video_failed[name] = time.monotonic()
+                    self._refuse_failed(name)
+                finally:
+                    self._cut_slots.release()
+            finally:
+                entry[0].release()
         finally:
             with self._clip_lock:
-                self._video_locks.pop(name, None)
+                entry[1] -= 1
+                if entry[1] == 0 and self._video_locks.get(name) is entry:
+                    del self._video_locks[name]
+
+    def _refuse_failed(self, name: str) -> None:
+        with self._clip_lock:
+            failed = self._video_failed.get(name)
+            if failed is not None and time.monotonic() - failed >= VIDEO_FAILURE_TTL_S:
+                del self._video_failed[name]
+                failed = None
+        if failed is not None:
+            raise _Reply(404, "cut-failed", "this clip couldn't be cut (the studio's log says "
+                         f"why); it is tried again after {VIDEO_FAILURE_TTL_S:g} s or when "
+                         "the index is rebuilt")  # fmt: skip
 
     # -- drafts -------------------------------------------------------------------------------
 
@@ -396,7 +451,8 @@ class StudioServer(ThreadingHTTPServer):
         """The character's candidates (`drafts.candidates`), read again only when the index's
         inputs changed since; under the drafts lock, never the decisions lock."""
         with self._drafts_lock:
-            digest = inputs_digest(self.ws, self.cfg, clips=self.clips)
+            digest = inputs_digest(self.ws, self.cfg, clips=self.clips,
+                                   sources=self._sources.get(self.cfg.source))  # fmt: skip
             got = self._candidates.get(character_id)
             if got is None or got[0] != digest:
                 got = (digest, candidates(self.ws, self.cfg, character_id))
@@ -445,10 +501,18 @@ class StudioServer(ThreadingHTTPServer):
 class _Reply(Exception):  # noqa: N818
     """Raised by a handler step to answer with a JSON error."""
 
-    def __init__(self, status: int, error: str, message: str, **extra: Any) -> None:
+    def __init__(
+        self, status: int, error: str, message: str, *, headers: dict[str, str] | None = None,
+        **extra: Any,
+    ) -> None:  # fmt: skip
         super().__init__(message)
         self.status = status
         self.body = {"error": error, "message": message, **extra}
+        self.headers = headers or {}
+
+
+def _busy(why: str) -> _Reply:
+    return _Reply(503, "busy", f"{why}; try again", headers={"Retry-After": "2"})
 
 
 _PATHS = re.compile(r"(?:[A-Za-z]:)?(?:[\\/][^\s'\"\\/:]+)+[\\/]?")
@@ -502,7 +566,7 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 self._route(method)
             except _Reply as r:
-                self._json(r.status, r.body)
+                self._json(r.status, r.body, headers=r.headers)
             except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 raise
             except Exception:  # noqa: BLE001 (the client gets a generic 500, stderr the rest)
@@ -872,7 +936,8 @@ class _Handler(BaseHTTPRequestHandler):
         span = self.server.video_names().get(name) if VIDEO_NAME.fullmatch(name) else None
         if span is None:
             raise _Reply(404, "not-found", "no such video in the index")
-        self.server.ensure_video(name, span)
+        if self.command != "HEAD":  # HEAD answers for a clip already cut and never cuts one
+            self.server.ensure_video(name, span)
         try:
             dfd = os.open(self.server.ws.root, os.O_RDONLY | os.O_DIRECTORY)
         except OSError:
@@ -928,9 +993,9 @@ class _Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(data)
 
-    def _json(self, status: int, obj: Any) -> None:
+    def _json(self, status: int, obj: Any, *, headers: dict[str, str] | None = None) -> None:
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self._bytes(status, "application/json; charset=utf-8", data)
+        self._bytes(status, "application/json; charset=utf-8", data, headers=headers)
 
 
 class _VersionRequest(BaseModel):

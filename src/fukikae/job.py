@@ -203,19 +203,31 @@ def _fingerprint(path: Path, ep: Episode, cache: _HashCache) -> str:
     return f"stat:{resolved}:{st.st_size}:{st.st_mtime_ns}"
 
 
-def _cache_key(stage: Stage, ep: Episode, cfg: Config, cache: _HashCache) -> str:
+def _cache_key(
+    stage: Stage, ep: Episode, cfg: Config, cache: _HashCache,
+    config: dict[str, Any] | None = None,
+) -> str:  # fmt: skip
     payload = {
         "stage": stage.name,
-        "config": json.dumps(stage.config_key(cfg, ep), sort_keys=True),
+        "config": json.dumps(
+            stage.config_key(cfg, ep) if config is None else config, sort_keys=True
+        ),  # fmt: skip
         "inputs": [_fingerprint(p, ep, cache) for p in stage.inputs(ep)],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def cache_key(stage: Stage, ep: Episode, cfg: Config) -> str:
+def cache_key(
+    stage: Stage, ep: Episode, cfg: Config, *, save: bool = True,
+    config: dict[str, Any] | None = None,
+) -> str:  # fmt: skip
+    """The stage's cache key for ``ep`` as the manifest records it; ``save=False`` leaves the
+    workspace's hash cache file as it was (a reader such as the studio index), and ``config``
+    is the stage's config key when the caller already has it."""
     cache = _HashCache(ep)
-    key = _cache_key(stage, ep, cfg, cache)
-    cache.save()
+    key = _cache_key(stage, ep, cfg, cache, config)
+    if save:
+        cache.save()
     return key
 
 

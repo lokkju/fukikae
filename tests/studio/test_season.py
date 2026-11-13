@@ -709,7 +709,23 @@ def _with_source(ws: Workspace, src: Path, media: Path) -> Path:
     shutil.copy(src, dest)
     toml = ws.root / "fukikae.toml"
     toml.write_text(toml.read_text(encoding="utf-8") + f'source = "{media}"\n', encoding="utf-8")
+    _record_extract(ws, dest)
     return dest
+
+
+def _record_extract(ws: Workspace, source: Path, episode_id: str = E1) -> None:
+    """The episode's manifest records an extract run of ``source`` (its real cache key), as
+    `fukikae run` would after reading it."""
+    from fukikae.job import cache_key, load_manifest
+    from fukikae.stages.extract import ExtractStage
+    from fukikae.workspace import Episode
+
+    ep = Episode(source=source, id=episode_id, work=ws.work_dir(episode_id),
+                 workspace_root=ws.root)  # fmt: skip
+    m = load_manifest(ep)
+    key = cache_key(ExtractStage(), ep, load_config(ws.root, user_config=None))
+    m.stages["extract"] = StageRecord(key=key, status="done", started=datetime.now(UTC))
+    save_manifest(ep, m)
 
 
 @pytest.fixture
@@ -806,7 +822,13 @@ def test_a_replaced_source_renames_its_clips_and_never_serves_a_stale_one(video_
     assert inputs_digest(video_ws, cfg, clips=4) != before
     second = _build(video_ws, clips=4)
     s2 = next(x for x in _entry(second, 1).samples if (x.episode, x.start) == (E1, s.start))
-    assert s2.video is not None and s2.video != s.video
+    assert s2.video is None  # not the file the extract stage read until extract runs again
+    note = next(e for e in second.episodes if e.id == E1).video_note
+    assert note is not None and "isn't the file the extract stage read" in note
+    _record_extract(video_ws, src)
+    third = _build(video_ws, clips=4)
+    s3 = next(x for x in _entry(third, 1).samples if (x.episode, x.start) == (E1, s.start))
+    assert s3.video is not None and s3.video != s.video
     with pytest.raises(NoVideo, match="changed"):
         cut_video(video_ws, old, s.start, s.end)  # named before the replacement: refused
     assert not (video_ws.root / "studio" / "video" / s.video).exists()
@@ -841,3 +863,183 @@ def test_the_video_filter_deinterlaces_an_interlaced_source():
     assert video_filter(interlaced=True).startswith("yadif,")
     assert "yadif" not in video_filter(interlaced=False)
     assert "scale=480:" in video_filter(interlaced=False)
+
+
+@pytest.mark.ffmpeg
+def test_a_cut_gives_ffmpeg_a_timeout_of_a_minute_or_more(video_ws, monkeypatch):
+    from fukikae import media
+    from fukikae.studio import season
+
+    cfg = load_config(video_ws.root, user_config=None)
+    got: list[float | None] = []
+
+    def fake(args: list[str], *, timeout: float | None = None) -> None:
+        got.append(timeout)
+        Path(args[-1]).write_bytes(b"clip")
+
+    monkeypatch.setattr(media, "run_ffmpeg", fake)
+    src = season.video_source(video_ws, cfg, E1)
+    season.cut_video(video_ws, src, 10.0, 12.0)
+    season.cut_video(video_ws, src, 10.0, 30.0)
+    assert got[0] == season.CUT_TIMEOUT_MIN_S == 60.0
+    assert got[1] == pytest.approx(season.CUT_TIMEOUT_PER_S * (20.0 + 2 * season.VIDEO_PAD_S))
+    assert (got[1] or 0.0) > 60.0
+
+
+@pytest.mark.ffmpeg
+def test_a_source_the_extract_stage_did_not_read_gives_no_video(video_ws):
+    from fukikae.job import load_manifest
+    from fukikae.registry.invalidate import episode
+
+    ep = episode(video_ws, E1)
+    m = load_manifest(ep)
+    m.stages["extract"] = m.stages["extract"].model_copy(update={"key": "another-file"})
+    save_manifest(ep, m)
+    doc = _build(video_ws, clips=4)
+    assert all(v is None for e, v in _videos(doc) if e == E1)
+    note = next(e for e in doc.episodes if e.id == E1).video_note
+    assert note is not None and "isn't the file the extract stage read" in note
+    del m.stages["extract"]
+    save_manifest(ep, m)
+    doc = _build(video_ws, clips=4)
+    note = next(e for e in doc.episodes if e.id == E1).video_note
+    assert note is not None and "no finished extract run" in note
+
+
+def _media_tree(root: Path) -> Path:
+    (root / "Season 1").mkdir(parents=True)
+    (root / "Season 1" / "Show - S01E01.mkv").write_bytes(b"x")
+    (root / "notes.txt").write_text("not a video")
+    return root
+
+
+def test_the_source_scan_is_cached_until_a_directory_changes(tmp_path, monkeypatch):
+    import time
+
+    from fukikae.studio import season
+
+    root = _media_tree(tmp_path / "media")
+    walks: list[Path] = []
+    real = season._walk_sources
+
+    def counting(r: Path):
+        walks.append(r)
+        return real(r)
+
+    monkeypatch.setattr(season, "_walk_sources", counting)
+    scan = season.SourceScanner(timeout=5)
+    first = scan.get(root)
+    assert first.note is None and set(first.files) == {"S01E01"}
+    assert scan.get(root).files == first.files and len(walks) == 1  # nothing changed: no walk
+    time.sleep(0.05)
+    (root / "Season 1" / "Show - S01E02.mkv").write_bytes(b"x")  # the subdirectory's mtime
+    assert set(scan.get(root).files) == {"S01E01", "S01E02"} and len(walks) == 2
+    time.sleep(0.05)
+    (root / "Season 2").mkdir()  # the root's mtime
+    (root / "Season 2" / "Show - S02E01.mkv").write_bytes(b"x")
+    assert set(scan.get(root).files) == {"S01E01", "S01E02", "S02E01"} and len(walks) == 3
+    assert scan.get(None).files == {} and scan.get(tmp_path / "nowhere").files == {}
+
+
+def test_a_stalled_source_scan_answers_within_its_timeout(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from fukikae.studio import season
+
+    root = _media_tree(tmp_path / "media")
+    gate = threading.Event()
+    real_walk, real_sig = season._walk_sources, season._signature
+
+    def stuck_walk(r: Path):
+        gate.wait(30)
+        return real_walk(r)
+
+    monkeypatch.setattr(season, "_walk_sources", stuck_walk)
+    scan = season.SourceScanner(timeout=0.3)
+    t0 = time.monotonic()
+    got = scan.get(root)
+    assert time.monotonic() - t0 < 2
+    assert got.files == {} and got.note is not None and "didn't answer" in got.note
+    t0 = time.monotonic()
+    assert scan.get(root).note is not None  # the same stalled walk: no second wait
+    assert time.monotonic() - t0 < 0.2
+    gate.set()
+    deadline = time.monotonic() + 5
+    while (got := scan.get(root)).note is not None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert set(got.files) == {"S01E01"}
+    # a stall after a good scan keeps answering with that scan
+    gate.clear()
+
+    def stuck_sig(dirs):
+        gate.wait(30)
+        return real_sig(dirs)
+
+    monkeypatch.setattr(season, "_signature", stuck_sig)
+    t0 = time.monotonic()
+    again = scan.get(root)
+    assert time.monotonic() - t0 < 2 and again.files == got.files and again.note is None
+    gate.set()
+
+
+def test_an_index_built_while_the_source_stalls_says_so(ws):
+    from fukikae.studio.season import SourceFiles, build_season, inputs_digest
+
+    toml = ws.root / "fukikae.toml"
+    toml.write_text(toml.read_text(encoding="utf-8") + 'source = "/nowhere"\n', encoding="utf-8")
+    cfg = load_config(ws.root, user_config=None)
+    stalled = SourceFiles({}, note="the source directory /nowhere didn't answer within 10 s")
+    doc = build_season(ws, cfg, sources=stalled)
+    note = next(e for e in doc.episodes if e.id == E1).video_note
+    assert note is not None and "didn't answer" in note
+    assert inputs_digest(ws, cfg, sources=stalled) != inputs_digest(
+        ws, cfg, sources=SourceFiles({})
+    )
+
+
+def test_pruning_removes_temp_files_a_killed_cut_left(ws, tmp_path):
+    import time
+
+    from fukikae.studio.season import prune_clips
+
+    doc = _build(ws)
+    videos = ws.root / "studio" / "video"
+    videos.mkdir(parents=True, exist_ok=True)
+    sha = "a" * 64
+    old = videos / f".{sha}.{'1' * 32}.tmp.mp4"
+    new = videos / f".{sha}.{'2' * 32}.tmp.mp4"
+    odd = videos / f".{sha}.notauuid.tmp.wav"
+    old_dir = videos / f".{sha}.{'3' * 32}.tmp.mp4"
+    outside = tmp_path / "outside.mp4"
+    link = videos / f".{sha}.{'4' * 32}.tmp.mp4"
+    for p in (old, new, odd, outside):
+        p.write_bytes(b"partial")
+    old_dir.mkdir()
+    link.symlink_to(outside)
+    hours_ago = time.time() - 2 * 3600
+    for p in (old, odd, old_dir, outside):
+        os.utime(p, (hours_ago, hours_ago))
+    os.utime(link, (hours_ago, hours_ago), follow_symlinks=False)
+    gone = prune_clips(ws, doc)
+    assert old.name in gone and not old.exists()
+    assert new.exists() and odd.exists() and old_dir.is_dir() and link.is_symlink()
+    assert outside.exists()
+
+
+@pytest.mark.ffmpeg
+def test_finding_a_video_source_bounds_every_probe(video_ws, monkeypatch):
+    from fukikae import media
+    from fukikae.studio import season
+
+    cfg = load_config(video_ws.root, user_config=None)
+    seen: list[tuple[str, float | None]] = []
+    real = media._run
+
+    def recording(cmd: list[str], timeout: float | None = None):
+        seen.append((cmd[0], timeout))
+        return real(cmd, timeout=timeout)
+
+    monkeypatch.setattr(media, "_run", recording)
+    season.video_source(video_ws, cfg, E1)
+    assert seen and all(t == season.PROBE_TIMEOUT_S for _, t in seen), seen

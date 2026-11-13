@@ -1106,3 +1106,217 @@ def test_a_symlinked_video_directory_is_not_followed(video_studio, ws, tmp_path)
     os.symlink(moved, videos)
     assert video_studio.request("GET", f"/video/{name}")[0] == 404
     assert list(moved.iterdir()) == []  # nothing was cut through the link
+
+
+# --- range edges, HEAD, and cut liveness ----------------------------------------------------
+
+
+def test_range_edges_on_audio(studio, ws):  # noqa: F811
+    clip = _a_clip(_season(studio))
+    path = ws.root / "studio" / "audio" / clip
+    data = path.read_bytes()
+    n = len(data)
+    status, headers, body = studio.request("GET", f"/audio/{clip}", headers={"Range": "bytes=0-0"})
+    assert status == 206 and body == data[:1] and headers["content-length"] == "1"
+    assert headers["content-range"] == f"bytes 0-0/{n}"
+    status, headers, body = studio.request("GET", f"/audio/{clip}",
+                                           headers={"Range": f"bytes=-{n * 10}"})  # fmt: skip
+    assert status == 206 and body == data and headers["content-range"] == f"bytes 0-{n - 1}/{n}"
+    status, headers, body = studio.request("HEAD", f"/audio/{clip}")
+    assert status == 200 and body == b"" and headers["content-length"] == str(n)
+    status, headers, body = studio.request("HEAD", f"/audio/{clip}",
+                                           headers={"Range": "bytes=0-9"})  # fmt: skip
+    assert status == 206 and body == b"" and headers["content-length"] == "10"
+
+
+def test_range_requests_against_an_empty_clip(studio, ws):  # noqa: F811
+    clip = _a_clip(_season(studio))
+    (ws.root / "studio" / "audio" / clip).write_bytes(b"")
+    status, headers, body = studio.request("GET", f"/audio/{clip}")
+    assert status == 200 and body == b"" and headers["content-length"] == "0"
+    for rng in ("bytes=0-0", "bytes=0-", "bytes=-5"):
+        status, headers, body = studio.request("GET", f"/audio/{clip}", headers={"Range": rng})
+        assert status == 416 and headers["content-range"] == "bytes */0", rng
+        assert headers["content-length"] == str(len(body))
+
+
+FAKE_MP4 = b"\0\0\0\x18ftypisom" + b"\0" * 100
+
+
+@contextlib.contextmanager
+def _serve_kw(w: Workspace, **kw) -> Iterator[Client]:
+    from fukikae.studio.server import StudioServer
+
+    server = StudioServer(w, load_config(w.root, user_config=None), port=0, token=TOKEN, **kw)
+    t = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+    t.start()
+    try:
+        yield Client(server)
+    finally:
+        server.shutdown()
+        server.server_close()
+        t.join(5)
+
+
+@pytest.fixture
+def video_ws(ws: Workspace, tmp_path: Path) -> Workspace:  # noqa: F811
+    from tests.studio.test_season import _make_source, _with_source
+
+    _with_source(ws, _make_source(tmp_path / "made.mkv"), tmp_path / "media")
+    return ws
+
+
+class _FakeCut:
+    """`media.run_ffmpeg` that writes `FAKE_MP4` (or fails) after a delay or a gate, counting
+    calls and the most running at once."""
+
+    def __init__(self, *, delay: float = 0.0, fail: bool = False, gate=None) -> None:
+        self.delay, self.fail, self.gate = delay, fail, gate
+        self.calls: list[str] = []
+        self.running = self.peak = 0
+        self.lock = threading.Lock()
+
+    def __call__(self, args: list[str], *, timeout: float | None = None) -> None:  # noqa: ARG002
+        import time
+
+        from fukikae.media import MediaError
+
+        with self.lock:
+            self.calls.append(args[-1])
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+        try:
+            if self.gate is not None:
+                self.gate.wait(30)
+            time.sleep(self.delay)
+            if self.fail:
+                raise MediaError("boom")
+            Path(args[-1]).write_bytes(FAKE_MP4)
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+def _videos_of(doc: dict) -> list[str]:
+    return list(dict.fromkeys(s["video"] for c in doc["characters"] for s in c["samples"]
+                              if s.get("video")))  # fmt: skip
+
+
+def _fetch_all(c: Client, paths: list[str]) -> list[tuple[int, dict[str, str], bytes]]:
+    out: list = [None] * len(paths)
+
+    def one(i: int) -> None:
+        out[i] = c.request("GET", paths[i])
+
+    ths = [threading.Thread(target=one, args=(i,)) for i in range(len(paths))]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join(30)
+    return out
+
+
+@pytest.mark.ffmpeg
+def test_head_on_an_uncut_video_does_not_cut_it(video_ws, monkeypatch):
+    from fukikae import media
+
+    fake = _FakeCut()
+    monkeypatch.setattr(media, "run_ffmpeg", fake)
+    with _serve_kw(video_ws) as c:
+        name = _a_video(_season(c))
+        status, _, body = c.request("HEAD", f"/video/{name}")
+        assert status == 404 and not fake.calls
+        assert not (video_ws.root / "studio" / "video" / name).exists()
+        assert c.request("GET", f"/video/{name}")[0] == 200 and len(fake.calls) == 1
+        status, headers, body = c.request("HEAD", f"/video/{name}")
+        assert status == 200 and body == b"" and headers["content-length"] == str(len(FAKE_MP4))
+        status, headers, body = c.request("HEAD", f"/video/{name}",
+                                          headers={"Range": "bytes=0-0"})  # fmt: skip
+        assert status == 206 and body == b"" and headers["content-length"] == "1"
+        assert len(fake.calls) == 1
+
+
+@pytest.mark.ffmpeg
+@pytest.mark.parametrize("fail", [False, True])
+def test_concurrent_fetches_of_one_name_cut_it_once(video_ws, monkeypatch, fail):
+    from fukikae import media
+
+    fake = _FakeCut(delay=0.3, fail=fail)
+    monkeypatch.setattr(media, "run_ffmpeg", fake)
+    with _serve_kw(video_ws) as c:
+        name = _a_video(_season(c))
+        got = _fetch_all(c, [f"/video/{name}"] * 6)
+        assert [r[0] for r in got] == [404 if fail else 200] * 6
+        assert len(fake.calls) == 1
+
+
+@pytest.mark.ffmpeg
+def test_a_failed_cut_is_remembered_until_it_expires_or_the_index_is_rebuilt(video_ws, monkeypatch):
+    from fukikae import media
+    from fukikae.studio import server as srv
+
+    fake = _FakeCut(fail=True)
+    monkeypatch.setattr(media, "run_ffmpeg", fake)
+    with _serve_kw(video_ws) as c:
+        name = _a_video(_season(c))
+        got = [c.request("GET", f"/video/{name}") for _ in range(5)]
+        assert [r[0] for r in got] == [404] * 5 and len(fake.calls) == 1
+        assert json.loads(got[-1][2])["error"] == "cut-failed"
+        monkeypatch.setattr(srv, "VIDEO_FAILURE_TTL_S", 0.0)
+        assert c.request("GET", f"/video/{name}")[0] == 404 and len(fake.calls) == 2
+        monkeypatch.setattr(srv, "VIDEO_FAILURE_TTL_S", 300.0)
+        assert c.request("GET", f"/video/{name}")[0] == 404 and len(fake.calls) == 3
+        assert c.request("GET", f"/video/{name}")[0] == 404 and len(fake.calls) == 3
+        (video_ws.root / "studio" / "season.json").unlink()  # the next index is a rebuild
+        assert name in _videos_of(_season(c))
+        fake.fail = False
+        assert c.request("GET", f"/video/{name}")[0] == 200 and len(fake.calls) == 4
+
+
+@pytest.mark.ffmpeg
+def test_at_most_max_cuts_run_at_once(video_ws, monkeypatch):
+    from fukikae import media
+    from fukikae.studio.server import MAX_CUTS
+
+    fake = _FakeCut(delay=0.4)
+    monkeypatch.setattr(media, "run_ffmpeg", fake)
+    with _serve_kw(video_ws) as c:
+        names = _videos_of(_season(c))[:4]
+        assert len(names) == 4
+        got = _fetch_all(c, [f"/video/{n}" for n in names])
+        assert [r[0] for r in got] == [200] * 4
+        assert len(fake.calls) == 4 and fake.peak == MAX_CUTS
+
+
+@pytest.mark.ffmpeg
+def test_stuck_cuts_answer_busy_and_leave_the_index_answering(video_ws, monkeypatch):
+    import time
+
+    from fukikae import media
+
+    gate = threading.Event()
+    fake = _FakeCut(gate=gate)
+    monkeypatch.setattr(media, "run_ffmpeg", fake)
+    try:
+        with _serve_kw(video_ws, max_handlers=4, cut_wait=0.5) as c:
+            names = _videos_of(_season(c))[:3]
+            out: list = []
+
+            def one(path: str) -> None:
+                out.append(c.request("GET", path))
+
+            for i in range(5):
+                threading.Thread(target=one, args=(f"/video/{names[i % 3]}",),
+                                 daemon=True).start()  # fmt: skip
+                time.sleep(0.05)
+            time.sleep(2.0)
+            t0 = time.monotonic()
+            assert c.request("GET", "/api/season")[0] == 200
+            assert time.monotonic() - t0 < 5
+            assert len(fake.calls) == 2  # MAX_CUTS stuck; the rest gave up waiting
+            busy = [r for r in out if r[0] == 503]
+            assert len(out) == 3 and len(busy) == 3
+            assert all(json.loads(r[2])["error"] == "busy" and r[1].get("retry-after")
+                       for r in busy)  # fmt: skip
+    finally:
+        gate.set()
