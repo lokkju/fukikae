@@ -63,6 +63,7 @@ the next `fukikae run` or another resolve redoes.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -160,7 +161,11 @@ def resolve_episodes(
     # keep it; they are not grouped, and their rows seed their character's anchor.
     decided = {
         ep.id: _name_decisions(
-            ep, turns[ep.id], {ev.cluster for ev in loaded[ep.id][0]}, ep.id in parents
+            ep,
+            turns[ep.id],
+            {ev.cluster for ev in loaded[ep.id][0]},
+            ep.id in parents,
+            _voice_labels(inputs[ep.id][2]),
         )
         for ep in episodes
     }
@@ -403,23 +408,33 @@ def resolve_episodes(
                     return created[gid]
 
                 for parent, parts in voice.items():
-                    weight: dict[tuple[str, int], float] = {}
-                    for lb in parts:
-                        prop = proposals.get(lb)
-                        if prop is None:
-                            continue
-                        k = ("a", prop[1]) if prop[0] == "matched" else ("g", prop[3])
-                        weight[k] = weight.get(k, 0.0) + secs_v.get(lb, 0.0)  # type: ignore[index]
-                    # an existing character first, then a new group; most seconds, then id
-                    best = sorted(weight, key=lambda k: (k[0] != "a", -weight[k], k[1]))
+                    # parts with an identity of their own are decisions (kept above); the
+                    # keeper rule decides only when no part of the parent has one
+                    held = [lb for lb in parts if lb in decided[e]]
+                    pending = [lb for lb in parts if lb not in decided[e]]
+                    if not pending:
+                        continue
+                    held_actors = {result[e][lb].actor_id for lb in held}
                     keeper: str | None = None
+                    keeper_actor: int | None = None
+                    best: list[tuple[str, int]] = []
+                    if not held:
+                        weight: dict[tuple[str, int], float] = {}
+                        for lb in pending:
+                            prop = proposals.get(lb)
+                            if prop is None:
+                                continue
+                            k = ("a", prop[1]) if prop[0] == "matched" else ("g", prop[3])
+                            weight[k] = weight.get(k, 0.0) + secs_v.get(lb, 0.0)  # type: ignore[index]
+                        # an existing character first, then a new group; most seconds, then id
+                        best = sorted(weight, key=lambda k: (k[0] != "a", -weight[k], k[1]))
                     if best:
                         kind, ident = best[0]
                         gender = None
                         if kind == "a":
                             c0 = chars.get(first_char.get(ident, -1))
                             gender = c0.gender if c0 is not None else None
-                        keeper = voice_keeper(parent, parts, gender, secs_v)
+                        keeper = voice_keeper(parent, pending, gender, secs_v)
                         if keeper is not None:
                             ev = ev_of[keeper]
                             if kind == "a":
@@ -433,15 +448,32 @@ def resolve_episodes(
                                 claimed.add(aid)
                             else:
                                 (aid, cid), status, score = group_char(ident), "new", None
+                            keeper_actor = aid
                             result[e][keeper] = ClusterAssignment(
                                 cluster=keeper, actor_id=aid, character_id=cid, score=score,
                                 clean_seconds=ev.clean_seconds, status=status,  # type: ignore[arg-type]
                                 split="kept",
                             )  # fmt: skip
-                    for lb in parts:
+                    taken = held_actors | {keeper_actor}
+                    for lb in pending:
                         if lb == keeper:
                             continue
                         ev, prop = ev_of[lb], proposals.get(lb)
+                        other, oscore = (
+                            (prop[1], prop[2]) if prop is not None and prop[0] == "matched"
+                            else (None, None)
+                        )  # fmt: skip
+                        if other is not None and other not in taken and other in first_char:
+                            # an existing character other than the keeper's (or a sibling's):
+                            # it keeps it
+                            aid = other
+                            result[e][lb] = ClusterAssignment(
+                                cluster=lb, actor_id=aid, character_id=first_char[aid],
+                                score=oscore, clean_seconds=ev.clean_seconds, status="matched",
+                            )  # fmt: skip
+                            claimed.add(aid)
+                            taken.add(aid)
+                            continue
                         if (
                             prop is not None
                             and prop[0] == "new"
@@ -455,11 +487,12 @@ def resolve_episodes(
                                 mean_embedding(emb) if len(emb) else None
                             )
                             new_actors.append(aid)
+                        taken.add(aid)
                         result[e][lb] = ClusterAssignment(
                             cluster=lb, actor_id=aid, character_id=cid, score=None,
                             clean_seconds=ev.clean_seconds, status="new", split="new",
                         )  # fmt: skip
-                    for lb in parts:
+                    for lb in pending:
                         a = result[e][lb]
                         if a.actor_id is not None and len(rows[lb]):
                             reg.add_exemplars(a.actor_id, e, lb, rows[lb], ev_of[lb].clean_seconds)
@@ -467,9 +500,9 @@ def resolve_episodes(
                     notes.append(
                         f"{e} pitch split {parent}: "
                         + ", ".join(
-                            f"{lb} {'keeps' if result[e][lb].split == 'kept' else 'new'} "
-                            f"character {result[e][lb].character_id}"
-                            for lb in parts
+                            f"{lb} {_voice_how(result[e][lb])} character "
+                            f"{result[e][lb].character_id}"
+                            for lb in pending
                         )
                     )
             if followers:  # Task 11 ruling: a rowless remainder follows its named siblings
@@ -530,13 +563,20 @@ def resolve_episodes(
 
 
 def _name_decisions(
-    ep: Episode, turns: Diarization, labels: set[str], names_used: bool
+    ep: Episode,
+    turns: Diarization,
+    labels: set[str],
+    names_used: bool,
+    voice: Collection[str] = (),
 ) -> dict[str, ClusterAssignment]:
     """The episode's current assignments that names decided (``source`` name or lock), for
     labels still in its identity clusters: named sub-clusters keep their character (or stay
-    named extras), whatever resolve's grouping would say. ValueError for a names-used episode
-    whose ``assignments.json`` is missing or answers other clusters than the identity pair
-    (other turns, or labels it doesn't cover): its decisions would be stale."""
+    named extras), whatever resolve's grouping would say. A pitch split's voice part
+    (``voice``) with a character is decided the same way: once a part has an identity of its
+    own (the keeper rule's, an operator merge, a name, a lock), it keeps it. ValueError for a
+    names-used episode whose ``assignments.json`` is missing or answers other clusters than
+    the identity pair (other turns, or labels it doesn't cover): its decisions would be
+    stale."""
     from fukikae.stages.characters import CharactersStage
 
     (path,) = CharactersStage().outputs(ep)
@@ -552,8 +592,22 @@ def _name_decisions(
     if a is None:
         return {}
     return {
-        c.cluster: c for c in a.clusters if c.source in ("name", "lock") and c.cluster in labels
+        c.cluster: c
+        for c in a.clusters
+        if c.cluster in labels
+        and (c.source in ("name", "lock") or (c.cluster in voice and c.character_id is not None))
     }
+
+
+def _voice_labels(names: Any) -> set[str]:
+    """The voice parts among a names result's labels (none without one)."""
+    if names is None:
+        return set()
+    return {lb for lb, i in names.labels.items() if i.cls == "voice"}
+
+
+def _voice_how(a: ClusterAssignment) -> str:
+    return {"kept": "keeps", "new": "new"}.get(a.split or "", "matches")
 
 
 def _parent_match(

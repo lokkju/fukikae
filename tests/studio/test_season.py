@@ -595,3 +595,27 @@ def test_a_split_skipped_by_its_fingerprint_flags_the_clusters_character(ws):
     doc = _build(ws)
     flags = [f for f in _entry(doc, 1).flags if f.kind == "split"]
     assert len(flags) == 1 and flags[0].episode == E1 and "decided on S0" in flags[0].text
+
+
+def test_a_voice_part_against_its_characters_stored_gender_raises_a_gender_flag(ws):
+    """A stored gender set after a split never moves the keeper; the index flags it."""
+    from fukikae.artifacts import read_json
+
+    path = ws.work_dir(E1) / "05-characters" / "assignments.json"
+    a = read_json(path, Assignments)
+    ren = {"S0": "S0~voice-m"}
+    turns = [t.model_copy(update={"speaker": ren.get(t.speaker, t.speaker)}) for t in a.turns or []]
+    clusters = [
+        c.model_copy(update={"cluster": ren[c.cluster], "split": "kept"}) if c.cluster in ren
+        else c
+        for c in a.clusters
+    ]  # fmt: skip
+    write_json(path, a.model_copy(update={"clusters": clusters, "turns": turns}))
+    assert not [f for f in _entry(_build(ws), 1).flags if f.kind == "gender"]
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_gender(1, "f")
+    flags = [f for f in _entry(_build(ws), 1).flags if f.kind == "gender"]
+    assert len(flags) == 1 and flags[0].episode == E1 and "S0~voice-m" in flags[0].text
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_gender(1, "m")
+    assert not [f for f in _entry(_build(ws), 1).flags if f.kind == "gender"]

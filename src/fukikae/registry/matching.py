@@ -209,10 +209,14 @@ def pin(
 ) -> dict[str, ClusterAssignment]:
     """Carry earlier assignments onto the current clusters (see `pin_sources`, which takes
     ``voice_only``), as `pinned`. A pin is acoustic: it never carries the name or source of the
-    sub-cluster it came from."""
+    sub-cluster it came from, nor a pitch split's ``split`` marker onto a label that is not a
+    voice part (a removed or skipped split collapses to the unsplit assignments)."""
+    from fukikae.names.align import VOICE_PREFIX
+
     prev_by_label = {c.cluster: c for c in previous.clusters}
     update = {"status": "pinned", "name": None, "source": "voice"}
-    return {
-        cur: prev_by_label[src].model_copy(update={"cluster": cur, **update})
-        for cur, src in pin_sources(previous, previous_turns, current_turns, voice_only).items()
-    }
+    out: dict[str, ClusterAssignment] = {}
+    for cur, src in pin_sources(previous, previous_turns, current_turns, voice_only).items():
+        extra = {} if f"~{VOICE_PREFIX}" in cur else {"split": None}
+        out[cur] = prev_by_label[src].model_copy(update={"cluster": cur, **update, **extra})
+    return out

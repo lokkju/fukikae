@@ -774,9 +774,12 @@ def _run_both(ep: Episode, cfg: Config) -> dict[str, Any]:
     return _asg(ep)
 
 
-def _structured_rows(ep: Episode, drop_who: str | None = None) -> None:
-    """Rewrite the diarize rows: SPEAKER_00's near one direction, SPEAKER_01's near another,
-    so acoustic matching is predictable; ``drop_who``'s rows left out (a rowless part)."""
+def _structured_rows(
+    ep: Episode, drop_who: str | None = None, by_who: dict[str, list[float]] | None = None
+) -> None:
+    """Rewrite the diarize rows: SPEAKER_00's near one direction, SPEAKER_01's near another
+    (or each speaker's near ``by_who``'s direction), so acoustic matching is predictable;
+    ``drop_who``'s rows left out (a rowless part)."""
     rng = np.random.default_rng(1)
     turns = read_json(ep.work / "04-diarize" / "turns.json", Diarization).turns
     centre = {"SPEAKER_00": np.array([1.0, 0, 0, 0]), "SPEAKER_01": np.array([0, 1.0, 0, 0])}
@@ -787,8 +790,14 @@ def _structured_rows(ep: Episode, drop_who: str | None = None) -> None:
             mid = (t.start + t.end) / 2
             who = next(n for a, b, n in LINES if a <= mid <= b)
             if t.speaker == lb and who != drop_who:
-                spans.append((t.start + 0.1, t.end - 0.1))
-        rows = centre[lb] + rng.normal(0, 0.05, (len(spans), 4))
+                spans.append((t.start + 0.1, t.end - 0.1, who))
+        rows = np.array(
+            [
+                (np.array(by_who[w]) if by_who else centre[lb]) + rng.normal(0, 0.05, 4)
+                for *_x, w in spans
+            ]
+        ).reshape(-1, 4)
+        spans = [(a, b) for a, b, _w in spans]
         arrays[f"{lb}/embeddings"] = rows.astype(np.float32)
         arrays[f"{lb}/spans"] = np.array(spans, dtype=np.float64).reshape(-1, 2)
         arrays[f"{lb}/clean_seconds"] = np.array(sum(e - s for s, e in spans))
@@ -971,12 +980,13 @@ def test_registry_resolve_agrees_on_the_split(tmp_path):
     assert after[longer].character_id == parent.character_id and after[longer].split == "kept"
     assert after[shorter].character_id not in (None, parent.character_id)
     assert after[shorter].status == "new" and after[shorter].split == "new"
-    with Registry(ws.registry_path) as reg:  # stored gender: resolve follows it too
+    with Registry(ws.registry_path) as reg:  # a later stored gender never flips the keeper
         reg.set_character_gender(parent.character_id, shorter[-1])  # type: ignore[arg-type]
+    kept = {lb: a.character_id for lb, a in after.items()}
     resolve_episodes(ws, [ep], threshold=0.6)
-    after = _asg(ep)
-    assert after[shorter].character_id == parent.character_id
-    assert after[longer].character_id not in (None, parent.character_id)
+    assert {lb: a.character_id for lb, a in _asg(ep).items() if "~voice-" in lb} == {
+        lb: c for lb, c in kept.items() if "~voice-" in lb
+    }
 
 
 def test_registry_resolve_never_makes_a_rowless_voice_part_an_extra(tmp_path):
@@ -1063,3 +1073,148 @@ def test_a_malformed_fingerprint_is_refused(tmp_path, fp):
     _write_split_fp(root, fp)
     with pytest.raises(SplitFileError, match="fingerprint"):
         NamesStage().run(ep, cfg_of(root))
+
+
+# ---- the keeper rule decides only for parts without an identity (Task 15 re-review) ----
+
+
+def _decide(root: Path, op: str, **fields: Any) -> None:
+    from fukikae.registry.store import Registry
+    from fukikae.studio.apply import apply_decision, stamp
+    from fukikae.studio.model import parse_decision
+    from fukikae.workspace import Workspace
+
+    ws = Workspace(root)
+    with Registry(ws.registry_path) as reg:
+        d = stamp(reg, parse_decision({"op": op, **fields}))
+    apply_decision(ws, d)
+
+
+def _who_has(asg: dict[str, Any]) -> dict[str, tuple[int | None, int | None]]:
+    return {lb: (a.actor_id, a.character_id) for lb, a in asg.items()}
+
+
+def _split_once(tmp_path: Path, structured: bool = True):
+    ep, root = make_ws(tmp_path, names=MIN_NEW, named=False)
+    write_vocals(ep, LONGER["m"])
+    if structured:
+        _structured_rows(ep)
+    cfg = cfg_of(root)
+    parent = _run_both(ep, cfg)["SPEAKER_00"]
+    write_split(root)
+    after = _run_both(ep, cfg)
+    longer, shorter = _parts_by_length(ep)
+    return ep, root, cfg, parent, after, longer, shorter
+
+
+def _rematch(ep: Episode, cfg: Config) -> dict[str, Any]:
+    NamesStage(cfg).run(ep, cfg)
+    CharactersStage(rematch=True).run(ep, cfg)
+    return _asg(ep)
+
+
+def _resolve(root: Path, ep: Episode) -> dict[str, Any]:
+    from fukikae.registry.resolve import resolve_episodes
+    from fukikae.workspace import Workspace
+
+    resolve_episodes(Workspace(root), [ep], threshold=0.6)
+    return _asg(ep)
+
+
+def _voice(asg: dict[str, Any]) -> dict[str, tuple[int | None, int | None]]:
+    return {lb: v for lb, v in _who_has(asg).items() if "~voice-" in lb}
+
+
+def test_rematch_keeps_the_voice_parts_identities(tmp_path):
+    ep, root, cfg, parent, after, longer, shorter = _split_once(tmp_path)
+    for _ in range(2):
+        assert _voice(_rematch(ep, cfg)) == _voice(after)
+
+
+def test_an_operator_merge_of_the_new_part_into_the_keeper_stays(tmp_path):
+    ep, root, cfg, parent, after, longer, shorter = _split_once(tmp_path, structured=False)
+    keep_c, new_c = after[longer].character_id, after[shorter].character_id
+    _decide(root, "merge", keep=keep_c, drop=new_c)
+    merged = _asg(ep)
+    assert merged[shorter].character_id == keep_c and merged[shorter].split is None
+    for run in (_run_both, _run_both, _rematch):
+        a = run(ep, cfg)
+        assert a[shorter].character_id == keep_c and a[longer].character_id == keep_c
+        assert a[shorter].split is None
+
+
+def test_a_named_locked_new_part_keeps_its_character_on_reruns_and_rematch(tmp_path):
+    ep, root, cfg, parent, after, longer, shorter = _split_once(tmp_path, structured=False)
+    new_c = after[shorter].character_id
+    _decide(root, "name", character=new_c, name="Happy")
+    _decide(root, "lock", character=new_c)
+    for run in (_run_both, _rematch, _rematch):
+        a = run(ep, cfg)
+        assert a[shorter].character_id == new_c
+        assert a[longer].character_id == parent.character_id
+
+
+def test_a_stored_gender_change_never_flips_the_keeper(tmp_path):
+    ep, root, cfg, parent, after, longer, shorter = _split_once(tmp_path)
+    _decide(root, "name", character=after[longer].character_id, name="Natsu")
+    _decide(root, "gender", character=after[longer].character_id, gender=shorter[-1])
+    assert _voice(_run_both(ep, cfg)) == _voice(after)
+    assert _voice(_resolve(root, ep)) == _voice(after)
+    assert _voice(_rematch(ep, cfg)) == _voice(after)
+
+
+def test_removing_the_split_restores_byte_identical_unsplit_assignments(tmp_path):
+    ep, root, cfg, parent, after, longer, shorter = _split_once(tmp_path, structured=False)
+    (root / "studio" / "splits" / "S01E01.json").unlink()
+    a = _run_both(ep, cfg)
+    assert a["SPEAKER_00"].character_id == parent.character_id
+    assert a["SPEAKER_00"].split is None
+    assert '"split"' not in (ep.work / "05-characters" / "assignments.json").read_text()
+
+
+def test_resolve_keeps_both_named_parts_and_agrees_with_the_characters_stage(tmp_path):
+    ep, root, cfg, parent, after, longer, shorter = _split_once(tmp_path)
+    _decide(root, "name", character=after[longer].character_id, name="Natsu")
+    _decide(root, "name", character=after[shorter].character_id, name="Happy")
+    want = _voice(_run_both(ep, cfg))
+    assert want == _voice(after)
+    assert _voice(_resolve(root, ep)) == want
+    assert _voice(_resolve(root, ep)) == want
+    assert _voice(_run_both(ep, cfg)) == want
+    assert _voice(_rematch(ep, cfg)) == want
+
+
+def test_resolve_keeps_an_operator_merge_of_the_parts(tmp_path):
+    ep, root, cfg, parent, after, longer, shorter = _split_once(tmp_path)
+    keep_c = after[longer].character_id
+    _decide(root, "name", character=keep_c, name="Natsu")
+    _decide(root, "merge", keep=keep_c, drop=after[shorter].character_id)
+    r = _resolve(root, ep)
+    assert r[longer].character_id == keep_c and r[shorter].character_id == keep_c
+
+
+def test_a_first_run_non_keeper_matched_to_another_character_keeps_it(tmp_path):
+    """No earlier assignments: the parent's match (Natsu) goes to the keeper; the other part
+    matches Happy, an existing character other than the keeper's, and keeps it rather than
+    becoming new."""
+    from fukikae.registry.store import Registry
+    from fukikae.workspace import Workspace
+
+    ep, root = make_ws(tmp_path, names=MIN_NEW, named=False)
+    write_vocals(ep, LONGER["m"])
+    _structured_rows(ep, by_who={"NATSU": [1, 0, 0, 0], "HAPPY": [0.6, 0.8, 0, 0],
+                                 "LUCY": [0, 0, 1, 0]})  # fmt: skip
+    with Registry(Workspace(root).registry_path) as reg:
+        natsu = reg.create_actor_with_character(np.array([1, 0, 0, 0], np.float32))
+        happy = reg.create_actor_with_character(np.array([0, 1, 0, 0], np.float32))
+        reg.rename_character(natsu[1], "Natsu")
+        reg.rename_character(happy[1], "Happy")
+        reg.set_character_gender(natsu[1], "m")
+    write_split(root)
+    cfg = cfg_of(root)
+    a = _run_both(ep, cfg)
+    assert _who_has(a)["SPEAKER_00~voice-m"] == natsu and a["SPEAKER_00~voice-m"].split == "kept"
+    assert _who_has(a)["SPEAKER_00~voice-f"] == happy
+    assert a["SPEAKER_00~voice-f"].status == "matched"
+    assert _voice(_run_both(ep, cfg)) == _voice(a)
+    assert _voice(_resolve(root, ep)) == _voice(a)

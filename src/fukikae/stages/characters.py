@@ -70,10 +70,12 @@ ambiguous key could mean) is not pruned before matching.
 Pitch splits (identification workflow, Part B; the Task 15 review ruling). An operator pitch
 split's voice parts (``<cluster>~voice-f`` and ``~voice-m``, ``LabelInfo.cls == "voice"``)
 never take the parent cluster's pin and never go through `decide`
-(`fukikae.registry.voice_parts`): a part pinned to its own earlier label keeps that pin;
-otherwise one part (the character's stored register, else the longer) keeps the parent's
-character (its earlier assignment, as a pin, else its acoustic match over the parts' rows), and
-every other part is a new actor and character (``split = "new"``), rowless or not.
+(`fukikae.registry.voice_parts`): a part pinned to its own earlier label keeps that pin, on
+a ``rematch`` too (read from the assignments on disk, its actor spared from the fresh prune);
+only when no part of the parent has one does one part (the character's stored register, else
+the longer) keep the parent's character (its earlier assignment, as a pin, else its acoustic
+match over the parts' rows), and every other part keeps its own match to another existing
+character, else is a new actor and character (``split = "new"``), rowless or not.
 
 Ignored characters (identification workflow, Part B). A cluster whose character the operator
 made ``kind = 'ignored'`` (crowd walla, a TV in the background, a hallucination A4 misses) is
@@ -162,24 +164,14 @@ def _plan_voice_parts(
     lines: list[str],
 ) -> tuple[list[str], dict[str, list[str]]]:
     """Settle each split parent's voice parts before matching (`fukikae.registry.voice_parts`),
-    editing ``pinned`` in place: a part pinned to its own label keeps its pin (two parts pinned
-    to one character keep it on the keeper only); a parent with no part so pinned gives its
-    earlier character (``prior``) to the keeper as a pin. Returns the parts to make new
-    characters and the parents left to the acoustic match (no earlier character)."""
+    editing ``pinned`` in place: a part pinned to its own label has an identity of its own and
+    keeps it, whatever the keeper rule would say now (two parts on one character, an operator
+    merge, stay so); only a parent none of whose parts has one gives its earlier character
+    (``prior``) to the keeper as a pin. Returns the parts to make new characters and the
+    parents left to the acoustic match (no earlier character)."""
     to_new: list[str] = []
     open_parents: dict[str, list[str]] = {}
     for parent, parts in voice.items():
-        by_char: dict[int | None, list[str]] = defaultdict(list)
-        for lb in parts:
-            if lb in pinned:
-                by_char[pinned[lb].character_id].append(lb)
-        for cid, lbs in by_char.items():
-            if len(lbs) > 1:
-                c = chars.get(cid) if cid is not None else None
-                keep = voice_keeper(parent, lbs, getattr(c, "gender", None), seconds)
-                for lb in lbs:
-                    if lb != keep:
-                        del pinned[lb]
         unpinned = [lb for lb in parts if lb not in pinned]
         if not unpinned:
             continue
@@ -584,8 +576,11 @@ class CharactersStage:
         keyed = {lb: info.key for lb, info in labels.items() if info.key is not None}
 
         previous: Assignments | None = None
-        if not self.rematch and assignments_path.exists():
-            previous = read_json(assignments_path, Assignments)
+        on_disk: Assignments | None = None
+        if assignments_path.exists():
+            on_disk = read_json(assignments_path, Assignments)
+        if not self.rematch:
+            previous = on_disk
         fresh = previous is None or previous.turns is None
         # Pins are acoustic: only voice-sourced assignments carry over, so a name or lock
         # decision never comes back as an acoustic pin once names stop being used (off, held
@@ -611,6 +606,16 @@ class CharactersStage:
                     for c in previous.clusters
                     if c.cluster in voice and c.character_id is not None
                 }
+        elif voice_of and on_disk is not None and on_disk.turns is not None:
+            # rematch: a voice part's own identity (its own label's earlier assignment: the
+            # keeper rule's, an operator merge, a name or a lock) still wins over matching
+            disk_turns = Diarization(backend=turns.backend, turns=on_disk.turns)
+            src = pin_sources(on_disk, disk_turns, turns, voice_only=True)
+            pinned = {
+                k: v
+                for k, v in pin(on_disk, disk_turns, turns, voice_only=True).items()
+                if k in voice_of and src.get(k) == k
+            }
 
         result: dict[str, ClusterAssignment] = {}
         with Registry(Workspace(ep.workspace_root).registry_path) as reg, reg.transaction():
@@ -649,7 +654,8 @@ class CharactersStage:
             path_pins = {k: v for k, v in pinned.items() if k not in named}
             claimed = {v.actor_id for v in path_pins.values() if v.actor_id is not None}
             if fresh:  # never before this run's keys had their say on the characters they name
-                reg.prune_actors([a for a in orphans if a not in answering])
+                # (nor a voice part's own identity, which a rematch keeps)
+                reg.prune_actors([a for a in orphans if a not in answering | claimed])
             touched: set[int] = set()
             for ev in evidence:
                 p = path_pins.get(ev.cluster)
@@ -816,7 +822,36 @@ class CharactersStage:
                                 f"pitch split {parent}: {keeper} keeps {_describe(c)}, the "
                                 f"parent's match ({keeper_why(c.gender)})"
                             )
-                    to_new += [lb for lb in parts if lb != keeper]
+                    # a non-keeper matched to an existing character other than the keeper's
+                    # keeps it; the parent's character never goes to it
+                    for lb in parts:
+                        if lb == keeper:
+                            continue
+                        top = None
+                        if len(rows[lb]):
+                            pev = ClusterEvidence(lb, mean_embedding(rows[lb]), 0.0)
+                            top = tops_of([pev], {lb: rows[lb]}).get(lb)
+                        if (
+                            top is None
+                            or top[1] < threshold
+                            or top[0] in taken
+                            or top[0] not in first_char
+                        ):
+                            to_new.append(lb)
+                            continue
+                        aid, score = top
+                        c, ev = live[first_char[aid]], ev_of_voice[lb]
+                        reg.add_exemplars(aid, ep.id, lb, rows[lb], ev.clean_seconds)
+                        touched.add(aid)
+                        taken.add(aid)
+                        result[lb] = ClusterAssignment(
+                            cluster=lb, actor_id=aid, character_id=c.id, score=score,
+                            clean_seconds=ev.clean_seconds, status="matched",
+                        )  # fmt: skip
+                        voice_lines.append(
+                            f"pitch split {parent}: {lb} matches {_describe(c)}, another "
+                            "character than the parent's"
+                        )
                 for lb in to_new:
                     ev, emb = ev_of_voice[lb], rows[lb]
                     aid, cid = reg.create_actor_with_character(

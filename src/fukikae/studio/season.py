@@ -498,7 +498,11 @@ def _splits(
 def _voice_split_flags(ep: _Episode, c: Character, clusters: dict[str, list[Turn]]) -> list[Flag]:
     """An ``identity`` flag for each cluster of the character that is a pitch split's new part
     (``split = "new"``) while the character is unreviewed, and a ``split`` flag for each of its
-    clusters whose operator split the names stage skipped (the fingerprint changed)."""
+    clusters whose operator split the names stage skipped (the fingerprint changed), and a
+    ``gender`` flag for a voice part in the other register from the character's stored gender
+    (a gender stored after the split, which never moves the parts)."""
+    from fukikae.names.align import VOICE_PREFIX
+
     by = {a.cluster: a for a in ep.asg.clusters}
     out: list[Flag] = []
     for cl in sorted(clusters):
@@ -509,6 +513,16 @@ def _voice_split_flags(ep: _Episode, c: Character, clusters: dict[str, list[Turn
                 text=f"{ep.id} {cl}: a new character from the pitch split of "
                      f"{cl.split('~', 1)[0]}; give it an identity (a name, a merge, narrator "
                      "or not a character)",
+            ))  # fmt: skip
+        part = cl.rsplit(f"~{VOICE_PREFIX}", 1)
+        # a later stored gender never moves the keeper: the conflict is flagged instead
+        wrong = len(part) == 2 and part[1] in ("f", "m") and c.gender in ("f", "m")
+        if wrong and part[1] != c.gender:
+            out.append(Flag(
+                kind="gender", episode=ep.id,
+                text=f"{ep.id} {cl}: the {part[1]} part of a pitch split, held by a "
+                     f"character stored as {c.gender}; merge, split out or correct the "
+                     "gender (the split's parts keep their characters)",
             ))  # fmt: skip
         v = ep.voice_splits.get(cl)
         if v is not None and v.check == "changed":
