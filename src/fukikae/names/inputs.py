@@ -1,7 +1,13 @@
 """Which turns and clusters identity reads: the names stage's refined pair when its
-`names.json` says names were used, else the diarize stage's (Task 4's helper for the characters
-stage, `registry resolve`, `reembed`, `adapt` and `eval identity`)."""
+`names.json` says names were used or a pitch split relabelled turns, else the diarize stage's
+(Task 4's helper for the characters stage, `registry resolve`, `reembed`, `adapt` and
+`eval identity`); and the operator pitch splits the names stage reads
+(``<ws>/studio/splits/<episode>.json``, written by `fukikae studio apply`)."""
 
+import hashlib
+import json
+import math
+from dataclasses import dataclass
 from pathlib import Path
 
 from fukikae.artifacts import read_json
@@ -22,12 +28,75 @@ def names_report_path(work: Path) -> Path:
 
 def identity_inputs(work: Path) -> tuple[Path, Path, NamesResult | None]:
     """(turns.json, clusters.npz, names result) for an episode's work directory: the refined
-    pair under `04c-names/` when names were used, else `04-diarize/`'s, with the result (None
-    when the names stage never ran)."""
+    pair under `04c-names/` when names were used or a pitch split relabelled turns
+    (`NamesResult.refined`), else `04-diarize/`'s, with the result (None when the names stage
+    never ran)."""
     path = names_path(work)
     result = read_json(path, NamesResult) if path.exists() else None
-    d = Path(work) / (NAMES_DIR if result is not None and result.used else DIARIZE_DIR)
+    d = Path(work) / (NAMES_DIR if result is not None and result.refined else DIARIZE_DIR)
     return d / "turns.json", d / "clusters.npz", result
+
+
+# ---- operator pitch splits ----
+
+
+def splits_path(workspace_root: Path, episode: str) -> Path:
+    """``<ws>/studio/splits/<episode>.json``: ``{cluster: {"by": "pitch", "male_below": Hz,
+    "female_above": Hz}}``."""
+    return Path(workspace_root) / "studio" / "splits" / f"{episode}.json"
+
+
+@dataclass(frozen=True)
+class PitchSplit:
+    male_below: float
+    female_above: float
+
+
+class SplitFileError(ValueError):
+    """An operator split file the names stage can't use, or a split it can't measure."""
+
+
+def splits_digest(workspace_root: Path, episode: str) -> str | None:
+    """sha256 of the episode's split file, or None when it has none."""
+    path = splits_path(workspace_root, episode)
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def operator_splits(workspace_root: Path, episode: str) -> dict[str, PitchSplit]:
+    """The episode's pitch splits by cluster; empty when it has no split file. SplitFileError
+    naming the file for anything else than an object of clusters, each ``by = "pitch"`` with
+    finite positive bands, ``male_below`` at most ``female_above``."""
+    path = splits_path(workspace_root, episode)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        raise SplitFileError(f"{path}: not a split file ({e})") from e
+    if not isinstance(raw, dict):
+        raise SplitFileError(f"{path}: expected an object of clusters, not {type(raw).__name__}")
+    out: dict[str, PitchSplit] = {}
+    for cluster, body in sorted(raw.items()):
+        if not isinstance(body, dict) or body.get("by") != "pitch":
+            raise SplitFileError(f'{path}: {cluster} is not a split with by = "pitch"')
+        bands = []
+        for k in ("male_below", "female_above"):
+            v = body.get(k)
+            if isinstance(v, bool) or not isinstance(v, int | float) or not math.isfinite(v):
+                raise SplitFileError(f"{path}: {cluster} {k} must be a number, not {v!r}")
+            if v <= 0:
+                raise SplitFileError(f"{path}: {cluster} {k} must be above 0 Hz, not {v!r}")
+            bands.append(float(v))
+        if bands[0] > bands[1]:
+            raise SplitFileError(
+                f"{path}: {cluster} male_below {bands[0]:g} Hz is above female_above "
+                f"{bands[1]:g} Hz"
+            )
+        out[cluster] = PitchSplit(*bands)
+    return out
 
 
 # What a held-out episode's names.json may say: it read no names (`holdout`), or names were

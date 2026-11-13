@@ -5,7 +5,7 @@ cluster label; `NamesResult` is `04c-names/names.json`."""
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 from pydantic.dataclasses import dataclass
 
 from fukikae.names.normalize import NameClass
@@ -44,12 +44,27 @@ class LabelInfo(BaseModel):
     parent: str
     key: str | None
     display: str | None
-    cls: Literal["named", "role", "remainder"]
+    cls: Literal["named", "role", "remainder", "voice"]  # voice: one part of an operator pitch
+    # split (`<cluster>~voice-f` or `~voice-m`), from the cluster's unnamed turns
     slug_clash: bool = False  # the key's slug collides with another key's in this cluster, so
     # the label carries the hashed form (`n` + 8 hex of sha256(key))
 
 
 Verdict = Literal["off", "none", "holdout", "partial", "full"]
+
+
+class VoiceSplit(BaseModel):
+    """What the names stage did with one cluster's operator pitch split
+    (``<ws>/studio/splits/<episode>.json``): the bands, the seconds of the cluster's unnamed
+    turns (pieces) in each class on their own medians, the part the unknown (``u``) turns
+    joined, and the labels written; no labels, and a reason, when nothing was split."""
+
+    male_below: float
+    female_above: float
+    seconds: dict[str, float]  # "f", "m", "u"
+    larger: Literal["f", "m"] | None  # where the u turns went
+    labels: list[str]  # the voice labels written, sorted
+    reason: str | None = None  # why the cluster was left as it was
 
 
 class NamesResult(BaseModel):
@@ -62,7 +77,7 @@ class NamesResult(BaseModel):
 
     schema_version: int = 1
     episode: str
-    used: bool  # turns.json and clusters.npz beside this file are the identity inputs
+    used: bool  # names were used (the refined pair is the identity input; see `refined`)
     verdict: Verdict
     reason: str | None  # why names weren't used (the failing test for `none`)
     source: dict[str, Any] | None  # the chosen track: how, language, track, codec, file, title
@@ -77,6 +92,22 @@ class NamesResult(BaseModel):
     excluded: list[tuple[float, float]]  # inner-voice and multi spans: never references
     dropped_row_seconds: float
     suggestions: list[tuple[str, str]]  # (rare, common) keys one edit apart
+    # The operator pitch splits read, by cluster; left out of names.json when there are none,
+    # so an episode without a split file writes what it wrote before splits existed.
+    voice_splits: dict[str, VoiceSplit] = Field(default_factory=dict)
+
+    @model_serializer(mode="wrap")
+    def _drop_no_splits(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        out = handler(self)
+        if not out.get("voice_splits"):
+            out.pop("voice_splits", None)
+        return out
+
+    @property
+    def refined(self) -> bool:
+        """Whether ``turns.json`` and ``clusters.npz`` beside this file are the identity
+        inputs: names were used, or a pitch split relabelled some turns."""
+        return self.used or any(s.labels for s in self.voice_splits.values())
 
     def visible_lines(self) -> list[NamedLine]:
         hidden = set(self.hidden)

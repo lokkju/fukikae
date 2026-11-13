@@ -136,7 +136,9 @@ def decisions_log(ws: Workspace) -> Path:
 def split_path(ws: Workspace, episode: str) -> Path:
     """``<ws>/studio/splits/<episode>.json``, the operator pitch splits the names stage reads:
     ``{cluster: {"by": "pitch", "male_below": Hz, "female_above": Hz}}``."""
-    return studio_dir(ws) / "splits" / f"{episode}.json"
+    from fukikae.names.inputs import splits_path
+
+    return splits_path(ws.root, episode)
 
 
 def _workspace(ws: Workspace | Path) -> Workspace:

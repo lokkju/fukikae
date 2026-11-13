@@ -1543,7 +1543,7 @@ def names_mismatch(work: Path, names: NamesResult, asg: Assignments | None) -> s
     from fukikae.names.inputs import NAMES_DIR
 
     if asg is None:
-        return "its names were used but it has no assignments.json"
+        return "its names stage refined its clusters but it has no assignments.json"
     path = Path(work) / NAMES_DIR / "turns.json"
     turns = read_json(path, Diarization).turns if path.exists() else None
     if asg.turns != turns or not set(names.labels) <= {c.cluster for c in asg.clusters}:
@@ -1554,9 +1554,18 @@ def names_mismatch(work: Path, names: NamesResult, asg: Assignments | None) -> s
 def checked_names(work: Path, asg: Assignments | None) -> tuple[NamesResult | None, str | None]:
     """(names, why skipped) for an episode: its used ``names.json`` and None when its
     assignments answer the refined clusters (`names_mismatch`), (None, the reason) when they
-    don't, (None, None) when its names stage used no names."""
+    don't, (None, None) when its names stage used no names. An episode refined by a pitch
+    split alone gets the same guard, but never comes back with names (it has none to give)."""
     names = used_names(work)
     if names is None:
+        from fukikae.artifacts import read_json
+        from fukikae.names.inputs import names_path
+        from fukikae.names.models import NamesResult
+
+        path = names_path(work)
+        split = read_json(path, NamesResult) if path.exists() else None
+        if split is not None and split.refined:
+            return None, names_mismatch(work, split, asg)
         return None, None
     why = names_mismatch(work, names, asg)
     return (None, why) if why is not None else (names, None)

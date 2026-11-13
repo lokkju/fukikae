@@ -497,8 +497,8 @@ class CharactersStage:
 
     def run(self, ep: Episode, cfg: Config) -> None:
         turns_path, clusters_path, names = identity_inputs(ep.work)
-        if names is not None and not names.used:
-            names = None
+        if names is not None and not names.refined:
+            names = None  # a pitch split alone keeps its labels: voice parts, no keys
         (assignments_path,) = self.outputs(ep)
         assignments_path.parent.mkdir(parents=True, exist_ok=True)
         report_path = self.report_path(ep)

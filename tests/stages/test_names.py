@@ -517,3 +517,240 @@ def test_ffmpeg_failure_leaves_the_track_index_unadvanced(tmp_path, monkeypatch)
         NamesStage(cfg).run(ep, cfg)
     assert index.read_bytes() == first
     assert not (ep.work / "04c-names" / "names.json").exists()
+
+
+# ---- operator pitch splits (Task 15) ----
+
+RATE = 16000
+HZ = {"NATSU": 120.0, "HAPPY": 250.0, "LUCY": 220.0}
+
+
+def _harmonic(hz: float, n: int) -> np.ndarray:
+    t = np.arange(n) / RATE
+    x = sum(a * np.sin(2 * np.pi * hz * k * t) for k, a in enumerate((1, 0.5, 0.33, 0.25), 1))
+    return (0.3 * x / np.abs(x).max()).astype(np.float32)
+
+
+def write_vocals(ep: Episode, hz_at: dict[int, float] | None = None) -> None:
+    """A tone per subtitle line at its speaker's pitch (``hz_at`` overrides by line index)."""
+    from scipy.io import wavfile
+
+    hz_at = hz_at or {}
+    x = np.zeros(int((LINES[-1][1] + 2) * RATE), np.float32)
+    for i, (a, b, who) in enumerate(LINES):
+        lo, hi = int(a * RATE), int(b * RATE)
+        x[lo:hi] = _harmonic(hz_at.get(i, HZ[who]), hi - lo)
+    d = ep.work / "01-separate"
+    d.mkdir(parents=True, exist_ok=True)
+    wavfile.write(d / "vocals.wav", RATE, (np.clip(x, -1, 1) * 32767).astype("<i2"))
+
+
+def write_split(root: Path, cluster: str = "SPEAKER_00", **bands: float) -> Path:
+    import json
+
+    path = root / "studio" / "splits" / "S01E01.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = {cluster: {"by": "pitch", "male_below": 165.0, "female_above": 200.0, **bands}}
+    path.write_text(json.dumps(body, sort_keys=True))
+    return path
+
+
+def _labels_by_who(ep: Episode) -> dict[str, set[str]]:
+    turns = read_json(ep.work / "04c-names" / "turns.json", Diarization).turns
+    out: dict[str, set[str]] = {}
+    for t in turns:
+        mid = (t.start + t.end) / 2
+        who = next(n for a, b, n in LINES if a <= mid <= b)
+        out.setdefault(who, set()).add(t.speaker)
+    return out
+
+
+def test_pitch_split_relabels_turns_by_their_median(tmp_path):
+    ep, root = make_ws(tmp_path, named=False)
+    write_vocals(ep)
+    write_split(root)
+    NamesStage().run(ep, cfg_of(root))
+    r = result(ep)
+    assert not r.used and r.verdict == "none" and r.refined
+    assert _labels_by_who(ep) == {
+        "NATSU": {"SPEAKER_00~voice-m"},
+        "HAPPY": {"SPEAKER_00~voice-f"},
+        "LUCY": {"SPEAKER_01"},
+    }
+    assert r.labels["SPEAKER_00~voice-f"].cls == "voice"
+    assert r.labels["SPEAKER_00~voice-f"].parent == "SPEAKER_00"
+    s = r.voice_splits["SPEAKER_00"]
+    assert s.labels == ["SPEAKER_00~voice-f", "SPEAKER_00~voice-m"] and s.seconds["u"] == 0
+    with np.load(ep.work / "04c-names" / "clusters.npz") as z:
+        assert z["SPEAKER_00~voice-m/embeddings"].shape == (10, 4)
+        assert z["SPEAKER_00~voice-f/embeddings"].shape == (10, 4)
+        assert z["SPEAKER_01/embeddings"].shape == (10, 4)
+    t, c, got = identity_inputs(ep.work)
+    assert t.parent.name == c.parent.name == "04c-names" and got is not None
+
+
+def test_unknown_turns_join_the_larger_part(tmp_path):
+    ep, root = make_ws(tmp_path, named=False)
+    happy = [i for i, (_, _, n) in enumerate(LINES) if n == "HAPPY"]
+    write_vocals(ep, dict.fromkeys(happy[:3], 182.0))  # between the bands
+    write_split(root)
+    NamesStage().run(ep, cfg_of(root))
+    s = result(ep).voice_splits["SPEAKER_00"]
+    natsu = sum(b - a + 0.1 for a, b, n in LINES if n == "NATSU")
+    assert s.seconds["m"] == pytest.approx(natsu, abs=1e-6) and s.seconds["m"] > s.seconds["f"]
+    assert s.larger == "m"
+    turns = read_json(ep.work / "04c-names" / "turns.json", Diarization).turns
+    for i in happy[:3]:
+        a, b, _ = LINES[i]
+        (t,) = [t for t in turns if t.start < (a + b) / 2 < t.end]
+        assert t.speaker == "SPEAKER_00~voice-m"
+
+
+def test_no_split_file_leaves_the_key_unchanged(tmp_path):
+    ep, root = make_ws(tmp_path)
+    cfg = cfg_of(root)
+    stage = NamesStage(cfg)
+    key0, inputs0 = stage.config_key(cfg, ep), stage.inputs(ep)
+    assert "splits" not in key0
+    assert all(p.name != "vocals.wav" for p in inputs0)
+    before = cache_key(stage, ep, cfg)
+    write_vocals(ep)
+    assert cache_key(NamesStage(cfg), ep, cfg) == before  # the stem alone changes nothing
+    path = write_split(root)
+    with_split = cache_key(NamesStage(cfg), ep, cfg)
+    assert with_split != before
+    assert ep.work / "01-separate" / "vocals.wav" in NamesStage(cfg).inputs(ep)
+    write_split(root, male_below=150.0)
+    assert cache_key(NamesStage(cfg), ep, cfg) != with_split
+    path.unlink()
+    assert cache_key(NamesStage(cfg), ep, cfg) == before
+
+
+def test_split_with_subtitle_names_splits_only_the_remainder(tmp_path):
+    ep, root = make_ws(tmp_path)
+    blank = {0: "", 3: "", 2: "", 5: ""}  # two NATSU and two HAPPY lines lose their names
+    (tmp_path / "media" / "S01E01.en.ass").write_text(ass(names_at=blank), encoding="utf-8")
+    write_vocals(ep)
+    write_split(root)
+    NamesStage().run(ep, cfg_of(root))
+    r = result(ep)
+    assert r.used and r.refined
+    turns = read_json(ep.work / "04c-names" / "turns.json", Diarization).turns
+    by_line = {}
+    for i, (a, b, _) in enumerate(LINES):
+        (t,) = [t for t in turns if t.start < (a + b) / 2 < t.end]
+        by_line[i] = t.speaker
+    assert by_line[0] == by_line[3] == "SPEAKER_00~voice-m"
+    assert by_line[2] == by_line[5] == "SPEAKER_00~voice-f"
+    assert by_line[6] == "SPEAKER_00~natsu" and by_line[8] == "SPEAKER_00~happy"
+    assert "SPEAKER_00" not in {t.speaker for t in turns}
+    assert r.labels["SPEAKER_00~natsu"].cls == "named"
+    assert r.voice_splits["SPEAKER_00"].seconds["m"] == pytest.approx(
+        sum(LINES[i][1] - LINES[i][0] + 0.1 for i in (0, 3)), abs=1e-6
+    )
+
+
+def test_characters_stage_matches_the_parts_separately(tmp_path):
+    from fukikae.models import Assignments
+
+    ep, root = make_ws(tmp_path, names="[registry]\nmin_new_seconds = 5\n", named=False)
+    write_vocals(ep)
+    write_split(root)
+    cfg = cfg_of(root)
+    NamesStage(cfg).run(ep, cfg)
+    assert CharactersStage().inputs(ep)[1] == ep.work / "04c-names" / "turns.json"
+    CharactersStage().run(ep, cfg)
+    asg = read_json(ep.work / "05-characters" / "assignments.json", Assignments)
+    by = {c.cluster: c for c in asg.clusters}
+    assert {"SPEAKER_00~voice-f", "SPEAKER_00~voice-m", "SPEAKER_01"} == set(by)
+    f, m = by["SPEAKER_00~voice-f"], by["SPEAKER_00~voice-m"]
+    assert f.actor_id is not None and m.actor_id is not None and f.actor_id != m.actor_id
+
+
+def test_removing_the_split_file_restores_the_unsplit_output(tmp_path):
+    ep, root = make_ws(tmp_path, named=False)
+    write_vocals(ep)
+    path = write_split(root)
+    NamesStage().run(ep, cfg_of(root))
+    path.unlink()
+    NamesStage().run(ep, cfg_of(root))
+    r = result(ep)
+    assert not r.refined and not r.voice_splits
+    assert not (ep.work / "04c-names" / "turns.json").exists()
+    assert identity_inputs(ep.work)[0].parent.name == "04-diarize"
+    assert '"voice_splits"' not in (ep.work / "04c-names" / "names.json").read_text()
+
+
+def test_a_split_for_a_cluster_not_in_the_episode_changes_nothing(tmp_path):
+    ep, root = make_ws(tmp_path, named=False)
+    write_vocals(ep)
+    write_split(root, cluster="SPEAKER_09")
+    NamesStage().run(ep, cfg_of(root))
+    r = result(ep)
+    assert not r.refined and "no unnamed turns" in (r.voice_splits["SPEAKER_09"].reason or "")
+    assert not (ep.work / "04c-names" / "turns.json").exists()
+
+
+@pytest.mark.parametrize(
+    "body",
+    ['{"SPEAKER_00": {"by": "cluster"}}', "[1, 2]", "{not json",
+     '{"SPEAKER_00": {"by": "pitch", "male_below": 210, "female_above": 200}}'],
+)  # fmt: skip
+def test_a_malformed_split_file_is_refused(tmp_path, body):
+    from fukikae.names.inputs import SplitFileError
+
+    ep, root = make_ws(tmp_path, named=False)
+    write_vocals(ep)
+    path = write_split(root)
+    path.write_text(body)
+    with pytest.raises(SplitFileError, match="S01E01.json"):
+        NamesStage().run(ep, cfg_of(root))
+
+
+def test_a_split_without_the_vocals_stem_is_refused(tmp_path):
+    from fukikae.names.inputs import SplitFileError
+
+    ep, root = make_ws(tmp_path, named=False)
+    write_split(root)
+    with pytest.raises(SplitFileError, match="vocals.wav"):
+        NamesStage().run(ep, cfg_of(root))
+
+
+def test_names_show_reports_the_pitch_split(tmp_path):
+    from fukikae.names.cli import show_episode
+    from fukikae.workspace import Workspace
+
+    ep, root = make_ws(tmp_path, named=False)
+    write_vocals(ep)
+    write_split(root)
+    NamesStage().run(ep, cfg_of(root))
+    media_dir = tmp_path / "media"
+    (media_dir / "S01E01.mkv").touch()
+    (root / "fukikae.toml").write_text(
+        f'target_language="en"\nsource_language="ja"\nsource="{media_dir}"\n'
+    )
+    out = show_episode(Workspace(root), "S01E01")
+    assert any(
+        ln.startswith("pitch split SPEAKER_00 (male below 165 Hz, female above 200 Hz): ")
+        and ln.endswith("SPEAKER_00~voice-f, SPEAKER_00~voice-m")
+        for ln in out
+    ), out
+
+
+def test_assignments_older_than_a_split_are_skipped_for_references(tmp_path):
+    from fukikae.cards.auto import checked_names
+    from fukikae.models import Assignments
+
+    ep, root = make_ws(tmp_path, names="[registry]\nmin_new_seconds = 5\n", named=False)
+    write_vocals(ep)
+    cfg = cfg_of(root)
+    NamesStage(cfg).run(ep, cfg)
+    CharactersStage().run(ep, cfg)
+    asg_path = ep.work / "05-characters" / "assignments.json"
+    assert checked_names(ep.work, read_json(asg_path, Assignments)) == (None, None)
+    write_split(root)
+    NamesStage(cfg).run(ep, cfg)
+    names, why = checked_names(ep.work, read_json(asg_path, Assignments))
+    assert names is None and why is not None and "older than its names" in why
+    CharactersStage().run(ep, cfg)
+    assert checked_names(ep.work, read_json(asg_path, Assignments)) == (None, None)

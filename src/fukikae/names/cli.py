@@ -353,6 +353,17 @@ def show_episode(ws: Workspace, ref: str) -> list[str]:
                 f"  tried {t.get('how')} {t.get('language') or t.get('file')}: "
                 f"{t.get('verdict')}" + (f" ({t['reason']})" if t.get("reason") else "")
             )
+    for cluster, v in sorted(result.voice_splits.items()):
+        out.append(
+            f"pitch split {cluster} (male below {v.male_below:g} Hz, female above "
+            f"{v.female_above:g} Hz): "
+            + (
+                v.reason
+                or f"{v.seconds['m']:.1f} s low, {v.seconds['f']:.1f} s high, "
+                f"{v.seconds['u']:.1f} s between went to the {v.larger} part -> "
+                + ", ".join(v.labels)
+            )
+        )
     if not result.used:
         return out
     cov = result.coverage

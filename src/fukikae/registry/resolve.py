@@ -142,11 +142,12 @@ def resolve_episodes(
     inputs = {ep.id: identity_inputs(ep.work) for ep in episodes}
     turns = {e: read_json(i[0], Diarization) for e, i in inputs.items()}
     loaded = {e: load_clusters(i[1]) for e, i in inputs.items()}
-    # each names-used label's parent diarize cluster, for a rowless remainder's match
+    # each refined label's parent diarize cluster (names, or a pitch split's voice parts), for
+    # a rowless remainder's match and the stale-assignments guard
     parents: dict[str, dict[str, str]] = {
         e: {lb: info.parent for lb, info in i[2].labels.items()}
         for e, i in inputs.items()
-        if i[2] is not None and i[2].used
+        if i[2] is not None and i[2].refined
     }
     # Name decisions (D27): the labels the characters stage gave a character by name or lock
     # keep it; they are not grouped, and their rows seed their character's anchor.
