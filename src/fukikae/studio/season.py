@@ -821,6 +821,12 @@ def build_season(ws: Workspace | Path, cfg: Config, *, clips: int = 6) -> Season
     return doc
 
 
+def referenced_clips(doc: SeasonDoc) -> set[str]:
+    """The clip names under ``<ws>/studio/audio`` that ``doc`` refers to: the only audio the
+    studio server serves from the index."""
+    return _clips(doc)
+
+
 def _clips(doc: SeasonDoc) -> set[str]:
     """The clip names the document refers to: character, extras and split-part samples."""
     out = {s.clip for c in doc.characters for s in c.samples}
@@ -886,6 +892,7 @@ __all__ = [
     "load_or_build",
     "order_queue",
     "prune_clips",
+    "referenced_clips",
     "registry_digest",
     "sample_name",
     "season_path",

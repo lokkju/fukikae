@@ -97,6 +97,11 @@ class StudioBusy(DecisionRefused):  # noqa: N818
     `fukikae run`. Nothing changed."""
 
 
+class UnfinishedRecords(DecisionRefused):  # noqa: N818
+    """An earlier decision (or `fukikae registry merge`) landed in the registry but left
+    steps undone; nothing new is applied until `fukikae studio resume` finishes it."""
+
+
 class LogUnreadable(DecisionRefused):  # noqa: N818
     """A line of ``studio/decisions.jsonl`` is not a record; nothing proceeds until the
     operator looks at it."""
@@ -266,6 +271,12 @@ def _check_digest(reg: Registry, d: Decision) -> None:
             f"{who} changed since this {d.op} decision was made (now {now}); reload "
             f"{'them' if len(ids) > 1 else 'it'}, or pass --force"
         )
+
+
+def check_digest(reg: Registry, d: Decision) -> None:
+    """The digest check `apply_decision` makes, alone and without writing: `StaleDecision`
+    naming what changed, `UncheckedDecision` when ``d`` carries no digest. For previews."""
+    _check_digest(reg, d)
 
 
 # --- planning ------------------------------------------------------------------------------
@@ -1121,7 +1132,7 @@ def _settle(ws: Workspace) -> list[dict[str, Any]]:
 
 
 def _refusal(ws: Workspace, rec: dict[str, Any]) -> DecisionRefused:
-    return DecisionRefused(
+    return UnfinishedRecords(
         f"the {_record_op(rec)} logged at {rec.get('time')} is incomplete ({_why(rec)}); fix "
         f"the cause and run `fukikae studio resume {ws.root}` before applying more decisions"
     )

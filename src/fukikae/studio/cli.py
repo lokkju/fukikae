@@ -1,10 +1,96 @@
 """`fukikae studio` commands."""
 
+import os
 from pathlib import Path
+from typing import Any
 
 import typer
+from typer.core import TyperGroup
 
-studio_app = typer.Typer(help="The season studio: identity and voices.", no_args_is_help=True)
+
+class _ServeByDefault(TyperGroup):
+    """`fukikae studio <ws>` is `fukikae studio serve <ws>`: a first argument that names no
+    subcommand (and is no option) is a workspace. A workspace directory literally named like
+    a subcommand is reached as ``./apply``."""
+
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:  # typer's vendored click
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            args = ["serve", *args]
+        return super().parse_args(ctx, args)
+
+
+studio_app = typer.Typer(
+    cls=_ServeByDefault,
+    help="The season studio: identity and voices. `fukikae studio <ws>` serves it (the "
+    "`serve` command); `apply` and `resume` work on decisions without it.",
+    no_args_is_help=True,
+)
+
+
+@studio_app.command("serve")
+def serve(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    port: int = typer.Option(8765, "--port", help="Port to listen on (0: any free one)."),
+    clips: int = typer.Option(6, "--clips", min=0, help="Sample clips per character."),
+    host: str = typer.Option(
+        "127.0.0.1", "--host", help="Address to bind: loopback unless --allow-non-loopback."
+    ),
+    allow_non_loopback: bool = typer.Option(
+        False,
+        "--allow-non-loopback",
+        help="Allow --host to name a non-loopback IPv4 address. Anyone who can reach it and "
+        "has the token can change the registry.",
+    ),
+    no_open: bool = typer.Option(
+        False, "--no-open", help="Don't open a browser (only tried when a display is set)."
+    ),
+) -> None:
+    """Serve the season studio for WORKSPACE on 127.0.0.1: builds or loads the season index,
+    prints the URL with this run's token and the `ssh -L` line that reaches it from your
+    machine, and serves until Ctrl-C. Every request needs the token."""
+    from fukikae.studio.server import StudioServer
+    from fukikae.workspace import Workspace
+
+    if not (workspace / "fukikae.toml").is_file():
+        typer.echo(f"error: {workspace} is not a workspace (no fukikae.toml)", err=True)
+        raise typer.Exit(1)
+    ws = Workspace(workspace.resolve())
+    try:
+        server = StudioServer(
+            ws, ws.config, host=host, port=port, clips=clips,
+            allow_non_loopback=allow_non_loopback,
+        )  # fmt: skip
+    except ValueError as e:
+        typer.echo(f"error: {e}", err=True)
+        raise typer.Exit(2) from e
+    except OSError as e:
+        typer.echo(f"error: can't listen on {host}:{port}: {e}", err=True)
+        raise typer.Exit(1) from e
+    try:
+        typer.echo("loading the season index ...")
+        try:
+            doc = server.season()
+        except (OSError, ValueError) as e:
+            typer.echo(f"error: the season index: {e}", err=True)
+            raise typer.Exit(1) from e
+        ready = sum(e.ready for e in doc.episodes)
+        typer.echo(
+            f"{len(doc.characters)} character(s); {ready} of {len(doc.episodes)} episode(s) ready"
+        )
+        typer.echo(f"studio: {server.url()}")
+        if server.loopback:
+            typer.echo(f"from your machine: {server.tunnel()}")
+        typer.echo("Ctrl-C stops it.")
+        if not no_open and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+            import webbrowser
+
+            webbrowser.open(server.url())
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            typer.echo("stopped")
+    finally:
+        server.server_close()
 
 
 @studio_app.command("apply")
