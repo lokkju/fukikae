@@ -1316,16 +1316,25 @@ class Registry:
     ) -> None:
         """Fold character ``drop`` into ``keep``: its aliases, its card history (`_fold_cards`),
         its external id when keep has none, and its operator gender when keep has none
-        (`_fold_gender`). Keep's own external id, kind and reviewed time win; a kind or
-        reviewed time of drop's that differs goes into ``report``."""
+        (`_fold_gender`). Keep's own external id, kind, lock and reviewed time win; a kind,
+        lock or reviewed time of drop's that differs goes into ``report``."""
         self._fold_gender(con, drop, keep)
         fields = {
-            r[0]: (r[1], r[2])
+            r[0]: (r[1], r[2], bool(r[3]))
             for r in con.execute(
-                "SELECT id, kind, reviewed FROM characters WHERE id IN (?, ?)", (drop, keep)
+                "SELECT id, kind, reviewed, locked FROM characters WHERE id IN (?, ?)",
+                (drop, keep),
             )
         }
-        (my_kind, my_reviewed), (their_kind, their_reviewed) = fields[keep], fields[drop]
+        (my_kind, my_reviewed, my_lock), (their_kind, their_reviewed, their_lock) = (
+            fields[keep],
+            fields[drop],
+        )
+        if their_lock and not my_lock:
+            report.append(
+                f"character {keep} stays unlocked; character {drop}'s lock was dropped "
+                f"(`fukikae registry lock WORKSPACE {keep} --character` locks it)"
+            )
         if their_kind != my_kind:
             report.append(
                 f"character {keep} keeps kind {my_kind}; character {drop}'s {their_kind} "

@@ -98,10 +98,10 @@ class AcceptDecision(_Base):
     language: str = Field(min_length=1)
     card_id: str
     draft: str  # the draft's name, <character>.<language>
-    version: int
+    version: int = Field(ge=1)
     references: list[RefSpan] = []
     overrides: list[RefSpan] = []  # gated references the operator chose anyway
-    auditions: int = 0  # how many auditions led to it, for the card's note
+    auditions: int = Field(default=0, ge=0)  # how many auditions led to it, for the note
 
 
 Decision = Annotated[

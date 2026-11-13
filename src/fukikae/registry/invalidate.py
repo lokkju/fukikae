@@ -56,6 +56,29 @@ def character_episodes(ws: Workspace, reg: Any, character_id: int, actor_id: int
     return sorted(found)
 
 
+def merge_episodes(ws: Workspace, reg: Any, drop_actor_id: int) -> list[str]:
+    """The episodes a merge of actor ``drop_actor_id`` into another touches, worked out before
+    it is applied: for each of the actor's characters, the episodes it speaks in
+    (`character_episodes`: the actor's exemplars, and assignments naming the character or the
+    actor), and the episodes whose names stage used one of its keys (its name's and its
+    aliases'). Their assignments are remapped and their characters stage reruns."""
+    from fukikae.registry.store import alias_key
+    from fukikae.registry.usage import episodes_naming
+
+    chars = [c for c in reg.characters() if c.actor_id == drop_actor_id]
+    found = set(reg.episode_counts(drop_actor_id))
+    found |= set(episodes_naming(ws.root, (drop_actor_id,), [c.id for c in chars]))
+    keys: set[str] = set()
+    for c in chars:
+        found |= set(character_episodes(ws, reg, c.id, drop_actor_id))
+        keys |= {a.alias for a in reg.aliases(c.id)}
+        if c.name and (k := alias_key(c.name)) is not None:
+            keys.add(k)
+    for key in sorted(keys):
+        found |= set(episodes_with_key(ws, key))
+    return sorted(found)
+
+
 def episodes_with_key(ws: Workspace, key: str) -> list[str]:
     """Episodes whose names stage used a line of this key."""
     from fukikae.artifacts import read_json

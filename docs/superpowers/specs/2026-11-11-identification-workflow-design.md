@@ -241,15 +241,17 @@ Per character, the identity panel offers:
 | name | `rename_character` (`name_by = "operator"`, operator alias) | characters stage of every episode naming the character (as `registry rename` does) |
 | alias | `add_alias(by="operator")` | same as name |
 | gender (f, m, clear) | new `set_character_gender(cid, gender, by="operator")` | tts of episodes where the character speaks |
-| merge (keep, drop) | `merge_actors` on the two characters' actors, then `_remap_assignments` | characters of both actors' episodes |
+| merge (keep, drop) | `merge_actors` on the two characters' actors, then `remap_assignments` | characters, with assignments remapped, of the drop character's episodes: those with its actor's exemplars, those whose assignments name it, and those whose names stage used one of its keys (`merge_episodes`; `registry merge` does the same) |
 | split by pitch | operator split file read by the names stage (below) | names, characters, and everything after, for that episode |
 | split cluster out (undo a match) | `split_cluster(actor_id, episode, cluster)` | characters of that episode |
 | narrator | new `set_character_kind(cid, "narrator")` | characters of episodes where it speaks |
 | not a character | new `set_character_kind(cid, "ignored")` | characters of episodes where it speaks |
-| lock | `lock_character(cid, True)` | nothing downstream |
+| lock | `lock_character(cid, True)` | characters of the character's episodes (its actor's exemplars, and assignments naming it), as `registry lock --character` does |
 | reviewed, no change | new `mark_reviewed(cid)` | nothing |
 
-"Invalidates" means `job.mark_stale(ep, stage)` on the named stage; the file-driven cascade (assignments.json is a translate input; cards and cues are tts inputs) reruns the rest. Every applied identity decision also marks its characters reviewed. The page shows, before the click, which episodes and stages a decision invalidates ("reruns translate on E02, E05 and E07"). A decision the registry refuses (merging into a locked actor, naming a character whose name an operator already set) fails with the registry's message and changes nothing.
+"Invalidates" means `job.mark_stale(ep, stage)` on the named stage; the file-driven cascade (assignments.json is a translate input; cards and cues are tts inputs) reruns the rest. Every applied identity decision also marks its characters reviewed. The page shows, before the click, which episodes and stages a decision invalidates ("reruns translate on E02, E05 and E07"). A decision the registry refuses (merging two characters with different operator genders, an alias another character holds by operator, a split of another character's cluster) fails with the registry's message and changes nothing. A decision with no digest is refused as unchecked; `--force` skips the digest check for every decision in a file, and `studio apply` says how many went unchecked. A dry run of a file checks every decision in one transaction, rolled back at the end, so a decision that depends on an earlier one is checked as it will apply.
+
+The steps after the commit run in a fixed order: the stale marks first, then the file changes (assignments remapped, a pitch split file), then the line in `studio/decisions.jsonl`. When a step fails, the registry part has landed and can't be rolled back, so the log line is still written, with `incomplete` naming the errors and the steps left as data, and the error says so. Every step is idempotent; `fukikae studio resume` redoes only what is left, and `studio apply` refuses new decisions until it has.
 
 ### The voice-tuning loop
 

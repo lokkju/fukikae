@@ -144,8 +144,10 @@ def test_stale_digest_refuses_without_force(ws):
 
 
 def test_a_decision_without_a_digest_needs_force(ws):
+    from fukikae.studio.apply import UncheckedDecision
+
     d = parse_decision({"op": "gender", "character": 1, "gender": "m"})
-    with pytest.raises(StaleDecision, match="no digest"):
+    with pytest.raises(UncheckedDecision, match="no digest"):
         apply_decision(ws, d)
     apply_decision(ws, d, force=True)
     assert char(ws, 1).gender == "m"
@@ -253,7 +255,9 @@ def fake_backends(monkeypatch):
     monkeypatch.setattr(loader, "backend_class", lambda _kind, name: CLASSES[name])
 
 
-def clone_card(ws: Workspace, tmp_path: Path, seed: int = 1) -> str:
+def clone_card(
+    ws: Workspace, tmp_path: Path, seed: int = 1, origin: tuple[str, float, float] | None = None
+) -> str:
     store = CardStore(ws.root)
     wav = tmp_path / f"ref{seed}.wav"
     with wave.open(str(wav), "wb") as w:
@@ -263,6 +267,9 @@ def clone_card(ws: Workspace, tmp_path: Path, seed: int = 1) -> str:
         w.writeframes(np.full(8000, seed, dtype="<i2").tobytes())
     ref = store.add_sidecar(wav, "clip")
     text = CLONE.replace("sha256:9e1f" + "0" * 60, ref)
+    if origin is not None:
+        ep, start, end = origin
+        text += f'origin = {{ episode = "{ep}", start = {start}, end = {end} }}\n'
     return store.put(parse_card(text))
 
 
@@ -277,7 +284,7 @@ def accept(ws: Workspace, card_id: str, **kw: Any):
 
 @pytest.mark.usefixtures("fake_backends")
 def test_accept_assigns_a_locked_studio_card(ws, tmp_path):
-    cid = clone_card(ws, tmp_path)
+    cid = clone_card(ws, tmp_path, origin=("S01E01", 1.0, 4.5))
     r = apply_decision(ws, accept(ws, cid))
     with reg_of(ws) as reg:
         a = reg.card_for(1, "en")
@@ -451,3 +458,276 @@ def test_studio_apply_command(ws, tmp_path):
     assert r.exit_code == 1 and "character 3" in r.output
     r = runner.invoke(app, ["studio", "apply", str(ws.root), str(path), "--force"])
     assert r.exit_code == 0, r.output
+
+
+# --- review fixes: merges reach named episodes, post-commit recovery, clone-only accept ----
+
+
+def _rowless_episode(ws: Workspace, ep: str, cid: int) -> None:
+    """An episode with no exemplars whose assignments name character ``cid`` (a rowless
+    remainder pinned to it)."""
+    from fukikae.registry.invalidate import episode
+
+    work = ws.work_dir(ep)
+    (work / "05-characters").mkdir(parents=True)
+    now = datetime.now(UTC)
+    save_manifest(
+        episode(ws, ep),
+        Manifest(stages={s: StageRecord(key="k", status="done", started=now) for s in STAGES}),
+    )
+    write_json(
+        work / "05-characters" / "assignments.json",
+        Assignments(episode=ep, threshold=0.5, clusters=[ClusterAssignment(
+            cluster="S9~rest", actor_id=cid, character_id=cid, score=0.9, clean_seconds=3.0,
+            status="matched",
+        )]),
+    )  # fmt: skip
+
+
+def _ids(ws: Workspace, ep: str) -> list[tuple[int | None, int | None]]:
+    a = read_json(ws.work_dir(ep) / "05-characters" / "assignments.json", Assignments)
+    return [(c.actor_id, c.character_id) for c in a.clusters]
+
+
+def test_merge_remaps_and_invalidates_an_episode_that_only_names_the_dropped_character(ws):
+    _rowless_episode(ws, "S01E03", 2)
+    r = apply_decision(ws, decision_for(ws, "merge", keep=1, drop=2))
+    assert _ids(ws, "S01E03") == [(1, 1)]
+    assert Invalidation("S01E03", "characters") in r.invalidations
+    assert "characters" not in stages_left(ws, "S01E03")
+
+
+def test_merge_invalidates_episodes_that_used_a_key_of_the_dropped_character(ws, monkeypatch):
+    from fukikae.registry import invalidate
+
+    _rowless_episode(ws, "S01E04", 3)  # names nobody involved, but its names stage used "roza"
+    with reg_of(ws) as reg:
+        reg.add_alias(2, "roza", by="operator")
+    monkeypatch.setattr(
+        invalidate, "episodes_with_key", lambda _ws, key: ["S01E04"] if key == "roza" else []
+    )
+    r = apply_decision(ws, decision_for(ws, "merge", keep=1, drop=2))
+    assert Invalidation("S01E04", "characters") in r.invalidations
+    assert "characters" not in stages_left(ws, "S01E04")
+
+
+def test_registry_merge_command_remaps_an_episode_that_only_names_the_dropped_character(ws):
+    _rowless_episode(ws, "S01E03", 2)
+    r = CliRunner().invoke(app, ["registry", "merge", str(ws.root), "1", "2"])
+    assert r.exit_code == 0, r.output
+    assert _ids(ws, "S01E03") == [(1, 1)]
+    assert "characters" not in stages_left(ws, "S01E03")
+
+
+def test_a_failed_file_change_after_commit_is_logged_and_resumable(ws):
+    from fukikae.studio.apply import IncompleteDecision, resume_incomplete
+
+    path = ws.work_dir("S01E02") / "05-characters" / "assignments.json"
+    good = path.read_text()
+    path.write_text("{not json")
+    d = decision_for(ws, "merge", keep=1, drop=2)
+    with pytest.raises(IncompleteDecision) as e:
+        apply_decision(ws, d)
+    msg = str(e.value)
+    assert "registry" in msg and "S01E02" in msg and "fukikae studio resume" in msg
+    with reg_of(ws) as reg:  # the registry part landed
+        assert [c.id for c in reg.characters()] == [1, 3]
+    assert "characters" not in stages_left(ws, "S01E02")  # marked stale before the files
+    (rec,) = log_lines(ws)
+    assert rec["decision"] == d.model_dump(mode="json")
+    inc = rec["incomplete"]
+    assert inc["errors"] and "S01E02" in inc["errors"][0]
+    assert [s["episode"] for s in inc["left"]] == ["S01E02"]
+    # nothing else applies until it is finished
+    with pytest.raises(DecisionRefused, match="studio resume"):
+        apply_decision(ws, decision_for(ws, "lock", character=3))
+    path.write_text(good)  # the operator fixes the cause
+    (res,) = resume_incomplete(ws)
+    assert _ids(ws, "S01E02") == [(1, 1), (3, 3)]
+    assert any("S01E02" in ln for ln in res.lines)
+    assert resume_incomplete(ws) == []  # idempotent: nothing left
+    assert log_lines(ws)[-1]["resumes"] == rec["id"]
+    apply_decision(ws, decision_for(ws, "lock", character=3))
+    # a replay of the log skips resume records (they carry no decision)
+    log = ws.root / "studio" / "decisions.jsonl"
+    from fukikae.studio.apply import read_decisions
+
+    assert [d.op for d in read_decisions(ws, log)] == ["merge", "lock"]
+
+
+def test_studio_resume_command(ws):
+    path = ws.work_dir("S01E02") / "05-characters" / "assignments.json"
+    good = path.read_text()
+    path.write_text("{not json")
+    runner = CliRunner()
+    f = _write_file(ws, ws.root.parent / "m.json", [decision_for(ws, "merge", keep=1, drop=2)])
+    r = runner.invoke(app, ["studio", "apply", str(ws.root), str(f)])
+    assert r.exit_code == 1 and "studio resume" in r.output
+    path.write_text(good)
+    r = runner.invoke(app, ["studio", "resume", str(ws.root)])
+    assert r.exit_code == 0, r.output
+    assert "1 incomplete decision(s) finished" in r.output
+    assert _ids(ws, "S01E02") == [(1, 1), (3, 3)]
+
+
+@pytest.mark.usefixtures("fake_backends")
+@pytest.mark.parametrize(
+    "voice",
+    [
+        'source = "stock"\nvoice = "af_heart"\n',
+        'source = "design"\ndescription = "a gravelly old sailor"\n',
+    ],
+)
+def test_accept_takes_only_a_clone_of_the_speaker(ws, voice):
+    store = CardStore(ws.root)
+    cid = store.put(parse_card(
+        'target_language = "en"\n\n[voice]\nbackend = "fake"\nmodel_revision = "1.0"\n' + voice
+    ))  # fmt: skip
+    with pytest.raises(DecisionRefused, match="D41") as e:
+        apply_decision(ws, accept(ws, cid))
+    assert "clone" in str(e.value)
+    with reg_of(ws) as reg:
+        assert reg.card_for(1, "en") is None
+
+
+@pytest.mark.usefixtures("fake_backends")
+def test_accept_digest_covers_only_the_card_assignment(ws, tmp_path):
+    card = clone_card(ws, tmp_path)
+    d = accept(ws, card)
+    with reg_of(ws) as reg:
+        reg.rename_character(1, "Someone")  # an identity change meanwhile
+    apply_decision(ws, d)  # not stale: accept is about the card
+    with reg_of(ws) as reg:
+        cur = reg.card_for(1, "en")
+        assert cur is not None and cur.card_id == card
+
+
+@pytest.mark.usefixtures("fake_backends")
+def test_accept_note_names_the_cards_references(ws, tmp_path):
+    cid = clone_card(ws, tmp_path, origin=("S01E01", 1.0, 4.5))
+    apply_decision(ws, accept(ws, cid, references=[{"episode": "S01E05", "start": 7.0,
+                                                    "end": 8.0}]))  # fmt: skip
+    with reg_of(ws) as reg:
+        cur = reg.card_for(1, "en")
+    assert cur is not None and cur.note is not None
+    assert "S01E01 1.00-4.50" in cur.note and "S01E05" not in cur.note
+
+
+def test_accept_version_and_auditions_are_validated():
+    base = {"op": "accept", "character": 1, "language": "en", "card_id": "0" * 16,
+            "draft": "1.en"}  # fmt: skip
+    with pytest.raises(ValueError):
+        parse_decision({**base, "version": 0})
+    with pytest.raises(ValueError):
+        parse_decision({**base, "version": 1, "auditions": -1})
+    parse_decision({**base, "version": 1, "auditions": 0})
+
+
+def test_a_decision_without_a_digest_is_unchecked_not_stale(ws):
+    from fukikae.studio.apply import DecisionError, UncheckedDecision
+
+    d = parse_decision({"op": "gender", "character": 1, "gender": "m"})
+    with pytest.raises(UncheckedDecision) as e:
+        apply_decision(ws, d)
+    assert isinstance(e.value, DecisionError) and not isinstance(e.value, StaleDecision)
+
+
+def test_studio_apply_force_says_how_many_were_unchecked(ws, tmp_path):
+    f = _write_file(ws, tmp_path / "d.json", [
+        parse_decision({"op": "gender", "character": 1, "gender": "m"}),
+        decision_for(ws, "kind", character=3, kind="narrator"),
+    ])  # fmt: skip
+    r = CliRunner().invoke(app, ["studio", "apply", str(ws.root), str(f), "--force"])
+    assert r.exit_code == 0, r.output
+    assert "2 decision(s) applied without a digest check" in r.output
+    assert "1 carried no digest" in r.output
+
+
+def test_file_dry_run_checks_decisions_as_they_will_apply(ws, tmp_path):
+    merge = decision_for(ws, "merge", keep=1, drop=2)
+    lock2 = decision_for(ws, "lock", character=2)  # character 2 is gone after the merge
+    f = _write_file(ws, tmp_path / "d.json", [merge, lock2])
+    with pytest.raises(DecisionRefused, match="decision 2"):
+        apply_file(ws, f, dry_run=True)
+    with reg_of(ws) as reg:
+        assert [c.id for c in reg.characters()] == [1, 2, 3]
+    f = _write_file(ws, tmp_path / "e.json", [merge, decision_for(ws, "lock", character=3)])
+    results = apply_file(ws, f, dry_run=True)
+    assert len(results) == 2
+    with reg_of(ws) as reg:
+        assert [c.id for c in reg.characters()] == [1, 2, 3]
+        assert not any(c.locked for c in reg.characters())
+    assert log_lines(ws) == [] and "characters" in stages_left(ws, "S01E02")
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_a_workspace_without_a_registry_is_refused(tmp_path, dry_run):
+    root = tmp_path / "w"
+    root.mkdir()
+    w = Workspace(root)
+    with pytest.raises(DecisionRefused, match="no registry"):
+        apply_decision(w, parse_decision({"op": "reviewed", "character": 1}), dry_run=dry_run,
+                       force=True)  # fmt: skip
+    assert list(root.rglob("*")) == []
+
+
+def test_a_dry_run_never_migrates_an_older_registry(ws):
+    import sqlite3
+
+    con = sqlite3.connect(ws.registry_path)
+    con.execute("DELETE FROM schema_version")
+    con.execute("INSERT INTO schema_version(version) VALUES (4)")
+    con.commit()
+    con.close()
+    with pytest.raises(DecisionRefused, match="migrat"):
+        apply_decision(ws, decision_for_raw("reviewed", character=1), dry_run=True, force=True)
+    con = sqlite3.connect(ws.registry_path)
+    assert con.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+    con.close()
+
+
+def decision_for_raw(op: str, **fields: Any):
+    return parse_decision({"op": op, **fields})
+
+
+def test_a_locked_registry_is_a_refusal(ws, monkeypatch):
+    import sqlite3
+    from contextlib import contextmanager
+
+    @contextmanager
+    def busy(_self):
+        raise sqlite3.OperationalError("database is locked")
+        yield
+
+    monkeypatch.setattr(Registry, "transaction", busy)
+    with pytest.raises(DecisionRefused, match="busy"):
+        apply_decision(ws, decision_for_raw("reviewed", character=1), force=True)
+
+
+def test_programming_errors_are_not_refusals(ws, monkeypatch):
+    from fukikae.studio import apply as apply_mod
+
+    def bug(*_a, **_k):
+        raise KeyError("oops")
+
+    monkeypatch.setattr(apply_mod, "_invalidations", bug)
+    with pytest.raises(KeyError):
+        apply_decision(ws, decision_for_raw("reviewed", character=1), force=True)
+
+
+def test_log_records_carry_the_workspace_and_replays_check_it(ws, tmp_path):
+    apply_decision(ws, decision_for(ws, "gender", character=1, gender="f"))
+    (rec,) = log_lines(ws)
+    assert rec["workspace"] == str(ws.root)
+    rec["workspace"] = "/elsewhere"
+    path = tmp_path / "other.jsonl"
+    path.write_text(json.dumps(rec) + "\n")
+    with pytest.raises(DecisionRefused, match="/elsewhere"):
+        apply_file(ws, path)
+
+
+def test_merge_reports_a_dropped_lock(ws):
+    with reg_of(ws) as reg:
+        reg.lock_character(2, True)
+    r = apply_decision(ws, decision_for(ws, "merge", keep=1, drop=2))
+    assert any("lock" in ln and "character 2" in ln for ln in r.lines)
