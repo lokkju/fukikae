@@ -1462,8 +1462,8 @@ def character_candidates(
     shouted 261 Hz register left her no reference at all). There the register is the
     character's majority register over the turns searched in that episode
     (``select.speaker_register``, on ``fukikae.pitch``'s bands, not
-    `gender_thresholds`: a profile band tuned on the old estimator, such as the anime
-    profile's 300 Hz pending D44, would keep only the turns above it and push the register
+    `gender_thresholds`: a workspace band tuned on the old estimator, such as the 300 Hz the
+    anime profile carried until D44, would keep only the turns above it and push the register
     up by 2 to 4 semitones on Sol Bianca). The voicing gate runs in both tiers, gate 3 reads
     the song detector's per-second mask (``select.reference_gating``) with each candidate's
     sung-ness, and its accepted song spans (``select.song_spans``), and the pitch tracks go
