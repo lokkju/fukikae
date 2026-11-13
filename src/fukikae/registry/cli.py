@@ -6,6 +6,12 @@ from typing import Any
 import typer
 
 from fukikae.names.inputs import identity_inputs
+from fukikae.registry.invalidate import (
+    character_episodes,
+    episodes_with_key,
+    mark_stale,
+    remap_assignments,
+)
 from fukikae.workspace import Episode, Workspace
 
 registry_app = typer.Typer(help="Manage the series character registry.", no_args_is_help=True)
@@ -103,64 +109,12 @@ def _same_dims(dims: dict[str, int], hint: str) -> None:
 
 def _stale(ws: Workspace, episodes: list[str], stage: str = "characters") -> None:
     """Delete each episode's ``stage`` manifest record and say so."""
-    from fukikae.job import mark_stale
-
-    if not episodes:
-        typer.echo("no episode has exemplars under it; nothing is stale")
-        return
-    for eid in episodes:
-        ep = Episode(source=Path(eid), id=eid, work=ws.work_dir(eid), workspace_root=ws.root)
-        mark_stale(ep, stage)
-    typer.echo(f"stale ({stage} will rerun on the next `fukikae run`): {', '.join(episodes)}")
+    typer.echo(mark_stale(ws, episodes, stage))
 
 
-def _character_episodes(ws: Workspace, reg: Any, character_id: int, actor_id: int) -> list[str]:
-    """The episodes a character speaks in: those with its actor's exemplars and those whose
-    assignments name it."""
-    from fukikae.registry.usage import episodes_naming
-
-    found = set(reg.episode_counts(actor_id)) | set(episodes_naming(ws.root, (), (character_id,)))
-    return sorted(found)
-
-
-def _remap_assignments(
-    ws: Workspace,
-    episode: str,
-    actor_map: dict[int, int],
-    only_cluster: str | None = None,
-    character: tuple[int, int] | None = None,
-    character_map: dict[int, int] | None = None,
-) -> None:
-    """Keep an episode's assignments.json in step with a merge or split.
-
-    Pinning copies actor and character ids from it, so stale ids would survive a rerun. A
-    split (``character``) also makes the split label a voice decision (``source = "voice"``,
-    no ``name``): the operator has overruled whatever name put it there, and the label's pin
-    to the new actor and character then carries over like any acoustic one.
-    """
-    from fukikae.artifacts import read_json, write_json
-    from fukikae.models import Assignments
-
-    path = ws.work_dir(episode) / "05-characters" / "assignments.json"
-    if not path.exists():
-        return
-    a = read_json(path, Assignments)
-    out = []
-    for c in a.clusters:
-        if only_cluster is not None and c.cluster != only_cluster:
-            out.append(c)
-            continue
-        upd: dict[str, int | str | None] = {}
-        if c.actor_id in actor_map:
-            upd["actor_id"] = actor_map[c.actor_id]
-        if character is not None and c.cluster == only_cluster:
-            upd["character_id"] = character[1]
-            upd["source"] = "voice"
-            upd["name"] = None
-        if character_map and c.character_id in character_map:
-            upd["character_id"] = character_map[c.character_id]
-        out.append(c.model_copy(update=upd))
-    write_json(path, a.model_copy(update={"clusters": out}))
+_character_episodes = character_episodes
+_remap_assignments = remap_assignments
+_episodes_with_key = episodes_with_key
 
 
 @registry_app.command("cluster")
@@ -362,27 +316,6 @@ def rename(
     key = alias_key(name)
     users = _episodes_with_key(ws, key) if key is not None else []
     _stale(ws, sorted(set(affected) | set(users)))
-
-
-def _episodes_with_key(ws: Workspace, key: str) -> list[str]:
-    """Episodes whose names stage used a line of this key."""
-    from fukikae.artifacts import read_json
-    from fukikae.names.inputs import names_path
-    from fukikae.names.models import NamesResult
-
-    out = []
-    episodes = ws.root / ".fukikae" / "episodes"
-    for work in sorted(episodes.iterdir()) if episodes.is_dir() else []:
-        path = names_path(work)
-        if not path.is_file():
-            continue
-        try:
-            r = read_json(path, NamesResult)
-        except ValueError:
-            continue
-        if r.used and any(ln.key == key for ln in r.visible_lines()):
-            out.append(work.name)
-    return out
 
 
 @registry_app.command("alias")

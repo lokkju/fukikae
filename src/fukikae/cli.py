@@ -11,6 +11,7 @@ from fukikae.cards.cli import voices_app
 from fukikae.eval.cli import eval_app
 from fukikae.names.cli import names_app
 from fukikae.registry.cli import registry_app
+from fukikae.studio.cli import studio_app
 
 if TYPE_CHECKING:
     from fukikae.config import Config
@@ -45,6 +46,7 @@ app.add_typer(eval_app, name="eval")
 app.add_typer(registry_app, name="registry")
 app.add_typer(voices_app, name="voices")
 app.add_typer(names_app, name="names")
+app.add_typer(studio_app, name="studio")
 
 backends_app = typer.Typer(help="Inspect installed model backends.", no_args_is_help=True)
 app.add_typer(backends_app, name="backends")
