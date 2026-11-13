@@ -96,6 +96,8 @@ indextts2_trt = "fukikae.backends.tts.indextts2_trt:IndexTts2TrtSynthesizer"
 cosyvoice3 = "fukikae.backends.tts.cosyvoice3:CosyVoice3Synthesizer"
 # runs in its own environment, workers/qwen3tts (README, "Cloning backends")
 qwen3_tts = "fukikae.backends.tts.qwen3_tts:Qwen3TtsSynthesizer"
+# spike (lokkju/fukikae#43): runs in its own environment, workers/zonos3
+zonos3 = "fukikae.backends.tts.zonos3:Zonos3Synthesizer"
 
 [project.entry-points."fukikae.backends.translate"]
 openai_compat = "fukikae.backends.translate.openai_compat:OpenAICompatTranslator"

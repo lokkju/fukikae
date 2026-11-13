@@ -1,0 +1,40 @@
+# The ZONOS3-Mini worker environment (spike, lokkju/fukikae#43). A uv project of its own (ruling
+# CD13): Zyphra's zonos3 package wants torch 2.9 and transformers <= 4.57.3, which fukikae's
+# environment can't hold. fukikae starts it as a JSON-lines worker
+# (fukikae.backends.tts.remote) with the venv at <checkout>/.venvs/zonos3.
+#
+# It runs Zyphra's plain-PyTorch reference (zonos3.reference), not the Mini-SGLang CUDA server:
+# the server JIT-compiles TileLang, quack and FlashInfer kernels against a CUDA 12.8 toolkit
+# that this host doesn't have, and its exact-mode kernels are Hopper-only. The reference is the
+# numerical oracle both of Zyphra's servers are tested against, so voices match; it is slower.
+#
+# zonos3 comes from git at a pinned commit (it is not on PyPI); its aligner, fusealign-hub, is
+# the submodule of that commit, and the reference path never imports it.
+[project]
+name = "fukikae-worker-zonos3"
+version = "0"
+requires-python = "==3.12.*"
+dependencies = [
+    "zonos3",
+    "torch==2.9.1",
+    "torchaudio==2.9.1",
+    "transformers==4.57.3",
+    "huggingface_hub==0.36.0",
+    "descript-audio-codec==1.0.0",
+    "zyphra-textnorm==0.1.0",
+    "numpy==2.4.1",
+    "soundfile==0.13.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+zonos3 = { git = "https://github.com/Zyphra/ZONOS3-Mini.git", rev = "b171b19149d29b8bcc31e0342d5e3b0063dc479b", subdirectory = "model" }
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
