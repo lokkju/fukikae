@@ -25,7 +25,7 @@ dependencies = [
     "HyperPyYAML==1.2.3",
     "inflect==7.3.1",
     "librosa==0.10.2",
-    "lightning==2.2.4",
+    "lightning==2.6.6",
     "modelscope==1.20.0",
     "omegaconf==2.3.0",
     "rich==13.7.1",
