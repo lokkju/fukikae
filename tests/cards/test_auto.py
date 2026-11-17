@@ -201,13 +201,15 @@ def test_default_bands_come_from_pitch():
     assert (select.MALE_BELOW, select.FEMALE_ABOVE) == (MALE_BELOW, FEMALE_ABOVE)
 
 
-def test_anime_profile_keeps_its_band_until_the_operator_decides():
-    """Task 2's calibration passed no band (docs/results/2026-11-11-gender-bands.md), so the
-    anime override stays until the operator rules on it."""
+@pytest.mark.parametrize("profile", ["default", "anime", "live-action"])
+def test_every_profile_uses_the_pitch_bands(profile):
+    """Ruling D44: 165/200 Hz on the median on every profile, no profile override
+    (docs/results/2026-11-11-gender-bands.md)."""
     from fukikae.config import load_profile
 
-    g = load_profile("anime")["tts"]["gender"]
-    assert g["male_below"] == 165.0 and g["female_above"] == 300.0
+    raw = load_profile(profile)
+    assert "gender" not in raw.get("tts", {})
+    assert auto.gender_thresholds(Config(profile_raw=raw)) == (165.0, 200.0)
 
 
 @pytest.fixture
