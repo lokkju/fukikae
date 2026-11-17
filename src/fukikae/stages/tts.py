@@ -469,13 +469,7 @@ class LazySynth:
             self._lock.enter_context(gpu_job(self.cfg.gpu_device, self.device, f"tts {inst.name}"))
             try:
                 if self.device.startswith("cuda"):
-                    wait_for_vram(
-                        self.cfg.gpu_device,
-                        inst.vram_mb,
-                        runctx.vram_timeout_s,
-                        query=free_mb,
-                        sleep=_sleep,
-                    )
+                    self.wait_vram(inst)
                 self.inst = inst
                 inst.load()
             except BaseException:
@@ -483,6 +477,14 @@ class LazySynth:
                 self._lock.close()
                 raise
         return self.inst
+
+    def wait_vram(self, inst: Synthesizer) -> None:
+        """Wait, with the card's lock held, until the card has room for ``inst``: the run's
+        VRAM timeout (``runctx``: None waits forever). Studio auditions override it with a
+        finite wait they can cancel."""
+        wait_for_vram(
+            self.cfg.gpu_device, inst.vram_mb, runctx.vram_timeout_s, query=free_mb, sleep=_sleep
+        )
 
     def close(self) -> None:
         try:

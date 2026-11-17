@@ -19,30 +19,45 @@ typed line's emotion prompt is gated against the character's register in that cu
 or across the season when it doesn't speak there. Wrong-gender source audio is never an
 emotion prompt here either: the rule lives in `delivery_passed`.
 
-An audition renders only with its version's own backend: one that isn't installed, or can't
-run here (`fukikae.cards.auto.clone_problem`), is refused when the job is submitted
-(`AuditionRefused`), naming ``fukikae backends setup``; nothing falls back to another backend
-or to a stock voice (D41).
+An audition renders only with its version's own backend and only a clone card (D41, a
+hand-edited draft naming a stock card included). A backend that isn't installed is refused
+when the job is submitted (`AuditionRefused`). Whether it can run here
+(`fukikae.cards.auto.clone_problem`, which can take 30 s for a Docker engine) is checked on
+the worker, never on the server's request thread: a job it refuses fails with ``refused`` set
+and a message naming ``fukikae backends setup``, and for `CLONE_CHECK_TTL_S` after that a
+submit for the backend is refused at once. Nothing falls back to another backend or to a stock
+voice.
 
 The GPU (CD15). The model loads only when a render isn't in the cache. On a GPU the worker
 first takes ``fukikae.gpulock`` for the workspace's card (``gpu_device``), polling every
 ``poll_s`` without blocking anything but its own queue: while another fukikae job holds the
 card the job is ``waiting`` and `status` names the holder from the lock file (the way
 ``fukikae run`` reports a wait, also logged every `fukikae.gpulock.WAIT_LOG_S`), and a
-waiting job can be cancelled. The lock is held for as long as the model is loaded and passed
-to the worker process. Between jobs the model stays loaded; after ``idle_s``
+waiting job can be cancelled. A busy lock whose file names nobody yet is tried again; what is
+left of a job that exited fails the job (`fukikae.gpulock.GpuLeftover`), and `status` reports
+it as ``leftover of pid N``. With the lock taken, the load waits at most ``vram_s``
+(`AUDITION_VRAM_S`, 120 s) for room on the card, ``waiting`` and cancellable, then fails
+naming the processes on it: `fukikae studio` sets no run VRAM timeout, and the tts stage's
+own wait would hold the lock forever. The lock is held for as long as the model is loaded and
+passed to the worker process, and never with nothing loaded: a job that stops or fails before
+its model loads lets go of it at once. Between jobs the model stays loaded; after ``idle_s``
 (`AUDITION_IDLE_S`, 300 s) with nothing queued, on `release` (which also cancels the queued
-and waiting jobs) and on `close` it is unloaded and the lock released. A job for another
-backend unloads the current one first. Jobs run one at a time, in order; at most `MAX_QUEUE`
-wait. A render already running is not interrupted by a cancel: it finishes into the cache and
-the job reports ``cancelled``. A worker process that hangs is killed by its own timeouts
+jobs and a job that hasn't started rendering) and on `close` it is unloaded and the lock
+released. A job for another backend unloads the current one only when it has a line to
+render: a line cached on it unloads nothing. Jobs run one at a time, in order; at most
+`MAX_QUEUE` wait. A cancel before the first render (preparing, waiting, loading) stops the
+job; a render already running is not interrupted: it finishes into the cache and the job
+reports ``cancelled``. A worker process that hangs is killed by its own timeouts
 (`fukikae.backends.tts.remote.WorkerSynthesizer`, 900 s to load, 300 s a render), and the job
 fails; the server's request threads never wait on the worker.
 
-Each finished audition is appended to its draft version (`fukikae.studio.model.Audition`,
-under the server's drafts lock, never the decisions lock) and its wav is hard-linked (or
-copied) from the cache to ``<ws>/studio/auditions/<key>.wav``, owner-only, for the server to
-serve at ``/audition/<key>.wav``.
+Each finished audition is appended to its draft version, matched by number and card
+(`fukikae.studio.model.Audition`, under the server's drafts lock, never the decisions lock),
+and its wav is hard-linked (or copied) from the cache to ``<ws>/studio/auditions/<key>.wav``
+for the server to serve at ``/audition/<key>.wav``. The link shares the cache file's inode,
+so its mode is left alone; the auditions directory is made 0700 on every use. Emotion clips
+cut into ``auditions/ref/`` that no draft's auditions use are pruned whenever the worker
+saves a draft.
 """
 
 from __future__ import annotations
@@ -62,11 +77,13 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from fukikae import gpulock
+from fukikae.gpu import VramTimeout, free_mb, gpu_processes
 from fukikae.stages.tts import LazySynth
-from fukikae.studio.drafts import DraftError, language_of, load_draft, save_draft
+from fukikae.studio.drafts import DraftError, drafts_dir, language_of, load_draft, save_draft
 from fukikae.studio.model import (
     Audition,
     AuditionLine,
+    Draft,
     DraftVersion,
     RealLine,
     RefSpan,
@@ -85,6 +102,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 AUDITION_IDLE_S = 300.0  # the model is unloaded after this long with nothing queued
+AUDITION_VRAM_S = 120.0  # how long a load waits for the card to have room, lock held
+CLONE_CHECK_TTL_S = 60.0  # how long a backend's `clone_problem` answer is reused
 LOCK_POLL_S = 2.0  # how often a waiting job tries the GPU lock again
 MAX_QUEUE = 16  # jobs waiting at most; past that a submit is refused (QueueFull)
 MAX_JOBS = 500  # finished jobs remembered for polling, oldest forgotten first
@@ -113,8 +132,10 @@ class _Cancelled(Exception):  # noqa: N818
 
 
 class AuditionJob(BaseModel):
-    """A job as the page polls it: its state, the error message of a failed one, how long it
-    waited for the GPU, loaded the model and rendered, and the audition once done."""
+    """A job as the page polls it: its state, the error message of a failed one (``refused``
+    when the worker found what `submit` would refuse, the server's 422: a backend that can't
+    run here), how long it waited for the GPU, loaded the model and rendered, and the audition
+    once done. A job waiting for room on the card says so in ``message``."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -125,6 +146,7 @@ class AuditionJob(BaseModel):
     line: AuditionLine
     state: JobState
     message: str | None = None
+    refused: bool = False
     submitted: str
     waited_s: float | None = None
     load_s: float | None = None
@@ -135,8 +157,9 @@ class AuditionJob(BaseModel):
 class GpuStatus(BaseModel):
     """The worker and the card: the backend loaded (None: none), its device, what the worker
     is doing, who holds the card's lock (``holder``, from the lock file: ``pid 4121 (tts
-    indextts2)``; ``ours`` when it is this worker), the jobs queued, the job running and how
-    long until an idle unload."""
+    indextts2)``; ``ours`` when it is this worker; ``leftover`` when the file names a process
+    that exited and the lock is still held, ``leftover of pid N (...); kill it or wait``), the
+    jobs queued, the job running and how long until an idle unload."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -148,6 +171,7 @@ class GpuStatus(BaseModel):
     holder_pid: int | None
     holder_job: str | None
     ours: bool
+    leftover: bool = False
     queued: int
     running: str | None
     unload_in_s: float | None
@@ -163,7 +187,9 @@ class _Job:
     submitted: str
     state: JobState = "queued"
     message: str | None = None
+    refused: bool = False
     cancel: bool = False
+    rendering: bool = False  # the first render began: a cancel lets it finish into the cache
     waited_s: float | None = None
     load_s: float | None = None
     render_s: float | None = None
@@ -173,7 +199,8 @@ class _Job:
     def snapshot(self) -> AuditionJob:
         return AuditionJob(
             id=self.id, character=self.character, language=self.language, version=self.version,
-            line=self.line, state=self.state, message=self.message, submitted=self.submitted,
+            line=self.line, state=self.state, message=self.message, refused=self.refused,
+            submitted=self.submitted,
             waited_s=self.waited_s, load_s=self.load_s, render_s=self.render_s,
             audition=self.audition,
         )  # fmt: skip
@@ -208,11 +235,13 @@ class AuditionWorker:
         drafts_lock: threading.RLock | None = None,
         idle_s: float = AUDITION_IDLE_S,
         poll_s: float = LOCK_POLL_S,
+        vram_s: float = AUDITION_VRAM_S,
     ) -> None:
         self.ws = ws if isinstance(ws, Workspace) else Workspace(Path(ws))
         self.cfg = cfg
         self.idle_s = idle_s
         self.poll_s = poll_s
+        self.vram_s = vram_s
         self._drafts_lock = drafts_lock if drafts_lock is not None else threading.RLock()
         self._cond = threading.Condition()
         self._queue: collections.deque[_Job] = collections.deque()
@@ -222,6 +251,7 @@ class AuditionWorker:
         self._closed = False
         self._thread: threading.Thread | None = None
         self._last_used = time.monotonic()
+        self._clone_checked: dict[str, tuple[float, str | None]] = {}  # name -> (when, problem)
         # worker-thread state: the synth, what it is for, and the GPU lock it holds
         self._synth: LazySynth | None = None
         self._synth_for: tuple[str, str] | None = None
@@ -233,8 +263,11 @@ class AuditionWorker:
     def submit(self, character: int, language: str, version: int, line: Any) -> str:
         """Queue an audition of the draft version on ``line`` (a `TypedLine`, `RealLine` or
         their dict); returns the job id. `NoSuchDraft` when the draft or version doesn't
-        exist, `AuditionRefused` when its backend can't render here or the line isn't
-        usable, `QueueFull` when `MAX_QUEUE` jobs wait. Never waits for the worker."""
+        exist, `AuditionRefused` when its backend isn't installed, is known (within
+        `CLONE_CHECK_TTL_S`) not to run here, or the line isn't usable, `QueueFull` when
+        `MAX_QUEUE` jobs wait. Never waits for the worker, and never runs `clone_problem`
+        (``docker inspect`` can take 30 s): the worker does, and a job it refuses fails with
+        ``refused`` set."""
         parsed: TypedLine | RealLine = (
             line if isinstance(line, TypedLine | RealLine) else _LINE.validate_python(line)
         )
@@ -243,7 +276,7 @@ class AuditionWorker:
         except DraftError as e:
             raise NoSuchDraft(str(e)) from None
         v = self._version(character, language, version)
-        self._renderer(character, language, v)
+        self._renderer(character, language, v, probe=False)
         self._resolve_line(character, language, parsed)
         job = _Job(
             id=secrets.token_hex(8), character=character, language=language, version=version,
@@ -294,14 +327,15 @@ class AuditionWorker:
             return j.snapshot()
 
     def release(self) -> None:
-        """Let go of the GPU: the queued and waiting jobs are cancelled, the model is
-        unloaded (after a render already running) and the lock released."""
+        """Let go of the GPU: the queued jobs and a job that hasn't started rendering
+        (preparing, waiting for the lock or for room on the card, loading) are cancelled, the
+        model is unloaded (after a render already running) and the lock released."""
         with self._cond:
             for j in self._queue:
                 j.state, j.message = "cancelled", "the GPU was released"
             self._queue.clear()
             cur = self._current
-            if cur is not None and cur.state == "waiting":
+            if cur is not None and cur.state not in FINISHED and not cur.rendering:
                 cur.cancel = True
             self._release = True
             self._cond.notify_all()
@@ -324,6 +358,15 @@ class AuditionWorker:
     def status(self) -> GpuStatus:
         index = int(self.cfg.gpu_device)
         holder = gpulock.current_holder(index)
+        left = gpulock.leftover_holder(index) if holder is None else None
+        named: str | None = f"pid {holder[0]} ({holder[1]})" if holder else None
+        if left is not None:
+            pid, what, found = left
+            listed = ", ".join(f"pid {p} ({cmd[:200]})" for p, cmd in found)
+            named = (
+                f"leftover of pid {pid} ({what}){': ' + listed if listed else ''}; kill it or wait"
+            )
+            holder = (pid, what)
         with self._cond:
             synth = self._synth
             loaded = synth is not None and (synth.inst is not None or self._gpu_held)
@@ -339,10 +382,14 @@ class AuditionWorker:
                 loaded_backend=synth.bc.backend if loaded and synth is not None else None,
                 device=synth.device if loaded and synth is not None else None,
                 state=state,
-                holder=f"pid {holder[0]} ({holder[1]})" if holder else None,
+                holder=named,
                 holder_pid=holder[0] if holder else None,
                 holder_job=holder[1] if holder else None,
-                ours=holder is not None and holder[0] == os.getpid() and self._gpu_held,
+                ours=left is None
+                and holder is not None
+                and holder[0] == os.getpid()
+                and self._gpu_held,
+                leftover=left is not None,
                 queued=len(self._queue),
                 running=cur.id if cur is not None else None,
                 unload_in_s=None if unload is None else round(unload, 1),
@@ -374,10 +421,13 @@ class AuditionWorker:
         return v
 
     def _renderer(
-        self, character: int, language: str, v: DraftVersion
+        self, character: int, language: str, v: DraftVersion, *, probe: bool
     ) -> tuple[Card, type[Synthesizer], str]:
         """The version's card, the class that renders it (``[tts] engines`` applied) and its
-        device; `AuditionRefused` when that backend isn't installed or can't run here."""
+        device; `AuditionRefused` for a card that isn't a clone (D41, a hand-edited draft
+        included), or a backend that isn't installed or can't run here. ``probe`` runs
+        `clone_problem` when its answer for the backend is stale (the worker); without it only
+        a fresh answer counts (`submit`, on the server's request thread)."""
         from fukikae.backends import loader
         from fukikae.cards import auto
         from fukikae.cards.card import CardError
@@ -396,6 +446,10 @@ class AuditionWorker:
             engines = tts_engines(self.cfg)
         except (CardError, ConfigError) as e:
             raise AuditionRefused(f"{who}: {e}") from None
+        if card.voice.source != "clone":
+            raise AuditionRefused(
+                f"{who}: card {v.card_id} is a {card.voice.source} voice, not a clone; {never}"
+            )
         name = engines.get(card.voice.backend, card.voice.backend)
         try:
             loader.backend_class("tts", name)
@@ -407,7 +461,7 @@ class AuditionWorker:
             cls = check_loaded_card(store, card, v.card_id, who, language, engines)
         except CardError as e:
             raise AuditionRefused(f"{e}; {never}") from None
-        problem = auto.clone_problem(cls, self.cfg)
+        problem = self._clone_problem(auto.clone_problem, cls, probe)
         if problem is not None:
             raise AuditionRefused(
                 f"{who}: the clone backend {cls.name} can't run here ({problem}); run `fukikae "
@@ -418,6 +472,20 @@ class AuditionWorker:
         except ConfigError as e:
             raise AuditionRefused(f"{who}: {e}") from None
         return card, cls, device
+
+    def _clone_problem(self, check: Any, cls: type[Synthesizer], probe: bool) -> str | None:
+        """``check(cls, cfg)`` (`clone_problem`), its answer reused for `CLONE_CHECK_TTL_S`;
+        without ``probe`` a stale or missing answer is None (not known to fail)."""
+        with self._cond:
+            hit = self._clone_checked.get(cls.name)
+        if hit is not None and time.monotonic() - hit[0] < CLONE_CHECK_TTL_S:
+            return hit[1]
+        if not probe:
+            return None
+        problem = check(cls, self.cfg)
+        with self._cond:
+            self._clone_checked[cls.name] = (time.monotonic(), problem)
+        return problem
 
     def _cues(self, episode: str, language: str) -> list[DubCue]:
         from fukikae.artifacts import read_json
@@ -526,6 +594,8 @@ class AuditionWorker:
         with self._cond:
             if job.state not in FINISHED:
                 job.state = state
+                if state != "waiting":
+                    job.message = None  # a waiting job's note goes once it moves on
             self._cond.notify_all()
 
     def _check_cancel(self, job: _Job) -> None:
@@ -545,35 +615,40 @@ class AuditionWorker:
         started = time.monotonic()
         state: JobState = "failed"
         message: str | None = None
+        refused = False
+        synth: _AuditionSynth | None = None
         try:
             self._check_cancel(job)
             v = self._version(job.character, job.language, job.version)
             prep = self._prepare(job, v)
+            self._check_cancel(job)  # cancelled or released while preparing
             r = prep.job
             want = (r.cls.name, prep.device)
-            if self._synth is not None and self._synth_for != want:
-                self._unload()
-            if self._synth is None:
-                self._synth = _AuditionSynth(
-                    self, job, backend_config(self.cfg, r.cls.name), prep.device, self.cfg
+            if isinstance(self._synth, _AuditionSynth) and self._synth_for == want:
+                synth = self._synth
+            else:
+                # Another backend: the current one is unloaded only if a render needs this one
+                # (`_AuditionSynth.get`), so a line cached on it unloads nothing.
+                synth = _AuditionSynth(
+                    self, want, backend_config(self.cfg, r.cls.name), prep.device, self.cfg
                 )
-                self._synth_for = want
-            assert isinstance(self._synth, _AuditionSynth)
-            self._synth.job = job
+            synth.job = job
             cache = self.ws.root / ".fukikae" / "tts-cache"
             cache.mkdir(parents=True, exist_ok=True)
             out = auditions_dir(self.ws)
             out.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(out, 0o700)  # owner-only on every use, as save_draft does the drafts dir
             ref_dir = out / "ref"
             ref_dir.mkdir(exist_ok=True, mode=0o700)
+            os.chmod(ref_dir, 0o700)
             got = render_line(
-                r, self._synth, cache, _store(self.ws), speedup=max_speedup(self.cfg),
+                r, synth, cache, _store(self.ws), speedup=max_speedup(self.cfg),
                 ref_dir=ref_dir, rates=SpeechRates(),
             )  # fmt: skip
             wav = f"{got.key}.wav"
+            # a hard link shares the cache file's inode, so its mode is left alone: the
+            # auditions dir (0700) is what keeps it owner-only
             TtsStage._link(cache / wav, out / wav)
-            with contextlib.suppress(OSError):
-                os.chmod(out / wav, 0o600)
             est = prep.line
             audition = Audition(
                 job=job.id, line=job.line, backend=r.cls.name, card_id=r.card_id,
@@ -595,15 +670,21 @@ class AuditionWorker:
             state = "cancelled"
             message = "the GPU was released" if self._release else "cancelled"
         except AuditionRefused as e:
+            message, refused = str(e), True
+        except (gpulock.GpuBusy, VramTimeout) as e:
             message = str(e)
         except Exception as e:  # noqa: BLE001 (the job fails; the worker goes on)
             log.exception("audition %s failed", job.id)
             message = f"{type(e).__name__}: {e}"
             self._unload()  # a worker that failed may be dead: start clean
+        if synth is not None and synth is not self._synth:
+            synth.close()  # a backend never loaded (every line cached): nothing to keep
+        if not (self._synth is not None and self._synth.inst is not None):
+            self._unload()  # never the lock held with no model loaded
         total = time.monotonic() - started
         with self._cond:
             job.render_s = round(max(0.0, total - (job.waited_s or 0.0) - (job.load_s or 0.0)), 3)
-            job.state, job.message = state, message
+            job.state, job.message, job.refused = state, message, refused
             self._cond.notify_all()
         a = job.audition
         log.info(
@@ -625,7 +706,7 @@ class AuditionWorker:
             tag_events,
         )
 
-        card, cls, device = self._renderer(job.character, job.language, v)
+        card, cls, device = self._renderer(job.character, job.language, v, probe=True)
         cue_in, episode = self._resolve_line(job.character, job.language, job.line)
         takes_audio = "emotion_audio" in cls.capabilities_for(card.voice.source)
         operator = TtsStage.operator_state(self.ws.root)[0]
@@ -661,7 +742,8 @@ class AuditionWorker:
             if cue_in is not None and episode is not None:
                 d = cue_in.delivery
                 delivery = Delivery(reference=d.reference, emotion=d.emotion,
-                                    emotion_confidence=d.emotion_confidence)  # fmt: skip
+                                    emotion_confidence=d.emotion_confidence,
+                                    direction=d.direction)  # fmt: skip
                 if takes_audio:
                     assert vocals is not None
                     line = line_genders(vocals, [cue_in], self.ws.root)[cue_in.id]
@@ -728,7 +810,10 @@ class AuditionWorker:
 
     def _take_gpu(self, job: _Job, device: str) -> None:
         """Take the card's lock before a model loads on it, waiting while another job holds
-        it (the job ``waiting``, cancellable) and failing on a leftover job (`GpuBusy`)."""
+        it (the job ``waiting``, cancellable). A busy lock whose file names a live holder, or
+        nobody yet (a holder between its ``flock`` and its line, or letting go), is tried
+        again; only what is left of a job that exited fails the job (`gpulock.GpuLeftover`,
+        named as gpulock's leftover scan names it)."""
         if not device.startswith("cuda") or self._gpu_held:
             return
         index = int(self.cfg.gpu_device)
@@ -743,16 +828,16 @@ class AuditionWorker:
                 )
                 self._gpu_held = True
                 break
+            except gpulock.GpuLeftover:
+                raise  # waiting won't free it: say who to kill
             except gpulock.GpuBusy:
                 holder = gpulock.current_holder(index)
-                if holder is None:
-                    raise  # a leftover job, or a holder that died: say so, don't wait
+                who = f"pid {holder[0]} ({holder[1]})" if holder else "another fukikae job"
                 waited = True
                 self._set(job, "waiting")
                 now = time.monotonic()
                 if logged is None or now - logged >= gpulock.WAIT_LOG_S:
-                    log.warning("audition %s: waiting for GPU %d, held by pid %d (%s)",
-                                job.id, index, holder[0], holder[1])  # fmt: skip
+                    log.warning("audition %s: waiting for GPU %d, held by %s", job.id, index, who)
                     logged = now
                 with self._cond:
                     if not (job.cancel or self._closed):
@@ -781,21 +866,56 @@ class AuditionWorker:
                     self._cond.notify_all()
 
     def _record(self, job: _Job, audition: Audition) -> None:
-        """Append the audition to its draft version, under the drafts lock."""
+        """Append the audition to its draft version (the same number and card: a draft
+        replaced meanwhile gets nothing), under the drafts lock; then prune the emotion clips
+        no draft's auditions use (`_prune_refs`)."""
+
+        def ours(v: DraftVersion) -> bool:
+            return v.n == job.version and v.card_id == audition.card_id
+
         with self._drafts_lock:
             try:
                 draft = load_draft(self.ws, job.character, job.language)
             except (DraftError, OSError, ValueError):
                 log.exception("audition %s: its draft can't be read; not recorded", job.id)
                 return
-            if draft is None or not any(v.n == job.version for v in draft.versions):
+            if draft is None or not any(ours(v) for v in draft.versions):
+                log.info("audition %s: its draft version is gone; not recorded", job.id)
                 return
             versions = [
-                v.model_copy(update={"auditions": [*v.auditions, audition]})
-                if v.n == job.version else v
+                v.model_copy(update={"auditions": [*v.auditions, audition]}) if ours(v) else v
                 for v in draft.versions
             ]  # fmt: skip
             save_draft(self.ws, draft.model_copy(update={"versions": versions}))
+            self._prune_refs()
+
+    def _prune_refs(self) -> None:
+        """Delete the files of ``auditions/ref/`` that no saved draft's auditions use. A
+        render cuts its emotion prompt there as ``<cue id>.wav`` (``typed.wav`` for a typed
+        line's), so the names kept are those of every audition's line. Runs on the worker
+        thread, under the drafts lock, after the worker saves a draft: never during one of
+        its renders, which read those files."""
+        from fukikae.artifacts import read_json
+
+        ref = auditions_dir(self.ws) / "ref"
+        if not ref.is_dir():
+            return
+        keep: set[str] = set()
+        for path in sorted(drafts_dir(self.ws).glob("*.json")):
+            try:
+                draft = read_json(path, Draft)
+            except (OSError, ValueError):
+                return  # a draft that can't be read may use any of them: keep all
+            for v in draft.versions:
+                for a in v.auditions:
+                    if isinstance(a.line, RealLine):
+                        keep.add(f"{a.line.cue_id}.wav")
+                    elif a.line.emotion_from is not None:
+                        keep.add(f"{TYPED_CUE_ID}.wav")
+        for f in ref.iterdir():
+            if f.name not in keep and not f.is_dir():
+                with contextlib.suppress(OSError):
+                    f.unlink()
 
 
 def _store(ws: Workspace) -> Any:
@@ -805,30 +925,90 @@ def _store(ws: Workspace) -> Any:
 
 
 class _AuditionSynth(LazySynth):
-    """The tts stage's `LazySynth`, taking the GPU lock through the worker first (a wait it
-    can report and cancel) and timing the load."""
+    """The tts stage's `LazySynth` for one backend and device (``want``), loaded only when a
+    render needs it: then it unloads the worker's current backend (a backend switch), takes
+    the GPU lock through the worker (a wait it can report and cancel), waits a finite,
+    cancellable time for room on the card (`AuditionWorker.vram_s`) and times the load. A
+    cancel before the first render stops the job; once rendering, the render finishes."""
 
-    def __init__(self, worker: AuditionWorker, job: _Job, bc: Any, device: str, cfg: Config):
+    def __init__(
+        self, worker: AuditionWorker, want: tuple[str, str], bc: Any, device: str, cfg: Config
+    ) -> None:
         super().__init__(bc, device, cfg)
         self.worker = worker
-        self.job = job
+        self.want = want
+        self.job: _Job | None = None
 
     def get(self) -> Synthesizer:
-        if self.inst is None:
-            self.worker._take_gpu(self.job, self.device)
-            self.worker._check_cancel(self.job)
-            self.worker._set(self.job, "loading")
-            t = time.monotonic()
+        w, job = self.worker, self.job
+        assert job is not None
+        if not job.rendering:
+            w._check_cancel(job)
+            if self.inst is None:
+                if w._synth is not self:
+                    w._unload()
+                    with w._cond:
+                        w._synth, w._synth_for = self, self.want
+                w._take_gpu(job, self.device)
+                w._check_cancel(job)
+                w._set(job, "loading")
+                t = time.monotonic()
+                super().get()
+                with w._cond:
+                    job.load_s = round(time.monotonic() - t, 3)
+            with w._cond:  # cancelled while loading: stop before the render
+                if job.cancel or w._closed:
+                    raise _Cancelled
+                job.rendering = True
+            w._set(job, "running")
+        elif self.inst is None:
             super().get()
-            with self.worker._cond:
-                self.job.load_s = round(time.monotonic() - t, 3)
-            self.worker._set(self.job, "running")
         assert self.inst is not None
         return self.inst
+
+    def wait_vram(self, inst: Synthesizer) -> None:
+        """Wait, lock held, for ``inst.vram_mb`` free on the card, polling every ``poll_s``
+        and stopping on a cancel, a release or close; after ``vram_s`` the job fails
+        (`VramTimeout`) naming the processes on the card, and the worker lets go of the
+        lock. The tts stage's wait (``runctx``) is forever when `fukikae studio` sets none."""
+        w, job = self.worker, self.job
+        assert job is not None
+        need = int(inst.vram_mb)
+        if need <= 0:
+            return
+        index = int(self.cfg.gpu_device)
+        started = time.monotonic()
+        logged = False
+        while True:
+            free = free_mb(index)
+            if free >= need:
+                w._set(job, "loading")
+                return
+            waited = time.monotonic() - started
+            if waited >= w.vram_s:
+                using = ", ".join(f"pid {p} ({n})" for p, n in gpu_processes(index))
+                raise VramTimeout(
+                    f"GPU {index} never had room for {inst.name}: it needs {need} MiB free and "
+                    f"had {free} MiB after {waited:.0f} s; using the card: "
+                    f"{using or 'nothing this host can name'}. Free the card and try again"
+                )
+            note = f"waiting for {need} MiB free on GPU {index} ({free} MiB free now)"
+            with w._cond:
+                if job.state not in FINISHED:
+                    job.state, job.message = "waiting", note
+                w._cond.notify_all()
+            if not logged:
+                log.warning("audition %s: %s", job.id, note)
+                logged = True
+            with w._cond:
+                if job.cancel or w._closed:
+                    raise _Cancelled
+                w._cond.wait(max(0.0, min(w.poll_s, w.vram_s - waited)))
 
 
 __all__ = [
     "AUDITION_IDLE_S",
+    "AUDITION_VRAM_S",
     "MAX_QUEUE",
     "AuditionJob",
     "AuditionRefused",

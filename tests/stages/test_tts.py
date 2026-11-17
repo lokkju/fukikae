@@ -1,3 +1,4 @@
+import json
 import shutil
 import wave
 from pathlib import Path
@@ -2057,9 +2058,12 @@ def test_an_unmeasurable_gender_mismatch_builds_no_clone_source(ep, monkeypatch,
 
 def test_stage_output_unchanged_after_render_line_refactor(ep, monkeypatch):
     """Every spoken cue renders through `render_line` (the path auditions share, Task 19), and
-    the plan records exactly what it returned."""
+    the plan records exactly what it returned. The first run's plan is the one the stage
+    wrote before the refactor (``tests/fixtures/tts_plan_golden.json``, made at 71ae801)."""
     TtsStage(CFG).run(ep, CFG)  # auto-assigns, renders
     before = (ep.work / "07-tts" / "plan.json").read_bytes()
+    golden = Path(__file__).parent.parent / "fixtures" / "tts_plan_golden.json"
+    assert json.loads(before) == json.loads(golden.read_text(encoding="utf-8"))
     seen: dict[str, tts.RenderedLine] = {}
     real = tts.render_line
 

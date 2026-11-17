@@ -54,8 +54,12 @@ serves; listing cuts nothing.
 Auditions (`fukikae.studio.audition`): ``POST /api/auditions`` checks the draft version and
 the line and queues a job for the server's one `AuditionWorker`, answering 202 at once; the
 page polls ``/api/auditions/<job>``, never waits on a render, and can cancel a job.
+A backend the worker finds can't run here fails the job with ``refused`` set (the check can
+take 30 s, so it never runs on a request thread), and a submit for it is then a 422 at once.
 ``/api/gpu`` reports the worker and who holds the card (read from the lock file, never
-waiting on it); ``/api/gpu/release`` unloads the model and lets go of the GPU. An audition's
+waiting on it; a file naming a process that exited while the lock is still held is reported
+as ``leftover of pid N``); ``/api/gpu/release`` cancels what hasn't started rendering,
+unloads the model and lets go of the GPU. An audition's
 audio is served at ``/audition/<key>.wav`` (16 hex, the render's cache key) from
 ``<ws>/studio/auditions``, opened the way ``/audio`` opens a clip, with the same token check
 and Range handling, only for the names this server's worker rendered or a draft it served
