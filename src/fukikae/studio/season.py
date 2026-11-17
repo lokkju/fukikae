@@ -11,7 +11,8 @@ characters, an ignored character never paired), split suggestions for a bimodal 
 cluster (`pitch.bimodal`), names evidence (`fukikae.names.flags`, shared with `names show`)
 and flags, among them a pitch split's new character needing an identity (``identity``, until
 it is reviewed) and an operator split the names stage skipped because the diarize cluster
-changed since it was decided (``split``). Extras clusters are listed per episode with their
+changed since it was decided (``split``), and the ``<ws>/cast.toml`` entry it matches, a
+suggestion only (`fukikae.studio.cast`). Extras clusters are listed per episode with their
 tier and samples. ``queue`` orders the characters for review (`order_queue`).
 
 An episode without its vocals stem is still listed, with a note, and gives no samples or pitch.
@@ -38,7 +39,9 @@ ever proposed (D41). `load_or_build` rebuilds it when its inputs' digest changes
 episode's assignments, turns, transcripts, names files, cues, tts plan and run, dropped
 hallucinations and manifest, the vocals' size and time, the source video's path, size and
 time, the resolved config (profile, user config and ``fukikae.toml``, `config_digest`,
-without ``[review]``) and the registry's contents.
+without ``[review]``), the registry's contents and ``<ws>/cast.toml``. A ``cast.toml`` that
+can't be read leaves the cast empty and says why (`SeasonDoc.cast_error`); the index still
+builds.
 """
 
 from __future__ import annotations
@@ -81,7 +84,7 @@ if TYPE_CHECKING:
     from fukikae.registry.store import Character, Registry
 
 # Bumped when the index built from the same inputs changes shape or content.
-SEASON_VERSION = 4
+SEASON_VERSION = 5
 # Registry centroid cosine at or over which two characters are suggested as one (spec, Part B).
 MERGE_SUGGEST_COS = 0.5
 MERGE_NEAREST = 3  # merge suggestions per character, nearest first
@@ -706,6 +709,7 @@ def inputs_digest(
     docstring), the target language, the clip count and `SEASON_VERSION`."""
     from fukikae.pitch import VERSION as PITCH_VERSION
     from fukikae.registry.store import Registry
+    from fukikae.studio.cast import cast_digest
 
     w = _workspace(ws)
     episodes: dict[str, Any] = {}
@@ -741,6 +745,7 @@ def inputs_digest(
         "episodes": episodes,
         "registry": registry,
         "source_scan": scan.note,
+        "cast": cast_digest(w),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -1115,10 +1120,16 @@ def build_season(
     from fukikae.cards.store import CardStore
     from fukikae.registry.store import Registry, alias_key
     from fukikae.studio.apply import row_digest
+    from fukikae.studio.cast import CastError, mark_ambiguous, match_cast, read_cast
 
     w = _workspace(ws)
     scan = _sources(cfg, sources)
     digest = inputs_digest(w, cfg, clips=clips, sources=scan)
+    cast_error: str | None = None
+    try:
+        cast = read_cast(w)
+    except CastError as e:
+        cast, cast_error = [], str(e)
     episodes: list[EpisodeEntry] = []
     eps: dict[str, _Episode] = {}
     for e in episode_ids(w):
@@ -1152,6 +1163,7 @@ def build_season(
             cards, card_flags = _card_infos(w, reg, store, speaking)
             merges = _merges(index, reg)
             names = _names_evidence(w, eps, reg)
+            matches = mark_ambiguous({cid: match_cast(cast, index[cid]) for cid in speaking})
             for cid in speaking:
                 c = index[cid]
                 per: dict[str, EpisodeSpeech] = {}
@@ -1203,6 +1215,7 @@ def build_season(
                     samples=_spread_samples(w, eps, turns_by_ep, clips),
                     gender=_gender(c, tracks), cards=cards.get(cid, []),
                     suggestions=suggestions, names=ev.lines, flags=flags,
+                    cast=matches[cid],
                 ))  # fmt: skip
     doc = SeasonDoc(
         workspace=str(w.root),
@@ -1212,6 +1225,8 @@ def build_season(
         characters=characters,
         extras=extras,
         queue=order_queue(characters),
+        cast=cast,
+        cast_error=cast_error,
     )
     prune_clips(w, doc)
     return doc

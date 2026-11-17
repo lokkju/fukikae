@@ -1050,12 +1050,13 @@ git -C $REPO commit -m "feat(run): opt-in identity and voices gates for the stud
 
 **Files:**
 - Create: `src/fukikae/studio/cast.py`
-- Modify: `src/fukikae/studio/season.py`, `src/fukikae/studio/model.py`, `src/fukikae/studio/static/app.js`
+- Modify: `src/fukikae/studio/season.py`, `src/fukikae/studio/model.py`, `src/fukikae/studio/static/index.html` (the placeholder; `app.js` waits on D47)
 - Test: `tests/studio/test_cast.py`
 
 **Interfaces:**
 - `CastEntry(name, gender: Literal["f","m"] | None, external_id: str | None, aliases: list[str])`; `read_cast(ws) -> list[CastEntry]` from `<ws>/cast.toml` (`[[cast]]`), absent file gives `[]`.
 - `SeasonDoc` gains `cast: list[CastEntry]`; the identity panel offers cast names in the name field, the queue header shows "cast lists N speaking roles; this season has M characters", and a cast gender is a one-click `gender` decision. Nothing is applied without the click; an applied cast gender is `gender_by = "operator"`.
+- As built (the page itself waits on D47, so there is no `app.js` yet): `read_cast` is strict (only `[[cast]]`, only the four keys, unknown keys fail with the file and the entry's line, a voice key such as `voice`, `card` or `stock` refused with D41's reason, every name and alias keying someone and none listed twice, no external id twice); `CastEntry` also records its `line`. `SeasonDoc` gains `cast` and `cast_error` (a broken file leaves the cast empty and the index still builds), `CharacterEntry` gains `cast: CastMatch | None` (by external id, name or alias; `gender` offered only when the operator stored none and it differs from the stored one), `cast.toml` joins the index inputs (`SEASON_VERSION` 5), and `cast_gender_decision(entry)` and `queue_header(doc)` give the page its click and its header. Cast aliases only match; they never become registry aliases (names evidence), and only the studio reads the file. Review fixes: a name or alias match is skipped when both sides carry different external ids; `CastMatch.ambiguous_with` names the other characters matching one entry; the file is read non-blocking, regular files only, at most `FILE_CAP + 1` bytes (the index digest too, `cast_digest`); a UTF-8 BOM is accepted.
 
 - [ ] **Step 1: Write the failing tests**: `test_read_cast_validates_genders`; `test_missing_cast_file_is_empty`; `test_season_doc_carries_the_cast`; `test_cast_gender_is_never_applied_without_a_decision`.
 - [ ] **Step 2: Run to verify they fail.** `uv run --directory $REPO pytest tests/studio/test_cast.py -v`. Expected: FAIL.
@@ -1064,7 +1065,7 @@ git -C $REPO commit -m "feat(run): opt-in identity and voices gates for the stud
 - [ ] **Step 5: Commit**
 
 ```bash
-git -C $REPO add src/fukikae/studio/cast.py src/fukikae/studio/season.py src/fukikae/studio/model.py src/fukikae/studio/static/app.js tests/studio/test_cast.py
+git -C $REPO add src/fukikae/studio/cast.py src/fukikae/studio/season.py src/fukikae/studio/model.py src/fukikae/studio/static/index.html tests/studio/test_cast.py
 git -C $REPO commit -m "feat(studio): name and gender suggestions from a hand-written cast.toml"
 ```
 
