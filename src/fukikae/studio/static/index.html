@@ -105,7 +105,8 @@ or <code>version-changed</code> when the version is another card than
 speech, D41, or audio named more than once) or the version records no digest; 423 while a
 run or another writer holds the studio lock.</li>
 <li><code>GET /api/backends</code>: the clone backends and each one's voice keys, with type
-and range.</li>
+and range, and whether it can run here (<code>checked</code> false until the check, run in the
+background, has answered).</li>
 <li><code>POST /api/auditions</code>: queue an audition of a draft version on a line,
 <code>{character, language, version, line}</code>, where <code>line</code> is
 <code>{kind: "real", episode, cue_id}</code> (one of the character's translated cues,

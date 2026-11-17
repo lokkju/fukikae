@@ -270,7 +270,7 @@ def run_stages(
     from fukikae.studio.apply import run_lock
 
     # Held shared for the whole call: studio and registry writers take it exclusively and are
-    # refused while a run is in progress (only when the workspace has a studio directory).
+    # refused while a run is in progress; a writer holding it is waited for a bounded time.
     with run_lock(ep.workspace_root):
         refuse_unfinished_decisions(ep.workspace_root, names[:stop])
         return _run_stages(ep, cfg, stages, start, stop, from_stage, gates or {})
@@ -365,7 +365,10 @@ def run_episodes(
     failure no further head starts; a tail already started finishes. ``from_stage`` and
     ``to_stage`` apply to every episode as in ``run_stages``, and so do ``gates``: an episode
     a gate stops (`ReviewRequired`, its result's error) goes no further, and the other
-    episodes go on."""
+    episodes go on. So does one whose run gave up waiting for a studio writer
+    (`studio.apply.StudioLockTimeout`, its result's error)."""
+    from fukikae.studio.apply import StudioLockTimeout
+
     names = [s.name for s in stages]
     for label, value in (("from_stage", from_stage), ("to_stage", to_stage)):
         if value is not None and value not in names:
@@ -401,6 +404,10 @@ def run_episodes(
             results[ep.id].ran += e.ran
             results[ep.id].error = e
             progress.episode(ep.id, progress.STOPPED)
+        except StudioLockTimeout as e:
+            results[ep.id].error = e
+            progress.episode(ep.id, progress.STOPPED)
+            log.error("%s: %s", ep.id, e)
         except BaseException as e:
             results[ep.id].error = e
             failed.set()
@@ -419,6 +426,10 @@ def run_episodes(
                     results[ep.id].ran += run_stages(ep, cfg, head, head_from, gates=gates)
             except ReviewRequired as e:
                 results[ep.id].ran += e.ran
+                results[ep.id].error = e
+                progress.episode(ep.id, progress.STOPPED)
+                continue
+            except StudioLockTimeout as e:  # this episode stops; the next one tries again
                 results[ep.id].error = e
                 progress.episode(ep.id, progress.STOPPED)
                 continue

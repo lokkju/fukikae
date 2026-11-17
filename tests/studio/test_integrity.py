@@ -183,15 +183,16 @@ def test_a_decision_is_refused_while_a_run_is_in_progress(ws):
     apply_decision(ws, decision_for(ws, "lock", character=3))  # the run is over
 
 
-def test_a_run_creates_only_the_lock_file_and_nothing_without_a_studio(ws):
+def test_a_run_creates_only_the_studio_dir_and_its_lock_file(ws):
     job.run_stages(_ep(ws, "S01E01"), ws.config, [_Stage("diarize")])
-    assert not apply_mod.studio_dir(ws).exists()
-    apply_mod.studio_dir(ws).mkdir()
+    assert [p.name for p in apply_mod.studio_dir(ws).iterdir()] == [".lock"]
     job.run_stages(_ep(ws, "S01E01"), ws.config, [_Stage("diarize")], from_stage="diarize")
     assert [p.name for p in apply_mod.studio_dir(ws).iterdir()] == [".lock"]
 
 
-def test_a_run_is_refused_while_a_writer_holds_the_lock_and_names_it(ws):
+def test_a_run_gives_up_on_a_writer_that_holds_the_lock_too_long_and_names_it(ws, monkeypatch):
+    monkeypatch.setattr(apply_mod, "RUN_LOCK_WAIT_S", 0.2)
+    monkeypatch.setattr(apply_mod, "RUN_LOCK_POLL_S", 0.05)
     with (
         apply_mod._studio_lock(ws, "`fukikae registry merge`"),
         pytest.raises(ValueError, match=r"`fukikae registry merge` \(pid \d+\)"),

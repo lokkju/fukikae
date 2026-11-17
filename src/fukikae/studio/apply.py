@@ -20,9 +20,10 @@ so `resume_incomplete` (`fukikae studio resume`) redoes only what is left; a pen
 whose commit never landed is logged as aborted, with nothing to redo. Until every record is
 finished, `apply_decision`, `fukikae registry merge` (`apply_registry_change`, the same
 records) and `fukikae run` (`unfinished_message`) refuse to start. Writers hold
-``studio/.lock`` exclusively and `job.run_stages` holds it shared (`run_lock`), so neither
-runs beside the other. A replay skips what the registry's `decision_marks` say landed
-(`_replay_state`), never what the log alone says.
+``studio/.lock`` exclusively, without waiting, and `job.run_stages` holds it shared
+(`run_lock`, which waits a bounded time for a writer), so neither runs beside the other. A
+replay skips what the registry's `decision_marks` say landed (`_replay_state`), never what
+the log alone says.
 """
 
 from __future__ import annotations
@@ -30,8 +31,10 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager, suppress
@@ -68,6 +71,8 @@ from fukikae.studio.model import (
     parse_decision,
 )
 from fukikae.workspace import Workspace
+
+log = logging.getLogger(__name__)
 
 
 class DecisionError(Exception):
@@ -1227,12 +1232,49 @@ def _lock_path(ws: Workspace | Path) -> Path:
     return root / "studio" / ".lock"
 
 
+# How long a run waits for a writer that holds ``studio/.lock`` (a decision takes seconds),
+# and how often it tries again meanwhile; studio and registry writers never wait.
+RUN_LOCK_WAIT_S = 120.0
+RUN_LOCK_POLL_S = 0.25
+
+
+class StudioLockTimeout(ValueError):  # noqa: N818 (a refusal, named as StudioBusy is)
+    """A run waited `RUN_LOCK_WAIT_S` for a studio or registry writer and it still holds
+    ``studio/.lock``: the episode stops here, and later episodes still try."""
+
+
+class _LockSymlink(OSError):  # noqa: N818
+    """``studio/.lock`` is a symlink, and is never opened through one."""
+
+
+def _open_lock(path: Path) -> Any:
+    """``studio/.lock`` opened for appending, created owner-only, never through a symlink
+    (`_LockSymlink`), so a writer's truncate can't reach another file. Its directory is made
+    when missing, owner-only."""
+    import errno
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as e:
+        if e.errno == errno.ELOOP or path.is_symlink():
+            raise _LockSymlink(
+                f"{path} is a symlink; the studio lock is never opened through one. Remove it "
+                "(it holds nothing) and try again"
+            ) from None
+        raise
+    return os.fdopen(fd, "a", encoding="utf-8")
+
+
 def _holder(path: Path) -> str | None:
     """Who holds ``studio/.lock`` exclusively, as the writer wrote it there."""
     try:
-        text = path.read_text(encoding="utf-8").strip()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
     except OSError:
         return None
+    with os.fdopen(fd, encoding="utf-8", errors="replace") as f:
+        text = f.read(4096).strip()
     return text or None
 
 
@@ -1255,6 +1297,13 @@ def _lock_refusal(ws: Workspace, path: Path, f: Any) -> StudioBusy:
     )
 
 
+def _writer_lock_file(path: Path) -> Any:
+    try:
+        return _open_lock(path)
+    except _LockSymlink as e:
+        raise StudioBusy(f"{e}; nothing changed") from None
+
+
 @contextmanager
 def _studio_lock(ws: Workspace, holder: str) -> Iterator[None]:
     """``studio/.lock``, held exclusively by a writer from before its write-ahead record to
@@ -1262,8 +1311,7 @@ def _studio_lock(ws: Workspace, holder: str) -> Iterator[None]:
     name it. Taken without waiting: another writer, or a `fukikae run` (which holds it
     shared), is `StudioBusy`."""
     path = _lock_path(ws)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
+    with _writer_lock_file(path) as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as e:
@@ -1280,11 +1328,18 @@ def _studio_lock(ws: Workspace, holder: str) -> Iterator[None]:
 
 
 @contextmanager
-def studio_lock(ws: Workspace | Path, holder: str) -> Iterator[None]:
+def studio_lock(
+    ws: Workspace | Path, holder: str, *, refuse_unfinished: bool = False
+) -> Iterator[None]:
     """`_studio_lock` for the `fukikae registry` commands that change identity outside a
-    recorded decision (rename, alias, lock, kind, gender): their registry write and stale
-    marks never run beside a decision or a `fukikae run`."""
-    with _studio_lock(_workspace(ws), holder):
+    recorded decision (rename, alias, lock, kind, gender, resolve, cluster): their registry
+    write and stale marks never run beside a decision or a `fukikae run`. With
+    ``refuse_unfinished`` (resolve, cluster: they rewrite assignments), `UnfinishedRecords`
+    while a decision's steps are left, as `fukikae run` refuses."""
+    w = _workspace(ws)
+    with _studio_lock(w, holder):
+        if refuse_unfinished:
+            _refuse_if_incomplete(w)
         yield
 
 
@@ -1293,8 +1348,7 @@ def _no_writer(ws: Workspace) -> Iterator[None]:
     """``studio/.lock`` held shared, for reading the log: no writer is live while it is held,
     so a pending record is never one being written. A `fukikae run` holds it shared too."""
     path = _lock_path(ws)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
+    with _writer_lock_file(path) as f:
         try:
             fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError as e:
@@ -1310,27 +1364,72 @@ def _no_writer(ws: Workspace) -> Iterator[None]:
 def run_lock(root: Path) -> Iterator[bool]:
     """``studio/.lock`` held shared for one `job.run_stages` call, so no studio or registry
     writer changes assignments, manifests or the registry under a run (they take it
-    exclusively, without waiting, and are refused). Only when ``<root>/studio`` exists: a run
-    creates the lock file at most, never the studio. ValueError, naming the writer, while one
-    holds it. Yields whether it is held."""
+    exclusively, without waiting, and are refused). The run creates ``<root>/studio`` and the
+    lock file (nothing else) when they are missing, so a decision made during the run's
+    first episode is refused too. A writer holding it is waited for, polling every
+    `RUN_LOCK_POLL_S`, for up to `RUN_LOCK_WAIT_S` (a decision takes seconds); still held
+    after that is `StudioLockTimeout`, naming the writer. ValueError for a symlinked lock
+    file. Yields True (it is held)."""
     path = _lock_path(root)
-    if not path.parent.is_dir():
-        yield False
-        return
-    with path.open("a", encoding="utf-8") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError as e:
-            who = _holder(path) or "a `fukikae studio` or `fukikae registry` command"
-            raise ValueError(
-                f"{who} is applying a decision to {root} ({path} is held); its registry change "
-                "and the stale marks and file changes after it must finish before a run "
-                "starts; try again when it is done"
-            ) from e
+    try:
+        f = _open_lock(path)
+    except _LockSymlink as e:
+        raise ValueError(str(e)) from None
+    with f:
+        deadline = time.monotonic() + RUN_LOCK_WAIT_S
+        logged = False
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                who = _holder(path) or "a `fukikae studio` or `fukikae registry` command"
+                if time.monotonic() >= deadline:
+                    raise StudioLockTimeout(
+                        f"{who} is applying a decision to {root} ({path} is held), and the run "
+                        f"waited {RUN_LOCK_WAIT_S:g} s for it; its registry change and the stale "
+                        "marks and file changes after it must finish before a run starts; "
+                        "run this episode again when it is done"
+                    ) from None
+                if not logged:
+                    log.info("waiting for %s to finish (%s is held)", who, path)
+                    logged = True
+                time.sleep(RUN_LOCK_POLL_S)
         try:
             yield True
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def merged_into(ws: Workspace | Path, character_id: int, live: Iterable[int]) -> int | None:
+    """The live character a character that is gone from the registry was merged into, as the
+    decisions log records it (a studio merge's ``drop``/``keep``, or the character map of any
+    merge's remap steps, `fukikae registry merge` included), following later merges; None
+    when the log says nothing of it or can't be read. Read-only, and takes no lock."""
+    alive = set(live)
+    try:
+        recs = _log_records(_workspace(ws))
+    except LogUnreadable:
+        return None
+    moved: dict[int, int] = {}
+    for rec in recs:
+        dec = rec.get("decision") or {}
+        drop, keep = dec.get("drop"), dec.get("keep")
+        if dec.get("op") == "merge" and isinstance(drop, int) and isinstance(keep, int):
+            moved[drop] = keep
+        for step in rec.get("steps") or []:
+            if isinstance(step, dict) and step.get("do") == "remap":
+                for pair in step.get("character_map") or []:
+                    if len(pair) == 2 and all(isinstance(x, int) for x in pair):
+                        moved[pair[0]] = pair[1]
+    cur, seen = character_id, {character_id}
+    while cur not in alive:
+        nxt = moved.get(cur)
+        if not isinstance(nxt, int) or nxt in seen:
+            return None
+        seen.add(nxt)
+        cur = nxt
+    return cur if cur != character_id else None
 
 
 def incomplete_records(ws: Workspace | Path) -> list[dict[str, Any]]:
@@ -1390,11 +1489,13 @@ def _append_log(ws: Workspace, rec: dict[str, Any]) -> None:
     own. On OSError the file is cut back to its size before the append, so a failed write
     leaves no half record behind."""
     path = decisions_log(ws)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)  # owner-only on every write, as save_draft does the drafts dir
     data = (json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8")
     created = not path.exists()
-    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
+        os.fchmod(fd, 0o600)
         size = os.fstat(fd).st_size
         try:
             if size and os.pread(fd, 1, size - 1) != b"\n":

@@ -606,3 +606,53 @@ def test_second_language_falls_back_to_another_operator_card(aud_ws, api, by):
     status, body = api.json("GET", "/api/drafts/1/de")
     assert status == 200 and body["draft"]["base"] == "derived"
     assert body["draft"]["derived_from"] == "en"
+
+
+# --- drafts of a character merged away ---------------------------------------------------------
+
+
+def test_a_draft_of_a_merged_character_is_refused_naming_the_survivor(aud_ws, api):
+    from fukikae.studio.apply import apply_decision, stamp
+    from fukikae.studio.model import parse_decision
+
+    status, body = api.json("GET", "/api/drafts/1/en")
+    assert status == 200, body
+    v = body["draft"]["versions"][-1]
+    with Registry(aud_ws.registry_path) as reg:
+        d = stamp(reg, parse_decision({"op": "merge", "keep": 2, "drop": 1}))
+    apply_decision(aud_ws, d)
+    with Registry(aud_ws.registry_path) as reg:
+        assert 1 not in {c.id for c in reg.characters()}
+
+    calls = [
+        ("GET", "/api/drafts/1/en", None),
+        ("HEAD", "/api/drafts/1/en", None),
+        ("POST", "/api/drafts/1/en/accept/preview", {"version": v["n"], "card_id": v["card_id"]}),
+        ("POST", "/api/drafts/1/en/accept", {"version": v["n"], "card_id": v["card_id"]}),
+        ("POST", "/api/drafts/1/en/versions",
+         {"references": v["references"], "backend": v["backend"], "params": {}}),
+        ("GET", f"/api/drafts/1/en/compare?a=1&b=1&line={quote(json.dumps(_real(E1, 'c10')))}",
+         None),
+        ("POST", "/api/drafts/1/en/reveal", {"a": 1, "b": 2, "line": _real(E1, "c10")}),
+        ("POST", "/api/auditions",
+         {"character": 1, "language": "en", "version": v["n"], "line": _real(E1, "c10")}),
+    ]  # fmt: skip
+    for method, path, payload in calls:
+        if method == "HEAD":
+            assert api.request("HEAD", path)[0] == 409, path
+            continue
+        status, got = api.json(method, path, payload)
+        assert status == 409, (path, status, got)
+        assert got["error"] == "character-merged" and got["merged_into"] == 2, got
+        assert "character 2" in got["message"], got
+    assert not api.server.auditions._jobs  # nothing was queued for the merged character
+    assert api.json("GET", "/api/drafts/2/en")[1].get("error") != "character-merged"
+
+
+def test_a_draft_of_a_character_that_never_existed_is_unknown(aud_ws, api):  # noqa: ARG001
+    status, got = api.json("GET", "/api/drafts/99/en")
+    assert status == 404 and got["error"] == "unknown-character", got
+    status, got = api.json("POST", "/api/auditions",
+                           {"character": 99, "language": "en", "version": 1,
+                            "line": _real(E1, "c10")})  # fmt: skip
+    assert status == 404 and got["error"] == "unknown-character", got

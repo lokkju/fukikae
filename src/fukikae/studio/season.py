@@ -125,6 +125,8 @@ SOURCE_SCAN_TIMEOUT_S = 10.0  # how long a request waits for the source tree sca
 # a temp file a cut left (`fukikae.artifacts.atomic_path`): ``.<sha>.<uuid hex>.tmp.mp4``
 VIDEO_TEMP_NAME = re.compile(r"\.[0-9a-f]{64}\.[0-9a-f]{32}\.tmp\.mp4")
 VIDEO_TEMP_MAX_AGE_S = 3600.0  # older temp files are a killed cut's, and pruned
+# the same for a sample clip's cut in studio/audio: ``.<sha>.<uuid hex>.tmp.wav``
+CLIP_TEMP_NAME = re.compile(r"\.[0-9a-f]{64}\.[0-9a-f]{32}\.tmp\.wav")
 EXTRA_STATUSES = ("extra", "review")  # clusters with no character: their cues are extras
 
 
@@ -164,6 +166,8 @@ def _last_stage(ws: Workspace, episode: str) -> str | None:
 
 def _audio_dir(ws: Workspace) -> Path:
     d = ws.root / "studio" / "audio"
+    if d.is_symlink():
+        raise ValueError(f"{d} is a symlink; no clip is cut through it. Remove it and rebuild")
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(d, 0o700)
     return d
@@ -1274,10 +1278,12 @@ def prune_clips(ws: Workspace | Path, doc: SeasonDoc) -> list[str]:
     """Delete the clips under ``<ws>/studio/audio`` and ``<ws>/studio/video`` that ``doc`` no
     longer refers to: only regular files named like `sample_name` (``<sha>.wav``) or
     `video_name` (``<sha>.mp4``) directly in those directories, never a symlink, a
-    subdirectory or anything else, and the temp files a killed cut left in studio/video
-    (`VIDEO_TEMP_NAME`) once they are an hour old. Returns the names deleted."""
+    subdirectory or anything else, and the temp files a killed cut left in studio/audio
+    (`CLIP_TEMP_NAME`) and studio/video (`VIDEO_TEMP_NAME`) once they are an hour old.
+    Returns the names deleted."""
     root = _workspace(ws).root / "studio"
     gone = _prune(root / "audio", _clips(doc), CLIP_NAME)
+    gone += _prune(root / "audio", set(), CLIP_TEMP_NAME, older_than=VIDEO_TEMP_MAX_AGE_S)
     gone += _prune(root / "video", set(referenced_videos(doc)), VIDEO_NAME)
     gone += _prune(root / "video", set(), VIDEO_TEMP_NAME, older_than=VIDEO_TEMP_MAX_AGE_S)
     return sorted(gone)
@@ -1323,7 +1329,7 @@ def load_or_build(
     """``season.json`` when its ``inputs_digest`` still matches the workspace, else a fresh
     `build_season`, written there (and passed to ``on_build``). ``sources`` is a scan of the
     ``source`` tree to use (`SourceScanner`); without it the tree is walked."""
-    from fukikae.artifacts import read_json, write_json
+    from fukikae.artifacts import atomic_path, read_json
 
     w = _workspace(ws)
     path = season_path(w)
@@ -1337,8 +1343,12 @@ def load_or_build(
                                                                   sources=scan):  # fmt: skip
             return doc
     doc = build_season(w, cfg, clips=clips, sources=scan)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_json(path, doc)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)  # owner-only, as the decisions log keeps it
+    with atomic_path(path) as tmp:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(doc.model_dump_json(indent=2))
     if on_build is not None:
         on_build(doc)
     return doc

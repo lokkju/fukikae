@@ -256,6 +256,7 @@ class AuditionWorker:
         self._thread: threading.Thread | None = None
         self._last_used = time.monotonic()
         self._clone_checked: dict[str, tuple[float, str | None]] = {}  # name -> (when, problem)
+        self._clone_checking: set[str] = set()  # backends a `clone_status` check is running for
         # worker-thread state: the synth, what it is for, and the GPU lock it holds
         self._synth: LazySynth | None = None
         self._synth_for: tuple[str, str] | None = None
@@ -492,6 +493,37 @@ class AuditionWorker:
         except ConfigError as e:
             raise AuditionRefused(f"{who}: {e}") from None
         return card, cls, device
+
+    def clone_status(self, cls: type[Synthesizer], cfg: Config) -> tuple[bool, str | None]:
+        """(whether it is known, the problem) for ``GET /api/backends``: the answer cached
+        for `CLONE_CHECK_TTL_S` (the worker's own, or an earlier listing's), never computed
+        on the caller's thread. Without a fresh one, `clone_problem` runs with ``cfg`` on a
+        thread of its own (one per backend at a time) and this is (False, None)."""
+        from fukikae.cards import auto
+
+        with self._cond:
+            hit = self._clone_checked.get(cls.name)
+            if hit is not None and time.monotonic() - hit[0] < CLONE_CHECK_TTL_S:
+                return True, hit[1]
+            if cls.name in self._clone_checking:
+                return False, None
+            self._clone_checking.add(cls.name)
+
+        def check() -> None:
+            try:
+                try:
+                    problem = auto.clone_problem(cls, cfg)
+                except Exception as e:  # noqa: BLE001 (reported, never fatal to the listing)
+                    problem = str(e)
+                with self._cond:
+                    self._clone_checked[cls.name] = (time.monotonic(), problem)
+            finally:
+                with self._cond:
+                    self._clone_checking.discard(cls.name)
+
+        threading.Thread(target=check, name=f"fukikae-clone-check-{cls.name}",
+                         daemon=True).start()  # fmt: skip
+        return False, None
 
     def _clone_problem(self, check: Any, cls: type[Synthesizer], probe: bool) -> str | None:
         """``check(cls, cfg)`` (`clone_problem`), its answer reused for `CLONE_CHECK_TTL_S`;

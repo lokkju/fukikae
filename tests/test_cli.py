@@ -298,3 +298,9 @@ def test_backends_setup_options_reach_the_clone_backend_without_a_tts_backend(tm
     assert options["use_fp16"] is True and options["num_beams"] == 2
     assert "max_pause_ms" not in options and "clone_backend" not in options  # stage keys
     assert _worker_setup_options("cosyvoice3", tmp_path) == {}  # [tts] names another backend
+
+
+def test_run_help_shows_the_review_table_name():
+    r = CliRunner().invoke(app, ["run", "--help"], env={"COLUMNS": "200"})
+    assert r.exit_code == 0, r.output
+    assert "[review] identity" in r.stdout, r.stdout

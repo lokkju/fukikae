@@ -283,7 +283,7 @@ def run(
     to_stage: str | None = typer.Option(None, "--to", help="Stop after this stage."),
     no_wait: bool = typer.Option(False, "--no-wait", help="Fail at once if the GPU lacks VRAM."),
 ) -> None:
-    """Run the pipeline stages for one episode, or several in order. With `[review] identity`
+    """Run the pipeline stages for one episode, or several in order. With `\\[review] identity`
     or `voices` on, an episode whose main characters need the studio stops before translate
     or tts (exit code 3, naming them, then once `fukikae studio <ws>` and `fukikae studio
     apply`); the other episodes go on."""

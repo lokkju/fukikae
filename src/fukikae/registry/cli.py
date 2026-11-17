@@ -111,16 +111,18 @@ def _same_dims(dims: dict[str, int], hint: str) -> None:
 
 
 @contextmanager
-def _writing(workspace: Path, command: str) -> Iterator[None]:
+def _writing(workspace: Path, command: str, *, assignments: bool = False) -> Iterator[None]:
     """The studio lock (`studio.apply.studio_lock`) around a registry command's write and its
     stale marks, so neither runs beside a studio decision or a `fukikae run`; refused, with
-    who holds it, rather than waited for."""
-    from fukikae.studio.apply import StudioBusy, studio_lock
+    who holds it, rather than waited for. A command that rewrites ``assignments`` (resolve,
+    cluster) is also refused while a decision's steps are left, as `fukikae run` is."""
+    from fukikae.studio.apply import DecisionRefused, studio_lock
 
     try:
-        with studio_lock(workspace, f"`fukikae registry {command}`"):
+        with studio_lock(workspace, f"`fukikae registry {command}`",
+                         refuse_unfinished=assignments):  # fmt: skip
             yield
-    except StudioBusy as e:
+    except DecisionRefused as e:  # StudioBusy, UnfinishedRecords, an unreadable log
         raise _fail(str(e)) from e
 
 
@@ -144,7 +146,9 @@ def cluster(
         None, "--threshold", help="Cosine distance to join clusters; default 1 - match_threshold."
     ),
 ) -> None:
-    """Seed an empty registry from a whole season at once."""
+    """Seed an empty registry from a whole season at once. Refused while a studio decision or a
+    `fukikae run` holds the studio lock, or a decision is unfinished (`fukikae studio
+    resume`)."""
     import numpy as np
 
     from fukikae.artifacts import read_json, write_json
@@ -181,78 +185,79 @@ def cluster(
     if not_done:
         raise _fail(f"diarize stage not done for {', '.join(not_done)}; run `fukikae run` first")
 
-    with _open(workspace) as reg, reg.transaction():  # all of it, or none of it
-        if reg.actors():
-            raise _fail(
-                "the registry already has actors; batch seeding needs an empty one. "
-                "Use per-episode matching (`fukikae run`, `registry rematch`)."
-            )
-        loaded = {ep.id: load_clusters(identity_inputs(ep.work)[1]) for ep in eps}
-        _same_dims(
-            {
-                e: next((r.shape[1] for r in rows.values() if len(r)), 0)
-                for e, (_, rows) in loaded.items()
-            },
-            "Re-run the older episodes' diarize stage with the configured embedder "
-            "(`fukikae run`), then cluster",
-        )
-        groups = seed_clusters(
-            {eid: ev for eid, (ev, _) in loaded.items()},
-            threshold if threshold is not None else 1.0 - cfg.registry.match_threshold,
-            cfg.registry.min_new_seconds,
-        )
-        member: dict[tuple[str, str], tuple[int, int]] = {}
-        review: dict[tuple[str, str], int] = {}
-        for g in groups:
-            gev: dict[tuple[str, str], ClusterEvidence] = {
-                (e, c): next(x for x in loaded[e][0] if x.cluster == c) for e, c in g
-            }
-            # One character per episode: of a group's clusters in one episode, the one with
-            # the most clean speech is matched; the others go to review and add nothing.
-            keep: dict[str, str] = {}
-            for m in sorted(g, key=lambda m: (-gev[m].clean_seconds, m)):
-                keep.setdefault(m[0], m[1])
-            kept = sorted((e, c) for e, c in keep.items())
-            centroid = mean_embedding(np.concatenate([loaded[e][1][c] for e, c in kept]))
-            assert centroid is not None
-            aid, cid = reg.create_actor_with_character(centroid)
-            for e, c in g:
-                if keep[e] != c:
-                    review[(e, c)] = aid
-                    continue
-                reg.add_exemplars(aid, e, c, loaded[e][1][c], gev[(e, c)].clean_seconds)
-                member[(e, c)] = (aid, cid)
-            reg.recompute_centroid(aid)
-
-    for ep in eps:
-        turns_path = identity_inputs(ep.work)[0]
-        turns = read_json(turns_path, Diarization)
-        evs, _ = loaded[ep.id]
-        out = []
-        for ev in evs:
-            hit = member.get((ep.id, ev.cluster))
-            rev = review.get((ep.id, ev.cluster))
-            out.append(
-                ClusterAssignment(
-                    cluster=ev.cluster,
-                    actor_id=hit[0] if hit else rev,
-                    character_id=hit[1] if hit else None,
-                    score=None,
-                    clean_seconds=ev.clean_seconds,
-                    status="matched" if hit else "review" if rev else "extra",
+    with _writing(workspace, "cluster", assignments=True):
+        with _open(workspace) as reg, reg.transaction():  # all of it, or none of it
+            if reg.actors():
+                raise _fail(
+                    "the registry already has actors; batch seeding needs an empty one. "
+                    "Use per-episode matching (`fukikae run`, `registry rematch`)."
                 )
+            loaded = {ep.id: load_clusters(identity_inputs(ep.work)[1]) for ep in eps}
+            _same_dims(
+                {
+                    e: next((r.shape[1] for r in rows.values() if len(r)), 0)
+                    for e, (_, rows) in loaded.items()
+                },
+                "Re-run the older episodes' diarize stage with the configured embedder "
+                "(`fukikae run`), then cluster",
             )
-        (path,) = stage.outputs(ep)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(
-            path,
-            Assignments(
-                episode=ep.id,
-                threshold=cfg.registry.match_threshold,
-                clusters=out,
-                turns=turns.turns,
-            ),
-        )
+            groups = seed_clusters(
+                {eid: ev for eid, (ev, _) in loaded.items()},
+                threshold if threshold is not None else 1.0 - cfg.registry.match_threshold,
+                cfg.registry.min_new_seconds,
+            )
+            member: dict[tuple[str, str], tuple[int, int]] = {}
+            review: dict[tuple[str, str], int] = {}
+            for g in groups:
+                gev: dict[tuple[str, str], ClusterEvidence] = {
+                    (e, c): next(x for x in loaded[e][0] if x.cluster == c) for e, c in g
+                }
+                # One character per episode: of a group's clusters in one episode, the one with
+                # the most clean speech is matched; the others go to review and add nothing.
+                keep: dict[str, str] = {}
+                for m in sorted(g, key=lambda m: (-gev[m].clean_seconds, m)):
+                    keep.setdefault(m[0], m[1])
+                kept = sorted((e, c) for e, c in keep.items())
+                centroid = mean_embedding(np.concatenate([loaded[e][1][c] for e, c in kept]))
+                assert centroid is not None
+                aid, cid = reg.create_actor_with_character(centroid)
+                for e, c in g:
+                    if keep[e] != c:
+                        review[(e, c)] = aid
+                        continue
+                    reg.add_exemplars(aid, e, c, loaded[e][1][c], gev[(e, c)].clean_seconds)
+                    member[(e, c)] = (aid, cid)
+                reg.recompute_centroid(aid)
+
+        for ep in eps:
+            turns_path = identity_inputs(ep.work)[0]
+            turns = read_json(turns_path, Diarization)
+            evs, _ = loaded[ep.id]
+            out = []
+            for ev in evs:
+                hit = member.get((ep.id, ev.cluster))
+                rev = review.get((ep.id, ev.cluster))
+                out.append(
+                    ClusterAssignment(
+                        cluster=ev.cluster,
+                        actor_id=hit[0] if hit else rev,
+                        character_id=hit[1] if hit else None,
+                        score=None,
+                        clean_seconds=ev.clean_seconds,
+                        status="matched" if hit else "review" if rev else "extra",
+                    )
+                )
+            (path,) = stage.outputs(ep)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_json(
+                path,
+                Assignments(
+                    episode=ep.id,
+                    threshold=cfg.registry.match_threshold,
+                    clusters=out,
+                    turns=turns.turns,
+                ),
+            )
     typer.echo(f"{len(groups)} characters from {len(eps)} episodes")
 
 
@@ -868,7 +873,8 @@ def resolve(
     operator, has an operator alias, an external id, an operator gender or a kind other than
     character, a migrated voice, or a locked or hand-assigned card); every other actor is matched
     against and never merged with another. One registry transaction; assignments.json
-    written after it.
+    written after it. Refused while a studio decision or a `fukikae run` holds the studio
+    lock, or a decision is unfinished (`fukikae studio resume`).
     """
     from fukikae.errors import user_errors
     from fukikae.eval.identity.cli import parse_options
@@ -892,10 +898,11 @@ def resolve(
             f"--matcher {matcher}: resolve runs the batch matcher joint; per-episode matchers "
             "run in the characters stage (`fukikae run`, `registry rematch`)"
         )
-    try:
-        s = resolve_episodes(ws, eps, thr, options=opts)
-    except user_errors() as e:
-        raise _fail(str(e)) from e
+    with _writing(workspace, "resolve", assignments=True):
+        try:
+            s = resolve_episodes(ws, eps, thr, options=opts)
+        except user_errors() as e:
+            raise _fail(str(e)) from e
     typer.echo(
         f"resolved {', '.join(s.episodes)} with joint at {thr:g}: {s.matched} clusters matched "
         f"to existing actors, {len(s.new_actors)} new actors"

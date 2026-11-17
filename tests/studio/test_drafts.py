@@ -387,6 +387,54 @@ def test_backends_endpoint_lists_voice_keys(api):
     }  # fmt: skip
 
 
+def test_backends_never_runs_the_clone_check_on_the_request_thread(api, monkeypatch):
+    """`clone_problem` can take 30 s (``docker inspect``): the listing answers at once from
+    the audition worker's cached answers, a backend not checked yet reports ``checked``
+    false, and the check runs off the request thread, so a later listing has its answer."""
+    import threading
+    import time
+
+    from fukikae.cards import auto
+
+    seen: list[str] = []
+    gate = threading.Event()
+
+    def slow(cls, cfg):  # noqa: ARG001
+        seen.append(threading.current_thread().name)
+        gate.wait(5)
+        return "its worker environment is missing"
+
+    monkeypatch.setattr(auto, "clone_problem", slow)
+    t0 = time.monotonic()
+    status, body = api.json("GET", "/api/backends")
+    assert status == 200 and time.monotonic() - t0 < 2, body
+    (b,) = body["backends"]
+    assert b["checked"] is False and b["installed"] is None and b["problem"] is None, b
+    gate.set()
+    deadline = time.monotonic() + 5
+    while True:
+        (b,) = api.json("GET", "/api/backends")[1]["backends"]
+        if b["checked"]:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    assert b["installed"] is False and b["problem"] == "its worker environment is missing"
+    assert len(seen) == 1 and seen[0].startswith("fukikae-clone-check"), seen
+
+
+def test_backends_reuse_the_workers_fresh_answer(api, monkeypatch):
+    import time
+
+    from fukikae.cards import auto
+
+    calls: list[str] = []
+    monkeypatch.setattr(auto, "clone_problem", lambda cls, _cfg: calls.append(cls.name))
+    with api.server.auditions._cond:
+        api.server.auditions._clone_checked["clonefake"] = (time.monotonic(), None)
+    (b,) = api.json("GET", "/api/backends")[1]["backends"]
+    assert b["checked"] is True and b["installed"] is True and calls == []
+
+
 def test_routes_list_the_new_endpoints():
     from fukikae.studio.server import ROUTES
 

@@ -51,7 +51,7 @@ from __future__ import annotations
 import math
 import os
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -195,6 +195,26 @@ def _character_state(ws: Workspace, character_id: int) -> tuple[Gender | None, b
         if not any(c.id == character_id for c in reg.characters()):
             raise UnknownCharacter(f"no character {character_id} in the registry")
         return operator_genders(reg).get(character_id), character_id in narrators(reg)
+
+
+def character_gone(ws: Workspace | Path, character_id: int) -> tuple[bool, int | None]:
+    """(whether the character is missing from the registry, the live character it was merged
+    into as the decisions log records it, `apply.merged_into`). (False, None) when there is no
+    registry or it can't be read: the caller's own refusals say so."""
+    import sqlite3
+
+    from fukikae.registry.store import RegistrySchemaError
+    from fukikae.studio.apply import merged_into
+
+    w = _workspace(ws)
+    try:
+        with _registry(w) as reg:
+            live = {c.id for c in reg.characters()}
+    except (NoRegistry, sqlite3.Error, RegistrySchemaError):
+        return False, None
+    if character_id in live:
+        return False, None
+    return True, merged_into(w, character_id, live)
 
 
 def ready_episodes(ws: Workspace | Path) -> list[str]:
@@ -537,10 +557,16 @@ def voice_key_spec(key: str) -> dict[str, Any]:
     return spec
 
 
-def backends(cfg: Config) -> list[dict[str, Any]]:
+def backends(
+    cfg: Config,
+    status: Callable[[type[Synthesizer]], tuple[bool, str | None]] | None = None,
+) -> list[dict[str, Any]]:
     """The clone backends this install can import, each with its voice keys (`voice_key_spec`),
     whether it is the workspace's ``[tts] clone_backend`` and whether it can render here
-    (``cards.auto.clone_problem``: its worker environment and device)."""
+    (``cards.auto.clone_problem``: its worker environment and device). ``status(cls)`` gives
+    (whether it is known, the problem) instead of running the check here (the studio's
+    `AuditionWorker.clone_status`); a backend not known yet has ``checked`` false and
+    ``installed`` None."""
     from fukikae.backends import loader
     from fukikae.cards.auto import clone_backend, clone_problem
 
@@ -556,13 +582,18 @@ def backends(cfg: Config) -> list[dict[str, Any]]:
         if own and own != name:
             continue
         synth = cast("type[Synthesizer]", cls)
-        try:
-            problem = clone_problem(synth, cfg)
-        except Exception as e:  # noqa: BLE001 (reported, never fatal to the listing)
-            problem = str(e)
+        if status is not None:
+            known, problem = status(synth)
+        else:
+            known = True
+            try:
+                problem = clone_problem(synth, cfg)
+            except Exception as e:  # noqa: BLE001 (reported, never fatal to the listing)
+                problem = str(e)
         out.append({
-            "name": name, "default": name == default, "installed": problem is None,
-            "problem": problem, "capabilities": sorted(getattr(cls, "capabilities", ())),
+            "name": name, "default": name == default, "checked": known,
+            "installed": (problem is None) if known else None, "problem": problem,
+            "capabilities": sorted(getattr(cls, "capabilities", ())),
             "voice_keys": [voice_key_spec(k) for k in VOICE_PARAMS if k in synth.voice_keys],
         })  # fmt: skip
     return out

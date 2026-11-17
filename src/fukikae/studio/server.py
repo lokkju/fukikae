@@ -159,6 +159,7 @@ from fukikae.studio.drafts import (
     backends,
     candidates,
     candidates_digest,
+    character_gone,
     floor_meter,
     language_of,
     load_draft,
@@ -254,7 +255,8 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
     (
         "GET",
         "/api/drafts/<id>/<lang>",
-        "the character's voice draft for a target language, opened (version 1) when missing",
+        "the character's voice draft for a target language, opened (version 1) when missing; "
+        "409 character-merged (naming merged_into) for a character merged away",
     ),
     (
         "POST",
@@ -286,7 +288,12 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
         "language: studio, locked; 409 when the card assignment changed since the version was "
         "made, or the version is another card now",
     ),
-    ("GET", "/api/backends", "the clone backends and each one's voice keys (type and range)"),
+    (
+        "GET",
+        "/api/backends",
+        "the clone backends and each one's voice keys (type and range), and whether it can run "
+        "here (checked false until a background check answers)",
+    ),
     (
         "POST",
         "/api/auditions",
@@ -837,7 +844,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._draft(int(m.group(1)), m.group(2))
         elif path == "/api/backends":
             self._need(method, get, "GET")
-            self._json(200, {"backends": backends(self.server.cfg)})
+            cfg = self.server.cfg
+            status = lambda cls: self.server.auditions.clone_status(cls, cfg)  # noqa: E731
+            self._json(200, {"backends": backends(cfg, status)})
         elif path == "/api/auditions":
             self._need(method, method == "POST", "POST")
             self._submit()
@@ -1057,7 +1066,9 @@ class _Handler(BaseHTTPRequestHandler):
     # -- drafts -----------------------------------------------------------------------------
 
     def _draft_refusal(self, e: DraftError) -> _Reply:
-        if isinstance(e, UnknownCharacter | UnknownVersion):
+        if isinstance(e, UnknownCharacter):
+            return _Reply(404, "unknown-character", str(e))
+        if isinstance(e, UnknownVersion):
             return _Reply(404, "not-found", str(e))
         if isinstance(e, NoRegistry):
             return _Reply(409, "no-registry", "the workspace has no registry yet")
@@ -1119,7 +1130,23 @@ class _Handler(BaseHTTPRequestHandler):
                          ) from None  # fmt: skip
         return draft
 
+    def _live_character(self, cid: int) -> None:
+        """A draft route's character must be in the registry: one merged away is 409
+        ``character-merged``, naming the character it was merged into (``merged_into``) as
+        the decisions log records it; any other missing one is 404 ``unknown-character``.
+        Nothing is opened, saved or queued for either. A registry that can't be read is left
+        to the route's own refusals."""
+        gone, into = character_gone(self.server.ws, cid)
+        if not gone:
+            return
+        if into is not None:
+            raise _Reply(409, "character-merged", f"character {cid} was merged into character "
+                         f"{into}, and its drafts went with it; open character {into}'s draft",
+                         merged_into=into)  # fmt: skip
+        raise _Reply(404, "unknown-character", f"no character {cid} in the registry")
+
     def _draft(self, cid: int, lang: str) -> None:
+        self._live_character(cid)
         if self.command == "HEAD":  # read-only: never opens or saves a draft
             try:
                 draft = load_draft(self.server.ws, cid, language_of(lang))
@@ -1143,6 +1170,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise _Reply(
                 400, "invalid", "not a draft version", detail=json.loads(e.json(include_url=False))
             ) from None
+        self._live_character(cid)
         s = self.server
         with s._drafts_lock:
             draft = self._load_or_open(cid, lang)
@@ -1204,6 +1232,7 @@ class _Handler(BaseHTTPRequestHandler):
         submitted (never on HEAD, and a failed or cancelled one only with ``retry=1``); the
         page polls this route until both are done. Pairs by line, never by cue key (which
         differs by card)."""
+        self._live_character(cid)
         q = parse_qs(query, keep_blank_values=True)
 
         def value(key: str) -> str:
@@ -1334,6 +1363,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise _Reply(
                 400, "invalid", "not a reveal", detail=json.loads(e.json(include_url=False))
             ) from None
+        self._live_character(cid)
         if req.a == req.b:
             raise _Reply(400, "bad-query", "a and b must be two different versions")
         draft = self._saved_draft(cid, lang)
@@ -1355,6 +1385,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise _Reply(
                 400, "invalid", "not an accept", detail=json.loads(e.json(include_url=False))
             ) from None
+        self._live_character(cid)
         s = self.server
         draft = self._saved_draft(cid, lang)
         try:
@@ -1409,6 +1440,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise _Reply(
                 400, "invalid", "not an audition", detail=json.loads(e.json(include_url=False))
             ) from None
+        self._live_character(req.character)
         try:
             job = self.server.auditions.submit(req.character, req.language, req.version, req.line)
         except NoSuchDraft as e:

@@ -523,6 +523,46 @@ def test_a_rebuild_prunes_clips_no_longer_referenced(ws, tmp_path):
     assert not (used - kept) & names
 
 
+def test_a_rebuild_prunes_hour_old_temp_clips_a_killed_cut_left(ws):
+    import time
+
+    first = _build(ws, clips=2)
+    assert first.characters
+    audio = ws.root / "studio" / "audio"
+    old = audio / f".{'a' * 64}.{'b' * 32}.tmp.wav"
+    new = audio / f".{'c' * 64}.{'d' * 32}.tmp.wav"
+    odd = audio / f".{'e' * 64}.tmp.wav"
+    for f in (old, new, odd):
+        f.write_bytes(b"half a clip")
+    hour_ago = time.time() - 3700
+    os.utime(old, (hour_ago, hour_ago))
+    os.utime(odd, (hour_ago, hour_ago))
+    _build(ws, clips=2)
+    assert not old.exists()
+    assert new.exists() and odd.exists()
+
+
+def test_a_symlinked_studio_audio_is_refused_and_nothing_is_cut_through_it(ws, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (ws.root / "studio").mkdir(exist_ok=True)
+    (ws.root / "studio" / "audio").symlink_to(elsewhere)
+    with pytest.raises(ValueError, match="symlink"):
+        _build(ws, clips=2)
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_season_json_is_owner_only(ws):
+    from fukikae.studio.season import load_or_build, season_path
+
+    d = ws.root / "studio"
+    d.mkdir(mode=0o755, exist_ok=True)
+    os.chmod(d, 0o755)  # noqa: S103 (the mode the fix must tighten)
+    load_or_build(ws, load_config(ws.root, user_config=None), clips=2)
+    assert stat.S_IMODE(season_path(ws).stat().st_mode) == 0o600
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+
 def test_load_or_build_on_an_older_registry_migrates_it_and_writes_nothing_else(ws):
     import hashlib
 
