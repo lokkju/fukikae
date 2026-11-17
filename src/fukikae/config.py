@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -186,6 +187,64 @@ def names_settings(table: Any) -> NamesSettings:
 
 
 @dataclass(frozen=True)
+class ReviewSettings:
+    """`[review]`: the opt-in gates of `fukikae run` (`fukikae.studio.gate`), a settings table
+    with no backend (exempt from R3 like `[resolve]` and `[names]`), merged profile then
+    workspace. ``identity`` stops an episode before translate until its main characters are
+    identity-reviewed; ``voices`` stops it before tts until each has a curated, imported or
+    locked card in the target language; a character with under ``min_seconds`` of speech in
+    the episode never holds it up. No shipped profile turns either gate on."""
+
+    identity: bool = False
+    voices: bool = False
+    # the spec's main character: 30 s or more of speech (the gender calibration's rule)
+    min_seconds: float = 30.0
+
+
+def review_settings(table: Any) -> ReviewSettings:
+    """`[review]` checked: unknown keys (the first draft's ``required`` with a pointer to the
+    two gates that replaced it), wrong types and a negative or non-finite ``min_seconds`` are
+    a ConfigError."""
+    if table is None:
+        return ReviewSettings()
+    if not isinstance(table, dict):
+        raise ConfigError(f"[review] must be a table, not {table!r}")
+    if "required" in table:
+        raise ConfigError(
+            "[review] required was the first draft's single gate; set identity = true (stop "
+            "before translate until the main characters are reviewed) and/or voices = true "
+            "(stop before tts until each has an accepted card)"
+        )
+    allowed = set(ReviewSettings.__dataclass_fields__)
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"[review] has unknown key(s) {', '.join(unknown)}; "
+            f"allowed: {', '.join(sorted(allowed))}"
+        )
+    flags: dict[str, bool] = {}
+    for key in ("identity", "voices"):
+        value = table.get(key, False)
+        if not isinstance(value, bool):
+            raise ConfigError(f"[review] {key} must be true or false, not {value!r}")
+        flags[key] = value
+    secs = table.get("min_seconds", ReviewSettings.min_seconds)
+    if (isinstance(secs, bool) or not isinstance(secs, int | float) or not math.isfinite(secs)
+            or secs < 0):  # fmt: skip
+        raise ConfigError(f"[review] min_seconds must be a finite number from 0, not {secs!r}")
+    return ReviewSettings(identity=flags["identity"], voices=flags["voices"],
+                          min_seconds=float(secs))  # fmt: skip
+
+
+def _review_table(profile_raw: dict[str, Any], raw: dict[str, Any]) -> Any:
+    """`[review]` of the profile with the user config's and workspace's over it."""
+    base, over = profile_raw.get("review"), raw.get("review")
+    if isinstance(base, dict) and isinstance(over, dict):
+        return {**base, **over}
+    return over if over is not None else base
+
+
+@dataclass(frozen=True)
 class SeriesInfo:
     """The workspace's `[series]` table: the title and genre the results ledger records."""
 
@@ -206,6 +265,7 @@ class Config:
     profile_raw: dict[str, Any] = field(default_factory=dict)
     series: SeriesInfo = field(default_factory=lambda: SeriesInfo("", "default", {}))
     names: NamesSettings = field(default_factory=NamesSettings)
+    review: ReviewSettings = field(default_factory=ReviewSettings)
 
     def resolve(
         self,
@@ -372,4 +432,5 @@ def load_config(
         profile_raw=profile_raw,
         series=_series(raw.get("series"), workspace, profile),
         names=names_settings(raw.get("names")),
+        review=review_settings(_review_table(profile_raw, raw)),
     )

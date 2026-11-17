@@ -428,3 +428,20 @@ def test_show_appends_the_floor_to_a_kept_stale_cards_line(tmp_path: Path):
         "WENDY; `fukikae voices clone` replaces it; below the clone floor (1 clip and 5.0 s, "
         "under the floor of 2 clips and 10 s)"
     )
+
+
+def test_names_show_output_unchanged_after_the_move(cli_ws: Path):
+    """The flag lines `names show` prints come from `fukikae.names.flags`, the one
+    implementation the season index shares (Task 16); the show output itself is pinned by the
+    tests above, which run unchanged."""
+    from fukikae.names import cli as names_cli
+    from fukikae.names import flags
+
+    assert names_cli._stale_decision is flags.stale_decision
+    assert names_cli._disagreements is flags.disagreements
+    assert names_cli._merge_suggestions is flags.merge_suggestions
+    assert names_cli._card_lines is flags.card_lines
+    _run_names(cli_ws, "S01E01")
+    out = runner.invoke(app, ["names", "show", str(cli_ws), "S01E01"])
+    assert out.exit_code == 0, out.output
+    assert "keys (named seconds; sub-clusters -> character, how):" in out.output

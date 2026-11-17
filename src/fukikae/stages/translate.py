@@ -273,7 +273,7 @@ class TranslateStage:
         return {
             a.character_id
             for a in asg.clusters
-            if a.character_id is not None and a.status not in ("extra", "review")
+            if a.character_id is not None and a.status not in ("extra", "review", "ignored")
         }
 
     @staticmethod

@@ -258,6 +258,23 @@ def test_run_ends_finished_failed_or_interrupted(tmp_path, clock):
     assert data["state"] == "interrupted" and data["ended"] and data["threads"] == {}
 
 
+def test_a_stop_for_review_ends_the_run_stopped_never_failed(tmp_path, clock):
+    """A `[review]` gate's stop is its own run state, whether the stop propagates (one
+    episode) or the run goes on to its end (several)."""
+    with pytest.raises(RuntimeError), _run(tmp_path, clock):
+        progress.episode("S01E12", progress.STOPPED)
+        raise RuntimeError("stopped before translate")
+    assert _status(tmp_path)["state"] == "stopped"
+    with _run(tmp_path, clock):
+        progress.episode("S01E12", progress.STOPPED)
+    assert _status(tmp_path)["state"] == "stopped"
+    with _run(tmp_path, clock):  # a failure beside a stop is a failure
+        progress.episode("S01E12", progress.STOPPED)
+        progress.episode("S01E13", "failed")
+    assert _status(tmp_path)["state"] == "failed"
+    assert "stopped at" in progress.describe(_status(tmp_path) | {"state": "stopped"})
+
+
 # -- fukikae status ----------------------------------------------------------------------------
 
 

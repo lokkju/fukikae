@@ -64,13 +64,14 @@ def test_spans_never_exceed_the_cap():
     assert span.end - span.start <= 100 + 2  # MAX_SONG_S plus the padding
 
 
-def _wav(path: Path, x: np.ndarray, rate: int) -> None:
+def _wav(path: Path, x: np.ndarray, rate: int) -> Path:
     with wave.open(str(path), "wb") as w:
         w.setnchannels(2)
         w.setsampwidth(2)
         w.setframerate(rate)
         st = np.stack([x, x], axis=1)
         w.writeframes((st * 32767).astype("<i2").tobytes())
+    return path
 
 
 def test_frame_features_from_stems(tmp_path):
@@ -268,3 +269,108 @@ def test_span_merging_is_public():
     ]
     assert [(p.start, p.end) for p in merge_spans(cands, 10.0)] == [(100.0, 170.0)]
     assert [(p.start, p.end) for p in merge_spans(cands)] == [(100.0, 150.0), (155.0, 170.0)]
+
+
+def _stems(root: Path, seed: int = 0) -> tuple[Path, Path]:
+    """A background and a vocals stem in an episode work dir under ``root``'s workspace, with
+    the per-process memo emptied (it is keyed by content, which other tests share)."""
+    from fukikae import songs
+
+    songs._FEATURES_MEMO.clear()
+    rate = 8000
+    t = np.arange(4 * rate) / rate
+    sep = root / ".fukikae" / "episodes" / "S01E01" / "01-separate"
+    sep.mkdir(parents=True, exist_ok=True)
+    bg = _wav(sep / "background.wav", 0.1 * np.sin(2 * np.pi * 200 * t), rate)
+    vo = np.where(t < 2 + seed, 0.1 * np.sin(2 * np.pi * 300 * t), 0.0)
+    return bg, _wav(sep / "vocals.wav", vo, rate)
+
+
+def _counting(monkeypatch) -> list[Path]:
+    from fukikae import songs
+
+    calls: list[Path] = []
+    real = songs._frame_db
+
+    def counted(path: Path) -> np.ndarray:
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(songs, "_frame_db", counted)
+    return calls
+
+
+def test_frame_features_are_kept_on_disk_for_the_next_process(tmp_path, monkeypatch):
+    from fukikae import songs
+
+    bg, vo = _stems(tmp_path)
+    calls = _counting(monkeypatch)
+    first = frame_features(bg, vo)
+    assert len(calls) == 2
+    cached = list((tmp_path / ".fukikae" / "song-cache").glob("*.npz"))
+    assert len(cached) == 1
+    songs._FEATURES_MEMO.clear()  # what a fresh process starts with
+    second = frame_features(bg, vo)
+    assert len(calls) == 2
+    for a, b in zip(first, second, strict=True):
+        assert np.array_equal(a, b)
+
+
+def test_a_changed_vocals_file_or_parameter_misses_the_cache(tmp_path, monkeypatch):
+    import os
+
+    from fukikae import songs
+
+    bg, vo = _stems(tmp_path)
+    calls = _counting(monkeypatch)
+    frame_features(bg, vo)
+    songs._FEATURES_MEMO.clear()
+    frame_features(bg, vo, active_db=-30.0)
+    assert len(calls) == 4
+    st = vo.stat()
+    _stems(tmp_path, seed=1)  # vocals on for 3 s now
+    os.utime(vo, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    songs._FEATURES_MEMO.clear()
+    _, _, act = frame_features(bg, vo)
+    assert len(calls) == 6
+    assert list(act) == pytest.approx([1.0, 1.0, 1.0, 0.0])
+    assert len(list((tmp_path / ".fukikae" / "song-cache").glob("*.npz"))) == 3
+
+
+def test_an_unreadable_cache_file_is_recomputed(tmp_path, monkeypatch):
+    from fukikae import songs
+
+    bg, vo = _stems(tmp_path)
+    first = frame_features(bg, vo)
+    (cached,) = (tmp_path / ".fukikae" / "song-cache").glob("*.npz")
+    cached.write_bytes(b"truncated")
+    songs._FEATURES_MEMO.clear()
+    calls = _counting(monkeypatch)
+    again = frame_features(bg, vo)
+    assert len(calls) == 2
+    assert np.array_equal(first[2], again[2])
+
+
+def test_stems_outside_a_workspace_are_not_cached_on_disk(tmp_path):
+    rate = 8000
+    t = np.arange(2 * rate) / rate
+    bg = _wav(tmp_path / "bg.wav", 0.1 * np.sin(2 * np.pi * 200 * t), rate)
+    vo = _wav(tmp_path / "vo.wav", 0.1 * np.sin(2 * np.pi * 300 * t), rate)
+    frame_features(bg, vo)
+    assert not (tmp_path / ".fukikae").exists()
+
+
+def test_a_rewritten_background_misses_the_cache(tmp_path, monkeypatch):
+    import os
+
+    from fukikae import songs
+
+    bg, vo = _stems(tmp_path)
+    calls = _counting(monkeypatch)
+    frame_features(bg, vo)
+    st = bg.stat()
+    _wav(bg, np.zeros(4 * 8000), 8000)
+    os.utime(bg, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    songs._FEATURES_MEMO.clear()
+    got, _, _ = frame_features(bg, vo)
+    assert len(calls) == 4 and got[0] < -100

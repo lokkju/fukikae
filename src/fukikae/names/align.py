@@ -13,7 +13,7 @@ import re
 import unicodedata
 import zipfile
 from collections import Counter, defaultdict
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
@@ -22,7 +22,7 @@ import numpy as np
 
 from fukikae.artifacts import atomic_path
 from fukikae.models import Turn
-from fukikae.names.models import LabelInfo, NamedLine, Piece
+from fukikae.names.models import LabelInfo, NamedLine, Piece, VoiceSplit
 from fukikae.names.normalize import NameClass
 
 MIN_SHARE = 0.6
@@ -146,11 +146,17 @@ def _slug(key: str) -> str | None:
     return re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-") or None
 
 
+VOICE_PREFIX = "voice-"  # the operator pitch split's labels; never a name slug's start
+
+
 def label_for(cluster: str, key: str, *, hashed: bool = False) -> str:
     """`<cluster>~<slug>`: the key's `[a-z0-9-]` slug when it has one, else `n` plus the first
     8 hex digits of sha256(key). `hashed` forces the second form, for keys whose slugs collide
-    within one cluster."""
+    within one cluster. A slug starting with `voice-` takes the hashed form too, so a name
+    can never take a pitch split's `<cluster>~voice-f` or `~voice-m` label."""
     slug = None if hashed else _slug(key)
+    if slug is not None and slug.startswith(VOICE_PREFIX):
+        slug = None
     if slug is None:
         slug = "n" + hashlib.sha256(key.encode()).hexdigest()[:8]
     return f"{cluster}~{slug}"
@@ -389,7 +395,8 @@ def label_infos(pieces: list[Piece], lines: list[NamedLine]) -> dict[str, LabelI
         if p.label in out:
             continue
         if p.key is None:
-            out[p.label] = LabelInfo(parent=p.cluster, key=None, display=None, cls="remainder")
+            cls = "remainder" if p.label == p.cluster else "voice"
+            out[p.label] = LabelInfo(parent=p.cluster, key=None, display=None, cls=cls)
             continue
         common = displays[p.key].most_common(1)
         cls = "role" if classes.get(p.key) is NameClass.ROLE else "named"
@@ -401,6 +408,71 @@ def label_infos(pieces: list[Piece], lines: list[NamedLine]) -> dict[str, LabelI
             slug_clash=p.label != label_for(p.cluster, p.key),
         )
     return out
+
+
+# ---- operator pitch splits: voice sub-clusters (Task 15) ----
+
+
+def voice_label(cluster: str, gender: str) -> str:
+    """`<cluster>~voice-f` or `<cluster>~voice-m`."""
+    return f"{cluster}~{VOICE_PREFIX}{gender}"
+
+
+def voice_candidates(pieces: list[Piece], splits: Mapping[str, tuple[float, float]]) -> list[int]:
+    """Indices of the pieces a split reads: the unnamed pieces (key None, the cluster's own
+    label) of every cluster in `splits`. A named sub-cluster is never split."""
+    return [
+        i
+        for i, p in enumerate(pieces)
+        if p.key is None and p.label == p.cluster and p.cluster in splits
+    ]
+
+
+def split_voices(
+    pieces: list[Piece],
+    splits: Mapping[str, tuple[float, float]],
+    genders: Mapping[int, str],
+) -> tuple[list[Piece], dict[str, VoiceSplit]]:
+    """The pieces with each split cluster's unnamed pieces relabelled `<cluster>~voice-f` or
+    `~voice-m` by `genders` (piece index -> `f`, `m` or `u`, each on the piece's own median,
+    for every index `voice_candidates` gives), and what each split did. The `u` pieces join
+    the part with more seconds (`f` on a tie). A cluster with no unnamed pieces, or none in
+    either band, is left as it was, with the reason. `splits` maps a cluster to its
+    (male_below, female_above) bands, recorded as given."""
+    out = list(pieces)
+    info: dict[str, VoiceSplit] = {}
+    by_cluster: dict[str, list[int]] = defaultdict(list)
+    for i in voice_candidates(pieces, splits):
+        by_cluster[pieces[i].cluster].append(i)
+    for cluster in sorted(splits):
+        lo, hi = splits[cluster]
+        mine = by_cluster.get(cluster, [])
+        secs = {"f": 0.0, "m": 0.0, "u": 0.0}
+        for i in mine:
+            secs[genders[i]] += pieces[i].end - pieces[i].start
+        secs = {g: round(v, 6) for g, v in secs.items()}
+        reason = None
+        if not mine:
+            reason = f"no unnamed turns of {cluster} in this episode"
+        elif secs["f"] == 0 and secs["m"] == 0:
+            reason = f"no turn of {cluster} has a median in either band"
+        if reason is not None:
+            info[cluster] = VoiceSplit(
+                male_below=lo, female_above=hi, seconds=secs, larger=None, labels=[],
+                reason=reason,
+            )  # fmt: skip
+            continue
+        larger = "f" if secs["f"] >= secs["m"] else "m"
+        for i in mine:
+            g = genders[i]
+            out[i] = pieces[i].model_copy(
+                update={"label": voice_label(cluster, larger if g == "u" else g)}
+            )
+        labels = sorted({out[i].label for i in mine})
+        info[cluster] = VoiceSplit(
+            male_below=lo, female_above=hi, seconds=secs, larger=larger, labels=labels
+        )
+    return out, info
 
 
 def excluded_spans(lines: list[NamedLine]) -> list[tuple[float, float]]:

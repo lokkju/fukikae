@@ -105,3 +105,55 @@ def test_verdict_none_says_it_read_the_subtitles_not_their_names(tmp_path: Path)
         check_held_out(work, "S01E14")
     assert "read its subtitles (verdict none)" in str(e.value)
     assert "subtitle names" not in str(e.value)
+
+
+def test_a_pitch_split_is_refused_as_a_split_not_as_names(tmp_path: Path):
+    """A held-out episode an operator pitch split: still refused (it is graded on diarize's
+    clusters), and the message names the split, not subtitle names."""
+    refined = [
+        Turn(start=0.0, end=2.0, speaker="S0~voice-f"),
+        Turn(start=2.0, end=4.0, speaker="S0~voice-m"),
+        DIARIZE[1],
+    ]
+    work = _work(
+        tmp_path,
+        [
+            {"cluster": "S0~voice-f", "split": "kept"},
+            {"cluster": "S0~voice-m", "split": "new"},
+            {"cluster": "S1"},
+        ],
+        turns=refined,
+    )
+    with pytest.raises(HeldOutNamesError) as e:
+        check_held_out(work, "S01E14")
+    msg = str(e.value)
+    assert "pitch split" in msg and "S0" in msg and "studio/splits" in msg
+    assert "subtitle" not in msg and "names stage's refined turns" not in msg
+
+
+def test_a_pitch_split_with_subtitle_names_is_refused_for_the_names(tmp_path: Path):
+    """Split plus names: the names are what the refusal names (they decide the grade's
+    validity first), whether through the assignments' name decisions or other turns."""
+    refined = [
+        Turn(start=0.0, end=2.0, speaker="S0~natsu"),
+        Turn(start=2.0, end=4.0, speaker="S0~voice-m"),
+        Turn(start=5.0, end=7.0, speaker="S1~voice-f"),
+        Turn(start=7.0, end=9.0, speaker="S1~voice-m"),
+    ]
+    clusters = [
+        {"cluster": "S0~voice-m"},
+        {"cluster": "S1~voice-f", "split": "kept"},
+        {"cluster": "S1~voice-m", "split": "new"},
+    ]
+    work = _work(tmp_path, [{"cluster": "S0~natsu", "name": "natsu", "source": "name"},
+                            *clusters], turns=refined)  # fmt: skip
+    with pytest.raises(HeldOutNamesError, match="name decisions"):
+        check_held_out(work, "S01E14")
+    other = tmp_path / "other"
+    work = _work(other, [{"cluster": "S0~natsu"}, *clusters], turns=refined)
+    with pytest.raises(HeldOutNamesError) as e:
+        check_held_out(work, "S01E14")
+    assert "names stage's refined turns" in str(e.value) and "pitch split" not in str(e.value)
+    _holdout_names(work, verdict="full")
+    with pytest.raises(HeldOutNamesError, match="subtitle names"):
+        check_held_out(work, "S01E14")

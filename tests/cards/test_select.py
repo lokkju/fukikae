@@ -1186,3 +1186,58 @@ def test_clone_card_always_records_its_tier(tmp_path):
     assert plain.meta["reference_tier"] == "floor"
     short = clone_card(CloneSynth, picks[:1], store, vocals, "ja", "en", "S01E11")
     assert short.meta["reference_tier"] == "short"
+
+
+# -- Task 18: every refused turn with its reasons (the studio's candidate list) --------------
+
+
+def test_refused_turns_are_reported_with_every_reason(tmp_path):
+    """`eligible_references` reports each of the speaker's turns that no eligible candidate
+    covers, with every check it fails (not just the first): too short, overlapping another
+    speaker, inside an exclusion, under someone else's names, no text, sparse text."""
+    from fukikae.cards.select import Refusal, eligible_references
+
+    turns = [Turn(start=s, end=s + 6, speaker="A") for s in (0, 10, 20)]
+    turns += [
+        Turn(start=30, end=31.5, speaker="A"),  # too short
+        Turn(start=40, end=46, speaker="A"),  # overlaps B
+        Turn(start=44, end=48, speaker="B"),
+        Turn(start=50, end=51, speaker="A"),  # too short and inside an exclusion
+        Turn(start=60, end=66, speaker="A"),  # under someone else's names
+        Turn(start=70, end=76, speaker="A"),  # no text
+    ]
+    vocals = _vocals(tmp_path / "v.wav", [(t.start, t.end, 0.01) for t in turns])
+    tr = _transcript([t for t in turns if t.start != 70])
+    refused: list[Refusal] = []
+    picks = eligible_references(
+        turns, "A", tr, None, vocals, exclude=[(49.0, 52.0)], foreign=[(60.0, 66.0)],
+        refused=refused,
+    )  # fmt: skip
+    assert sorted(p.start for p in picks) == [0, 10, 20]
+    by = {r.pick.start: set(r.reasons) for r in refused}
+    assert by == {
+        30: {"length"},
+        40: {"overlap"},
+        50: {"length", "excluded"},
+        60: {"foreign"},
+        70: {"no_text"},
+    }
+    assert all(r.pick.snr_db is not None for r in refused)
+
+
+def test_refused_turns_are_measured_by_the_gates_too(tmp_path):
+    """With the A1 gates on, a refused turn is measured as well (its median and its gate
+    verdicts, for the studio), and the eligible candidates are unchanged by asking."""
+    from fukikae.cards.select import Refusal, eligible_references
+
+    spans = [(10, 11.5, 140.0, 0.01)] + [(30 + 10 * i, 36 + 10 * i, 264.0, 0.01) for i in range(3)]
+    turns, tr, vocals = _gate_case(tmp_path, spans)
+    plain = eligible_references(turns, "A", tr, None, vocals, register=("f", 264.0))
+    refused: list[Refusal] = []
+    picks = eligible_references(
+        turns, "A", tr, None, vocals, register=("f", 264.0), refused=refused
+    )
+    assert picks == plain
+    (r,) = refused
+    assert r.reasons == ("length",) and r.gates == ("off_register",)
+    assert r.pick.median is not None and r.pick.median < 165

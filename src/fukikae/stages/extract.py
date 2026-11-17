@@ -9,6 +9,30 @@ from fukikae.config import Config
 from fukikae.workspace import Episode
 
 
+def source_track(cfg: Config, source: Path, *, timeout: float | None = None) -> media.AudioTrack:
+    """The source-language audio track of ``source`` the extract stage takes: ``[extract]
+    audio_track`` when set, else the source language (and ``audio_title``), else the first
+    non-English track (`media.choose_audio_track`). ``timeout`` bounds the probe."""
+    table = cfg.raw.get("extract", {})
+    override = table.get("audio_track")
+    return media.choose_audio_track(
+        media.probe(source, timeout=timeout),
+        cfg.source_language,
+        None if override is None else int(override),
+        table.get("audio_title"),
+    )
+
+
+def extract_config(cfg: Config, track: int) -> dict[str, Any]:
+    """The extract stage's config key when it takes audio track ``track``."""
+    return {
+        "track": track,
+        "audio_title": cfg.raw.get("extract", {}).get("audio_title"),
+        "rate": 44100,
+        "channels": 2,
+    }
+
+
 class ExtractStage:
     name = "extract"
 
@@ -19,22 +43,10 @@ class ExtractStage:
         return [ep.work / "00-extract" / "audio.wav"]
 
     def _track(self, cfg: Config, ep: Episode) -> media.AudioTrack:
-        table = cfg.raw.get("extract", {})
-        override = table.get("audio_track")
-        return media.choose_audio_track(
-            media.probe(ep.source),
-            cfg.source_language,
-            None if override is None else int(override),
-            table.get("audio_title"),
-        )
+        return source_track(cfg, ep.source)
 
     def config_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:
-        return {
-            "track": self._track(cfg, ep).index,
-            "audio_title": cfg.raw.get("extract", {}).get("audio_title"),
-            "rate": 44100,
-            "channels": 2,
-        }
+        return extract_config(cfg, self._track(cfg, ep).index)
 
     def run(self, ep: Episode, cfg: Config) -> None:
         track = self._track(cfg, ep)

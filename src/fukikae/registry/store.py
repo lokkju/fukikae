@@ -14,7 +14,7 @@ import logging
 import re
 import sqlite3
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -29,7 +29,7 @@ from fukikae.names.normalize import parse_name
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Who set a character's name (schema 4) and who set an alias.
 NAME_BY = frozenset({"operator", "subs"})
@@ -37,11 +37,14 @@ AliasBy = Literal["operator", "subs"]
 
 # `by` values of an assignment; `import:<pack title>` is the one with a suffix. `migrated`
 # (the schema-1 voice note) and `lock`/`unlock` rows are written by the registry itself.
-ASSIGNED_BY = frozenset({"auto", "auto-fallback", "assign", "revert", "edit", "derive", "restock"})
+ASSIGNED_BY = frozenset(
+    {"auto", "auto-fallback", "assign", "revert", "edit", "derive", "restock", "studio"}
+)
 # Operator actions (ruling CD2): a card they chose is never replaced by `auto` or an import
 # unless the caller passes override (an import the operator confirmed with --replace). An
-# imported card is never replaced by `auto` without override either (CD3).
-OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive"})
+# imported card is never replaced by `auto` without override either (CD3). `studio` is a
+# voice the operator accepted in `fukikae studio` (schema 5): curated like any other.
+OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive", "studio"})
 # Automatic sources (ruling CD9): `restock` re-pins an automatic stock card to a new model
 # revision. It is no operator choice, so a restocked card stays uncurated, and it is refused
 # over a locked, operator-chosen or imported card exactly as `auto` is.
@@ -49,6 +52,14 @@ OPERATOR_BY = frozenset({"assign", "revert", "edit", "derive"})
 # here (Task 12 fix round 2); automatic assignment replaces it with a clone once it can.
 AUTOMATIC_BY = frozenset({"auto", "auto-fallback", "restock"})
 _LOCK_BY = frozenset({"lock", "unlock"})
+# A character's kind (schema 5): a dialogue character, a narrator (its own card, exempt from
+# the one-scene reference gate and the line gender gate), or ignored (its cues are never
+# translated or rendered: the operator's way to leave a speaker without a clone).
+KINDS = frozenset({"character", "narrator", "ignored"})
+# Who set a character's stored gender (schema 5). The estimate is never stored.
+GENDER_BY = frozenset({"operator", "cast"})
+Gender = Literal["f", "m"]
+_GENDERS = frozenset({"f", "m"})
 # The longest external character id a registry stores (and a pack carries).
 EXTERNAL_ID_CAP = 100
 _CARD_ID = re.compile(r"[0-9a-f]{16}")
@@ -69,7 +80,15 @@ CREATE TABLE IF NOT EXISTS characters (
     voice TEXT, -- schema 1's free-text voice, always NULL from schema 2 (card_assignments)
     locked INTEGER NOT NULL DEFAULT 0,
     external_id TEXT,
-    name_by TEXT -- who set `name`: 'operator', 'subs' or NULL (schema 4)
+    name_by TEXT, -- who set `name`: 'operator', 'subs' or NULL (schema 4)
+    -- schema 5: gender is 'f', 'm' or NULL (a stored voice register, never the estimate),
+    -- gender_by 'operator', 'cast' or NULL, kind 'character', 'narrator' or 'ignored', and
+    -- reviewed when the operator last reviewed its identity (ISO 8601 UTC) or NULL.
+    -- (No semicolon in any comment here: _init_schema splits this text on them.)
+    gender TEXT,
+    gender_by TEXT,
+    kind TEXT NOT NULL DEFAULT 'character',
+    reviewed TEXT
 );
 CREATE TABLE IF NOT EXISTS exemplars (
     id INTEGER PRIMARY KEY,
@@ -114,6 +133,21 @@ CREATE TABLE IF NOT EXISTS character_aliases (
     language TEXT, -- the subtitle track's language, informational
     created TEXT NOT NULL
 );
+-- schema 5: one row per decision whose registry writes committed, written in the same
+-- transaction, so a decisions.jsonl write-ahead record can tell afterwards whether it landed
+CREATE TABLE IF NOT EXISTS decision_marks (
+    id TEXT PRIMARY KEY, -- the decisions.jsonl record id
+    op TEXT NOT NULL,
+    applied TEXT NOT NULL
+);
+-- schema 5: what each character's last identity review saw, per episode: the digest of its
+-- names flags there (`fukikae.names.flags.names_flag_digest`), written with `reviewed`
+CREATE TABLE IF NOT EXISTS review_evidence (
+    character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    episode TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    PRIMARY KEY (character_id, episode)
+);
 CREATE INDEX IF NOT EXISTS character_aliases_character ON character_aliases(character_id);
 CREATE INDEX IF NOT EXISTS card_history_character ON card_history(character_id, target_language);
 CREATE INDEX IF NOT EXISTS exemplars_actor ON exemplars(actor_id);
@@ -138,6 +172,10 @@ class Character:
     external_id: str | None
     locked: bool
     name_by: str | None = None  # 'operator', 'subs' or None (no name)
+    gender: str | None = None  # 'f', 'm' or None (schema 5)
+    gender_by: str | None = None  # 'operator', 'cast' or None
+    kind: str = "character"  # one of KINDS
+    reviewed: str | None = None  # ISO 8601, UTC; None: never reviewed
 
 
 @dataclass(frozen=True)
@@ -169,6 +207,11 @@ class CardAssignment:
     locked: bool
     note: str | None
     chosen_by: str
+
+
+def _character_row(r: tuple) -> Character:
+    """A ``characters`` row, in the column order `Registry.characters` selects."""
+    return Character(r[0], r[1], r[2], r[3], bool(r[4]), r[5], r[6], r[7], r[8], r[9])
 
 
 class RegistrySchemaError(RuntimeError):
@@ -316,6 +359,8 @@ class Registry:
                     self._migrate_2_to_3(con)
                 if row[0] <= 3:
                     self._migrate_3_to_4(con)
+                if row[0] <= 4:
+                    self._migrate_4_to_5(con)
 
     def _migrate_1_to_2(self, con: sqlite3.Connection) -> None:
         """Schema 1 to 2: ``characters.external_id``, the card tables (already created by
@@ -404,6 +449,21 @@ class Registry:
                 )  # fmt: skip
         con.execute("UPDATE schema_version SET version = 4")
 
+    def _migrate_4_to_5(self, con: sqlite3.Connection) -> None:
+        """Schema 4 to 5: ``characters.gender``, ``gender_by``, ``kind`` (``character`` for
+        every existing row) and ``reviewed``, all unset, and ``decision_marks`` (created by
+        ``_SCHEMA``). Runs inside `_init_schema`'s one transaction; safe to run twice."""
+        cols = {r[1] for r in con.execute("PRAGMA table_info(characters)")}
+        for col, decl in (
+            ("gender", "TEXT"),
+            ("gender_by", "TEXT"),
+            ("kind", "TEXT NOT NULL DEFAULT 'character'"),
+            ("reviewed", "TEXT"),
+        ):
+            if col not in cols:
+                con.execute(f"ALTER TABLE characters ADD COLUMN {col} {decl}")
+        con.execute("UPDATE schema_version SET version = 5")
+
     def _normalize_card_languages(self, con: sqlite3.Connection) -> None:
         """Rewrite ``card_history`` and ``card_assignments`` language keys the way reads
         normalize them (schema 2 stored whatever case it was given). History rows that meet
@@ -478,16 +538,20 @@ class Registry:
 
     def characters(self) -> list[Character]:
         rows = self._con.execute(
-            "SELECT id, actor_id, name, external_id, locked, name_by FROM characters ORDER BY id"
+            "SELECT id, actor_id, name, external_id, locked, name_by, gender, gender_by, kind,"
+            " reviewed FROM characters"
+            " ORDER BY id"
         ).fetchall()
-        return [Character(r[0], r[1], r[2], r[3], bool(r[4]), r[5]) for r in rows]
+        return [_character_row(r) for r in rows]
 
     def _character(self, con: sqlite3.Connection, character_id: int) -> Character | None:
         r = con.execute(
-            "SELECT id, actor_id, name, external_id, locked, name_by FROM characters WHERE id = ?",
+            "SELECT id, actor_id, name, external_id, locked, name_by, gender, gender_by, kind,"
+            " reviewed FROM characters"
+            " WHERE id = ?",
             (character_id,),
         ).fetchone()
-        return None if r is None else Character(r[0], r[1], r[2], r[3], bool(r[4]), r[5])
+        return None if r is None else _character_row(r)
 
     # aliases (schema 4)
 
@@ -647,9 +711,11 @@ class Registry:
     ) -> None:
         """Subtitles name an unnamed, uncurated character: ``name = display``, ``name_by =
         'subs'`` and a ``subs`` alias for ``key``, all or nothing. ValueError when the
-        character has a name (subtitles never rename), is curated (`_is_curated`: an external
-        id, a locked or operator-chosen or imported card) or is locked, or its actor is
-        locked; AliasConflictError when another character answers to ``key``."""
+        character has a name (subtitles never rename), is curated other than by an operator
+        gender (`_is_curated` with ``gender=False``: an operator alias, an external id, a kind
+        other than ``character``, a migrated voice, a locked or not-``auto`` card) or is
+        locked, or its actor is locked; AliasConflictError when another character answers to
+        ``key``. An operator gender alone doesn't stop it, and the gender stays."""
         with self._tx() as con:
             c = self._character(con, character_id)
             if c is None:
@@ -662,7 +728,7 @@ class Registry:
             actor_locked = con.execute(
                 "SELECT locked FROM actors WHERE id = ?", (c.actor_id,)
             ).fetchone()[0]
-            if c.locked or actor_locked or self._is_curated(con, character_id):
+            if c.locked or actor_locked or self._is_curated(con, character_id, gender=False):
                 raise ValueError(f"character {character_id} is curated or locked; not naming it")
             con.execute(
                 "UPDATE characters SET name = ?, name_by = 'subs' WHERE id = ?",
@@ -813,21 +879,27 @@ class Registry:
             StoredProjection(r[0], r[1], _blob_array(r[2]), _blob_array(r[3]), r[4]) for r in rows
         ]
 
-    def _is_curated(self, con: sqlite3.Connection, character_id: int) -> bool:
+    def _is_curated(
+        self, con: sqlite3.Connection, character_id: int, *, gender: bool = True
+    ) -> bool:
         """Named by the operator (``name_by = 'operator'``; a name without ``name_by`` predates
         schema 4 and counts as the operator's), answering to an operator alias, with an
-        external id, with a schema-1 voice migrated into history, or with a current card (any
-        target language) that is locked or was not chosen by ``auto`` (ruling CD2). A name or
-        alias from subtitles curates nothing (D29 #2), nor do lock and unlock rows by
-        themselves."""
+        external id, with an operator gender (``gender_by = 'operator'``), with a kind other
+        than ``character``, with a schema-1 voice migrated into history, or with a current
+        card (any target language) that is locked or was not chosen by ``auto`` (ruling CD2).
+        A name or alias from subtitles curates nothing (D29 #2), nor does a cast gender, a
+        review time, or lock and unlock rows by themselves. ``gender=False`` leaves the
+        operator gender out: subtitle naming (`name_character`) asks that way, because naming
+        sets only the name and the gender stays."""
         row = con.execute(
             "SELECT (name IS NOT NULL AND COALESCE(name_by, 'operator') = 'operator')"
-            " OR external_id IS NOT NULL OR EXISTS (SELECT 1 FROM"
+            " OR external_id IS NOT NULL OR (? AND gender_by IS 'operator')"
+            " OR kind != 'character' OR EXISTS (SELECT 1 FROM"
             " card_history WHERE character_id = characters.id AND by = 'migrated')"
             " OR EXISTS (SELECT 1 FROM character_aliases WHERE character_id = characters.id"
             " AND by = 'operator')"
             " FROM characters WHERE id = ?",
-            (character_id,),
+            (gender, character_id),
         ).fetchone()
         if row is None:
             return False
@@ -841,10 +913,11 @@ class Registry:
             ).fetchall()
         )
 
-    def curated_characters(self) -> set[int]:
-        """Characters someone has curated (`_is_curated`)."""
+    def curated_characters(self, *, gender: bool = True) -> set[int]:
+        """Characters someone has curated (`_is_curated`); ``gender=False`` leaves out those
+        whose only curation is an operator gender, the set subtitle naming may not touch."""
         ids = [r[0] for r in self._con.execute("SELECT id FROM characters").fetchall()]
-        return {cid for cid in ids if self._is_curated(self._con, cid)}
+        return {cid for cid in ids if self._is_curated(self._con, cid, gender=gender)}
 
     def protected_actors(self) -> set[int]:
         """Actors someone has curated, which pruning never deletes: locked or named, or with
@@ -1173,6 +1246,105 @@ class Registry:
             if cur.rowcount == 0:
                 raise KeyError(character_id)
 
+    def set_character_gender(
+        self, character_id: int, gender: Gender | None, by: str = "operator"
+    ) -> None:
+        """Store the character's voice register (``f`` or ``m``) and who set it (``GENDER_BY``),
+        or with None clear both. The pitch estimate is never stored here (it lives in the pitch
+        cache); this is the operator's call, or later a cast list's."""
+        if gender is not None and gender not in _GENDERS:
+            raise ValueError(f"gender must be 'f', 'm' or None, not {gender!r}")
+        if by not in GENDER_BY:
+            raise ValueError(f"unknown gender by {by!r}; use one of {', '.join(sorted(GENDER_BY))}")
+        with self._tx() as con:
+            cur = con.execute(
+                "UPDATE characters SET gender = ?, gender_by = ? WHERE id = ?",
+                (gender, None if gender is None else by, character_id),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(character_id)
+
+    def set_character_kind(self, character_id: int, kind: str) -> None:
+        """Make the character a dialogue ``character``, a ``narrator`` or ``ignored``
+        (``KINDS``)."""
+        if kind not in KINDS:
+            raise ValueError(f"unknown kind {kind!r}; use one of {', '.join(sorted(KINDS))}")
+        with self._tx() as con:
+            cur = con.execute("UPDATE characters SET kind = ? WHERE id = ?", (kind, character_id))
+            if cur.rowcount == 0:
+                raise KeyError(character_id)
+
+    def mark_decision(self, record_id: str, op: str) -> None:
+        """Record that the decision logged as ``record_id`` committed: call it inside the
+        decision's own transaction, so the row exists exactly when its writes do."""
+        with self._tx() as con:
+            con.execute(
+                "INSERT INTO decision_marks(id, op, applied) VALUES (?, ?, ?)",
+                (record_id, op, _now()),
+            )
+
+    def decision_marked(self, record_id: str) -> bool:
+        """Whether the decision logged as ``record_id`` committed (`mark_decision`)."""
+        row = self._con.execute(
+            "SELECT 1 FROM decision_marks WHERE id = ?", (record_id,)
+        ).fetchone()
+        return row is not None
+
+    def card_ids_for(self, character_id: int) -> set[str]:
+        """Every card id the character's assignment history names, in any target language."""
+        return {
+            r[0]
+            for r in self._con.execute(
+                "SELECT DISTINCT card_id FROM card_history WHERE character_id = ?"
+                " AND card_id IS NOT NULL",
+                (character_id,),
+            )
+        }
+
+    def mark_reviewed(
+        self,
+        character_id: int,
+        when: str | None = None,
+        digests: Mapping[str, str] | None = None,
+    ) -> None:
+        """Record that the operator reviewed the character's identity, at ``when`` (ISO 8601
+        with a timezone offset, stored in UTC as `_now` writes it) or now. ValueError when
+        ``when`` doesn't parse or has no offset.
+
+        ``digests`` (episode -> the digest of the character's names flags there, as the review
+        saw them) replaces the character's review evidence in the same transaction; None
+        leaves the evidence as it was."""
+        if when is None:
+            stamp = _now()
+        else:
+            t = datetime.fromisoformat(when)
+            if t.tzinfo is None or t.utcoffset() is None:
+                raise ValueError(f"review time {when!r} has no timezone offset")
+            stamp = t.astimezone(UTC).isoformat(timespec="microseconds")
+        with self._tx() as con:
+            cur = con.execute(
+                "UPDATE characters SET reviewed = ? WHERE id = ?", (stamp, character_id)
+            )
+            if cur.rowcount == 0:
+                raise KeyError(character_id)
+            if digests is not None:
+                con.execute("DELETE FROM review_evidence WHERE character_id = ?", (character_id,))
+                con.executemany(
+                    "INSERT INTO review_evidence(character_id, episode, digest) VALUES (?, ?, ?)",
+                    [(character_id, e, d) for e, d in sorted(digests.items())],
+                )
+
+    def review_evidence(self, character_id: int) -> dict[str, str]:
+        """Episode -> the digest of the character's names flags its last review saw there
+        (`mark_reviewed`); empty when none was recorded."""
+        return dict(
+            self._con.execute(
+                "SELECT episode, digest FROM review_evidence WHERE character_id = ?"
+                " ORDER BY episode",
+                (character_id,),
+            ).fetchall()
+        )
+
     def _require_character(self, con: sqlite3.Connection, character_id: int) -> None:
         if con.execute("SELECT 1 FROM characters WHERE id = ?", (character_id,)).fetchone() is None:
             raise KeyError(character_id)
@@ -1181,11 +1353,66 @@ class Registry:
         con.execute("DELETE FROM card_assignments WHERE character_id = ?", (character_id,))
         con.execute("DELETE FROM card_history WHERE character_id = ?", (character_id,))
 
+    def _fold_gender(self, con: sqlite3.Connection, drop: int, keep: int) -> None:
+        """Keep's gender stays unless only drop's was set by the operator, which then moves
+        (with its ``gender_by``). Two different operator genders refuse: the operator has
+        said these are two voices, and a merge must not pick one silently."""
+        rows = {
+            r[0]: (r[1], r[2])
+            for r in con.execute(
+                "SELECT id, gender, gender_by FROM characters WHERE id IN (?, ?)", (drop, keep)
+            )
+        }
+        (mine, mine_by), (theirs, theirs_by) = rows[keep], rows[drop]
+        if theirs_by != "operator":
+            return
+        if mine_by == "operator":
+            if mine != theirs:
+                raise ValueError(
+                    f"character {keep} has operator gender {mine!r} and character {drop} has "
+                    f"operator gender {theirs!r}; clear one (`fukikae registry gender --clear`) "
+                    "before merging"
+                )
+            return
+        con.execute(
+            "UPDATE characters SET gender = ?, gender_by = ? WHERE id = ?",
+            (theirs, theirs_by, keep),
+        )
+
     def _fold_character(
         self, con: sqlite3.Connection, drop: int, keep: int, report: list[str]
     ) -> None:
-        """Fold character ``drop`` into ``keep``: its aliases, its card history (`_fold_cards`)
-        and its external id when keep has none. Keep's own external id wins a conflict."""
+        """Fold character ``drop`` into ``keep``: its aliases, its card history (`_fold_cards`),
+        its external id when keep has none, and its operator gender when keep has none
+        (`_fold_gender`). Keep's own external id, kind, lock and reviewed time win; a kind,
+        lock or reviewed time of drop's that differs goes into ``report``."""
+        self._fold_gender(con, drop, keep)
+        fields = {
+            r[0]: (r[1], r[2], bool(r[3]))
+            for r in con.execute(
+                "SELECT id, kind, reviewed, locked FROM characters WHERE id IN (?, ?)",
+                (drop, keep),
+            )
+        }
+        (my_kind, my_reviewed, my_lock), (their_kind, their_reviewed, their_lock) = (
+            fields[keep],
+            fields[drop],
+        )
+        if their_lock and not my_lock:
+            report.append(
+                f"character {keep} stays unlocked; character {drop}'s lock was dropped "
+                f"(`fukikae registry lock WORKSPACE {keep} --character` locks it)"
+            )
+        if their_kind != my_kind:
+            report.append(
+                f"character {keep} keeps kind {my_kind}; character {drop}'s {their_kind} "
+                "was dropped"
+            )
+        if their_reviewed is not None and their_reviewed != my_reviewed:
+            report.append(
+                f"character {keep} keeps reviewed {my_reviewed or 'never'}; character "
+                f"{drop}'s {their_reviewed} was dropped"
+            )
         ids = dict(
             con.execute("SELECT id, external_id FROM characters WHERE id IN (?, ?)", (drop, keep))
         )
@@ -1311,7 +1538,9 @@ class Registry:
         characters are deleted and folded into keep's lowest-id character (card history and
         external id, `_fold_character`); returns {drop character id: keep character id} for
         the caller to remap references. Lines worth telling the operator (a curated card or
-        an external id that lost) are appended to ``report``.
+        an external id that lost) are appended to ``report``. Keep's character keeps its
+        gender, kind and reviewed time; an operator gender only drop's character has moves to
+        it, and two different operator genders raise ValueError (nothing changes).
         """
         notes: list[str] = report if report is not None else []
         if keep == drop:

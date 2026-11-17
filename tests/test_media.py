@@ -339,3 +339,84 @@ def test_extract_subtitles_removes_its_files_when_ffmpeg_fails(tmp_path, monkeyp
     with pytest.raises(media.MediaError):
         media.extract_subtitles(tmp_path / "in.mkv", [(a, tmp_path / "a"), (b, tmp_path / "b")])
     assert list(tmp_path.iterdir()) == []
+
+
+# -- timeouts and the picture stream (studio video clips) ------------------------------------
+
+
+def test_run_kills_a_command_that_outlives_its_timeout():
+    import time
+
+    from fukikae.media import MediaError, _run
+
+    t0 = time.monotonic()
+    with pytest.raises(MediaError, match="timed out after 0.3 s"):
+        _run(["sleep", "30"], timeout=0.3)
+    assert time.monotonic() - t0 < 5
+
+
+@pytest.mark.parametrize(
+    ("codec", "field_order", "interlaced"),
+    [
+        ("h264", "tt", True),
+        ("h264", "bb", True),
+        ("mpeg2video", "tb", True),
+        ("hevc", "bt", True),
+        ("h264", "progressive", False),
+        ("mpeg2video", "progressive", False),
+        ("h264", "unknown", False),
+        ("h264", None, False),
+        ("mpeg2video", "unknown", True),  # DVD and broadcast TS rarely flag their field order
+        ("mpeg2video", None, True),
+        ("mpeg4", None, False),
+    ],
+)
+def test_interlaced_trusts_field_order_and_assumes_it_for_unflagged_mpeg2(
+    codec, field_order, interlaced
+):
+    from fukikae.media import is_interlaced
+
+    assert is_interlaced(codec, field_order) is interlaced
+
+
+def test_video_stream_skips_cover_art_and_reads_the_field_order():
+    from fukikae.media import VideoStream, parse_video_streams
+
+    data = {"streams": [
+        {"index": 0, "codec_name": "mjpeg", "disposition": {"attached_pic": 1}},
+        {"index": 1, "codec_name": "mpeg2video", "disposition": {"attached_pic": 0}},
+        {"index": 2, "codec_name": "h264", "field_order": "tt"},
+    ]}  # fmt: skip
+    assert parse_video_streams(data) == VideoStream(1, "mpeg2video", True)
+    assert parse_video_streams({"streams": data["streams"][2:]}) == VideoStream(2, "h264", True)
+    assert parse_video_streams({"streams": data["streams"][:1]}) is None
+    assert parse_video_streams({}) is None
+
+
+@pytest.mark.ffmpeg
+def test_probe_video_skips_an_attached_cover(tmp_path):
+    import subprocess
+
+    from fukikae.media import probe_video
+
+    def ff(*args: str) -> None:
+        subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True)
+
+    jpg = tmp_path / "cover.jpg"
+    ff("-f", "lavfi", "-i", "color=red:s=32x32:d=1", "-frames:v", "1", str(jpg))
+    src = tmp_path / "src.mkv"
+    ff("-f", "lavfi", "-i", "testsrc=s=64x48:r=4:d=2", "-f", "lavfi", "-i",
+       "sine=frequency=440:duration=2", "-c:v", "mpeg4", "-c:a", "aac", str(src))  # fmt: skip
+    both = tmp_path / "cover.mp4"
+    ff("-i", str(jpg), "-i", str(src), "-map", "0", "-map", "1:v", "-map", "1:a", "-c", "copy",
+       "-c:v:0", "mjpeg", "-disposition:v:0", "attached_pic", str(both))  # fmt: skip
+    got = probe_video(both)  # the MP4 muxer moves the cover after the picture
+    assert got is not None and got.index == 0 and got.codec == "mpeg4"
+    only = tmp_path / "audio.m4a"
+    ff("-i", str(jpg), "-i", str(src), "-map", "0", "-map", "1:a", "-c", "copy", "-c:v",
+       "mjpeg", "-disposition:v:0", "attached_pic", str(only))  # fmt: skip
+    assert probe_video(only) is None
+    mka = tmp_path / "audio.mka"  # a Matroska cover attachment demuxes as an attached picture
+    ff("-i", str(src), "-map", "0:a", "-c", "copy", "-attach", str(jpg), "-metadata:s:t",
+       "mimetype=image/jpeg", "-metadata:s:t", "filename=cover.jpg", str(mka))  # fmt: skip
+    assert probe_video(mka) is None

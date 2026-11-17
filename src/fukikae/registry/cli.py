@@ -1,11 +1,20 @@
 """`fukikae registry` commands."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
 import typer
 
 from fukikae.names.inputs import identity_inputs
+from fukikae.registry.invalidate import (
+    character_episodes,
+    episodes_with_key,
+    mark_stale,
+    merge_episodes,
+    remap_assignments,
+)
 from fukikae.workspace import Episode, Workspace
 
 registry_app = typer.Typer(help="Manage the series character registry.", no_args_is_help=True)
@@ -18,8 +27,11 @@ def rematch(
 ) -> None:
     """Forget an episode's registry contributions and match its clusters again.
 
-    Actors only this episode created are deleted first (unless curated), so its clusters
-    are judged against the rest of the series, never against their own earlier result.
+    Actors only this episode created are deleted first (unless curated: locked, named, or
+    with a character that is named by the operator, has an operator alias, an external id, an
+    operator gender or a kind other than character, a migrated voice, or a locked or
+    hand-assigned card), so its clusters are judged against the rest of the series, never
+    against their own earlier result.
     """
     from fukikae import job
     from fukikae.artifacts import read_json
@@ -98,57 +110,30 @@ def _same_dims(dims: dict[str, int], hint: str) -> None:
         )
 
 
-def _stale(ws: Workspace, episodes: list[str]) -> None:
-    """Delete each episode's `characters` manifest record and say so."""
-    from fukikae.job import mark_stale
+@contextmanager
+def _writing(workspace: Path, command: str, *, assignments: bool = False) -> Iterator[None]:
+    """The studio lock (`studio.apply.studio_lock`) around a registry command's write and its
+    stale marks, so neither runs beside a studio decision or a `fukikae run`; refused, with
+    who holds it, rather than waited for. A command that rewrites ``assignments`` (resolve,
+    cluster) is also refused while a decision's steps are left, as `fukikae run` is."""
+    from fukikae.studio.apply import DecisionRefused, studio_lock
 
-    if not episodes:
-        typer.echo("no episode has exemplars under it; nothing is stale")
-        return
-    for eid in episodes:
-        ep = Episode(source=Path(eid), id=eid, work=ws.work_dir(eid), workspace_root=ws.root)
-        mark_stale(ep, "characters")
-    typer.echo(f"stale (characters will rerun on the next `fukikae run`): {', '.join(episodes)}")
+    try:
+        with studio_lock(workspace, f"`fukikae registry {command}`",
+                         refuse_unfinished=assignments):  # fmt: skip
+            yield
+    except DecisionRefused as e:  # StudioBusy, UnfinishedRecords, an unreadable log
+        raise _fail(str(e)) from e
 
 
-def _remap_assignments(
-    ws: Workspace,
-    episode: str,
-    actor_map: dict[int, int],
-    only_cluster: str | None = None,
-    character: tuple[int, int] | None = None,
-    character_map: dict[int, int] | None = None,
-) -> None:
-    """Keep an episode's assignments.json in step with a merge or split.
+def _stale(ws: Workspace, episodes: list[str], stage: str = "characters") -> None:
+    """Delete each episode's ``stage`` manifest record and say so."""
+    typer.echo(mark_stale(ws, episodes, stage))
 
-    Pinning copies actor and character ids from it, so stale ids would survive a rerun. A
-    split (``character``) also makes the split label a voice decision (``source = "voice"``,
-    no ``name``): the operator has overruled whatever name put it there, and the label's pin
-    to the new actor and character then carries over like any acoustic one.
-    """
-    from fukikae.artifacts import read_json, write_json
-    from fukikae.models import Assignments
 
-    path = ws.work_dir(episode) / "05-characters" / "assignments.json"
-    if not path.exists():
-        return
-    a = read_json(path, Assignments)
-    out = []
-    for c in a.clusters:
-        if only_cluster is not None and c.cluster != only_cluster:
-            out.append(c)
-            continue
-        upd: dict[str, int | str | None] = {}
-        if c.actor_id in actor_map:
-            upd["actor_id"] = actor_map[c.actor_id]
-        if character is not None and c.cluster == only_cluster:
-            upd["character_id"] = character[1]
-            upd["source"] = "voice"
-            upd["name"] = None
-        if character_map and c.character_id in character_map:
-            upd["character_id"] = character_map[c.character_id]
-        out.append(c.model_copy(update=upd))
-    write_json(path, a.model_copy(update={"clusters": out}))
+_character_episodes = character_episodes
+_remap_assignments = remap_assignments
+_episodes_with_key = episodes_with_key
 
 
 @registry_app.command("cluster")
@@ -161,7 +146,9 @@ def cluster(
         None, "--threshold", help="Cosine distance to join clusters; default 1 - match_threshold."
     ),
 ) -> None:
-    """Seed an empty registry from a whole season at once."""
+    """Seed an empty registry from a whole season at once. Refused while a studio decision or a
+    `fukikae run` holds the studio lock, or a decision is unfinished (`fukikae studio
+    resume`)."""
     import numpy as np
 
     from fukikae.artifacts import read_json, write_json
@@ -198,78 +185,79 @@ def cluster(
     if not_done:
         raise _fail(f"diarize stage not done for {', '.join(not_done)}; run `fukikae run` first")
 
-    with _open(workspace) as reg, reg.transaction():  # all of it, or none of it
-        if reg.actors():
-            raise _fail(
-                "the registry already has actors; batch seeding needs an empty one. "
-                "Use per-episode matching (`fukikae run`, `registry rematch`)."
-            )
-        loaded = {ep.id: load_clusters(identity_inputs(ep.work)[1]) for ep in eps}
-        _same_dims(
-            {
-                e: next((r.shape[1] for r in rows.values() if len(r)), 0)
-                for e, (_, rows) in loaded.items()
-            },
-            "Re-run the older episodes' diarize stage with the configured embedder "
-            "(`fukikae run`), then cluster",
-        )
-        groups = seed_clusters(
-            {eid: ev for eid, (ev, _) in loaded.items()},
-            threshold if threshold is not None else 1.0 - cfg.registry.match_threshold,
-            cfg.registry.min_new_seconds,
-        )
-        member: dict[tuple[str, str], tuple[int, int]] = {}
-        review: dict[tuple[str, str], int] = {}
-        for g in groups:
-            gev: dict[tuple[str, str], ClusterEvidence] = {
-                (e, c): next(x for x in loaded[e][0] if x.cluster == c) for e, c in g
-            }
-            # One character per episode: of a group's clusters in one episode, the one with
-            # the most clean speech is matched; the others go to review and add nothing.
-            keep: dict[str, str] = {}
-            for m in sorted(g, key=lambda m: (-gev[m].clean_seconds, m)):
-                keep.setdefault(m[0], m[1])
-            kept = sorted((e, c) for e, c in keep.items())
-            centroid = mean_embedding(np.concatenate([loaded[e][1][c] for e, c in kept]))
-            assert centroid is not None
-            aid, cid = reg.create_actor_with_character(centroid)
-            for e, c in g:
-                if keep[e] != c:
-                    review[(e, c)] = aid
-                    continue
-                reg.add_exemplars(aid, e, c, loaded[e][1][c], gev[(e, c)].clean_seconds)
-                member[(e, c)] = (aid, cid)
-            reg.recompute_centroid(aid)
-
-    for ep in eps:
-        turns_path = identity_inputs(ep.work)[0]
-        turns = read_json(turns_path, Diarization)
-        evs, _ = loaded[ep.id]
-        out = []
-        for ev in evs:
-            hit = member.get((ep.id, ev.cluster))
-            rev = review.get((ep.id, ev.cluster))
-            out.append(
-                ClusterAssignment(
-                    cluster=ev.cluster,
-                    actor_id=hit[0] if hit else rev,
-                    character_id=hit[1] if hit else None,
-                    score=None,
-                    clean_seconds=ev.clean_seconds,
-                    status="matched" if hit else "review" if rev else "extra",
+    with _writing(workspace, "cluster", assignments=True):
+        with _open(workspace) as reg, reg.transaction():  # all of it, or none of it
+            if reg.actors():
+                raise _fail(
+                    "the registry already has actors; batch seeding needs an empty one. "
+                    "Use per-episode matching (`fukikae run`, `registry rematch`)."
                 )
+            loaded = {ep.id: load_clusters(identity_inputs(ep.work)[1]) for ep in eps}
+            _same_dims(
+                {
+                    e: next((r.shape[1] for r in rows.values() if len(r)), 0)
+                    for e, (_, rows) in loaded.items()
+                },
+                "Re-run the older episodes' diarize stage with the configured embedder "
+                "(`fukikae run`), then cluster",
             )
-        (path,) = stage.outputs(ep)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(
-            path,
-            Assignments(
-                episode=ep.id,
-                threshold=cfg.registry.match_threshold,
-                clusters=out,
-                turns=turns.turns,
-            ),
-        )
+            groups = seed_clusters(
+                {eid: ev for eid, (ev, _) in loaded.items()},
+                threshold if threshold is not None else 1.0 - cfg.registry.match_threshold,
+                cfg.registry.min_new_seconds,
+            )
+            member: dict[tuple[str, str], tuple[int, int]] = {}
+            review: dict[tuple[str, str], int] = {}
+            for g in groups:
+                gev: dict[tuple[str, str], ClusterEvidence] = {
+                    (e, c): next(x for x in loaded[e][0] if x.cluster == c) for e, c in g
+                }
+                # One character per episode: of a group's clusters in one episode, the one with
+                # the most clean speech is matched; the others go to review and add nothing.
+                keep: dict[str, str] = {}
+                for m in sorted(g, key=lambda m: (-gev[m].clean_seconds, m)):
+                    keep.setdefault(m[0], m[1])
+                kept = sorted((e, c) for e, c in keep.items())
+                centroid = mean_embedding(np.concatenate([loaded[e][1][c] for e, c in kept]))
+                assert centroid is not None
+                aid, cid = reg.create_actor_with_character(centroid)
+                for e, c in g:
+                    if keep[e] != c:
+                        review[(e, c)] = aid
+                        continue
+                    reg.add_exemplars(aid, e, c, loaded[e][1][c], gev[(e, c)].clean_seconds)
+                    member[(e, c)] = (aid, cid)
+                reg.recompute_centroid(aid)
+
+        for ep in eps:
+            turns_path = identity_inputs(ep.work)[0]
+            turns = read_json(turns_path, Diarization)
+            evs, _ = loaded[ep.id]
+            out = []
+            for ev in evs:
+                hit = member.get((ep.id, ev.cluster))
+                rev = review.get((ep.id, ev.cluster))
+                out.append(
+                    ClusterAssignment(
+                        cluster=ev.cluster,
+                        actor_id=hit[0] if hit else rev,
+                        character_id=hit[1] if hit else None,
+                        score=None,
+                        clean_seconds=ev.clean_seconds,
+                        status="matched" if hit else "review" if rev else "extra",
+                    )
+                )
+            (path,) = stage.outputs(ep)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_json(
+                path,
+                Assignments(
+                    episode=ep.id,
+                    threshold=cfg.registry.match_threshold,
+                    clusters=out,
+                    turns=turns.turns,
+                ),
+            )
     typer.echo(f"{len(groups)} characters from {len(eps)} episodes")
 
 
@@ -308,6 +296,10 @@ def show(
                     + (f" (name by {c.name_by})" if c.name and c.name_by else "")
                     + (f" (external id {c.external_id})" if c.external_id else "")
                 )
+                gender = c.gender or "-"
+                if c.gender and c.gender_by:
+                    gender += f" ({c.gender_by})"
+                typer.echo(f"    gender {gender}, kind {c.kind}, reviewed {c.reviewed or 'never'}")
                 aliases = reg.aliases(c.id)
                 if aliases:
                     typer.echo("    aliases: " + ", ".join(f"{a.alias} ({a.by})" for a in aliases))
@@ -331,42 +323,22 @@ def rename(
     whose names stage used that key."""
     from fukikae.registry.store import alias_key
 
-    ws = Workspace(workspace)
-    with _open(workspace) as reg:
-        char = next((c for c in reg.characters() if c.id == character_id), None)
-        if char is None:
-            raise _fail(f"no character {character_id}")
-        with reg.transaction():
-            warning = reg.rename_character(character_id, name)
-            if external_id is not None:
-                reg.set_character_external_id(character_id, external_id or None)
-        affected = list(reg.episode_counts(char.actor_id))
-    if warning:
-        typer.echo(f"warning: {warning}")
-    key = alias_key(name)
-    users = _episodes_with_key(ws, key) if key is not None else []
-    _stale(ws, sorted(set(affected) | set(users)))
-
-
-def _episodes_with_key(ws: Workspace, key: str) -> list[str]:
-    """Episodes whose names stage used a line of this key."""
-    from fukikae.artifacts import read_json
-    from fukikae.names.inputs import names_path
-    from fukikae.names.models import NamesResult
-
-    out = []
-    episodes = ws.root / ".fukikae" / "episodes"
-    for work in sorted(episodes.iterdir()) if episodes.is_dir() else []:
-        path = names_path(work)
-        if not path.is_file():
-            continue
-        try:
-            r = read_json(path, NamesResult)
-        except ValueError:
-            continue
-        if r.used and any(ln.key == key for ln in r.visible_lines()):
-            out.append(work.name)
-    return out
+    with _writing(workspace, "rename"):
+        ws = Workspace(workspace)
+        with _open(workspace) as reg:
+            char = next((c for c in reg.characters() if c.id == character_id), None)
+            if char is None:
+                raise _fail(f"no character {character_id}")
+            with reg.transaction():
+                warning = reg.rename_character(character_id, name)
+                if external_id is not None:
+                    reg.set_character_external_id(character_id, external_id or None)
+            affected = list(reg.episode_counts(char.actor_id))
+        if warning:
+            typer.echo(f"warning: {warning}")
+        key = alias_key(name)
+        users = _episodes_with_key(ws, key) if key is not None else []
+        _stale(ws, sorted(set(affected) | set(users)))
 
 
 @registry_app.command("alias")
@@ -394,49 +366,52 @@ def alias(
     be another character's name."""
     from fukikae.registry.store import AliasConflictError, alias_key
 
-    ws = Workspace(workspace)
-    with _open(workspace) as reg:
-        target = None
-        if character is not None:
+    with _writing(workspace, "alias") if name is not None else nullcontext():
+        ws = Workspace(workspace)
+        with _open(workspace) as reg:
+            target = None
+            if character is not None:
+                try:
+                    target = reg.character_by_ref(character)
+                except ValueError as e:
+                    raise _fail(str(e)) from e
+            if name is None:
+                if remove or replace:
+                    raise _fail("--remove and --replace need a NAME")
+                typer.echo("alias\tcharacter\tby\tlanguage")
+                for a in reg.aliases(None if target is None else target.id):
+                    typer.echo(f"{a.alias}\t{a.character_id}\t{a.by}\t{a.language or '-'}")
+                return
+            assert target is not None
+            key = alias_key(name)
+            if key is None:
+                raise _fail(
+                    f"{name!r} names nobody (two speakers, a group word, a sign or a song, or "
+                    "blank); only a single speaker's name can be an alias"
+                )
             try:
-                target = reg.character_by_ref(character)
-            except ValueError as e:
+                before = reg.character_for_key(key) if not remove else None
+            except ValueError as e:  # two characters' names share the key
                 raise _fail(str(e)) from e
-        if name is None:
-            if remove or replace:
-                raise _fail("--remove and --replace need a NAME")
-            typer.echo("alias\tcharacter\tby\tlanguage")
-            for a in reg.aliases(None if target is None else target.id):
-                typer.echo(f"{a.alias}\t{a.character_id}\t{a.by}\t{a.language or '-'}")
-            return
-        assert target is not None
-        key = alias_key(name)
-        if key is None:
-            raise _fail(
-                f"{name!r} names nobody (two speakers, a group word, a sign or a song, or blank); "
-                "only a single speaker's name can be an alias"
-            )
-        try:
-            before = reg.character_for_key(key) if not remove else None
-        except ValueError as e:  # two characters' names share the key
-            raise _fail(str(e)) from e
-        if remove:
-            held = next((a for a in reg.aliases() if a.alias == key), None)
-            if held is None:
-                raise _fail(f"no alias {key!r}")
-            if held.character_id != target.id:
-                raise _fail(f"{key!r} is character {held.character_id}'s alias, not {target.id}'s")
-            reg.remove_alias(key)
-            typer.echo(f"character {target.id}: alias {key!r} removed")
-        else:
-            try:
-                got = reg.add_alias(target.id, key, by="operator", replace=replace)
-            except AliasConflictError as e:
-                raise _fail(str(e)) from e
-            typer.echo(f"character {target.id}: answers to {got.alias!r} (operator)")
-        actors = {target.actor_id} | ({before.actor_id} if before is not None else set())
-        affected = {e for aid in actors for e in reg.episode_counts(aid)}
-    _stale(ws, sorted(affected | set(_episodes_with_key(ws, key))))
+            if remove:
+                held = next((a for a in reg.aliases() if a.alias == key), None)
+                if held is None:
+                    raise _fail(f"no alias {key!r}")
+                if held.character_id != target.id:
+                    raise _fail(
+                        f"{key!r} is character {held.character_id}'s alias, not {target.id}'s"
+                    )
+                reg.remove_alias(key)
+                typer.echo(f"character {target.id}: alias {key!r} removed")
+            else:
+                try:
+                    got = reg.add_alias(target.id, key, by="operator", replace=replace)
+                except AliasConflictError as e:
+                    raise _fail(str(e)) from e
+                typer.echo(f"character {target.id}: answers to {got.alias!r} (operator)")
+            actors = {target.actor_id} | ({before.actor_id} if before is not None else set())
+            affected = {e for aid in actors for e in reg.episode_counts(aid)}
+        _stale(ws, sorted(affected | set(_episodes_with_key(ws, key))))
 
 
 @registry_app.command("merge")
@@ -445,20 +420,42 @@ def merge(
     keep: int = typer.Argument(..., metavar="KEEP", help="Actor id to keep."),
     drop: int = typer.Argument(..., metavar="DROP", help="Actor id folded into KEEP."),
 ) -> None:
-    """Merge actor DROP into actor KEEP; DROP's characters fold into KEEP's first one."""
+    """Merge actor DROP into actor KEEP; DROP's characters fold into KEEP's first one. The
+    characters stage reruns, with assignments remapped, in every episode DROP's characters
+    speak in or are named in, and every episode whose names stage used one of their keys.
+    It is logged in studio/decisions.jsonl as a studio merge is: a remap that fails is
+    finished by `fukikae studio resume`, and blocks later decisions until it is."""
+    from fukikae.registry.invalidate import Invalidation, stale_message
+    from fukikae.studio.apply import DecisionError, DecisionRefused, apply_registry_change
+
     ws = Workspace(workspace)
-    with _open(workspace) as reg:
+
+    def stage(reg: Any) -> tuple[list[str], list[Invalidation], list[dict[str, Any]]]:
         notes: list[str] = []
         try:
-            affected = list(reg.episode_counts(drop))
+            affected = merge_episodes(ws, reg, drop)
             chars = reg.merge_actors(keep, drop, report=notes)
         except (KeyError, ValueError) as e:
-            raise _fail(f"cannot merge {drop} into {keep}: {e!r}") from e
-    for line in notes:
+            raise DecisionRefused(f"cannot merge {drop} into {keep}: {e!r}") from e
+        remaps = [
+            {"do": "remap", "episode": eid, "actor_map": [[drop, keep]],
+             "character_map": [[k, v] for k, v in chars.items()]}
+            for eid in affected
+        ]  # fmt: skip
+        return notes, [Invalidation(e, "characters") for e in affected], remaps
+
+    # Recorded as a studio decision is: the stale marks first (a remap that fails must not
+    # leave them fresh), then the remaps; one that fails is finished by `studio resume`.
+    try:
+        result = apply_registry_change(
+            ws, "merge", {"command": "merge", "keep": keep, "drop": drop}, stage
+        )
+    except DecisionError as e:
+        raise _fail(str(e)) from e
+    for line in result.lines:
         typer.echo(line)
-    for eid in affected:
-        _remap_assignments(ws, eid, {drop: keep}, character_map=chars)
-    _stale(ws, affected)
+    if not result.invalidations:
+        typer.echo(stale_message([]))
 
 
 @registry_app.command("split")
@@ -467,19 +464,39 @@ def split(
     episode: str = typer.Option(..., "--episode", help="Episode code (SxxEyy)."),
     cluster: str = typer.Option(..., "--cluster", help="Cluster label in that episode."),
 ) -> None:
-    """Move one episode cluster to a new actor and character."""
+    """Move one episode cluster to a new actor and character. It is logged in
+    studio/decisions.jsonl as a merge is: the episode's characters stage is marked stale and
+    its assignments remapped after the registry commit, and a remap that fails is finished
+    by `fukikae studio resume`."""
+    from fukikae.registry.invalidate import Invalidation
+    from fukikae.studio.apply import DecisionError, DecisionRefused, apply_registry_change
+
     ws = Workspace(workspace)
-    with _open(workspace) as reg:
+
+    def stage(reg: Any) -> tuple[list[str], list[Invalidation], list[dict[str, Any]]]:
         holders = reg.cluster_actors(episode, cluster)
         if len(holders) != 1:
-            raise _fail(f"no exemplars for {episode} {cluster}")
+            raise DecisionRefused(f"no exemplars for {episode} {cluster}")
         old = holders[0]
-        new_aid, new_cid = reg.split_cluster(old, episode, cluster)
-    _remap_assignments(
-        ws, episode, {old: new_aid}, only_cluster=cluster, character=(new_aid, new_cid)
-    )
-    typer.echo(f"{episode} {cluster}: actor {old} -> {new_aid}, character {new_cid}")
-    _stale(ws, [episode])
+        try:
+            new_aid, new_cid = reg.split_cluster(old, episode, cluster)
+        except (KeyError, ValueError) as e:
+            raise DecisionRefused(f"cannot split {episode} {cluster}: {e}") from e
+        remap = {
+            "do": "remap", "episode": episode, "actor_map": [[old, new_aid]],
+            "only_cluster": cluster, "character": [new_aid, new_cid],
+        }  # fmt: skip
+        line = f"{episode} {cluster}: actor {old} -> {new_aid}, character {new_cid}"
+        return [line], [Invalidation(episode, "characters")], [remap]
+
+    try:
+        result = apply_registry_change(
+            ws, "split", {"command": "split", "episode": episode, "cluster": cluster}, stage
+        )
+    except DecisionError as e:
+        raise _fail(str(e)) from e
+    for line in result.lines:
+        typer.echo(line)
 
 
 @registry_app.command("lock")
@@ -499,23 +516,86 @@ def lock(
     assignments name the actor or character."""
     from fukikae.registry.usage import episodes_naming
 
-    what = "character" if character else "actor"
-    ws = Workspace(workspace)
-    with _open(workspace) as reg:
-        try:
-            if character:
-                reg.lock_character(actor_id, not unlock)
-                owner = next(c.actor_id for c in reg.characters() if c.id == actor_id)
-                users = episodes_naming(ws.root, (), (actor_id,))
-            else:
-                reg.lock_actor(actor_id, not unlock)
-                owner = actor_id
-                users = episodes_naming(ws.root, (actor_id,))
-        except KeyError as e:
-            raise _fail(f"no {what} {actor_id}") from e
-        affected = set(reg.episode_counts(owner)) | set(users)
-    typer.echo(f"{what} {actor_id}: {'unlocked' if unlock else 'locked'}")
-    _stale(ws, sorted(affected))
+    with _writing(workspace, "lock"):
+        what = "character" if character else "actor"
+        ws = Workspace(workspace)
+        with _open(workspace) as reg:
+            try:
+                if character:
+                    reg.lock_character(actor_id, not unlock)
+                    owner = next(c.actor_id for c in reg.characters() if c.id == actor_id)
+                    users = episodes_naming(ws.root, (), (actor_id,))
+                else:
+                    reg.lock_actor(actor_id, not unlock)
+                    owner = actor_id
+                    users = episodes_naming(ws.root, (actor_id,))
+            except KeyError as e:
+                raise _fail(f"no {what} {actor_id}") from e
+            affected = set(reg.episode_counts(owner)) | set(users)
+        typer.echo(f"{what} {actor_id}: {'unlocked' if unlock else 'locked'}")
+        _stale(ws, sorted(affected))
+
+
+@registry_app.command("gender")
+def gender(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    character: str = typer.Argument(..., metavar="CHARACTER", help="Character id or name."),
+    value: str | None = typer.Argument(None, metavar="[f|m]", help="The voice register."),
+    clear: bool = typer.Option(False, "--clear", help="Clear the stored gender instead."),
+) -> None:
+    """Store a character's gender (its voice register, f or m) as the operator's, or clear it.
+    The pitch estimate is never stored; a stored gender is the operator's call. It beats the
+    estimate in the reference gates and the line gate, and an automatic clone card whose
+    references are the other register is re-picked, so tts reruns next time for the
+    character's episodes."""
+    if clear == (value is not None):
+        raise _fail("give f or m, or --clear")
+    if value is not None and value not in ("f", "m"):
+        raise _fail(f"gender must be f or m, not {value!r}")
+    with _writing(workspace, "gender"):
+        with _open(workspace) as reg:
+            try:
+                target = reg.character_by_ref(character)
+            except ValueError as e:
+                raise _fail(str(e)) from e
+            reg.set_character_gender(
+                target.id, None if value is None else "f" if value == "f" else "m"
+            )
+            affected = _character_episodes(Workspace(workspace), reg, target.id, target.actor_id)
+        if clear:
+            typer.echo(f"character {target.id}: gender cleared")
+        else:
+            typer.echo(f"character {target.id}: gender {value} (operator)")
+        _stale(Workspace(workspace), affected, "tts")
+
+
+@registry_app.command("kind")
+def kind(
+    workspace: Path = typer.Argument(..., help="Workspace directory."),
+    character: str = typer.Argument(..., metavar="CHARACTER", help="Character id or name."),
+    value: str = typer.Argument(
+        ..., metavar="character|narrator|ignored", help="The character's kind."
+    ),
+) -> None:
+    """Make a character a dialogue character, a narrator (its own card, exempt from the
+    one-scene reference gate and the line gender gate) or ignored (its lines are never
+    translated or rendered, and the mix keeps the original audio under them). The characters
+    stage reruns next time for the character's episodes (it marks an ignored character's
+    clusters), and everything after it whose inputs that changes."""
+    from fukikae.registry.store import KINDS
+
+    if value not in KINDS:
+        raise _fail(f"kind must be one of {', '.join(sorted(KINDS))}, not {value!r}")
+    with _writing(workspace, "kind"):
+        with _open(workspace) as reg:
+            try:
+                target = reg.character_by_ref(character)
+            except ValueError as e:
+                raise _fail(str(e)) from e
+            reg.set_character_kind(target.id, value)
+            affected = _character_episodes(Workspace(workspace), reg, target.id, target.actor_id)
+        typer.echo(f"character {target.id}: kind {value}")
+        _stale(Workspace(workspace), affected)
 
 
 @registry_app.command("actor")
@@ -789,9 +869,12 @@ def resolve(
     their assignments.
 
     Every listed episode needs a done diarize stage. Actors only these episodes made are
-    replaced (unless curated: locked, named, or hand-voiced); every other actor is matched
+    replaced (unless curated: locked, named, or with a character that is named by the
+    operator, has an operator alias, an external id, an operator gender or a kind other than
+    character, a migrated voice, or a locked or hand-assigned card); every other actor is matched
     against and never merged with another. One registry transaction; assignments.json
-    written after it.
+    written after it. Refused while a studio decision or a `fukikae run` holds the studio
+    lock, or a decision is unfinished (`fukikae studio resume`).
     """
     from fukikae.errors import user_errors
     from fukikae.eval.identity.cli import parse_options
@@ -815,10 +898,11 @@ def resolve(
             f"--matcher {matcher}: resolve runs the batch matcher joint; per-episode matchers "
             "run in the characters stage (`fukikae run`, `registry rematch`)"
         )
-    try:
-        s = resolve_episodes(ws, eps, thr, options=opts)
-    except user_errors() as e:
-        raise _fail(str(e)) from e
+    with _writing(workspace, "resolve", assignments=True):
+        try:
+            s = resolve_episodes(ws, eps, thr, options=opts)
+        except user_errors() as e:
+            raise _fail(str(e)) from e
     typer.echo(
         f"resolved {', '.join(s.episodes)} with joint at {thr:g}: {s.matched} clusters matched "
         f"to existing actors, {len(s.new_actors)} new actors"

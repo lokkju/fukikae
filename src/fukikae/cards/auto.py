@@ -68,6 +68,24 @@ one kept in history, CD1) when the current rules give picks; with none it is kep
 flagged, never made stock. A curated, imported or locked card is flagged only, in the tts
 run's flags, ``fukikae voices list`` and ``fukikae names show`` (`impure_lines`). A card both
 stale, under the floor and impure gets one re-pick with every reason in its note.
+
+Operator state (Part B). A character's operator gender (``gender_by = 'operator'``,
+`operator_genders`) replaces the pitch estimate's class in the A1 register gate
+(``select.operator_register``: in `character_candidates` and in `impure_cards`). Names vouch
+for identity, not register: name-confirmed turns, ungated otherwise, keep the gate with the
+operator's class when there is one, on the class only (no estimate median: a turn between the
+bands is kept, one confidently in the other class refused) and without the split flag
+(`_vouched`); the acoustic tier keeps the estimate's median when it is the operator's class.
+A thin pick the operator's register forced (it refused gated candidates) is flagged on that
+run (`OPERATOR_THIN_WHY`). It is a re-pick
+reason of its own: an automatic clone card whose references are the other class
+(`gender_mismatches`, measured on their origin spans, else on the card's clips) is re-picked
+with the operator's class as the register, noted `GENDER_NOTE` only when the picks pass the
+gates; one whose references can't be measured, and a curated, imported or locked one, is
+flagged (`gender_lines` in ``voices list`` and ``names show``). A
+cast gender (``gender_by = 'cast'``) is a prior, never the operator's call, and changes
+nothing here. A narrator (``kind = 'narrator'``, `narrators`) is picked with no one-scene gate
+(``scene_gap=None``): narration is often one long scene.
 """
 
 from __future__ import annotations
@@ -82,6 +100,7 @@ from fukikae.cards.select import (
     CLONE_MIN_S,
     FLOOR_CLIPS,
     FOREIGN_MAX,
+    SCENE_GAP_S,
     Gated,
     floor_shortfall,
     meets_floor,
@@ -97,10 +116,11 @@ if TYPE_CHECKING:
 
     from fukikae.backends.base import Synthesizer
     from fukikae.cards.card import Card
-    from fukikae.cards.select import Gate, Measured, RefPick, Register, Tier
+    from fukikae.cards.select import Gate, Measured, RefPick, Refusal, RefVerdict, Register, Tier
     from fukikae.config import Config
     from fukikae.models import Assignments, ClusterAssignment, DubCue, Tags, Transcript
     from fukikae.names.models import NamesResult
+    from fukikae.pitch import Gender
     from fukikae.registry.store import CardAssignment, Registry
     from fukikae.workspace import Episode, Workspace
 
@@ -109,9 +129,11 @@ log = logging.getLogger(__name__)
 __all__ = [
     "AUTOMATIC_BY",
     "FLOOR_NOTE",
+    "GENDER_NOTE",
     "REPICK_NOTE",
     "STOCK_NOTE",
     "STALE_OVERLAP",
+    "CandidateReport",
     "CharacterRefs",
     "Cloning",
     "ProtectedAssignmentError",
@@ -132,8 +154,12 @@ __all__ = [
     "impure_cards",
     "impure_lines",
     "foreign_spans",
+    "gender_lines",
+    "gender_mismatches",
     "gender_thresholds",
     "key_owner",
+    "narrators",
+    "operator_genders",
     "repick_blocker",
     "replace_refusal",
     "stale_cards",
@@ -166,6 +192,18 @@ PURITY_NOTE = "re-picked: references fail the reference gates"
 PURITY_FIX = "replace it with `fukikae voices clone`"
 STOCK_NOTE = "re-picked: stock voices are retired (D41)"
 STOCK_FIX = "stock voices are retired (D41): `fukikae voices clone` makes a clone"
+GENDER_NOTE = "re-picked: operator gender"
+GENDER_FIX = "`fukikae voices clone` with a clip in the operator's register replaces it"
+# a re-pick made for another reason (stale, stock) whose picks no register gate passed
+UNMET_WHY = (
+    "re-picked for another reason, but no reference in the operator's register passes the "
+    "gates, so the new picks are ungated"
+)
+# thin picks the operator's register forced: it refused candidates the gated tiers offered
+OPERATOR_THIN_WHY = (
+    "the operator's register (operator gender {gender}) refused {n} gated candidate(s), so the "
+    "picks are ungated"
+)
 GATE_WORDS = {"off_register": "off-register", "unvoiced": "unvoiced", "song_like": "song-like"}
 
 
@@ -190,6 +228,22 @@ class CharacterRefs:
     # episodes left out because their assignments are older than their names, in which the
     # character holds a cluster (its turns there wait for the characters stage to rerun)
     skipped: tuple[str, ...] = ()
+    # thin picks only: the candidates the operator's register refused in the gated tiers
+    # (each episode counted once, its larger tier), the reason those tiers came up short
+    refused: int = 0
+
+
+@dataclass(frozen=True)
+class CandidateReport:
+    """One episode's candidates as `character_candidates` judged them, for the studio: every
+    candidate eligible before the A1 gates with its verdict (CD5 order), every turn no
+    candidate covers with its reasons, whether the turns searched were the name-confirmed ones,
+    and those turns' spans."""
+
+    verdicts: list[RefVerdict]
+    refused: list[Refusal]
+    confirmed: bool
+    turn_spans: list[tuple[float, float]]
 
 
 @dataclass(frozen=True)
@@ -330,16 +384,26 @@ def reference_gates(
     song_spans: Sequence[tuple[float, float]],
     bands: tuple[float, float] = (float(MALE_BELOW), float(FEMALE_ABOVE)),
     pitch_root: Path | None = None,
+    operator: Gender | None = None,
 ) -> tuple[Measured, tuple[Gate, ...]]:
     """One card reference's A1 verdict on its origin ``span`` of the episode's ``vocals``, as
     selection gives it (`select.measure_candidates`, `select.verdict`): measured on the
     speaker's own turns inside it (``own_spans``; ``confirmed_spans`` instead when the span
-    lies inside the character's name-confirmed turns, which then gate no pitch), against
-    ``register`` (the speaker's in that episode: the cross-class rule, and no pitch gate for
-    a near-even bimodal one), with ``song_like`` (the per-second mask) and ``song_spans``
-    (the detector's accepted spans) for gate 3. The rule `impure_cards` applies, and
-    ``eval gender``'s reference purity."""
-    from fukikae.cards.select import Register, measure_candidates, song_share, verdict
+    lies inside the character's name-confirmed turns), against ``register`` (the speaker's in
+    that episode: the cross-class rule, and no pitch gate for a near-even bimodal one), with
+    ``song_like`` (the per-second mask) and ``song_spans`` (the detector's accepted spans)
+    for gate 3. ``operator``, the character's operator gender, is the register's class
+    (``select.operator_register``). Names vouch for identity, not register: a name-confirmed
+    span gates no pitch unless the character has an operator gender, which then gates it
+    on the operator's class only (no median, no split, `_vouched`). The rule `impure_cards` applies,
+    and ``eval gender``'s reference purity."""
+    from fukikae.cards.select import (
+        Register,
+        measure_candidates,
+        operator_register,
+        song_share,
+        verdict,
+    )
 
     start, end = span
     vouched = (
@@ -351,8 +415,12 @@ def reference_gates(
     pieces = confirmed_spans if vouched else own_spans
     (m,) = measure_candidates(vocals, [(start, end)], pieces, pitch_root)
     reg_here = register
-    if vouched and register is not None:
-        reg_here = Register("u", register.median)
+    if register is not None:
+        reg_here = operator_register(register, operator)
+    elif operator in ("f", "m"):
+        reg_here = Register(operator, None, operator=True)
+    if vouched and reg_here is not None:
+        reg_here = _vouched(reg_here)
     share = None if song_like is None else song_share(start, end, song_like)
     gates = verdict(
         m, register=reg_here or Register("u", None), song=share, bands=bands,
@@ -361,12 +429,28 @@ def reference_gates(
     return m, gates
 
 
+def _vouched(register: Register) -> Register:
+    """The register for name-confirmed turns: names vouch for identity, not register (the
+    controller's ruling). With the operator's class (``register.operator``) the gate still
+    runs on them, on the class only (``vouched``: no estimate median, so a turn between the
+    bands is kept and only one confidently in the other class is refused) and without the
+    split flag (the names say the turns are the character's); without one, no gate and no
+    split flag."""
+    from fukikae.cards.select import Register
+
+    if register.operator:
+        return register._replace(median=None, bimodal=False, even=False, vouched=True)
+    return Register("u", register.median)
+
+
 def impure_cards(
     ws: Workspace,
     reg: Registry,
     store: CardStore,
     language: str,
     characters: Iterable[int] | None = None,
+    *,
+    genders: Mapping[int, Gender] | None = None,
 ) -> dict[int, Impurity]:
     """Character -> its ``language`` clone card's `Impurity`, for the characters (every one
     by default) whose card has a reference failing A1 gate 1, 2 or 3 measured on its origin
@@ -377,7 +461,9 @@ def impure_cards(
     mask and the song detector's accepted spans. The accepted-span part of gate 3 only ever
     refuses a card made before it: reference selection already leaves those spans out of
     every new pick (they are theme exclusions, ``select.reference_exclusions``), so it is here
-    that it reads. Gate 4 is about the set, which the floor judges. Cards of any
+    that it reads. The character's operator gender (``genders``, `operator_genders` read
+    from ``reg`` by default), when stored, is the register's class, on name-confirmed turns
+    too (`reference_gates`). Gate 4 is about the set, which the floor judges. Cards of any
     ``chosen_by`` are listed (the caller decides by `replace_refusal`:
     a curated, imported or locked card is only flagged); a reference without an episode
     origin (``voices clone``'s ``{"source": "voices clone"}``) or in an episode without
@@ -389,6 +475,8 @@ def impure_cards(
     bands = (float(MALE_BELOW), float(FEMALE_ABOVE))
     if characters is None:
         characters = [c.id for c in reg.characters()]
+    if genders is None:
+        genders = operator_genders(reg)
     loaded: dict[str, EpisodeArtifacts | None] = {}
     owner: KeyOwner | None = None
     songs = mix_settings(ws.config).songs
@@ -457,6 +545,7 @@ def impure_cards(
                     art.vocals, (start, end), own_spans=own_spans,
                     confirmed_spans=confirmed_spans, register=register, song_like=mask,
                     song_spans=accepted, bands=bands, pitch_root=ws.root,
+                    operator=genders.get(cid),
                 )  # fmt: skip
                 if gates:
                     failing.append({
@@ -625,6 +714,140 @@ def character_spans(asg: Assignments) -> dict[int, list[tuple[float, float]]]:
     return out
 
 
+def operator_genders(reg: Registry) -> dict[int, Gender]:
+    """Character -> the gender the operator stored (``gender_by = 'operator'``, ``f`` or
+    ``m``). A cast gender is a prior, never the operator's call, and is left out."""
+    out: dict[int, Gender] = {}
+    for c in reg.characters():
+        if c.gender_by == "operator" and c.gender in ("f", "m"):
+            out[c.id] = "f" if c.gender == "f" else "m"
+    return out
+
+
+def narrators(reg: Registry) -> set[int]:
+    """The characters the operator made ``kind = 'narrator'``."""
+    return {c.id for c in reg.characters() if c.kind == "narrator"}
+
+
+@dataclass(frozen=True)
+class GenderMismatch:
+    """A clone card whose references are the other class from its character's operator
+    gender: its id, the operator's gender and the references' class (None: no reference
+    could be measured, so the card is flagged, never re-picked on a guess)."""
+
+    card_id: str
+    operator: Gender
+    refs: Gender | None
+
+    @property
+    def phrase(self) -> str:
+        if self.refs is None:
+            return f"references not measurable, operator {self.operator}"
+        return f"references {self.refs}, operator {self.operator}"
+
+
+_WHOLE_CLIP = (0.0, 1e7)  # a span covering any clip file (pitch clips it to the file)
+
+
+def references_class(ws: Workspace, card: Card, store: CardStore | None = None) -> Gender | None:
+    """The class of a clone card's references, each measured on its origin span in its
+    episode's vocals, or, when that episode's vocals aren't here (or the reference has no
+    episode origin, as ``voices clone`` makes), on the card's own clip file (as ``eval
+    gender`` reads clips), through the workspace's pitch cache: the class holding at least
+    ``pitch.BIMODAL_GATE_RATIO`` (2x) the other's seconds (each reference classed on its own
+    median), else ``u``; None when no reference can be measured either way."""
+    from fukikae.cards.card import CardError
+    from fukikae.pitch import BIMODAL_GATE_RATIO, band_seconds, cached_track
+
+    store = store if store is not None else CardStore(ws.root)
+    bands = (float(MALE_BELOW), float(FEMALE_ABOVE))
+    by_episode: dict[str, list[tuple[float, float]]] = {}
+    clips: list[str] = []
+    for ref in card.voice.references:
+        o = ref.origin or {}
+        e, start, end = o.get("episode"), o.get("start"), o.get("end")
+        if (
+            isinstance(e, str)
+            and isinstance(start, int | float)
+            and isinstance(end, int | float)
+            and (ws.work_dir(e) / "01-separate" / "vocals.wav").exists()
+        ):
+            by_episode.setdefault(e, []).append((float(start), float(end)))
+        else:
+            clips.append(ref.clip)
+    m = f = 0.0
+    measured = False
+    for e, spans in by_episode.items():
+        vocals = ws.work_dir(e) / "01-separate" / "vocals.wav"
+        measured = True
+        got = band_seconds(cached_track(ws.root, vocals, spans), bands)
+        m, f = m + got["m"], f + got["f"]
+    for clip in clips:
+        try:
+            path = store.sidecar_path(clip)
+        except (CardError, OSError):
+            continue  # unreadable: this reference can't be measured
+        measured = True
+        got = band_seconds(cached_track(ws.root, path, [_WHOLE_CLIP]), bands)
+        m, f = m + got["m"], f + got["f"]
+    if not measured:
+        return None
+    if m > 0 and m >= BIMODAL_GATE_RATIO * f:
+        return "m"
+    if f > 0 and f >= BIMODAL_GATE_RATIO * m:
+        return "f"
+    return "u"
+
+
+def gender_mismatches(
+    ws: Workspace,
+    reg: Registry,
+    store: CardStore,
+    language: str,
+    characters: Iterable[int] | None = None,
+    *,
+    operator: Mapping[int, Gender] | None = None,
+) -> dict[int, GenderMismatch]:
+    """Character -> its ``language`` clone card's `GenderMismatch`, for the characters (every
+    one by default) with an operator gender whose card's references are strictly the other
+    class (`references_class`; ``u`` never mismatches), or can't be measured at all (``refs``
+    None: flagged, never skipped silently). Cards of any ``chosen_by`` are listed: the caller
+    decides by `replace_refusal` (a curated, imported or locked card is flagged). ``operator``
+    is `operator_genders`, read from ``reg`` by default."""
+    from fukikae.cards.card import CardError
+
+    genders = operator_genders(reg) if operator is None else operator
+    ids = list(genders) if characters is None else [c for c in characters if c in genders]
+    out: dict[int, GenderMismatch] = {}
+    for cid in ids:
+        a = reg.card_for(cid, language)
+        if a is None or a.card_id is None or not store.has(a.card_id):
+            continue
+        try:
+            card = store.get(a.card_id)
+        except CardError:
+            continue
+        if card.voice.source != "clone":
+            continue
+        refs = references_class(ws, card, store)
+        if refs is None or {refs, genders[cid]} == {"m", "f"}:
+            out[cid] = GenderMismatch(a.card_id, genders[cid], refs)
+    return out
+
+
+def _gender_flag(reg: Registry, cid: int, mm: GenderMismatch, why: str) -> str:
+    if mm.refs is None:
+        return (
+            f"character {_label(reg, cid)}: clone card {mm.card_id}'s references are not "
+            "measurable (no episode vocals here and no readable clip), so they can't be checked "
+            f"against its operator gender {mm.operator}; {why}: {GENDER_FIX}"
+        )
+    return (
+        f"character {_label(reg, cid)}: clone card {mm.card_id}'s references are {mm.refs}, "
+        f"against its operator gender {mm.operator}; {why}: {GENDER_FIX}"
+    )
+
+
 def _label(reg: Registry, cid: int) -> str:
     name = next((c.name for c in reg.characters() if c.id == cid), None)
     return f"{cid} ({name})" if name else str(cid)
@@ -634,9 +857,23 @@ def _where(refs: Sequence[dict]) -> str:
     """The stale references as a report phrase: episode, span and the names said over it."""
     parts = []
     for r in refs:
-        said = ", ".join(r.get("names") or []) or "no name"
+        if r.get("split"):
+            said = f"pitch split: {r['split']}, another character's part"
+        else:
+            said = ", ".join(r.get("names") or []) or "no name"
         parts.append(f"{r['episode']} {r['start']:.2f}-{r['end']:.2f} ({said})")
     return "; ".join(parts)
+
+
+def _otherwise(refs: Sequence[dict]) -> str:
+    """What makes the references someone else's: subtitle names, a pitch split, or both."""
+    split = any(r.get("split") for r in refs)
+    named = any(not r.get("split") for r in refs)
+    if split and named:
+        return "the subtitles name otherwise or a pitch split now gives another character"
+    if split:
+        return "a pitch split now gives another character"
+    return "the subtitles now name otherwise"
 
 
 def ensure_assignments(
@@ -650,6 +887,7 @@ def ensure_assignments(
     short: Mapping[int, Shortfall] | None = None,
     impure: Mapping[int, Impurity] | None = None,
     stock: Mapping[int, str] | None = None,
+    genders: Mapping[int, GenderMismatch] | None = None,
     flags: list[str] | None = None,
 ) -> list[str]:
     """Give every character in ``character_spans`` without a ``cfg.target_language`` card
@@ -686,7 +924,19 @@ def ensure_assignments(
     one (``auto``, ``auto-fallback`` or ``restock``, unlocked) is re-picked as a clone, noted
     `STOCK_NOTE`, whatever tier its picks reach; with no speech of its own to clone from it
     is kept and flagged. A curated, imported or locked one is kept (CD2, CD3, CD9) and flagged
-    on every run, pointing at ``fukikae voices clone``."""
+    on every run, pointing at ``fukikae voices clone``.
+
+    ``genders`` (`gender_mismatches`) lists clone cards whose references are the other class
+    from the character's operator gender. An automatic one is re-picked (noted `GENDER_NOTE`)
+    when ``cloning``, which searches with the operator's class as the register, gives
+    gate-passing picks; with none, or when the picks are the card it has, it is kept and
+    flagged, never made stock. A curated, imported or locked one is flagged only, as is one
+    whose references can't be measured (``refs`` None). With another reason it is one
+    re-pick, every reason in the note; `GENDER_NOTE` is among them only when the picks passed
+    the gates (a stale or stock re-pick that falls to the ungated thin tier is noted for its
+    own reason and the gender mismatch is flagged beside it). Any card made from thin picks
+    the operator's register forced (``refused``: it refused candidates of the gated tiers)
+    has that reason in its thin flag (`OPERATOR_THIN_WHY`), new card or re-pick alike."""
     language = cfg.target_language
     usable = cloning is not None and cloning.unavailable is None
     todo = []
@@ -694,6 +944,7 @@ def ensure_assignments(
     repick: dict[int, str] = {}  # character -> its current card id
     floor: dict[int, Shortfall] = {}  # characters re-picked for the clone floor
     purity: dict[int, Impurity] = {}  # characters re-picked for impure references
+    regender: dict[int, GenderMismatch] = {}  # characters re-picked for the operator gender
     lines: list[str] = []
     flagged = flags if flags is not None else []
     # one flag line per character's card (ruling 8, as card_status_lines gives them)
@@ -746,8 +997,8 @@ def ensure_assignments(
                 flag(
                     cid,
                     f"character {_label(reg, cid)}'s card {a.card_id} ({a.chosen_by}"
-                    f"{', locked' if a.locked else ''}) was cloned from turns the subtitles "
-                    f"now name otherwise: {where}; `fukikae voices clone` replaces it{also}",
+                    f"{', locked' if a.locked else ''}) was cloned from turns "
+                    f"{_otherwise(refs)}: {where}; `fukikae voices clone` replaces it{also}",
                 )
             elif usable:
                 todo.append((cid, spans))
@@ -755,8 +1006,8 @@ def ensure_assignments(
             elif cloning is None:
                 flag(
                     cid,
-                    f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns the "
-                    f"subtitles now name otherwise ({where}); kept, because no [tts] "
+                    f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns "
+                    f"{_otherwise(refs)} ({where}); kept, because no [tts] "
                     "clone_backend is set to re-pick it with: set one, or replace it with "
                     f"`fukikae voices clone` or `fukikae voices assign`{also}",
                 )
@@ -764,8 +1015,8 @@ def ensure_assignments(
                 name = cloning.backend.name
                 flag(
                     cid,
-                    f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns the "
-                    f"subtitles now name otherwise ({where}); kept until the clone backend "
+                    f"character {_label(reg, cid)}: card {a.card_id} is cloned from turns "
+                    f"{_otherwise(refs)} ({where}); kept until the clone backend "
                     f"{name} can run ({cloning.unavailable}; `fukikae backends setup {name}`), "
                     f"and the next tts run then re-picks it{also}",
                 )
@@ -796,6 +1047,16 @@ def ensure_assignments(
                 purity[cid] = imp
             else:
                 flag(cid, _impure_flag(reg, cid, a.card_id, imp, _keep_why(a, cloning)))
+        mm = (genders or {}).get(cid)
+        if mm is not None and a is not None and a.card_id == mm.card_id:
+            if mm.refs is None:  # nothing to judge the card by: flagged, never a guessed re-pick
+                flag(cid, _gender_flag(reg, cid, mm, "kept, flagged for review"))
+            elif a.chosen_by in AUTOMATIC_BY and replace_refusal(a, "auto") is None and usable:
+                regender[cid] = mm
+                if all(c != cid for c, _ in todo):
+                    todo.append((cid, spans))
+            else:
+                flag(cid, _gender_flag(reg, cid, mm, _keep_why(a, cloning)))
     if not todo:
         return done()
     assert cloning is not None
@@ -811,6 +1072,17 @@ def ensure_assignments(
             ))  # fmt: skip
             continue
         gated_picks = found is not None and bool(found.picks) and found.tier != "thin"
+        # the operator's gender is met only by gate-passing picks (thin picks are ungated)
+        unmet = regender.get(cid) if not gated_picks else None
+        if unmet is not None and cid not in restock and cid not in repick:
+            why = "no reference in the operator's register passes the gates; kept, flagged"
+            flag(cid, _gender_flag(reg, cid, regender[cid], why))
+            if cid in purity:
+                imp = purity[cid]
+                flag(cid, _impure_flag(reg, cid, imp.card_id, imp, why))
+            if cid in floor:
+                flag(cid, _short_flag(reg, cid, floor[cid]))
+            continue  # never a stock voice
         if cid in purity and cid not in repick and not gated_picks:
             imp = purity[cid]
             why = "no gate-passing reference pick exists; kept, flagged for review"
@@ -818,11 +1090,21 @@ def ensure_assignments(
             if cid in floor:
                 flag(cid, _short_flag(reg, cid, floor[cid]))
             continue  # never a stock voice
-        if cid in floor and cid not in purity and not _better(found, floor[cid]):
+        if (
+            cid in floor
+            and cid not in purity
+            and cid not in regender
+            and not _better(found, floor[cid])
+        ):
             flag(cid, _short_flag(reg, cid, floor[cid], own=found))
             continue  # the best picks there are: kept, flagged (never a stock voice)
         below: str | None = None
         thin: str | None = None
+        thin_why: str | None = None  # the operator's register forced the thin tier
+        if found.tier == "thin" and found.refused and unmet is None:
+            thin_why = OPERATOR_THIN_WHY.format(
+                gender=operator_genders(reg).get(cid, "?"), n=found.refused
+            )
         own_lines = found is not None and found.from_cues
         if found.picks:
             new, note = _clone(cloning, found, store, language)
@@ -857,24 +1139,34 @@ def ensure_assignments(
             continue
         again = "the current rules pick it again; kept, flagged for review"
         held = reg.card_for(cid, language)
-        if (cid in repick or cid in floor or cid in purity) and held and new == held.card_id:
+        if (
+            (cid in repick or cid in floor or cid in purity or cid in regender)
+            and held
+            and new == held.card_id
+        ):
             # the re-pick is the card it has: nothing changes, and every flag stays, a stale
             # card's shortfall on its own line (one line per card)
             if cid in repick:
                 flag(
                     cid,
-                    f"character {_label(reg, cid)}: card {new} is cloned from turns the "
-                    f"subtitles now name otherwise ({_where((stale or {})[cid])}); {again}: "
+                    f"character {_label(reg, cid)}: card {new} is cloned from turns "
+                    f"{_otherwise((stale or {})[cid])} ({_where((stale or {})[cid])}); {again}: "
                     f"`fukikae voices clone` replaces it{_shortfall_suffix(below, thin)}",
                 )
             if cid in purity:
                 flag(cid, _impure_flag(reg, cid, new, purity[cid], again))
+            if unmet is not None:
+                flag(cid, _gender_flag(reg, cid, unmet, UNMET_WHY))
+            elif cid in regender:
+                flag(cid, _gender_flag(reg, cid, regender[cid], again))
             if cid not in repick and thin is not None:
-                flag(cid, _thin_flag(reg, cid, new, thin, own=found))
+                flag(cid, _thin_flag(reg, cid, new, thin, thin_why, own=found))
             elif cid not in repick and below is not None:
                 flag(cid, _floor_flag(reg, cid, new, below, again))
             continue
         reasons: list[str] = [STOCK_NOTE] if cid in restock else []
+        if cid in regender and unmet is None:  # only a gated re-pick meets the operator's call
+            reasons.append(f"{GENDER_NOTE} ({regender[cid].phrase})")
         if cid in repick:
             reasons.append(f"{REPICK_NOTE} ({_where((stale or {})[cid])})")
         if cid in floor or (cid in repick and cid in (short or {})):
@@ -890,10 +1182,12 @@ def ensure_assignments(
             lines.append(f"character {_label(reg, cid)}: kept its card ({e})")
             continue
         lines.append(f"character {_label(reg, cid)}: {note}")
+        if unmet is not None:  # re-picked for another reason, still not in the operator's register
+            flag(cid, _gender_flag(reg, cid, unmet, f"{UNMET_WHY}, now card {new}"))
         if below is not None:
             flag(cid, _floor_flag(reg, cid, new, below))
         if thin is not None:
-            flag(cid, _thin_flag(reg, cid, new, thin, own=found))
+            flag(cid, _thin_flag(reg, cid, new, thin, thin_why, own=found))
     return done()
 
 
@@ -1277,7 +1571,7 @@ def names_mismatch(work: Path, names: NamesResult, asg: Assignments | None) -> s
     from fukikae.names.inputs import NAMES_DIR
 
     if asg is None:
-        return "its names were used but it has no assignments.json"
+        return "its names stage refined its clusters but it has no assignments.json"
     path = Path(work) / NAMES_DIR / "turns.json"
     turns = read_json(path, Diarization).turns if path.exists() else None
     if asg.turns != turns or not set(names.labels) <= {c.cluster for c in asg.clusters}:
@@ -1288,9 +1582,18 @@ def names_mismatch(work: Path, names: NamesResult, asg: Assignments | None) -> s
 def checked_names(work: Path, asg: Assignments | None) -> tuple[NamesResult | None, str | None]:
     """(names, why skipped) for an episode: its used ``names.json`` and None when its
     assignments answer the refined clusters (`names_mismatch`), (None, the reason) when they
-    don't, (None, None) when its names stage used no names."""
+    don't, (None, None) when its names stage used no names. An episode refined by a pitch
+    split alone gets the same guard, but never comes back with names (it has none to give)."""
     names = used_names(work)
     if names is None:
+        from fukikae.artifacts import read_json
+        from fukikae.names.inputs import names_path
+        from fukikae.names.models import NamesResult
+
+        path = names_path(work)
+        split = read_json(path, NamesResult) if path.exists() else None
+        if split is not None and split.refined:
+            return None, names_mismatch(work, split, asg)
         return None, None
     why = names_mismatch(work, names, asg)
     return (None, why) if why is not None else (names, None)
@@ -1450,17 +1753,21 @@ def character_candidates(
     *,
     acoustic: bool = False,
     gated: dict[str, Gated] | None = None,
+    gender: Gender | None = None,
+    report: dict[str, CandidateReport] | None = None,
 ) -> dict[str, list[RefPick]]:
     """Per episode, the character's eligible reference turns (``eligible_references``, songs
     and singing excluded), ranked. ``exclusions`` caches each episode's excluded spans and
     ``loaded`` its artifacts, so a caller asking for many characters reads each file once.
 
-    The A1 gates run on every episode's candidates. The register gate runs only in the
-    acoustic tier (no names, or ``acoustic``): a name-confirmed turn is the character's by its
-    subtitle name, and a wide-ranging character's confirmed speech has a majority register
-    that refuses its calmer turns (Fairy Tail E13: Erza's 143 to 179 Hz alto against a
-    shouted 261 Hz register left her no reference at all). There the register is the
-    character's majority register over the turns searched in that episode
+    The A1 gates run on every episode's candidates. The register gate with the estimate's
+    median runs only in the acoustic tier (no names, or ``acoustic``): a name-confirmed turn
+    is the character's by its subtitle name, and a wide-ranging character's confirmed speech
+    has a majority register that refuses its calmer turns (Fairy Tail E13: Erza's 143 to
+    179 Hz alto against a shouted 261 Hz register left her no reference at all), so
+    name-confirmed turns get a register gate only from an operator gender, and then on the
+    class alone (below). In the acoustic tier the register is the character's majority
+    register over the turns searched in that episode
     (``select.speaker_register``, on ``fukikae.pitch``'s bands, not
     `gender_thresholds`: a workspace band tuned on the old estimator, such as the 300 Hz the
     anime profile carried until D44, would keep only the turns above it and push the register
@@ -1469,16 +1776,27 @@ def character_candidates(
     sung-ness, and its accepted song spans (``select.song_spans``), and the pitch tracks go
     through the workspace's pitch cache. ``gated`` receives each episode's `Gated` counts
     (``split`` when the register is bimodal, ``even`` when no register gate ran for it).
+    ``gender``, the character's operator gender, is the register's class in both tiers
+    (``select.operator_register``: the operator's call beats the estimate, and picks the
+    character's part of a mixed cluster). Names vouch for identity, not register, so
+    name-confirmed turns keep a gate with the operator's class, on the class only: no
+    estimate median (a turn between the bands passes, one a full ``CONFIDENCE_ST`` inside the
+    other band is refused) and no split flag (`_vouched`); without an operator gender they
+    stay ungated.
 
     In an episode whose names were used (``owner`` answers keys, the workspace's registry by
     default), the candidates are the character's name-confirmed turns (`confirmed_labels`),
     or with ``acoustic`` all of its turns, unnamed remainders included; either way never a
     span of the names stage's inner-voice and multi lines, nor a turn with `STALE_OVERLAP` of
     it under someone else's names (`foreign_spans`). A names-used episode whose assignments
-    are older than its names (``skipped``) offers nothing."""
+    are older than its names (``skipped``) offers nothing.
+
+    ``report`` receives each searched episode's `CandidateReport` (every candidate's verdict
+    and every refused turn with its reasons: the studio's candidate list); asking for it reads
+    the episode afresh and changes nothing in the result."""
     from fukikae.cards.select import (
-        Register,
         eligible_references,
+        operator_register,
         reference_gating,
         song_spans,
         speaker_register,
@@ -1528,21 +1846,27 @@ def character_candidates(
         rkey = (str(work), tuple(spans), bands, _stamp(a.vocals))
         if rkey not in _REGISTER_MEMO:
             _remember(_REGISTER_MEMO, rkey, speaker_register(a.vocals, spans, bands, ws.root))
-        register = _REGISTER_MEMO[rkey]
+        register = operator_register(_REGISTER_MEMO[rkey], gender)
         if confirmed:
-            register = Register("u", register.median)  # names vouch: no gate, no split flag
+            register = _vouched(register)  # names vouch for identity, not register
         key = (
             str(work), tuple(sorted(speakers)), tuple(exclude), tuple(foreign), register,
             gkey, _stamp(*_candidate_files(work)),
         )  # fmt: skip
-        if key not in _CANDIDATES_MEMO:
+        if key not in _CANDIDATES_MEMO or report is not None:
             counts: list[Gated] = []
+            verdicts: list[RefVerdict] | None = [] if report is not None else None
+            refused: list[Refusal] | None = [] if report is not None else None
             picks = eligible_references(
                 a.assignments.turns, speakers, a.transcript, a.tags, a.vocals, exclude=exclude,
                 foreign=foreign, register=register, song_like=song_like, bands=bands,
-                pitch_root=ws.root, gated=counts, song_spans=accepted,
+                pitch_root=ws.root, gated=counts, song_spans=accepted, verdicts=verdicts,
+                refused=refused,
             )  # fmt: skip
             _remember(_CANDIDATES_MEMO, key, (picks, counts[0] if counts else Gated()))
+            if report is not None:
+                assert verdicts is not None and refused is not None
+                report[e] = CandidateReport(verdicts, refused, confirmed, spans)
         picks, found = _CANDIDATES_MEMO[key]
         out[e] = list(picks)
         if gated is not None:
@@ -1682,6 +2006,7 @@ def _best(
     found: Mapping[str, list[RefPick]],
     allowed: Collection[str] | None,
     min_total: float = PRE_FLOOR_S,
+    scene_gap: float | None = SCENE_GAP_S,
 ) -> tuple[str, list[RefPick]] | None:
     from fukikae.cards.select import pick_references
 
@@ -1689,7 +2014,11 @@ def _best(
     for e in episodes:
         if allowed is not None and e not in allowed:
             continue
-        picks = pick_references(found[e], min_total=min_total) if e in found else None
+        picks = (
+            pick_references(found[e], min_total=min_total, scene_gap=scene_gap)
+            if e in found
+            else None
+        )
         if picks and (best is None or _episode_key(picks) > _episode_key(best[1])):
             best = (e, picks)
     return best
@@ -1725,6 +2054,7 @@ def character_references(
     loaded: dict[str, EpisodeArtifacts | None] | None = None,
     owner: KeyOwner | None = None,
     min_total: float = PRE_FLOOR_S,
+    scene_gap: float | None = SCENE_GAP_S,
 ) -> tuple[str, list[RefPick], bool] | None:
     """The character's reference clips (``pick_references``) in the episode where they add
     up to the most speech, with that episode and whether the picks are name-confirmed; None
@@ -1733,7 +2063,8 @@ def character_references(
     episode's ``names.json`` by default) are tried first; only when none yields picks, the
     character's own acoustic speech in every episode (``acoustic``, by default
     `character_candidates` with ``acoustic``). Picks under ``min_total`` seconds don't
-    count (`PRE_FLOOR_S`; `find_references` asks again down to ``select.CLONE_MIN_S``)."""
+    count (`PRE_FLOOR_S`; `find_references` asks again down to ``select.CLONE_MIN_S``).
+    ``scene_gap`` is the one-scene gate (None for a narrator)."""
     loaded = loaded if loaded is not None else {}
     found = (
         candidates
@@ -1742,7 +2073,7 @@ def character_references(
     )
     if named is None:
         named = {e for e in episodes if used_names(ws.work_dir(e)) is not None}
-    best = _best(episodes, found, named, min_total)
+    best = _best(episodes, found, named, min_total, scene_gap)
     if best is not None:
         return best[0], best[1], True
     if acoustic is None:
@@ -1753,7 +2084,7 @@ def character_references(
                 acoustic=True,
             ),
         }  # fmt: skip
-    best = _best(episodes, acoustic, None, min_total)
+    best = _best(episodes, acoustic, None, min_total, scene_gap)
     return (best[0], best[1], False) if best is not None else None
 
 
@@ -1812,6 +2143,61 @@ def stale_references(
     return out
 
 
+def _split_assignments(
+    ws: Workspace, episode: str, read: Assignments | None = None
+) -> Assignments | None:
+    """The episode's assignments (``read`` when the caller has them) when they hold a pitch
+    split's voice part, else None."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import Assignments
+    from fukikae.names.align import VOICE_PREFIX
+
+    asg = read
+    if asg is None:
+        path = ws.work_dir(episode) / "05-characters" / "assignments.json"
+        if not path.exists():
+            return None
+        asg = read_json(path, Assignments)
+    return asg if any(f"~{VOICE_PREFIX}" in c.cluster for c in asg.clusters) else None
+
+
+def split_foreign_spans(asg: Assignments, cid: int) -> list[tuple[float, float, str]]:
+    """The turns of the voice parts another character holds in each pitch split one of whose
+    parts ``cid`` holds (the other part of a split it kept, or was given), with their label."""
+    from fukikae.names.align import VOICE_PREFIX
+
+    def parent(label: str) -> str | None:
+        head, sep, _ = label.partition(f"~{VOICE_PREFIX}")
+        return head if sep else None
+
+    mine = {parent(c.cluster) for c in asg.clusters if c.character_id == cid} - {None}
+    theirs = {
+        c.cluster for c in asg.clusters if c.character_id != cid and parent(c.cluster) in mine
+    }
+    return [(t.start, t.end, t.speaker) for t in asg.turns or [] if t.speaker in theirs]
+
+
+def split_stale_references(card: Card, split: Mapping[str, Assignments], cid: int) -> list[dict]:
+    """The card's reference origins with `STALE_OVERLAP` or more of them in the turns of a
+    pitch split's other part (`split_foreign_spans`), each as ``{episode, start, end, overlap,
+    names: [], split: <that part's label>}``: after a split, the keeper's automatic card
+    re-picks from its own turns, the same share D29 uses for subtitle names."""
+    out: list[dict] = []
+    for ref in card.voice.references:
+        o = ref.origin or {}
+        e, start, end = o.get("episode"), o.get("start"), o.get("end")
+        if not isinstance(e, str) or e not in split or start is None or end is None:
+            continue
+        spans = split_foreign_spans(split[e], cid)
+        share = _inside(float(start), float(end), [(a, b) for a, b, _ in spans])
+        if share >= STALE_OVERLAP:
+            a0, b0 = float(start), float(end)
+            label = max(spans, key=lambda s: min(s[1], b0) - max(s[0], a0))[2]
+            out.append({"episode": e, "start": a0, "end": b0, "overlap": round(share, 3),
+                        "names": [], "split": label})  # fmt: skip
+    return out
+
+
 def _names_over(
     names: NamesResult, start: float, end: float, answers: Callable[[str], bool]
 ) -> list[str]:
@@ -1843,13 +2229,17 @@ def stale_cards(
 
     cache: NamesCache = {}
     named: list[str] = []
+    split: dict[str, Assignments] = {}  # episodes whose assignments hold pitch-split parts
     for e in _all_episodes(ws):
-        _, names, why = _episode_names(ws, e, cache)
+        read, names, why = _episode_names(ws, e, cache)
         if why is not None and notes is not None:
             notes.append(f"{e}: {why}; {SKIP_HINT.format(episode=e)}")
         if names is not None:
             named.append(e)
-    if not named:
+        asg = _split_assignments(ws, e, read)
+        if asg is not None:
+            split[e] = asg
+    if not named and not split:
         return {}
     owner = key_owner(reg)
     out: dict[int, list[dict]] = {}
@@ -1878,6 +2268,10 @@ def stale_cards(
             asg, names, _ = cache[r["episode"]]
             assert asg is not None and names is not None
             r["names"] = _names_over(names, r["start"], r["end"], _answers(asg, cid, owner))
+        seen = {(r["episode"], r["start"], r["end"]) for r in refs}
+        for r in split_stale_references(card, split, cid):
+            if (r["episode"], r["start"], r["end"]) not in seen:
+                refs.append(r)
         if refs:
             out[cid] = refs
     return out
@@ -1933,14 +2327,16 @@ def workspace_cloning(
     workspace has processed so far (the current one first), each card's source language the
     transcript language of the episode its clips come from. A character that holds no turn in
     any episode is cloned from its own spoken ``cues``' source spans (``delivery.reference``)
-    in the current episode, thin (`cue_references`), the way a cluster-less line is. When the
-    backend can't run here (``clone_problem``), the result says why and reads no
-    references."""
+    in the current episode, thin (`cue_references`), the way a cluster-less line is. Each
+    character's operator gender and narrator kind (read from the registry once, here) steer
+    its search (`find_references`). When the backend can't run here (``clone_problem``), the
+    result says why and reads no references."""
     from typing import cast
 
     from fukikae.backends import loader
     from fukikae.backends.base import Synthesizer
     from fukikae.config import ConfigError
+    from fukikae.registry.store import Registry
     from fukikae.workspace import Workspace
 
     name = clone_backend(cfg)
@@ -1958,6 +2354,11 @@ def workspace_cloning(
         return Cloning(cls, cfg.source_language or "", nothing, unavailable=problem)
     ws = Workspace(root)
     episodes = workspace_episodes(ws, current)
+    genders: dict[int, Gender] = {}
+    narrating: set[int] = set()
+    if ws.registry_path.exists():
+        with Registry(ws.registry_path) as reg:
+            genders, narrating = operator_genders(reg), narrators(reg)
     loaded: dict[str, EpisodeArtifacts | None] = {}
     exclusions: dict[str, list[tuple[float, float]]] = {}
     here = episode_artifacts(ws, current)
@@ -1969,7 +2370,10 @@ def workspace_cloning(
         )
 
     def references(cid: int) -> CharacterRefs:
-        found = find_references(ws, episodes, cid, fallback, loaded, exclusions)
+        found = find_references(
+            ws, episodes, cid, fallback, loaded, exclusions,
+            gender=genders.get(cid), narrator=cid in narrating,
+        )  # fmt: skip
         if found.picks or not cues:
             return found
         picks = cue_references(ws, current, cid, cues, exclusions)
@@ -2027,6 +2431,9 @@ def find_references(
     fallback: str | None = None,
     loaded: dict[str, EpisodeArtifacts | None] | None = None,
     exclusions: dict[str, list[tuple[float, float]]] | None = None,
+    *,
+    gender: Gender | None = None,
+    narrator: bool = False,
 ) -> CharacterRefs:
     """What the character's turns in ``episodes`` offer a clone (`CharacterRefs`): the
     name-confirmed tier first, the acoustic one only when that gives no picks
@@ -2035,19 +2442,25 @@ def find_references(
     thin tier (`character_thin`). A character with
     any turn always gets picks (A2, D41). Reads no backend, so the CLI can ask it too.
     ``fallback`` is the picks' language when their episode's transcript has none; ``loaded``
-    and ``exclusions`` cache what each episode's files give, across characters."""
+    and ``exclusions`` cache what each episode's files give, across characters. ``gender``
+    (the character's operator gender) is the register gate's class, and a ``narrator`` is
+    picked with no one-scene gate (Part B)."""
     loaded = loaded if loaded is not None else {}
     exclusions = exclusions if exclusions is not None else {}
+    scene_gap = None if narrator else SCENE_GAP_S
     gated: dict[str, Gated] = {}
-    candidates = character_candidates(ws, episodes, cid, exclusions, loaded, gated=gated)
+    candidates = character_candidates(
+        ws, episodes, cid, exclusions, loaded, gated=gated, gender=gender
+    )
     named = {e for e, a in loaded.items() if a is not None and a.names is not None}
     tiers = [candidates]
     acoustic_gated: dict[str, Gated] = {}
     best = None
     for minimum in (PRE_FLOOR_S, CLONE_MIN_S):
         best = character_references(
-            ws, episodes, cid, candidates=candidates, named=named, acoustic={}, min_total=minimum
-        )
+            ws, episodes, cid, candidates=candidates, named=named, acoustic={},
+            min_total=minimum, scene_gap=scene_gap,
+        )  # fmt: skip
         if best is not None:
             break
         if len(tiers) == 1:  # the acoustic tier is read only when confirmed turns give no picks
@@ -2055,14 +2468,15 @@ def find_references(
                 **{e: c for e, c in candidates.items() if e not in named},
                 **character_candidates(
                     ws, [e for e in episodes if e in named], cid, exclusions, loaded,
-                    acoustic=True, gated=acoustic_gated,
+                    acoustic=True, gated=acoustic_gated, gender=gender,
                 ),
             }  # fmt: skip
             acoustic_gated = {e: g for e, g in gated.items() if e not in named} | acoustic_gated
             tiers.append(acoustic)
         best = character_references(
-            ws, episodes, cid, candidates={}, named=named, acoustic=tiers[1], min_total=minimum
-        )
+            ws, episodes, cid, candidates={}, named=named, acoustic=tiers[1],
+            min_total=minimum, scene_gap=scene_gap,
+        )  # fmt: skip
         if best is not None:
             break
     if best is None:  # A2: the thin tier, from the character's longest turns
@@ -2081,11 +2495,17 @@ def find_references(
             return CharacterRefs(seconds=round(seconds, 3), names_used=bool(named), skipped=skipped)
         e, picks = thin
         arts = loaded.get(e)
+        refused: dict[str, int] = {}
+        for counts in (gated, acoustic_gated):
+            for ep, g in counts.items():
+                if g.operator:
+                    refused[ep] = max(refused.get(ep, 0), g.off_register)
         return CharacterRefs(
             round(sum(p.seconds for p in picks), 3), picks, e,
             ws.work_dir(e) / "01-separate" / "vocals.wav",
-            (arts.transcript.language if arts else None) or fallback, False,
-            names_used=bool(named), tier="thin",
+            (arts.transcript.language if arts else None) or fallback,
+            _thin_confirmed(ws, arts, cid, picks), names_used=bool(named), tier="thin",
+            refused=sum(refused.values()) if gender in ("f", "m") else 0,
         )  # fmt: skip
     e, picks, confirmed = best
     pool = candidates if confirmed else tiers[-1]
@@ -2100,17 +2520,51 @@ def find_references(
     )  # fmt: skip
 
 
+def _thin_confirmed(
+    ws: Workspace, arts: EpisodeArtifacts | None, cid: int, picks: Sequence[RefPick]
+) -> bool:
+    """Whether every thin pick lies in the character's name-confirmed turns of a names-used
+    episode as far as it lies in its own turns (the rule `reference_gates` vouches by)."""
+    from fukikae.cards.select import share_inside
+
+    if arts is None or arts.names is None or not picks:
+        return False
+    labels = confirmed_labels(arts.assignments, cid, _workspace_owner(ws))
+    own = {
+        c.cluster
+        for c in arts.assignments.clusters
+        if c.character_id == cid and c.status not in ("extra", "review")
+    }
+    turns = arts.assignments.turns or []
+    named = [(t.start, t.end) for t in turns if t.speaker in labels]
+    mine = [(t.start, t.end) for t in turns if t.speaker in own]
+    return bool(named) and all(
+        share_inside(p.start, p.end, named) >= share_inside(p.start, p.end, mine) - 1e-6 > 0
+        for p in picks
+    )
+
+
 def floor_lines(
-    ws: Workspace, reg: Registry, store: CardStore, characters: Iterable[int], language: str
+    ws: Workspace,
+    reg: Registry,
+    store: CardStore,
+    characters: Iterable[int],
+    language: str,
+    *,
+    operator: Mapping[int, Gender] | None = None,
+    narrating: Collection[int] | None = None,
 ) -> list[str]:
     """One line per automatic clone card under the clone floor (`below_floor`, D32) for
     `voices list` and `names show`: whether the next tts run re-picks it (unlocked, a better
-    pick exists, cloning can run here) or it stays flagged for review."""
+    pick exists, cloning can run here) or it stays flagged for review. The search is the tts
+    stage's (`find_references` with each character's operator gender and narrator kind,
+    ``operator`` and ``narrating``, read from ``reg`` when not given)."""
     short = {
         cid: sf for cid, sf in below_floor(reg, store, characters, language).items() if not sf.thin
     }  # a thin clone has its own line (`thin_lines`)
     if not short:
         return []
+    operator, narrating = _operator_state(reg, operator, narrating)
     loaded: dict[str, EpisodeArtifacts | None] = {}
     exclusions: dict[str, list[tuple[float, float]]] = {}
     episodes = _all_episodes(ws)
@@ -2128,7 +2582,7 @@ def floor_lines(
         if refusal is not None:
             out.append(f"{head}; kept: {refusal}: {FLOOR_FIX}")
             continue
-        found = find_references(ws, episodes, cid, None, loaded, exclusions)
+        found = _search(ws, episodes, cid, loaded, exclusions, operator, narrating)
         if not _better(found, sf):
             out.append(f"{head}; no better reference pick exists; flagged for review: {FLOOR_FIX}")
             continue
@@ -2172,14 +2626,18 @@ def impure_lines(
     language: str,
     *,
     impure: Mapping[int, Impurity] | None = None,
+    operator: Mapping[int, Gender] | None = None,
+    narrating: Collection[int] | None = None,
 ) -> list[str]:
     """One line per clone card with references the A1 gates refuse (`impure_cards`, or the
     ``impure`` already measured) for `voices list` and `names show`: whether the next tts
     run re-picks it (automatic, a gate-passing pick exists, cloning can run here) or it stays
-    flagged."""
+    flagged. The search is the tts stage's (``operator`` and ``narrating`` as `floor_lines`
+    takes them)."""
     chars = set(characters)
+    operator, narrating = _operator_state(reg, operator, narrating)
     if impure is None:
-        impure = impure_cards(ws, reg, store, language, chars)
+        impure = impure_cards(ws, reg, store, language, chars, genders=operator)
     impure = {cid: imp for cid, imp in impure.items() if cid in chars}
     if not impure:
         return []
@@ -2200,9 +2658,99 @@ def impure_lines(
         if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
             out.append(f"{head}; kept: {PURITY_FIX}")
             continue
-        found = find_references(ws, episodes, cid, None, loaded, exclusions)
+        found = _search(ws, episodes, cid, loaded, exclusions, operator, narrating)
         if not found.picks or found.tier == "thin":  # thin picks set the gates aside
             out.append(f"{head}; no gate-passing reference pick exists; flagged: {PURITY_FIX}")
+            continue
+        n = len(found.picks)
+        better = f"{n} clip{'' if n == 1 else 's'}, {sum(p.seconds for p in found.picks):.1f} s"
+        if not blocker:
+            blocker.append(repick_blocker(ws.config))
+        if blocker[0] is None:
+            out.append(f"{head}; the next tts run re-picks it ({better})")
+        else:
+            out.append(f"{head}; a gate-passing pick exists ({better}), kept while {blocker[0]}")
+    return out
+
+
+def _operator_state(
+    reg: Registry, operator: Mapping[int, Gender] | None, narrating: Collection[int] | None
+) -> tuple[Mapping[int, Gender], Collection[int]]:
+    """``operator`` and ``narrating`` as given, each read from ``reg`` when not."""
+    return (
+        operator_genders(reg) if operator is None else operator,
+        narrators(reg) if narrating is None else narrating,
+    )
+
+
+def _search(
+    ws: Workspace,
+    episodes: Sequence[str],
+    cid: int,
+    loaded: dict[str, EpisodeArtifacts | None],
+    exclusions: dict[str, list[tuple[float, float]]],
+    operator: Mapping[int, Gender],
+    narrating: Collection[int],
+) -> CharacterRefs:
+    """`find_references` as the tts stage asks it (`workspace_cloning`): with the character's
+    operator gender and narrator kind."""
+    return find_references(
+        ws, episodes, cid, None, loaded, exclusions,
+        gender=operator.get(cid), narrator=cid in narrating,
+    )  # fmt: skip
+
+
+def _gender_reason(mm: GenderMismatch) -> str:
+    if mm.refs is None:
+        return f"has references that can't be measured against its operator gender {mm.operator}"
+    return f"has references in {mm.refs}, against its operator gender {mm.operator}"
+
+
+def gender_lines(
+    ws: Workspace,
+    reg: Registry,
+    store: CardStore,
+    characters: Iterable[int],
+    language: str,
+    *,
+    mismatches: Mapping[int, GenderMismatch] | None = None,
+    operator: Mapping[int, Gender] | None = None,
+    narrating: Collection[int] | None = None,
+) -> list[str]:
+    """One line per clone card whose references are the other class from its character's
+    operator gender, or can't be measured (`gender_mismatches`, or the ``mismatches`` already
+    measured), for `voices list` and `names show`: a curated, imported or locked one is kept
+    and flagged; an automatic one is re-picked by the next tts run when a search with the
+    operator's class as the register gives gate-passing picks, else flagged."""
+    chars = set(characters)
+    operator, narrating = _operator_state(reg, operator, narrating)
+    if mismatches is None:
+        mismatches = gender_mismatches(ws, reg, store, language, chars, operator=operator)
+    mismatches = {cid: mm for cid, mm in mismatches.items() if cid in chars}
+    loaded: dict[str, EpisodeArtifacts | None] = {}
+    exclusions: dict[str, list[tuple[float, float]]] = {}
+    blocker: list[str | None] = []
+    out: list[str] = []
+    for cid in sorted(mismatches):
+        mm = mismatches[cid]
+        a = reg.card_for(cid, language)
+        assert a is not None
+        head = (
+            f"character {_label(reg, cid)}'s card {mm.card_id} ({a.chosen_by}"
+            f"{', locked' if a.locked else ''}) {_gender_reason(mm)}"
+        )
+        if a.chosen_by not in AUTOMATIC_BY or replace_refusal(a, "auto") is not None:
+            out.append(f"{head}; kept: {GENDER_FIX}")
+            continue
+        if mm.refs is None:
+            out.append(f"{head}; flagged for review: {GENDER_FIX}")
+            continue
+        found = _search(ws, _all_episodes(ws), cid, loaded, exclusions, operator, narrating)
+        if not found.picks or found.tier == "thin":  # thin picks pass no register gate
+            out.append(
+                f"{head}; no reference in the operator's register passes the gates; flagged: "
+                f"{GENDER_FIX}"
+            )
             continue
         n = len(found.picks)
         better = f"{n} clip{'' if n == 1 else 's'}, {sum(p.seconds for p in found.picks):.1f} s"
@@ -2228,7 +2776,8 @@ def card_status_lines(
     per card with every reason it has (review fix 7): references the subtitle names now give
     someone else (`stale_cards`; a kept stale card under the floor says so too,
     `floor_suffix`), under the clone floor (`floor_lines`) or a thin-reference clone
-    (`thin_lines`), and references the reference gates refuse (`impure_lines`), then stock
+    (`thin_lines`), references the reference gates refuse (`impure_lines`) and references
+    in the other register from the character's operator gender (`gender_lines`), then stock
     cards (D41: an automatic one is re-picked as a clone by the next tts run, a curated,
     imported or locked one is kept). A card with one reason gets that reason's line; one with
     several gets a line naming each and what the next tts run does, as its single re-pick
@@ -2236,16 +2785,20 @@ def card_status_lines(
     so its flagged card gets one line saying so instead. ``notes`` receives the episodes
     `stale_cards` skipped."""
     chars = sorted(set(characters))
+    operator, narrating = operator_genders(reg), narrators(reg)  # read once, for every search
     stale = stale_cards(ws, reg, store, chars, language, notes=notes)
     short = below_floor(reg, store, chars, language)
-    impure = impure_cards(ws, reg, store, language, chars)
+    impure = impure_cards(ws, reg, store, language, chars, genders=operator)
+    genders = gender_mismatches(ws, reg, store, language, chars, operator=operator)
     silent = silent_characters(ws, chars, language)
-    silent_lines = _silent_lines(reg, store, language, silent, stale, short, impure)
+    silent_lines = _silent_lines(reg, store, language, silent, stale, short, impure, genders)
     chars = [cid for cid in chars if cid not in silent]
     stale = {cid: v for cid, v in stale.items() if cid not in silent}
     short = {cid: v for cid, v in short.items() if cid not in silent}
     impure = {cid: v for cid, v in impure.items() if cid not in silent}
+    genders = {cid: v for cid, v in genders.items() if cid not in silent}
     multi = {cid for cid in impure if cid in stale or cid in short}
+    multi |= {cid for cid in genders if cid in stale or cid in short or cid in impure}
     blocker: list[str | None] = []
 
     def block() -> str | None:
@@ -2259,17 +2812,22 @@ def card_status_lines(
         if cid not in multi and reg.card_for(cid, language) is not None
     ]
     rest = [cid for cid in chars if cid not in stale and cid not in multi]
-    out += floor_lines(ws, reg, store, rest, language)
+    single = [cid for cid in chars if cid not in multi]
+    out += floor_lines(ws, reg, store, rest, language, operator=operator, narrating=narrating)
     out += thin_lines(reg, store, sorted({*rest, *silent}), language)  # no re-pick claimed
     out += impure_lines(
-        ws, reg, store, [cid for cid in chars if cid not in multi], language, impure=impure
+        ws, reg, store, single, language, impure=impure, operator=operator, narrating=narrating
     )
+    out += gender_lines(
+        ws, reg, store, single, language, mismatches=genders, operator=operator,
+        narrating=narrating,
+    )  # fmt: skip
     loaded: dict[str, EpisodeArtifacts | None] = {}
     exclusions: dict[str, list[tuple[float, float]]] = {}
     for cid in sorted(multi):
         a = reg.card_for(cid, language)
-        assert a is not None
-        imp, sf, refs = impure[cid], short.get(cid), stale.get(cid)
+        assert a is not None and a.card_id is not None
+        imp, sf, refs, mm = impure.get(cid), short.get(cid), stale.get(cid), genders.get(cid)
         reasons: list[str] = []
         if refs:
             reasons.append(f"was cloned from turns {_now_named(refs)}")
@@ -2279,20 +2837,30 @@ def card_status_lines(
                 if sf.thin
                 else f"is below the clone floor ({sf.phrase})"
             )
-        reasons.append(f"has references that fail the reference gates ({imp.phrase})")
+        if imp is not None:
+            reasons.append(f"has references that fail the reference gates ({imp.phrase})")
+        if mm is not None:
+            reasons.append(_gender_reason(mm))
         head = (
-            f"character {_label(reg, cid)}'s card {imp.card_id} ({a.chosen_by}"
+            f"character {_label(reg, cid)}'s card {a.card_id} ({a.chosen_by}"
             f"{', locked' if a.locked else ''}) {'; '.join(reasons)}"
         )
+        fix = PURITY_FIX if imp is not None else GENDER_FIX
         refusal = replace_refusal(a, "auto")
         if a.chosen_by not in AUTOMATIC_BY or refusal is not None:
-            out.append(f"{head}; kept{f': {refusal}' if refusal else ''}: {PURITY_FIX}")
+            out.append(f"{head}; kept{f': {refusal}' if refusal else ''}: {fix}")
             continue
-        found = find_references(ws, _all_episodes(ws), cid, None, loaded, exclusions)
-        gated = bool(found.picks) and found.tier != "thin"
+        found = _search(ws, _all_episodes(ws), cid, loaded, exclusions, operator, narrating)
+        # gated picks re-pick for impurity or a measured gender mismatch only (an unmeasurable
+        # one is flagged, never re-picked on a guess); the floor needs picks that beat the card
+        gated = (
+            bool(found.picks)
+            and found.tier != "thin"
+            and (imp is not None or (mm is not None and mm.refs is not None))
+        )
         repicks = bool(refs and found.picks) or gated or (sf is not None and _better(found, sf))
         if not repicks:
-            out.append(f"{head}; no better reference pick exists; flagged: {PURITY_FIX}")
+            out.append(f"{head}; no better reference pick exists; flagged: {fix}")
             continue
         picks = found.picks or []
         n = len(picks)
@@ -2351,6 +2919,7 @@ def _silent_lines(
     stale: Mapping[int, Sequence[dict]],
     short: Mapping[int, Shortfall],
     impure: Mapping[int, Impurity],
+    genders: Mapping[int, GenderMismatch] | None = None,
 ) -> list[str]:
     """One line per silent character whose card is flagged: what is wrong with it, and that
     no tts run re-picks it (a thin clone alone has `thin_lines`' line, which claims no
@@ -2371,6 +2940,8 @@ def _silent_lines(
             reasons.append("is below the clone floor")
         if cid in impure:
             reasons.append(f"has references that fail the reference gates ({impure[cid].phrase})")
+        if (mm := (genders or {}).get(cid)) is not None:
+            reasons.append(_gender_reason(mm))
         if reasons:
             out.append(
                 f"character {_label(reg, cid)}'s card {a.card_id} ({a.chosen_by}"
@@ -2382,7 +2953,13 @@ def _silent_lines(
 
 def _now_named(refs: Sequence[dict]) -> str:
     said = sorted({k for r in refs for k in r.get("names") or []})
-    return f"now named {', '.join(k.upper() for k in said) or 'otherwise'}"
+    split = sorted({r["split"] for r in refs if r.get("split")})
+    out = []
+    if said or not split:
+        out.append(f"now named {', '.join(k.upper() for k in said) or 'otherwise'}")
+    if split:
+        out.append(f"now another character's part of a pitch split ({', '.join(split)})")
+    return " and ".join(out)
 
 
 def _stale_line(

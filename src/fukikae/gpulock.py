@@ -58,6 +58,11 @@ class GpuBusy(RuntimeError):  # noqa: N818 - reads as the state, like VramTimeou
     """The card is held by another fukikae job, or a leftover one still runs on it."""
 
 
+class GpuLeftover(GpuBusy):
+    """What is left of a job that exited holds the card (a child still holding the lock it
+    took, or a fukikae worker still running on it): waiting won't free it, killing it will."""
+
+
 _mutex = threading.Lock()
 _held: dict[tuple[int, int], list[int]] = {}  # (index, thread ident) -> [fd, depth]
 
@@ -247,6 +252,57 @@ def _held_since(fd: int) -> float | None:
         return None
 
 
+def current_holder(index: int) -> tuple[int, str] | None:
+    """(pid, job) of the fukikae job holding card ``index``, as its lock file names it, while
+    that process lives; None when the file names nobody (a holder empties it on release) or a
+    process that is gone. Only reads the file: never takes the lock or waits for it, so a
+    status page can call it at any time. A holder killed outright leaves its line behind, and
+    a later process reusing its pid would be named until the next job takes the lock."""
+    pid, what, alive = _named(index)
+    if pid is None or not alive:
+        return None
+    return pid, what
+
+
+def leftover_holder(index: int) -> tuple[int, str, list[tuple[int, str]]] | None:
+    """(pid, job, leftover jobs) when card ``index``'s lock file names a process that has
+    exited and the lock is still held (a child of it holds the descriptor, as `_acquire`
+    reports it); None otherwise, a dead pid's line with the lock free included (a holder
+    killed outright with no child left). Tests the lock with a shared ``flock`` that is let go
+    at once, and only when the named pid is gone; scans /proc only then."""
+    pid, what, alive = _named(index)
+    if pid is None or alive:
+        return None
+    try:
+        fd = os.open(lock_path(index), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                return None
+        else:
+            return None  # nobody holds it: a stale line
+    finally:
+        os.close(fd)  # closing lets go of the shared lock, when it was taken
+    return pid, what, leftover_jobs(index)
+
+
+def _named(index: int) -> tuple[int | None, str, bool]:
+    """(pid, job, whether that pid lives) as card ``index``'s lock file names its holder."""
+    try:
+        fd = os.open(lock_path(index), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        return None, "", False
+    try:
+        pid, what = _holder(fd)
+    finally:
+        os.close(fd)
+    return pid, what, pid is not None and _alive(pid)
+
+
 def _listed(found: list[tuple[int, str]]) -> str:
     return ", ".join(f"pid {pid} ({cmd[:200]})" for pid, cmd in found)
 
@@ -298,7 +354,7 @@ def _acquire(index: int, what: str, timeout_s: float | None, poll_s: float) -> i
             if pid is not None and not _alive(pid):
                 # the job that took it is gone and a child of it still holds the lock
                 found = leftover_jobs(index)
-                raise GpuBusy(
+                raise GpuLeftover(
                     f"GPU {index} is locked by what is left of pid {pid} ({held_what}), which "
                     f"exited: {_listed(found) or 'a child of it still runs'}; stop it "
                     "(`kill <pid>`) and run again"
@@ -320,7 +376,7 @@ def _acquire(index: int, what: str, timeout_s: float | None, poll_s: float) -> i
             time.sleep(pause)
         found = leftover_jobs(index)
         if found:
-            raise GpuBusy(
+            raise GpuLeftover(
                 f"GPU {index} already runs {_listed(found)}, probably left over from an earlier "
                 "run; stop it (`kill <pid>`) and run again"
             )

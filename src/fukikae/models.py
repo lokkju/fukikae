@@ -76,22 +76,30 @@ class ClusterAssignment(BaseModel):
     sub-cluster stands for, and ``source`` how it got its character: ``voice`` (pinned or
     matched acoustically), ``name`` (by its name key) or ``lock`` (kept by a locked actor
     against its name). Both are left out of the JSON at their defaults, so assignments written
-    without names are byte-identical to those written before the fields existed."""
+    without names are byte-identical to those written before the fields existed. ``status``
+    ``ignored`` is a cluster whose character the operator made ``kind = 'ignored'``: its cues
+    are skipped (``skip = "ignored"``), never translated or rendered. ``split`` is set on a
+    voice part of an operator pitch split (``<cluster>~voice-f`` or ``~voice-m``): ``kept``
+    for the part that kept the parent cluster's character, ``new`` for the part given a new
+    character, which needs an identity from the operator; left out at None."""
 
     cluster: str
     actor_id: int | None
     character_id: int | None
     score: float | None
     clean_seconds: float
-    status: Literal["matched", "new", "extra", "pinned", "review"]
+    status: Literal["matched", "new", "extra", "pinned", "review", "ignored"]
     name: str | None = None
     source: Literal["voice", "name", "lock"] = "voice"
+    split: Literal["kept", "new"] | None = None
 
     @model_serializer(mode="wrap")
     def _omit_defaults(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         out: dict[str, Any] = handler(self)
         if self.name is None:
             out.pop("name", None)
+        if self.split is None:
+            out.pop("split", None)
         if self.source == "voice":
             out.pop("source", None)
         return out

@@ -516,3 +516,88 @@ def test_all_multi_lines_name_nothing():
 def test_multi_line_over_two_keys_names_nothing():
     lines = [_multi(0, 10), line(0, 5, "a"), line(5, 10, "b")]
     assert _spans([turn(0, 10, "S")], lines) == [(0, 10, None)]
+
+
+# ---- operator pitch splits (Task 15) ----
+
+
+def _piece(start: float, end: float, cluster: str, key: str | None = None, turn: int = 0):
+    from fukikae.names.models import Piece
+
+    label = cluster if key is None else label_for(cluster, key)
+    return Piece(
+        start=start, end=end, cluster=cluster, label=label, key=key, line_ids=[], turn=turn
+    )
+
+
+def test_voice_labels_cannot_clash_with_name_slugs():
+    from fukikae.names.align import voice_label
+
+    for key in ("voice f", "Voice-M", "voice-female"):
+        assert not label_for("SPEAKER_00", key).startswith("SPEAKER_00~voice-")
+    assert label_for("SPEAKER_00", "voices") == "SPEAKER_00~voices"
+    assert voice_label("SPEAKER_00", "f") == "SPEAKER_00~voice-f"
+    assert voice_label("SPEAKER_00", "m") == "SPEAKER_00~voice-m"
+
+
+def test_split_voices_relabels_only_the_named_clusters_unnamed_pieces():
+    from fukikae.names.align import split_voices, voice_candidates
+
+    pieces = [
+        _piece(0, 2, "A", turn=0),
+        _piece(3, 5, "A", "natsu", turn=1),
+        _piece(6, 9, "A", turn=2),
+        _piece(10, 11, "A", turn=3),
+        _piece(12, 14, "B", turn=4),
+    ]
+    splits = {"A": (165.0, 200.0)}
+    assert voice_candidates(pieces, splits) == [0, 2, 3]
+    out, info = split_voices(pieces, splits, {0: "m", 2: "f", 3: "u"})
+    assert [p.label for p in out] == [
+        "A~voice-m", "A~natsu", "A~voice-f", "A~voice-f", "B",
+    ]  # fmt: skip
+    assert all(p.key is None for i, p in enumerate(out) if i != 1)
+    s = info["A"]
+    assert s.seconds == {"f": 3.0, "m": 2.0, "u": 1.0}
+    assert s.larger == "f" and s.labels == ["A~voice-f", "A~voice-m"] and s.reason is None
+
+
+def test_unknown_pieces_join_the_larger_part_by_seconds():
+    from fukikae.names.align import split_voices
+
+    pieces = [_piece(0, 4, "A", turn=0), _piece(5, 6, "A", turn=1), _piece(7, 8, "A", turn=2)]
+    out, info = split_voices(pieces, {"A": (165.0, 200.0)}, {0: "m", 1: "f", 2: "u"})
+    assert [p.label for p in out] == ["A~voice-m", "A~voice-f", "A~voice-m"]
+    assert info["A"].larger == "m"
+
+
+def test_a_split_with_nothing_classified_leaves_the_cluster_and_says_why():
+    from fukikae.names.align import split_voices
+
+    pieces = [_piece(0, 4, "A", turn=0)]
+    out, info = split_voices(pieces, {"A": (165.0, 200.0), "Z": (165.0, 200.0)}, {0: "u"})
+    assert out == pieces
+    assert info["A"].labels == [] and "no turn" in (info["A"].reason or "")
+    assert info["Z"].labels == [] and "no unnamed turns" in (info["Z"].reason or "")
+
+
+def test_label_infos_describe_voice_parts():
+    from fukikae.names.align import split_voices
+
+    pieces = [_piece(0, 2, "A", turn=0), _piece(3, 5, "A", turn=1)]
+    out, _ = split_voices(pieces, {"A": (165.0, 200.0)}, {0: "m", 1: "f"})
+    infos = label_infos(out, [])
+    assert {lb: (i.parent, i.key, i.cls) for lb, i in infos.items()} == {
+        "A~voice-m": ("A", None, "voice"),
+        "A~voice-f": ("A", None, "voice"),
+    }
+
+
+def test_unknown_pieces_join_f_on_an_even_split():
+    from fukikae.names.align import split_voices
+
+    pieces = [_piece(0, 2, "A", turn=0), _piece(3, 5, "A", turn=1), _piece(6, 7, "A", turn=2)]
+    out, info = split_voices(pieces, {"A": (165.0, 200.0)}, {0: "m", 1: "f", 2: "u"})
+    assert info["A"].seconds == {"f": 2.0, "m": 2.0, "u": 1.0}
+    assert info["A"].larger == "f"
+    assert [p.label for p in out] == ["A~voice-m", "A~voice-f", "A~voice-f"]

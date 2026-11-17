@@ -58,6 +58,9 @@ log = logging.getLogger(__name__)
 RUNS_DIR = "runs"
 HISTORY_NAME = "stage-history.json"
 HISTORY_KEEP = 20
+# an episode's position when a `[review]` gate stopped it (`fukikae.studio.gate`); a run with
+# one and no failed episode ends ``stopped``, never ``failed``
+STOPPED = "stopped for review"
 STALE_S = 120.0  # a run on another host whose file is older than this has stopped
 KEEP_DEAD_S = 86400.0  # `fukikae status` deletes dead runs' files older than this
 TAIL_PREFIX = "fukikae-tail"  # job.run_episodes' tail thread
@@ -690,7 +693,10 @@ class Reporter:
         with self._lock:
             with contextlib.suppress(Exception):
                 self.clear_line()
-            if state == "finished" and any(p == "failed" for p in self.positions.values()):
+            positions = set(self.positions.values())
+            if state in ("finished", "failed") and STOPPED in positions:
+                state = "stopped"  # a gate's stop, which raises out of a one-episode run
+            if state in ("finished", "stopped") and "failed" in positions:
                 state = "failed"
             self.state = state
             self.ended = self.wall()
@@ -743,7 +749,8 @@ def _call(method: str, *args: Any) -> None:
 @contextlib.contextmanager
 def run(workspace: Path, episodes: list[str], **options: Any) -> Iterator[Reporter | None]:
     """Open the run's reporter for the block (None if it can't be opened); the run file ends
-    as finished, failed or interrupted."""
+    as finished, failed, interrupted or stopped (an episode stopped for review, `STOPPED`,
+    and none failed)."""
     global _active
     tick = options.pop("tick", None)
     reporter: Reporter | None = None

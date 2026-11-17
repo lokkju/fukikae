@@ -43,7 +43,10 @@ in the register's own band is never refused, however far from the register's med
 ``u`` register gates no pitch. A bimodal register (``pitch.bimodal``: a cluster with two
 voices) is flagged as needing a split; it still gates pitch when its majority class has at
 least ``pitch.BIMODAL_GATE_RATIO`` (2x) the minority's seconds, and gates none when the two
-are near even (``pitch.even_bimodal``). A candidate under ``REF_VOICED_MIN`` (0.35) of its loud
+are near even (``pitch.even_bimodal``). A vouched register (name-confirmed turns of a
+character with an operator gender) reads the class only: it refuses a candidate only a full
+``CONFIDENCE_ST`` inside the other band, and keeps one between the bands whatever the
+estimate's median. A candidate under ``REF_VOICED_MIN`` (0.35) of its loud
 frames voiced is ``unvoiced`` (whispers, effects, processed voices). With ``song_like`` (the
 song detector's per-second mask, ``songs.song_like_seconds``), a candidate with
 ``REF_SONG_SHARE`` (half) or more of its seconds song-like whose frames are sung
@@ -57,6 +60,10 @@ the refusals for ``reference_report``. The fourth gate is about the set: ``pick_
 takes at most one clip per scene (starts within ``SCENE_GAP_S``, 60 s, of a taken pick)
 until the floor needs more, so one long scene (an opening narration) can't fill every
 slot; ``scene_gap=None`` turns it off (narrators).
+
+For the studio's candidate list, ``eligible_references`` also reports (``refused``) each of
+the speaker's turns that no candidate covers, with every check it fails (`REASONS`) and, when
+the gates run, what they measure of it (`Refusal`).
 
 Reference tiers (A2, D41: fukikae never renders a stock voice). `tiered_references` is the one
 entry point for any speaker, a character or an extras cluster: ``floor`` when the gated picks
@@ -274,6 +281,19 @@ def share_inside(start: float, end: float, spans: Sequence[tuple[float, float]])
     return covered / (end - start) if end > start else 1.0
 
 
+def clean_span(
+    start: float,
+    end: float,
+    others: Sequence[tuple[float, float]],
+    exclude: Sequence[tuple[float, float]] = (),
+    slack: float = 0.0,
+) -> bool:
+    """Whether ``start``-``end`` overlaps no other speaker's turn (``others``) and nothing in
+    ``exclude``: what makes a turn clean for a reference. ``slack`` forgives that much overlap
+    at either edge (an origin's float rounding)."""
+    return not any(a < end - slack and start + slack < b for a, b in (*others, *exclude))
+
+
 def _chains(
     clean: Sequence[tuple[float, float]], blockers: Sequence[tuple[float, float]], gap: float
 ) -> list[list[tuple[float, float]]]:
@@ -352,14 +372,19 @@ type RegisterLike = Register | tuple[Gender, float | None]
 
 class Register(NamedTuple):
     """A speaker's register in an episode: the majority class, the median of that class's
-    turns, whether the turns are bimodal (two voices: flagged for a split) and whether the
-    two are near even (``pitch.even_bimodal``: no pitch gate). A plain ``(gender, median)``
-    pair is accepted wherever a register is."""
+    turns, whether the turns are bimodal (two voices: flagged for a split), whether the
+    two are near even (``pitch.even_bimodal``: no pitch gate), whether the class is the
+    operator's stored gender rather than the estimate's (`operator_register`) and whether the
+    turns are name-confirmed (``vouched``: the gate reads the class only, refusing a candidate
+    only when it is a full ``CONFIDENCE_ST`` inside the other band, never by a median). A plain
+    ``(gender, median)`` pair is accepted wherever a register is."""
 
     gender: Gender
     median: float | None
     bimodal: bool = False
     even: bool = False
+    operator: bool = False
+    vouched: bool = False
 
 
 @dataclass(frozen=True)
@@ -376,12 +401,32 @@ class RefVerdict:
         return not self.gates
 
 
+# Why a turn of the speaker is no candidate at all (`eligible_references`' ``refused``): out
+# of the length range, overlapping another speaker, inside an exclusion (a theme song, tagged
+# singing, a names-excluded line), `FOREIGN_MAX` or more under someone else's names, no ASR
+# text, text too sparse, or (``repeat``) passing every check alone but overlapping the end of
+# a joined candidate that already holds its audio.
+REASONS = ("length", "overlap", "excluded", "foreign", "no_text", "sparse", "repeat")
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A turn of the speaker that no eligible candidate covers: the turn (with what the A1
+    gates measured of it, when they ran), every check it fails (`REASONS`) and the gates that
+    would refuse it as well."""
+
+    pick: RefPick
+    reasons: tuple[str, ...]
+    gates: tuple[Gate, ...] = ()
+
+
 @dataclass(frozen=True)
 class Gated:
     """How many candidates each gate refused (a candidate refused by several counts under
     each), ``top``: how many refused candidates would have ranked in the first three,
-    ``split``: the speaker's turns are bimodal, so it needs a split, and ``even``: the two
-    registers are near even, so no pitch gate ran."""
+    ``split``: the speaker's turns are bimodal, so it needs a split, ``even``: the two
+    registers are near even, so no pitch gate ran, and ``operator``: the register gate read
+    the operator's stored gender."""
 
     off_register: int = 0
     unvoiced: int = 0
@@ -389,6 +434,7 @@ class Gated:
     top: int = 0
     split: bool = False
     even: bool = False
+    operator: bool = False
 
     def phrase(self) -> str:
         parts = [
@@ -408,10 +454,27 @@ def as_register(r: RegisterLike) -> Register:
     return r if isinstance(r, Register) else Register(r[0], r[1])
 
 
+def operator_register(estimate: Register, gender: Gender | None) -> Register:
+    """``estimate`` (`speaker_register`) with the operator's stored gender (``f`` or ``m``)
+    as its class: the operator's call beats the pitch estimate (Part B). The median stays when
+    the estimate is the same class, and the bimodal flag stays (the cluster still holds two
+    voices), but the gate always runs: the operator's class says which part is the
+    character's, so a near-even cluster is gated too. Without an operator gender, the
+    estimate unchanged."""
+    if gender not in ("f", "m"):
+        return estimate
+    median = estimate.median if estimate.gender == gender else None
+    return Register(gender, median, estimate.bimodal, False, True)
+
+
 SPLIT_NOTE = "needs a split: the speaker's turns are in both registers, so no register gate ran"
 SPLIT_GATED_NOTE = (
     "needs a split: the speaker's turns are in both registers; the register gate read the "
     "larger part's"
+)
+SPLIT_OPERATOR_NOTE = (
+    "needs a split: the speaker's turns are in both registers; the register gate read the "
+    "operator's gender"
 )
 
 
@@ -530,6 +593,8 @@ def _cross_class(m: Measured, register: Register, bands: Bands) -> bool:
         return False
     s = F0Summary(m.median, m.median, m.median, m.median, m.voiced_s, m.voiced_s, 1.0, 1.0)
     own = classify(s, bands[0], bands[1], LINE_MIN_VOICED_S)
+    if register.vouched:  # name-confirmed turns: class only, and only a confident other class
+        return own.gender not in ("u", register.gender) and own.confidence >= 1.0
     if own.gender not in ("u", register.gender):
         return True
     if own.gender == "u" and own.voiced_s >= LINE_MIN_VOICED_S and register.median is not None:
@@ -598,7 +663,9 @@ def gate_candidates(
     return out
 
 
-def count_gated(verdicts: Sequence[RefVerdict], split: bool = False, even: bool = False) -> Gated:
+def count_gated(
+    verdicts: Sequence[RefVerdict], split: bool = False, even: bool = False, operator: bool = False
+) -> Gated:
     """`Gated` of these verdicts; ``top`` counts refused ones ranked in the first three."""
     refused = [v for v in verdicts if not v.passed]
     return Gated(
@@ -608,6 +675,7 @@ def count_gated(verdicts: Sequence[RefVerdict], split: bool = False, even: bool 
         top=sum(v.rank < 3 for v in refused),
         split=split,
         even=even,
+        operator=operator,
     )
 
 
@@ -629,6 +697,7 @@ def eligible_references(
     gated: list[Gated] | None = None,
     verdicts: list[RefVerdict] | None = None,
     song_spans: Sequence[tuple[float, float]] | None = None,
+    refused: list[Refusal] | None = None,
 ) -> list[RefPick]:
     """Every turn of the speaker that could be a reference (no overlap with another speaker,
     within ``each``, outside ``exclude``, under `FOREIGN_MAX` of it in ``foreign``, with an
@@ -648,7 +717,11 @@ def eligible_references(
     other turn (another speaker's, or one of the speaker's own that isn't clean) falls in the
     gap and the result stays within ``each[1]`` (D32 #1). A joined turn is checked like any
     other (``exclude`` and ``foreign`` over its gaps, its transcript, its text rate); where
-    one fails, `_split` cuts the run at the failing gap and keeps the valid sub-joins."""
+    one fails, `_split` cuts the run at the failing gap and keeps the valid sub-joins.
+
+    ``refused`` (an out-parameter, for the studio's candidate list) receives a `Refusal` for
+    each of the speaker's turns that no candidate covers, with every check it fails, and,
+    when the gates run, what they measure of it; asking for it changes nothing else."""
     from scipy.io import wavfile
 
     mine = {speaker} if isinstance(speaker, str) else set(speaker)
@@ -685,10 +758,10 @@ def eligible_references(
         snr = snr_db(_samples(data, rate, start, end), rate)
         return RefPick(start, end, text, round(snr, 2), _emotion(tags, start, end))
 
+    other_spans = [(o.start, o.end) for o in others]
+
     def clean(s: float, e: float) -> bool:
-        return not any(o.start < e and s < o.end for o in others) and not any(
-            a < e and s < b for a, b in exclude
-        )
+        return clean_span(s, e, other_spans, exclude)
 
     spans = [(round(t.start, 3), round(t.end, 3)) for t in own]
     good = [sp for sp in spans if clean(*sp)]
@@ -699,7 +772,50 @@ def eligible_references(
     for run in _chains(good, blockers, join_gap):
         eligible += _split(run, pick, each[1])
     eligible.sort(key=rank_key)
-    if register is None and song_like is None and song_spans is None:
+    gating = not (register is None and song_like is None and song_spans is None)
+    if refused is not None:
+
+        def reasons(t: Turn) -> list[str]:
+            start, end = t.start, t.end
+            why = [] if each[0] <= end - start <= each[1] else ["length"]
+            if any(o.start < end and start < o.end for o in others):
+                why.append("overlap")
+            if any(a < end and start < b for a, b in exclude):
+                why.append("excluded")
+            if t in dropped:
+                why.append("foreign")
+            text = turn_text(transcript, start, end)
+            if not text:
+                why.append("no_text")
+            elif _sparse(text_units(text, lang) / max(end - start, 1e-9), median, lang):
+                why.append("sparse")
+            return why
+
+        lost: list[tuple[RefPick, tuple[str, ...]]] = []
+        seen: set[tuple[float, float]] = set()
+        for t in sorted((*own, *dropped), key=lambda t: (t.start, t.end)):
+            s, e = round(t.start, 3), round(t.end, 3)
+            if e <= s or (s, e) in seen:
+                continue
+            seen.add((s, e))
+            if any(p.start - 1e-6 <= s and e <= p.end + 1e-6 for p in eligible):
+                continue
+            snr = round(snr_db(_samples(data, rate, s, e), rate), 2)
+            text = turn_text(transcript, s, e)
+            lost.append(
+                (RefPick(s, e, text, snr, _emotion(tags, s, e)), tuple(reasons(t)) or ("repeat",))
+            )
+        if gating and lost:
+            measured = gate_candidates(
+                [p for p, _ in lost], vocals, register=register, song_like=song_like,
+                turn_spans=spans, bands=bands, pitch_root=pitch_root, song_spans=song_spans,
+            )  # fmt: skip
+            refused += [
+                Refusal(v.pick, why, v.gates) for v, (_, why) in zip(measured, lost, strict=True)
+            ]
+        else:
+            refused += [Refusal(p, why) for p, why in lost]
+    if not gating:
         if verdicts is not None:
             verdicts += [RefVerdict(p, (), i) for i, p in enumerate(eligible)]
         return eligible
@@ -710,7 +826,8 @@ def eligible_references(
     if gated is not None:
         reg = None if register is None else as_register(register)
         gated.append(count_gated(judged, reg is not None and reg.bimodal,
-                                 reg is not None and reg.bimodal and reg.even))  # fmt: skip
+                                 reg is not None and reg.bimodal and reg.even,
+                                 reg is not None and reg.operator))  # fmt: skip
     if verdicts is not None:
         verdicts += judged
     return [v.pick for v in judged if v.passed]
@@ -1086,14 +1203,18 @@ def song_spans(work: Path, settings: Any = None) -> list[tuple[float, float]]:
 def reference_report(picks: list[RefPick], gated: Gated | None = None) -> list[str]:
     """The CD5 warning for chosen references a scored source calls non-neutral, if any, the
     A1 line when a gate refused a candidate that would have ranked in the first three, and
-    when the speaker's turns are bimodal `SPLIT_NOTE` (near even: no register gate ran) or
-    `SPLIT_GATED_NOTE` (the gate read the larger part's register)."""
+    when the speaker's turns are bimodal `SPLIT_NOTE` (near even: no register gate ran),
+    `SPLIT_OPERATOR_NOTE` (the gate read the operator's stored gender) or `SPLIT_GATED_NOTE`
+    (the gate read the larger part's register)."""
     labels = sorted({p.emotion for p in picks if p.emotion})
     out = [f"references may carry emotion: {', '.join(labels)}"] if labels else []
     if gated is not None and gated.top > 0:
         out.append(f"gated: {gated.phrase()}")
     if gated is not None and gated.split:
-        out.append(SPLIT_NOTE if gated.even else SPLIT_GATED_NOTE)
+        if gated.even:
+            out.append(SPLIT_NOTE)
+        else:
+            out.append(SPLIT_OPERATOR_NOTE if gated.operator else SPLIT_GATED_NOTE)
     return out
 
 
@@ -1128,27 +1249,56 @@ def clone_card(
     the same id replaces the stored tier (``CardStore.put`` keeps stored ``[meta]`` only for a
     card with none). With no ``tier``, the picks' own: ``floor`` when they reach the D32 floor,
     ``short`` from `CLONE_MIN_S`, else ``thin``. Not put in the store."""
+    return clone_card_spans(
+        backend, [SpanPick(p, episode, vocals, source_language) for p in picks], store,
+        target_language, tier,
+    )  # fmt: skip
+
+
+class SpanPick(NamedTuple):
+    """A reference pick with the episode it comes from, that episode's vocals and the
+    language its transcript speaks: what a clone card's references may mix across episodes
+    (the studio's drafts)."""
+
+    pick: RefPick
+    episode: str
+    vocals: Path
+    language: str
+
+
+def clone_card_spans(
+    backend: type[Synthesizer],
+    picks: Sequence[SpanPick],
+    store: CardStore,
+    target_language: str,
+    tier: Tier | None = None,
+) -> Card:
+    """`clone_card` for picks that may come from several episodes: each reference cut from its
+    own episode's vocals, with that episode in its origin and that transcript's language. The
+    same picks from one episode make the same card as `clone_card`. Not put in the store."""
     from fukikae.cards.card import Card, Reference, Voice
 
     refs: list[Reference] = []
     with tempfile.TemporaryDirectory(prefix="fukikae-clip-") as tmp:
-        for i, p in enumerate(picks):
-            clip = cut_clip(vocals, p.start, p.end, Path(tmp) / f"{i}.wav")
+        for i, sp in enumerate(picks):
+            p = sp.pick
+            clip = cut_clip(sp.vocals, p.start, p.end, Path(tmp) / f"{i}.wav")
             refs.append(
                 Reference(
                     clip=store.add_sidecar(clip, "clip"),
                     transcript=p.transcript,
-                    language=source_language,
-                    origin={"episode": episode, "start": p.start, "end": p.end},
+                    language=sp.language,
+                    origin={"episode": sp.episode, "start": p.start, "end": p.end},
                 )
             )
-    labels = sorted({p.emotion for p in picks if p.emotion})
+    plain = [sp.pick for sp in picks]
+    labels = sorted({p.emotion for p in plain if p.emotion})
     # always written, empty too: a re-put of the same id merges [meta] (CardStore.put), so a
     # key left out would keep a stale value
     meta: dict[str, Any] = {"reference_emotions": labels}
     if tier is None:
-        seconds = sum(p.seconds for p in picks)
-        tier = "floor" if meets_floor(picks) else "short" if seconds >= CLONE_MIN_S else "thin"
+        seconds = sum(p.seconds for p in plain)
+        tier = "floor" if meets_floor(plain) else "short" if seconds >= CLONE_MIN_S else "thin"
     meta["reference_tier"] = tier
     return Card(
         target_language=target_language,

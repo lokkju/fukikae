@@ -1,11 +1,13 @@
 """Manifest, cache keys and the resumable stage runner."""
 
+import fcntl
 import hashlib
 import json
 import logging
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,6 +34,26 @@ class Stage(Protocol):
     def run(self, ep: Episode, cfg: Config) -> None: ...
 
 
+# A gate (`fukikae.studio.gate`): the reasons the episode must stop before the stage it is
+# registered for, or none.
+Gate = Callable[[Episode, Config], list[str]]
+
+
+class ReviewRequired(Exception):  # noqa: N818 - the plan's name; a stop, not an error
+    """An episode stopped before ``stage`` by a `[review]` gate, for ``reasons`` (Task 21):
+    not a failure of the stage, which never started. ``ran`` names the stages this call ran
+    before it."""
+
+    def __init__(
+        self, episode: str, stage: str, reasons: Sequence[str], ran: Sequence[str] = ()
+    ) -> None:
+        self.episode = episode
+        self.stage = stage
+        self.reasons = list(reasons)
+        self.ran = list(ran)
+        super().__init__(f"{episode}: stopped before {stage}: {'; '.join(self.reasons)}")
+
+
 def _prepare(stage: Stage, ep: Episode, cfg: Config) -> None:
     """A stage may define ``prepare(ep, cfg)``: registry work that decides its inputs (the
     tts stage's automatic cards), run before its key is computed."""
@@ -50,6 +72,9 @@ class StageRecord(BaseModel):
 
 class Manifest(BaseModel):
     stages: dict[str, StageRecord] = Field(default_factory=dict)
+    # When each stage was last marked stale (`mark_stale`) and not run since: a run that
+    # started the stage before the mark doesn't record it done.
+    stale: dict[str, datetime] = Field(default_factory=dict)
 
 
 def _manifest_path(ep: Episode) -> Path:
@@ -73,6 +98,39 @@ def load_manifest(ep: Episode) -> Manifest:
 def save_manifest(ep: Episode, manifest: Manifest) -> None:
     ep.work.mkdir(parents=True, exist_ok=True)
     write_json(_manifest_path(ep), manifest)
+
+
+@contextmanager
+def _manifest_lock(ep: Episode) -> Iterator[None]:
+    """An exclusive lock for one read-modify-write of an episode's manifest
+    (``<ws>/.fukikae/manifest-locks/<episode>.lock``), so a stage record saved by a run and a
+    stale mark made meanwhile can't lose each other."""
+    path = ep.workspace_root / ".fukikae" / "manifest-locks" / f"{ep.id}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _record_stage(ep: Episode, name: str, record: StageRecord) -> None:
+    """Save one stage's record into the manifest as it is on disk now, leaving every other
+    stage's record as it is there, so a stale mark made while the stage ran stays made. A
+    ``done`` record for a stage marked stale after it started is not saved: it ran on what
+    the mark says changed, so the next run redoes it."""
+    with _manifest_lock(ep):
+        manifest = load_manifest(ep)
+        marked = manifest.stale.get(name)
+        if record.status == "done" and marked is not None and marked >= record.started:
+            log.warning(
+                "%s: %s was marked stale while it ran; it reruns on the next run", ep.id, name
+            )
+            return
+        manifest.stages[name] = record
+        manifest.stale.pop(name, None)
+        save_manifest(ep, manifest)
 
 
 class _HashCache:
@@ -145,20 +203,50 @@ def _fingerprint(path: Path, ep: Episode, cache: _HashCache) -> str:
     return f"stat:{resolved}:{st.st_size}:{st.st_mtime_ns}"
 
 
-def _cache_key(stage: Stage, ep: Episode, cfg: Config, cache: _HashCache) -> str:
+def _cache_key(
+    stage: Stage, ep: Episode, cfg: Config, cache: _HashCache,
+    config: dict[str, Any] | None = None,
+) -> str:  # fmt: skip
     payload = {
         "stage": stage.name,
-        "config": json.dumps(stage.config_key(cfg, ep), sort_keys=True),
+        "config": json.dumps(
+            stage.config_key(cfg, ep) if config is None else config, sort_keys=True
+        ),  # fmt: skip
         "inputs": [_fingerprint(p, ep, cache) for p in stage.inputs(ep)],
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def cache_key(stage: Stage, ep: Episode, cfg: Config) -> str:
+def cache_key(
+    stage: Stage, ep: Episode, cfg: Config, *, save: bool = True,
+    config: dict[str, Any] | None = None,
+) -> str:  # fmt: skip
+    """The stage's cache key for ``ep`` as the manifest records it; ``save=False`` leaves the
+    workspace's hash cache file as it was (a reader such as the studio index), and ``config``
+    is the stage's config key when the caller already has it."""
     cache = _HashCache(ep)
-    key = _cache_key(stage, ep, cfg, cache)
-    cache.save()
+    key = _cache_key(stage, ep, cfg, cache, config)
+    if save:
+        cache.save()
     return key
+
+
+# The stages that read assignments.json or the studio's split files, which a studio decision
+# (or `registry merge`) changes after its registry commit.
+ASSIGNMENT_STAGES = frozenset({"names", "characters", "tag", "translate", "tts", "timefit", "mix"})
+
+
+def refuse_unfinished_decisions(workspace_root: Path, stage_names: Sequence[str]) -> None:
+    """ValueError when ``stage_names`` include one that reads assignments while a studio
+    decision's steps are left (or one is being applied): its assignments may not match the
+    registry until `fukikae studio resume` finishes it."""
+    if not ASSIGNMENT_STAGES.intersection(stage_names):
+        return
+    from fukikae.studio.apply import unfinished_message
+
+    msg = unfinished_message(workspace_root)
+    if msg is not None:
+        raise ValueError(msg)
 
 
 def run_stages(
@@ -167,22 +255,44 @@ def run_stages(
     stages: Sequence[Stage],
     from_stage: str | None = None,
     to_stage: str | None = None,
+    gates: Mapping[str, Gate] | None = None,
 ) -> list[str]:
+    """Run ``stages`` in order, each only when its record is missing, failed or keyed
+    otherwise, an output is missing, or ``from_stage`` forces it. A stage named in ``gates``
+    that is about to run asks its gate first, and a non-empty answer raises `ReviewRequired`
+    before the stage starts (an up-to-date stage runs nothing, so its gate is not asked)."""
     names = [s.name for s in stages]
     for label, value in (("from_stage", from_stage), ("to_stage", to_stage)):
         if value is not None and value not in names:
             raise ValueError(f"unknown {label} {value!r}; stages are {names}")
     start = names.index(from_stage) if from_stage else 0
     stop = names.index(to_stage) + 1 if to_stage else len(stages)
+    from fukikae.studio.apply import run_lock
 
-    manifest = load_manifest(ep)
+    # Held shared for the whole call: studio and registry writers take it exclusively and are
+    # refused while a run is in progress; a writer holding it is waited for a bounded time.
+    with run_lock(ep.workspace_root):
+        refuse_unfinished_decisions(ep.workspace_root, names[:stop])
+        return _run_stages(ep, cfg, stages, start, stop, from_stage, gates or {})
+
+
+def _run_stages(
+    ep: Episode,
+    cfg: Config,
+    stages: Sequence[Stage],
+    start: int,
+    stop: int,
+    from_stage: str | None,
+    gates: Mapping[str, Gate],
+) -> list[str]:
     cache = _HashCache(ep)
     ran: list[str] = []
     try:
         for i, stage in enumerate(stages[:stop]):
             _prepare(stage, ep, cfg)
             key = _cache_key(stage, ep, cfg, cache)
-            record = manifest.stages.get(stage.name)
+            # read now, not once at the start: a stale mark made since must count
+            record = load_manifest(ep).stages.get(stage.name)
             stale = (
                 i >= start
                 and from_stage is not None
@@ -193,25 +303,34 @@ def run_stages(
             )
             if not stale:
                 continue
+            gate = gates.get(stage.name)
+            if gate is not None:
+                reasons = gate(ep, cfg)
+                if reasons:
+                    raise ReviewRequired(ep.id, stage.name, reasons, ran)
             started = datetime.now(UTC)
             try:
                 with progress.stage(ep.id, stage.name):
                     stage.run(ep, cfg)
             except BaseException as e:
-                manifest.stages[stage.name] = StageRecord(
-                    key=key,
-                    status="failed",
-                    started=started,
-                    finished=datetime.now(UTC),
-                    error=f"{type(e).__name__}: {e}",
+                _record_stage(
+                    ep,
+                    stage.name,
+                    StageRecord(
+                        key=key,
+                        status="failed",
+                        started=started,
+                        finished=datetime.now(UTC),
+                        error=f"{type(e).__name__}: {e}",
+                    ),
                 )
-                save_manifest(ep, manifest)
                 raise
             # Outputs changed; hash them fresh for later stages' keys.
-            manifest.stages[stage.name] = StageRecord(
-                key=key, status="done", started=started, finished=datetime.now(UTC)
+            _record_stage(
+                ep,
+                stage.name,
+                StageRecord(key=key, status="done", started=started, finished=datetime.now(UTC)),
             )
-            save_manifest(ep, manifest)
             ran.append(stage.name)
     finally:
         cache.save()
@@ -235,6 +354,7 @@ def run_episodes(
     tail: Sequence[str],
     from_stage: str | None = None,
     to_stage: str | None = None,
+    gates: Mapping[str, Gate] | None = None,
 ) -> dict[str, EpisodeResult]:
     """Run ``stages`` for several episodes, in order, overlapping each episode's CPU ``tail``
     (the trailing stages named there: timefit and mix) with the next episode's head (D26). One
@@ -243,11 +363,18 @@ def run_episodes(
     its episode's files, and every stage writes only its own episode's directory, so the
     outputs and manifests are those of running the episodes one after another. After a
     failure no further head starts; a tail already started finishes. ``from_stage`` and
-    ``to_stage`` apply to every episode as in ``run_stages``."""
+    ``to_stage`` apply to every episode as in ``run_stages``, and so do ``gates``: an episode
+    a gate stops (`ReviewRequired`, its result's error) goes no further, and the other
+    episodes go on. So does one whose run gave up waiting for a studio writer
+    (`studio.apply.StudioLockTimeout`, its result's error)."""
+    from fukikae.studio.apply import StudioLockTimeout
+
     names = [s.name for s in stages]
     for label, value in (("from_stage", from_stage), ("to_stage", to_stage)):
         if value is not None and value not in names:
             raise ValueError(f"unknown {label} {value!r}; stages are {names}")
+    if episodes:
+        refuse_unfinished_decisions(episodes[0].workspace_root, names)
     split = len(stages)
     while split > 0 and stages[split - 1].name in tail:
         split -= 1
@@ -271,8 +398,16 @@ def run_episodes(
     def run_tail(ep: Episode) -> None:
         try:
             progress.episode(ep.id, "tail")
-            results[ep.id].ran += run_stages(ep, cfg, rest, tail_from)
+            results[ep.id].ran += run_stages(ep, cfg, rest, tail_from, gates=gates)
             progress.episode(ep.id, "done")
+        except ReviewRequired as e:
+            results[ep.id].ran += e.ran
+            results[ep.id].error = e
+            progress.episode(ep.id, progress.STOPPED)
+        except StudioLockTimeout as e:
+            results[ep.id].error = e
+            progress.episode(ep.id, progress.STOPPED)
+            log.error("%s: %s", ep.id, e)
         except BaseException as e:
             results[ep.id].error = e
             failed.set()
@@ -287,7 +422,17 @@ def run_episodes(
             results[ep.id] = EpisodeResult()
             try:
                 progress.episode(ep.id, "head")
-                results[ep.id].ran += run_stages(ep, cfg, head, head_from) if head else []
+                if head:
+                    results[ep.id].ran += run_stages(ep, cfg, head, head_from, gates=gates)
+            except ReviewRequired as e:
+                results[ep.id].ran += e.ran
+                results[ep.id].error = e
+                progress.episode(ep.id, progress.STOPPED)
+                continue
+            except StudioLockTimeout as e:  # this episode stops; the next one tries again
+                results[ep.id].error = e
+                progress.episode(ep.id, progress.STOPPED)
+                continue
             except BaseException as e:
                 results[ep.id].error = e
                 failed.set()
@@ -309,8 +454,11 @@ def run_episodes(
 
 def mark_stale(ep: Episode, stage: str) -> bool:
     """Forget a stage's manifest record so the next run redoes it; True if there was one."""
-    manifest = load_manifest(ep)
-    if manifest.stages.pop(stage, None) is None:
-        return False
-    save_manifest(ep, manifest)
-    return True
+    with _manifest_lock(ep):
+        if not _manifest_path(ep).exists():
+            return False
+        manifest = load_manifest(ep)
+        had = manifest.stages.pop(stage, None) is not None
+        manifest.stale[stage] = datetime.now(UTC)
+        save_manifest(ep, manifest)
+    return had
