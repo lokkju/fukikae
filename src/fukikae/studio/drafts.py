@@ -143,13 +143,21 @@ def draft_path(ws: Workspace | Path, character_id: int, language: str) -> Path:
 
 
 def load_draft(ws: Workspace | Path, character_id: int, language: str) -> Draft | None:
-    """The saved draft, or None when there is none."""
+    """The saved draft, or None when there is none. ValueError when the file is another
+    character's or language's draft (copied or renamed into place)."""
     from fukikae.artifacts import read_json
 
     path = draft_path(ws, character_id, language)
     if not path.is_file():
         return None
-    return read_json(path, Draft)
+    draft = read_json(path, Draft)
+    want = (int(character_id), language_of(language))
+    if (draft.character_id, draft.language) != want:
+        raise ValueError(
+            f"{path.name} holds the draft of character {draft.character_id} "
+            f"({draft.language}), not of character {want[0]} ({want[1]})"
+        )
+    return draft
 
 
 def save_draft(ws: Workspace | Path, draft: Draft) -> Path:

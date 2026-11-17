@@ -69,18 +69,29 @@ Compare and accept (Task 20). ``GET /api/drafts/<id>/<lang>/compare`` reports tw
 of the saved draft on one line, pairing auditions by their line (never by ``cue_key``, which
 differs by card): a version's latest audition of the line in the draft, else its latest job's,
 else a new job queued through the worker (never on HEAD; a failed or cancelled side again only
-with ``retry=1``), so the page polls the route and never waits on a render. With ``blind=1``
+with ``retry=1``, even after the worker's job ring forgot the job), so the page polls the
+route and never waits on a render. The lookup and the submit hold one lock per draft, version
+and line (`StudioServer.compare_lock`), so two tabs never queue a side twice. With ``blind=1``
 the sides are ``A`` and ``B`` (`fukikae.abpair.blind_pair` under a seed drawn per server and
-kept in memory, the slot the draft and line, so a pair keeps its labels either way round) and
-carry nothing that names a version; ``POST .../reveal`` gives the key. ``POST .../accept``
-builds the accept decision from the saved version (`fukikae.studio.drafts.accept_decision`:
-its card, references, overrides, audition count, and the digest of the language's card
-assignment taken when the version was made, so a tts run that re-picked the card since makes
-it stale, 409) and applies it through `apply_decision` under the decisions lock, after a dry
-run that fills its key and external id; ``/api/decisions`` still refuses a raw accept.
-``.../accept/preview`` is the dry run alone. Both add ``cached``, per episode whose tts goes
+kept in memory, the slot the draft and line, so a pair keeps its labels either way round),
+queued in label order, never query order. A blind answer has one state for the pair
+(``rendering`` until both sides are done, then ``ready``; `_pair_state`) and generic messages,
+and each side only a ``wav_url`` once the pair is ready: an opaque alias
+(`StudioServer.blind_name`, an HMAC of the seed, draft, pair, line and label) that
+``/audition`` resolves to the render, never the render key the draft JSON lists. So neither
+the order sides finish in nor a URL tells the versions apart; ``POST .../reveal`` gives the
+key. ``POST .../accept`` takes ``{version, card_id}`` (409 ``version-changed`` when the
+version is another card now: the draft was opened again since the page loaded it), rechecks
+the version's `fukikae.studio.drafts.accept_problems` (422 naming them), builds the accept
+decision from the saved version (`fukikae.studio.drafts.accept_decision`: its card,
+references, overrides, audition count, and the digest of the language's card assignment taken
+when the version was made, so a tts run that re-picked the card since makes it stale, 409)
+and applies it through `apply_decision` under the decisions lock, after a dry run that fills
+its key and external id; ``/api/decisions`` still refuses a raw accept. ``.../accept/preview``
+is the same checks and the dry run alone. Both add ``cached``, per episode whose tts goes
 stale the character's lines already in the tts cache with that card
-(`fukikae.studio.audition.cached_lines`, worked out outside both locks).
+(`fukikae.studio.audition.cached_lines` under the workspace's config re-read now, as the next
+run reads it; worked out outside both locks).
 
 The page itself waits on the design pick (D47); ``static/index.html`` is a placeholder that
 lists `ROUTES`.
@@ -88,6 +99,7 @@ lists `ROUTES`.
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import ipaddress
 import json
@@ -102,10 +114,11 @@ import threading
 import time
 import traceback
 from collections import OrderedDict
+from collections.abc import Iterator
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -141,6 +154,7 @@ from fukikae.studio.drafts import (
     UnknownCharacter,
     UnknownVersion,
     accept_decision,
+    accept_problems,
     add_version,
     backends,
     candidates,
@@ -251,8 +265,8 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
         "GET",
         "/api/drafts/<id>/<lang>/compare",
         "two versions' auditions of one line (?a=<n>&b=<n>&line=<JSON line>), the missing ones "
-        "submitted; &blind=1 labels them A and B with the versions hidden, &retry=1 submits "
-        "a failed side again",
+        "submitted; &blind=1 labels them A and B with one state for the pair and the versions "
+        "hidden, &retry=1 submits a failed side again",
     ),
     (
         "POST",
@@ -262,14 +276,15 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
     (
         "POST",
         "/api/drafts/<id>/<lang>/accept/preview",
-        "a dry run of accepting a draft version ({version}): what reruns, whether it is stale, "
-        "the accept decision, and the lines already cached",
+        "a dry run of accepting a draft version ({version, card_id}): what reruns, whether it "
+        "is stale, the accept decision, and the lines already cached",
     ),
     (
         "POST",
         "/api/drafts/<id>/<lang>/accept",
-        "accept a draft version ({version}) as the character's card for the language: studio, "
-        "locked; 409 when the card assignment changed since the version was made",
+        "accept a draft version ({version, card_id}) as the character's card for the "
+        "language: studio, locked; 409 when the card assignment changed since the version was "
+        "made, or the version is another card now",
     ),
     ("GET", "/api/backends", "the clone backends and each one's voice keys (type and range)"),
     (
@@ -309,6 +324,8 @@ _LINE: TypeAdapter[TypedLine | RealLine] = TypeAdapter(AuditionLine)
 _JOB = re.compile(r"/api/auditions/([0-9a-f]{16})")
 _JOB_CANCEL = re.compile(r"/api/auditions/([0-9a-f]{16})/cancel")
 AUDITION_NAME = re.compile(r"[0-9a-f]{16}\.wav")
+BLIND_NAME = re.compile(r"b[0-9a-f]{32}\.wav")  # a blind compare side's alias
+_USER_CONFIG = object()  # StudioServer's default: ~/.config/fukikae/config.toml, as load_config
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -384,10 +401,12 @@ class StudioServer(ThreadingHTTPServer):
         request_timeout: float | None = None,
         max_handlers: int = MAX_HANDLERS,
         cut_wait: float = CUT_WAIT_S,
+        user_config: Path | None | object = _USER_CONFIG,
     ) -> None:
         bind = check_bind(host, allow_non_loopback=allow_non_loopback)
         self.ws = ws if isinstance(ws, Workspace) else Workspace(Path(ws))
         self.cfg = cfg
+        self._user_config = user_config  # the user config `config` reads beneath fukikae.toml
         self.clips = clips
         self.token = token or secrets.token_urlsafe(32)
         self._lock = threading.RLock()  # the index and every decision, one at a time
@@ -417,8 +436,12 @@ class StudioServer(ThreadingHTTPServer):
         # draft, never the decisions lock) and the audition wavs listed to the page in drafts
         self.auditions = AuditionWorker(self.ws, cfg, drafts_lock=self._drafts_lock)
         self._audition_names: OrderedDict[str, None] = OrderedDict()
-        # blind compares: the labels' seed, drawn per server and kept only in memory
+        # blind compares: the labels' seed, drawn per server and kept only in memory; the
+        # opaque names blind sides' audio is served under (alias -> render wav name, under
+        # _clip_lock); and one lock per (draft, version, line) a compare may submit
         self.blind_seed = secrets.randbits(64)
+        self._blind_names: OrderedDict[str, str] = OrderedDict()
+        self._compare_locks: dict[tuple[str, ...], list[Any]] = {}
         super().__init__((bind, port), _Handler)
         p = self.server_address[1]
         names = ["127.0.0.1", "localhost"] if _loopback(bind) else [bind]
@@ -470,6 +493,54 @@ class StudioServer(ThreadingHTTPServer):
                 self._audition_names.move_to_end(name)
                 while len(self._audition_names) > MAX_CUT:
                     self._audition_names.popitem(last=False)
+
+    def blind_name(self, draft: str, pair: tuple[int, int], line: str, label: str,
+                   wav: str) -> str:  # fmt: skip
+        """The opaque name a blind side's audio is served under: an HMAC of the server's seed,
+        the draft, the pair, the line and the label (so it says nothing of the version or its
+        render key), remembered (bounded, `MAX_CUT`) as an alias of ``wav`` for ``/audition``
+        to resolve."""
+        lo, hi = sorted(pair)
+        msg = "\0".join((draft, str(lo), str(hi), line, label)).encode()
+        name = "b" + hmac.new(self.blind_seed.to_bytes(8, "big"), msg, "sha256").hexdigest()[:32]
+        name += ".wav"
+        with self._clip_lock:
+            self._blind_names[name] = wav
+            self._blind_names.move_to_end(name)
+            while len(self._blind_names) > MAX_CUT:
+                self._blind_names.popitem(last=False)
+        return name
+
+    def blind_wav(self, name: str) -> str | None:
+        """The render wav a blind alias stands for, or None."""
+        with self._clip_lock:
+            return self._blind_names.get(name)
+
+    @contextlib.contextmanager
+    def compare_lock(self, key: tuple[str, ...]) -> Iterator[None]:
+        """One compare at a time looking up and submitting the same (draft, version, line), so
+        two tabs polling one pair never queue a side twice. The lock is dropped when no request
+        holds or waits on it."""
+        with self._clip_lock:
+            entry = self._compare_locks.setdefault(key, [threading.Lock(), 0])
+            entry[1] += 1
+        try:
+            with entry[0]:
+                yield
+        finally:
+            with self._clip_lock:
+                entry[1] -= 1
+                if entry[1] == 0 and self._compare_locks.get(key) is entry:
+                    del self._compare_locks[key]
+
+    def config(self) -> Config:
+        """The workspace's config as it is now (re-read, as the next `fukikae run` reads it),
+        for what must match a run; ConfigError when it no longer reads."""
+        from fukikae.config import load_config
+
+        if self._user_config is _USER_CONFIG:
+            return load_config(self.ws.root)
+        return load_config(self.ws.root, cast(Path | None, self._user_config))
 
     def audition_names(self) -> set[str]:
         """The audition wavs ``/audition`` may serve: those this server's worker rendered and
@@ -1161,8 +1232,12 @@ class _Handler(BaseHTTPRequestHandler):
         draft = self._saved_draft(cid, lang)
         versions = {n: self._version_of(draft, n) for n in (a, b)}
         submit = self.command != "HEAD"
-        sides = {n: self._side(draft, versions[n], line, submit=submit, retry=retry)
-                 for n in (a, b)}  # fmt: skip
+        key = self._blind_key(draft, a, b, line) if blind else None
+        # blind: the sides are looked up and queued in label order, so the queue (and the
+        # order they finish in) follows the labels, never the query
+        order = [key["A"], key["B"]] if key is not None else [a, b]
+        sides = {n: self._side(draft, versions[n], line, submit=submit, retry=retry,
+                               blind=blind) for n in order}  # fmt: skip
         source = next((x.source for x, _ in sides.values()
                        if x is not None and x.source is not None), None)  # fmt: skip
         body: dict[str, Any] = {
@@ -1171,54 +1246,85 @@ class _Handler(BaseHTTPRequestHandler):
             "source_clip": (self.server.offer(source.episode, source.start, source.end)
                             if source is not None else None),
         }  # fmt: skip
-        if blind:
-            key = self._blind_key(draft, a, b, line)
-            body["sides"] = {label: _blind_side(sides[n][1]) for label, n in sorted(key.items())}
-        else:
+        if key is None:
             body["sides"] = {"a": sides[a][1], "b": sides[b][1]}
+            self._json(200, body)
+            return
+        state = _pair_state([sides[n][1]["state"] for n in order])
+        body["state"] = state
+        body["message"] = _BLIND_MESSAGES.get(state)
+        line_json = line.model_dump_json()
+
+        def url(label: str, n: int) -> str | None:
+            got = sides[n][0]
+            if state != "ready" or got is None:
+                return None
+            return "/audition/" + self.server.blind_name(draft.name, (a, b), line_json, label,
+                                                         got.wav)  # fmt: skip
+
+        body["sides"] = {label: {"wav_url": url(label, n)} for label, n in sorted(key.items())}
         self._json(200, body)
 
     def _side(
         self, draft: Draft, v: DraftVersion, line: TypedLine | RealLine, *, submit: bool,
-        retry: bool,
+        retry: bool, blind: bool = False,
     ) -> tuple[Audition | None, dict[str, Any]]:  # fmt: skip
         """One version's audition of ``line``: the draft's latest (by line), else its latest
-        job's, else a new job (``state`` ``missing`` on HEAD)."""
+        job's, else a new job (``state`` ``missing`` on HEAD). The job lookup and the submit
+        hold the server's lock for this draft, version and line, so two compares never queue
+        it twice; a failed or cancelled job (remembered by the worker past its job ring) is
+        submitted again only with ``retry``. ``blind``: a refused submit names no backend or
+        version."""
         s = self.server
         got = next((x for x in reversed(v.auditions) if x.line == line), None)
-        job = (
-            None
-            if got is not None
-            else s.auditions.latest(draft.character_id, draft.language, v.n, line)
-        )
-        if got is None and job is not None and job.state == "done" and job.audition is not None:
-            got = job.audition if job.audition.card_id == v.card_id else None
         side: dict[str, Any] = {"version": v.n, "state": "missing", "message": None,
                                 "job": None, "audition": None, "wav_url": None}  # fmt: skip
-        if got is not None:
-            s.list_audition(got.wav)
-            side.update(state="done", audition=got.model_dump(mode="json"),
-                        wav_url=f"/audition/{got.wav}")  # fmt: skip
-            return got, side
-        # a pending job is polled, a failed or cancelled one reported unless retry, and a done
-        # one of a replaced card submitted again
-        if job is not None and job.state != "done" and (job.state not in FINISHED or not retry):
-            side.update(state=job.state, message=_PATHS.sub("<path>", job.message or "")
-                        or None, job=job.id)  # fmt: skip
-            return None, side
-        if not submit:
-            return None, side
+        if got is None:
+            lock = (draft.name, str(v.n), v.card_id, line.model_dump_json())
+            with s.compare_lock(lock):
+                job = s.auditions.latest(draft.character_id, draft.language, v.n, line)
+                if job is not None and job.state == "done" and job.audition is not None:
+                    got = job.audition if job.audition.card_id == v.card_id else None
+                if got is None:
+                    # a pending job is polled, a failed or cancelled one reported unless
+                    # retry, and a done one of a replaced card submitted again
+                    if (
+                        job is not None
+                        and job.state != "done"
+                        and (job.state not in FINISHED or not retry)
+                    ):
+                        side.update(
+                            state=job.state,
+                            job=job.id,
+                            message=_PATHS.sub("<path>", job.message or "") or None,
+                        )
+                        return None, side  # fmt: skip
+                    if not submit:
+                        return None, side
+                    jid = self._submit_side(draft, v, line, blind=blind)
+                    snap = s.auditions.job(jid)
+                    side.update(state=snap.state if snap is not None else "queued", job=jid)
+                    return None, side
+        s.list_audition(got.wav)
+        side.update(state="done", audition=got.model_dump(mode="json"),
+                    wav_url=f"/audition/{got.wav}")  # fmt: skip
+        return got, side
+
+    def _submit_side(
+        self, draft: Draft, v: DraftVersion, line: TypedLine | RealLine, *, blind: bool
+    ) -> str:
+        """Queue a compare side's audition; the refusals as `_submit` gives them, except that
+        in a blind compare they name no backend or version (the status is kept)."""
         try:
-            jid = s.auditions.submit(draft.character_id, draft.language, v.n, line)
+            return self.server.auditions.submit(draft.character_id, draft.language, v.n, line)
         except NoSuchDraft as e:
-            raise _Reply(404, "not-found", _PATHS.sub("<path>", str(e))) from None
+            why = _BLIND_REFUSAL if blind else _PATHS.sub("<path>", str(e))
+            raise _Reply(404, "not-found", why) from None
         except AuditionRefused as e:
-            raise _Reply(422, "refused", _PATHS.sub("<path>", str(e))) from None
+            why = _BLIND_REFUSAL if blind else _PATHS.sub("<path>", str(e))
+            raise _Reply(422, "refused", why) from None
         except QueueFull as e:
-            raise _busy(str(e)) from None
-        snap = s.auditions.job(jid)
-        side.update(state=snap.state if snap is not None else "queued", job=jid)
-        return None, side
+            raise _busy("the audition queue is full" if blind else str(e)) from None
 
     def _reveal(self, cid: int, lang: str) -> None:
         body = self._body()
@@ -1252,11 +1358,21 @@ class _Handler(BaseHTTPRequestHandler):
         s = self.server
         draft = self._saved_draft(cid, lang)
         try:
+            v = version_of(draft, req.version)
             d = accept_decision(draft, req.version)
         except DraftError as e:
             raise self._draft_refusal(e) from None
+        if v.card_id != req.card_id:
+            raise _Reply(409, "version-changed", f"draft {draft.name} version {v.n} is card "
+                         f"{v.card_id} now, not {req.card_id}: the draft was opened again since "
+                         "the page loaded it; reload it")  # fmt: skip
         if not s.ws.registry_path.is_file():
             raise _Reply(409, "no-registry", f"{s.ws.root} has no registry yet")
+        problems = accept_problems(s.ws, cid, v.card_id, v.references)
+        if problems:
+            raise _Reply(422, "refused", _PATHS.sub(
+                "<path>", f"draft {draft.name} version {v.n} can't be accepted: "
+                + "; ".join(problems)))  # fmt: skip
         if preview:
             out = self._dry_run(d)
         else:
@@ -1272,7 +1388,7 @@ class _Handler(BaseHTTPRequestHandler):
         episodes = sorted({i["episode"] for i in invalidations if i["stage"] == "tts"})
         s = self.server
         try:
-            got = cached_lines(s.ws, s.cfg, d.character, d.card_id, d.language, episodes)
+            got = cached_lines(s.ws, s.config(), d.character, d.card_id, d.language, episodes)
         except Exception as e:  # noqa: BLE001 (a read-only report; the accept stands either way)
             traceback.print_exc(file=sys.stderr)
             return {"cached": None, "cached_error": _why(e)}
@@ -1325,7 +1441,12 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(200, self._job_body(job))
 
     def _audition(self, name: str) -> None:
-        if not AUDITION_NAME.fullmatch(name) or name not in self.server.audition_names():
+        if BLIND_NAME.fullmatch(name):  # a blind side: its alias stands for one render
+            real = self.server.blind_wav(name)
+            if real is None:
+                raise _Reply(404, "not-found", "no such audition")
+            name = real
+        elif not AUDITION_NAME.fullmatch(name) or name not in self.server.audition_names():
             raise _Reply(404, "not-found", "no such audition")
         try:
             dfd = os.open(self.server.ws.root, os.O_RDONLY | os.O_DIRECTORY)
@@ -1454,11 +1575,13 @@ class _VersionRequest(BaseModel):
 
 
 class _AcceptRequest(BaseModel):
-    """``POST /api/drafts/<id>/<lang>/accept`` (and ``/accept/preview``): the version."""
+    """``POST /api/drafts/<id>/<lang>/accept`` (and ``/accept/preview``): the version and the
+    card the page showed for it (409 when the version is another card now)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     version: int = Field(ge=1, le=10**6)
+    card_id: str = Field(pattern=r"^[0-9a-f]{16}$")
 
 
 class _RevealRequest(BaseModel):
@@ -1485,15 +1608,26 @@ def _line(raw: str) -> TypedLine | RealLine:
         ) from None
 
 
-def _blind_side(side: dict[str, Any]) -> dict[str, Any]:
-    """A compare side with nothing that names its version (number, card, backend, job)."""
-    failed = side["state"] in ("failed", "cancelled")
-    return {
-        "state": side["state"],
-        "wav_url": side["wav_url"],
-        "message": "this side's audition did not finish; compare unblinded to see why"
-        if failed else None,
-    }  # fmt: skip
+_PENDING = frozenset({"queued", "waiting", "loading", "running"})
+_BLIND_MESSAGES = {
+    "failed": "an audition of this pair did not finish; compare unblinded to see why, or "
+    "retry with retry=1",
+    "missing": "this pair has auditions still to queue; GET the compare to queue them",
+}
+_BLIND_REFUSAL = "a side of this blind pair can't be auditioned; compare unblinded to see why"
+
+
+def _pair_state(states: list[str]) -> str:
+    """A blind pair's one state from its sides': ``rendering`` while either is queued or
+    rendering, ``missing`` while either is unqueued (HEAD), ``failed`` when either failed or
+    was cancelled, else ``ready``. Never per side, which would tell which renders first."""
+    if any(x in _PENDING for x in states):
+        return "rendering"
+    if "missing" in states:
+        return "missing"
+    if any(x in ("failed", "cancelled") for x in states):
+        return "failed"
+    return "ready"
 
 
 class _AuditionRequest(BaseModel):

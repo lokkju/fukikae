@@ -107,6 +107,7 @@ CLONE_CHECK_TTL_S = 60.0  # how long a backend's `clone_problem` answer is reuse
 LOCK_POLL_S = 2.0  # how often a waiting job tries the GPU lock again
 MAX_QUEUE = 16  # jobs waiting at most; past that a submit is refused (QueueFull)
 MAX_JOBS = 500  # finished jobs remembered for polling, oldest forgotten first
+MAX_LINES = 4096  # (draft version, line) pairs whose last job `latest` remembers past MAX_JOBS
 TYPED_CUE_ID = "typed"
 
 JobState = Literal["queued", "waiting", "loading", "running", "done", "failed", "cancelled"]
@@ -246,6 +247,9 @@ class AuditionWorker:
         self._cond = threading.Condition()
         self._queue: collections.deque[_Job] = collections.deque()
         self._jobs: collections.OrderedDict[str, _Job] = collections.OrderedDict()
+        # the last job per (character, language, version, line), kept after the job ring
+        # forgets it, so a compare never takes a forgotten failure for a line never tried
+        self._by_line: collections.OrderedDict[tuple[Any, ...], _Job] = collections.OrderedDict()
         self._current: _Job | None = None
         self._release = False
         self._closed = False
@@ -289,6 +293,11 @@ class AuditionWorker:
                 raise QueueFull(f"{MAX_QUEUE} auditions are already queued; wait for some")
             self._queue.append(job)
             self._remember(job)
+            key = _line_key(character, language, version, parsed)
+            self._by_line[key] = job
+            self._by_line.move_to_end(key)
+            while len(self._by_line) > MAX_LINES:
+                self._by_line.popitem(last=False)
             self._start()
             self._cond.notify_all()
         return job.id
@@ -405,14 +414,11 @@ class AuditionWorker:
     ) -> AuditionJob | None:
         """The last job submitted for this draft version and line (equal lines: the same
         kind, cue or text and emotion prompt), or None; what a compare polls instead of
-        submitting the line again."""
+        submitting the line again. Remembered for the last `MAX_LINES` pairs, after the job
+        ring (`MAX_JOBS`) forgets the job."""
         with self._cond:
-            for j in reversed(self._jobs.values()):
-                if (j.character, j.language, j.version) == (character, language, version) and (
-                    j.line == line
-                ):
-                    return j.snapshot()
-        return None
+            j = self._by_line.get(_line_key(character, language, version, line))
+            return j.snapshot() if j is not None else None
 
     # -- checks shared by submit and the worker ------------------------------------------------
 
@@ -941,11 +947,12 @@ def cached_lines(
     episodes: list[str],
 ) -> dict[str, list[str]]:
     """Per episode, the character's spoken cues whose render with ``card_id`` is already in
-    the workspace's tts cache under the stage's own ``cue_key`` (prepared as `_prepare`
-    prepares a real line, the line gate included), so the next tts run takes them as cache
-    hits: what an accept's response lists beside the episodes it makes stale. An episode
-    without ``cues.<language>.json`` lists none. Reads only; raises what the card check or
-    a read raises."""
+    the workspace's tts cache under the stage's own ``cue_key`` (prepared as the stage
+    prepares them, the line gate measured over every spoken cue of the episode as the stage
+    measures it), so the next tts run takes them as cache hits: what an accept's response
+    lists beside the episodes it makes stale. ``cfg`` is the config that run will read (the
+    server re-reads it). An episode without ``cues.<language>.json`` lists none. Reads only;
+    raises what the card check or a read raises."""
     from fukikae.artifacts import read_json
     from fukikae.models import DubCues
     from fukikae.stages.tts import (
@@ -973,18 +980,18 @@ def cached_lines(
         if not path.is_file():
             out[ep] = []
             continue
-        spoken = [
-            c for c in read_json(path, DubCues).cues
-            if c.character_id == character and TtsStage._skipped(c) is None
-        ]  # fmt: skip
+        spoken = [c for c in read_json(path, DubCues).cues if TtsStage._skipped(c) is None]
+        mine = [c for c in spoken if c.character_id == character]
+        # the gate over every spoken cue of the episode, as the stage measures it: the pitch
+        # tracks are cached by their spans, so this reads the stage's entry
         gate = (
-            gender_gate(work, spoken, w.root, operator=operator) if takes_audio and spoken
+            gender_gate(work, spoken, w.root, operator=operator) if takes_audio and mine
             else GenderGate({}, {})
         )  # fmt: skip
         events = tag_events(work)
         vocals = work / "01-separate" / "vocals.wav"
         hits: list[str] = []
-        for c in spoken:
+        for c in mine:
             r = prepare_cue(
                 c, card_id, cfg, store, who=who, checked=(card, cls), vocals=vocals,
                 events=events, line=gate.line(c.id), voice=gate.voice(c.id),
@@ -993,6 +1000,12 @@ def cached_lines(
                 hits.append(c.id)
         out[ep] = hits
     return out
+
+
+def _line_key(
+    character: int, language: str, version: int, line: TypedLine | RealLine
+) -> tuple[Any, ...]:
+    return (character, language, version, line.model_dump_json())
 
 
 def _store(ws: Workspace) -> Any:

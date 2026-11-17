@@ -62,6 +62,7 @@ from fukikae.studio.model import (
     LockDecision,
     MergeDecision,
     NameDecision,
+    RefSpan,
     ReviewedDecision,
     SplitDecision,
     parse_decision,
@@ -495,6 +496,8 @@ def _accept(ws: Workspace, reg: Registry, d: AcceptDecision) -> str:
             f"{who}: card {d.card_id} names sidecar(s) missing from {store.root}: "
             f"{', '.join(missing)}"
         )
+    if (problem := _duplicate_references(card, d)) is not None:
+        raise DecisionRefused(f"{who}: card {d.card_id}: {problem}")
     own, overlapping = _own_speech(ws, reg, d.character, d.card_id, card)
     note = f"studio: draft {d.draft} version {d.version}, {d.auditions} auditions; references " + (
         ", ".join(_ref_label(r) for r in card.voice.references) or "none"
@@ -505,6 +508,28 @@ def _accept(ws: Workspace, reg: Registry, d: AcceptDecision) -> str:
         note += "; gated override: " + ", ".join(r.label() for r in d.overrides)
     _call(d.op, reg.assign_card, d.character, language, d.card_id, "studio", True, note=note)
     return f"character {d.character}: {language} card {d.card_id} accepted (studio, locked); {own}"
+
+
+def _duplicate_references(card: Any, d: AcceptDecision) -> str | None:
+    """Why an accept names a piece of audio more than once (the draft rule,
+    `fukikae.studio.drafts.accept_problems`): the card's references by origin span or by
+    clip, or the decision's own references; None when it doesn't. A hand-built accept is held
+    to it as a draft version is."""
+    from fukikae.studio.drafts import _duplicates
+
+    clips = [r.clip for r in card.voice.references]
+    twice = sorted({c for c in clips if clips.count(c) > 1})
+    if twice:
+        return f"a card names the same reference clip more than once: {', '.join(twice)}"
+    spans: list[RefSpan] = []
+    for r in card.voice.references:
+        o = r.origin or {}
+        try:
+            spans.append(RefSpan(episode=str(o["episode"]), start=float(o["start"]),
+                                 end=float(o["end"])))  # fmt: skip
+        except (KeyError, TypeError, ValueError):
+            continue
+    return _duplicates(spans) or _duplicates(d.references)
 
 
 # How far a reference may run past the character's turns (the origin's float rounding).

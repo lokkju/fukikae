@@ -67,30 +67,43 @@ saved draft on one line, <code>?a=&lt;n&gt;&amp;b=&lt;n&gt;&amp;line=&lt;line&gt
 (<code>line</code> the URL-encoded JSON of an audition line, as <code>POST
 /api/auditions</code> takes it). A version with no audition of that line gets one queued
 (auditions pair by line, never by cue key); the page polls until both sides are
-<code>done</code>. Each side has its <code>state</code>, <code>wav_url</code> and, unblinded,
-its <code>version</code>, <code>job</code> and <code>audition</code>; <code>source_clip</code>
+<code>done</code>. Each side has its <code>state</code>, <code>wav_url</code>,
+<code>version</code>, <code>job</code> and <code>audition</code>; <code>source_clip</code>
 is a real line's source span under <code>/audio</code>. <code>&amp;blind=1</code> labels the
-sides <code>A</code> and <code>B</code> with nothing naming a version (the labels hold for
-that pair and line until the server stops); <code>&amp;retry=1</code> queues a failed side
-again. HEAD queues nothing. 400 for a bad query or the same version twice, 404 for no saved
-draft or version, 422 when the line can't be auditioned, 503 when the queue is full.</li>
+sides <code>A</code> and <code>B</code> (queued in that order; the labels hold for that pair
+and line until the server stops) and answers one <code>state</code> for the pair
+(<code>rendering</code> until both sides are done, then <code>ready</code>, or
+<code>failed</code>) with a generic <code>message</code>; each side has only its
+<code>wav_url</code>, an opaque alias under <code>/audition</code>, and only once the pair is
+<code>ready</code>. Nothing in a blind answer names a version, card, backend or render key,
+its refusals included. <code>&amp;retry=1</code> queues a failed side again; without it a
+failed side stays failed. HEAD queues nothing. 400 for a bad query or the same version twice,
+404 for no saved draft or version, 409 when the draft file can't be read (or is another
+character's or language's), 422 when the line can't be auditioned, 503 when the queue is
+full.</li>
 <li><code>POST /api/drafts/&lt;id&gt;/&lt;lang&gt;/reveal</code>: a blind compare's key,
 <code>{a, b, line}</code> to <code>{key: {A: &lt;n&gt;, B: &lt;n&gt;}}</code>.</li>
 <li><code>POST /api/drafts/&lt;id&gt;/&lt;lang&gt;/accept/preview</code>: a dry run of
-accepting a saved version, <code>{version}</code>: the accept decision the server built,
+accepting a saved version, <code>{version, card_id}</code>: the accept decision the server
+built,
 what reruns, <code>stale</code> or <code>unchecked</code> when the apply would refuse it for
 that, and <code>cached</code>: per episode whose tts goes stale, the character's lines
-already in the tts cache with the version's card (<code>null</code> with
-<code>cached_error</code> when that can't be worked out). Writes nothing.</li>
+already in the tts cache with the version's card under the workspace's config as it is now
+(<code>null</code> with <code>cached_error</code> when that can't be worked out). Refuses as
+the accept does. Writes nothing.</li>
 <li><code>POST /api/drafts/&lt;id&gt;/&lt;lang&gt;/accept</code>: accept a saved version,
-<code>{version}</code>, as the character's card for the language (studio, locked: curated
+<code>{version, card_id}</code> (<code>card_id</code> the version's card as the page showed
+it), as the character's card for the language (studio, locked: curated
 from then on). The decision is built here from the version (its card, references, overrides,
 audition count, and the digest of the language's card assignment taken when the version was
 made), so a raw <code>accept</code> is never posted to <code>/api/decisions</code>. Answers
 as <code>POST /api/decisions</code> does, plus <code>cached</code>. 409 when the card
 assignment changed since the version was made (a tts run re-picked it, or another accept),
-422 when accept refuses the card (not the character's own clean speech, D41) or the version
-records no digest, 423 while a run or another writer holds the studio lock.</li>
+or <code>version-changed</code> when the version is another card than
+<code>card_id</code> (the draft was opened again since); 422 when accept refuses the version
+(the draft's <code>accept_problems</code>, rechecked here: not the character's own clean
+speech, D41, or audio named more than once) or the version records no digest; 423 while a
+run or another writer holds the studio lock.</li>
 <li><code>GET /api/backends</code>: the clone backends and each one's voice keys, with type
 and range.</li>
 <li><code>POST /api/auditions</code>: queue an audition of a draft version on a line,

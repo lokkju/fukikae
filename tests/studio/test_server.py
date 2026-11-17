@@ -77,7 +77,9 @@ class Client:
 def studio(ws: Workspace) -> Iterator[Client]:  # noqa: F811
     from fukikae.studio.server import StudioServer
 
-    server = StudioServer(ws, load_config(ws.root, user_config=None), port=0, token=TOKEN)
+    server = StudioServer(
+        ws, load_config(ws.root, user_config=None), port=0, token=TOKEN, user_config=None
+    )
     t = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
     t.start()
     try:
