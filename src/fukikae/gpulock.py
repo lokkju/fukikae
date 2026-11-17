@@ -247,6 +247,25 @@ def _held_since(fd: int) -> float | None:
         return None
 
 
+def current_holder(index: int) -> tuple[int, str] | None:
+    """(pid, job) of the fukikae job holding card ``index``, as its lock file names it, while
+    that process lives; None when the file names nobody (a holder empties it on release) or a
+    process that is gone. Only reads the file: never takes the lock or waits for it, so a
+    status page can call it at any time. A holder killed outright leaves its line behind, and
+    a later process reusing its pid would be named until the next job takes the lock."""
+    try:
+        fd = os.open(lock_path(index), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        pid, what = _holder(fd)
+    finally:
+        os.close(fd)
+    if pid is None or not _alive(pid):
+        return None
+    return pid, what
+
+
 def _listed(found: list[tuple[int, str]]) -> str:
     return ", ".join(f"pid {pid} ({cmd[:200]})" for pid, cmd in found)
 

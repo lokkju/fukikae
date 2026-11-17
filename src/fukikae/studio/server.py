@@ -51,6 +51,16 @@ Candidate and draft clips are cut only when first fetched, by the server itself
 (`fukikae.studio.season.cut_sample`), and only a clip the server has cut joins the audio it
 serves; listing cuts nothing.
 
+Auditions (`fukikae.studio.audition`): ``POST /api/auditions`` checks the draft version and
+the line and queues a job for the server's one `AuditionWorker`, answering 202 at once; the
+page polls ``/api/auditions/<job>``, never waits on a render, and can cancel a job.
+``/api/gpu`` reports the worker and who holds the card (read from the lock file, never
+waiting on it); ``/api/gpu/release`` unloads the model and lets go of the GPU. An audition's
+audio is served at ``/audition/<key>.wav`` (16 hex, the render's cache key) from
+``<ws>/studio/auditions``, opened the way ``/audio`` opens a clip, with the same token check
+and Range handling, only for the names this server's worker rendered or a draft it served
+lists. `server_close` stops the worker, which unloads its model and releases the lock.
+
 The page itself waits on the design pick (D47); ``static/index.html`` is a placeholder that
 lists `ROUTES`.
 """
@@ -93,6 +103,13 @@ from fukikae.studio.apply import (
     UnfinishedRecords,
     apply_decision,
 )
+from fukikae.studio.audition import (
+    AuditionJob,
+    AuditionRefused,
+    AuditionWorker,
+    NoSuchDraft,
+    QueueFull,
+)
 from fukikae.studio.drafts import (
     MAX_REFERENCES,
     DraftError,
@@ -110,6 +127,7 @@ from fukikae.studio.drafts import (
 )
 from fukikae.studio.model import (
     IDENTITY_OPS,
+    AuditionLine,
     Candidate,
     CharacterEntry,
     Decision,
@@ -198,6 +216,26 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
         "a new draft version from {references, backend, params}: its card id, overrides and meter",
     ),
     ("GET", "/api/backends", "the clone backends and each one's voice keys (type and range)"),
+    (
+        "POST",
+        "/api/auditions",
+        "queue an audition of a draft version on a line ({character, language, version, line}): "
+        "202 with the job; 422 when its backend can't render here, 503 when the queue is full",
+    ),
+    (
+        "GET",
+        "/api/auditions/<job>",
+        "an audition job: queued, waiting (for the GPU), loading, running, done (its wav_url and "
+        "a real line's source_clip), failed (its message) or cancelled",
+    ),
+    ("POST", "/api/auditions/<job>/cancel", "cancel an audition job"),
+    ("GET", "/api/gpu", "the audition worker and the GPU: backend loaded, who holds the card"),
+    ("POST", "/api/gpu/release", "unload the audition model and let go of the GPU"),
+    (
+        "GET",
+        "/audition/<key>.wav",
+        "an audition's audio (a job's or a draft's wav); one Range: bytes= range, 206/416",
+    ),
 )
 
 _SEGMENT = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
@@ -208,6 +246,9 @@ _LANG = r"([A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8}){0,3})"
 _RANGE = re.compile(r"bytes=([0-9]{0,18})-([0-9]{0,18})")
 _DRAFT = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG)
 _VERSIONS = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG + "/versions")
+_JOB = re.compile(r"/api/auditions/([0-9a-f]{16})")
+_JOB_CANCEL = re.compile(r"/api/auditions/([0-9a-f]{16})/cancel")
+AUDITION_NAME = re.compile(r"[0-9a-f]{16}\.wav")
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -312,6 +353,10 @@ class StudioServer(ThreadingHTTPServer):
         self._cut_slots = threading.BoundedSemaphore(MAX_CUTS)
         self.cut_wait = cut_wait
         self._video_failed: dict[str, float] = {}
+        # auditions: the worker (its own thread; takes the drafts lock to read and record a
+        # draft, never the decisions lock) and the audition wavs listed to the page in drafts
+        self.auditions = AuditionWorker(self.ws, cfg, drafts_lock=self._drafts_lock)
+        self._audition_names: OrderedDict[str, None] = OrderedDict()
         super().__init__((bind, port), _Handler)
         p = self.server_address[1]
         names = ["127.0.0.1", "localhost"] if _loopback(bind) else [bind]
@@ -349,6 +394,27 @@ class StudioServer(ThreadingHTTPServer):
         except OSError:
             pass
         self.shutdown_request(request)
+
+    def server_close(self) -> None:
+        """Stop the audition worker (unloading its model, letting go of the GPU), then close."""
+        self.auditions.close()
+        super().server_close()
+
+    def list_audition(self, name: str) -> None:
+        """Let ``/audition`` serve ``name``, a wav a saved draft lists."""
+        if AUDITION_NAME.fullmatch(name):
+            with self._clip_lock:
+                self._audition_names[name] = None
+                self._audition_names.move_to_end(name)
+                while len(self._audition_names) > MAX_CUT:
+                    self._audition_names.popitem(last=False)
+
+    def audition_names(self) -> set[str]:
+        """The audition wavs ``/audition`` may serve: those this server's worker rendered and
+        those the drafts it served list."""
+        with self._clip_lock:
+            listed = set(self._audition_names)
+        return listed | self.auditions.made()
 
     @property
     def port(self) -> int:
@@ -605,7 +671,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _route(self, method: str) -> None:
         self._guard()
         path = urlsplit(self.path).path
-        guarded = path == "/api" or path.startswith(("/api/", "/audio/", "/video/"))
+        guarded = path == "/api" or path.startswith(("/api/", "/audio/", "/video/", "/audition/"))
         if guarded and not self._authorized():
             raise _Reply(403, "forbidden", f"no valid studio token (send {TOKEN_HEADER})")
         get = method in ("GET", "HEAD")
@@ -630,6 +696,27 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/backends":
             self._need(method, get, "GET")
             self._json(200, {"backends": backends(self.server.cfg)})
+        elif path == "/api/auditions":
+            self._need(method, method == "POST", "POST")
+            self._submit()
+        elif m := _JOB_CANCEL.fullmatch(path):
+            self._need(method, method == "POST", "POST")
+            self._drain()
+            self._job(self.server.auditions.cancel(m.group(1)))
+        elif m := _JOB.fullmatch(path):
+            self._need(method, get, "GET")
+            self._job(self.server.auditions.job(m.group(1)))
+        elif path == "/api/gpu":
+            self._need(method, get, "GET")
+            self._json(200, self.server.auditions.status().model_dump(mode="json"))
+        elif path == "/api/gpu/release":
+            self._need(method, method == "POST", "POST")
+            self._drain()
+            self.server.auditions.release()
+            self._json(200, self.server.auditions.status().model_dump(mode="json"))
+        elif path.startswith("/audition/"):
+            self._need(method, get, "GET")
+            self._audition(path[len("/audition/") :])
         elif m := _CHARACTER.fullmatch(path):
             self._need(method, get, "GET")
             cid = int(m.group(1))
@@ -853,6 +940,8 @@ class _Handler(BaseHTTPRequestHandler):
     def _draft_body(self, draft: Draft) -> dict[str, Any]:
         clips: dict[str, str] = {}
         for v in draft.versions:
+            for a in v.auditions:
+                self.server.list_audition(a.wav)
             for r in v.references:
                 name = self.server.offer(r.episode, r.start, r.end)
                 if name is not None:
@@ -921,6 +1010,67 @@ class _Handler(BaseHTTPRequestHandler):
                  if (n := s.offer(r.episode, r.start, r.end)) is not None}  # fmt: skip
         self._json(200, {"version": version.model_dump(mode="json"),
                          "meter": floor_meter(version.references), "clips": clips})  # fmt: skip
+
+    # -- auditions --------------------------------------------------------------------------
+
+    def _drain(self) -> None:
+        """Read a POST body that carries nothing the route needs (none, or JSON)."""
+        if self.headers.get("Content-Length") not in (None, "0"):
+            self._body()
+
+    def _submit(self) -> None:
+        body = self._body()
+        try:
+            req = _AuditionRequest.model_validate_json(body)
+        except ValidationError as e:
+            raise _Reply(
+                400, "invalid", "not an audition", detail=json.loads(e.json(include_url=False))
+            ) from None
+        try:
+            job = self.server.auditions.submit(req.character, req.language, req.version, req.line)
+        except NoSuchDraft as e:
+            raise _Reply(404, "not-found", _PATHS.sub("<path>", str(e))) from None
+        except AuditionRefused as e:
+            raise _Reply(422, "refused", _PATHS.sub("<path>", str(e))) from None
+        except QueueFull as e:
+            raise _busy(str(e)) from None
+        snap = self.server.auditions.job(job)
+        assert snap is not None
+        self._json(202, {"job": self._job_body(snap)})
+
+    def _job_body(self, job: AuditionJob) -> dict[str, Any]:
+        """The job as the page reads it: with the URL of its wav and, for a line with a source
+        span, the clip of that span (served by ``/audio``, cut on first fetch)."""
+        out = job.model_dump(mode="json")
+        a = job.audition
+        out["wav_url"] = f"/audition/{a.wav}" if a is not None else None
+        src = a.source if a is not None else None
+        out["source_clip"] = (
+            self.server.offer(src.episode, src.start, src.end) if src is not None else None
+        )
+        if out["message"]:
+            out["message"] = _PATHS.sub("<path>", out["message"])
+        return out
+
+    def _job(self, job: AuditionJob | None) -> None:
+        if job is None:
+            raise _Reply(404, "not-found", "no such audition job")
+        self._json(200, self._job_body(job))
+
+    def _audition(self, name: str) -> None:
+        if not AUDITION_NAME.fullmatch(name) or name not in self.server.audition_names():
+            raise _Reply(404, "not-found", "no such audition")
+        try:
+            dfd = os.open(self.server.ws.root, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            raise _Reply(404, "not-found", "no such audition") from None
+        try:
+            data = _read_regular(dfd, ["studio", "auditions", name])
+        finally:
+            os.close(dfd)
+        if data is None:
+            raise _Reply(404, "not-found", "no such audition")
+        self._media("audio/wav", data)
 
     # -- files ------------------------------------------------------------------------------
 
@@ -1034,6 +1184,18 @@ class _VersionRequest(BaseModel):
     backend: str = Field(min_length=1, max_length=64)
     params: dict[str, Any] = {}
     keep_unlisted: bool = True  # carry the previous version's origin-less references
+
+
+class _AuditionRequest(BaseModel):
+    """``POST /api/auditions``: the draft version (character, target language, version
+    number) and the line."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    character: int = Field(ge=1, le=10**9)
+    language: str = Field(min_length=2, max_length=40)
+    version: int = Field(ge=1, le=10**6)
+    line: AuditionLine
 
 
 class _Unsatisfiable(Exception):  # noqa: N818

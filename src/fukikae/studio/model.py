@@ -325,16 +325,71 @@ class Candidate(_Strict):
         return RefSpan(episode=self.episode, start=self.start, end=self.end)
 
 
-class Audition(_Strict):
-    """One audition of a draft version (Task 19 renders them): the line, and what the render
-    gave."""
+# Episode and cue ids in audition requests become paths and lookups: plain names only.
+_EPISODE_ID = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+_CUE_ID = r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,63}$"
 
-    line: dict[str, Any]
-    cue_key: str | None = None
-    seconds: float | None = None
-    suspect: bool | None = None
-    passed: bool | None = None
-    wav: str | None = None
+
+class CueRef(_Strict):
+    """A cue of an episode's ``06-translate/cues.<language>.json``."""
+
+    episode: str = Field(pattern=_EPISODE_ID)
+    cue_id: str = Field(pattern=_CUE_ID)
+
+
+class TypedLine(_Strict):
+    """A typed test line in the target language: rendered with no ``emotion_audio``, unless
+    ``emotion_from`` names a cue whose source span is then passed as the prompt, under the
+    line gate (A3) against the draft's character."""
+
+    kind: Literal["typed"]
+    text: str = Field(min_length=1, max_length=500, pattern=r"\S")
+    emotion_from: CueRef | None = None
+
+
+class RealLine(_Strict):
+    """One of the character's own translated cues, rendered exactly as the tts stage renders
+    it (its ``cue_key``)."""
+
+    kind: Literal["real"]
+    episode: str = Field(pattern=_EPISODE_ID)
+    cue_id: str = Field(pattern=_CUE_ID)
+
+
+AuditionLine = Annotated[TypedLine | RealLine, Field(discriminator="kind")]
+
+
+class Audition(_Strict):
+    """One audition of a draft version (`fukikae.studio.audition`): the line, the class that
+    rendered it (``backend``: an engine from ``[tts] engines`` included) and the card, the
+    stage's ``cue_key`` (the first render at the card's own rate, what the tts stage keys the
+    line by), ``key`` (the cached wav that plays: after the render guards' retry, the rate fit
+    and the pause cap), its seconds, the first render's seconds and the rate factor, the
+    render guards' verdict (``suspect``: ``long``, ``short`` or None; ``retry_seed``), what
+    the backend was passed beyond the text (``passed``, as ``plan.json`` records it), the line
+    gate's measurement (``source_gender``, and ``gender_gate`` when the emotion prompt was
+    dropped for it), the source span a real line (or a typed line's emotion prompt) is played
+    beside, the renders made (0: all from the cache) and ``wav``, the file under
+    ``<ws>/studio/auditions/`` served at ``/audition/<wav>``."""
+
+    job: str
+    line: AuditionLine
+    backend: str
+    card_id: str
+    cue_key: str
+    key: str
+    seconds: float
+    rendered_seconds: float
+    rate_factor: float = 1.0
+    suspect: str | None = None
+    retry_seed: int | None = None
+    passed: dict[str, Any]
+    source_gender: Literal["f", "m", "u"] | None = None
+    gender_gate: bool = False
+    source: RefSpan | None = None
+    renders: int = Field(ge=0)
+    wav: str = Field(pattern=r"^[0-9a-f]{16}\.wav$")
+    created: str
 
 
 class DraftVersion(_Strict):
@@ -391,6 +446,10 @@ __all__ = [
     "AcceptDecision",
     "AliasDecision",
     "Audition",
+    "AuditionLine",
+    "CueRef",
+    "RealLine",
+    "TypedLine",
     "Candidate",
     "Draft",
     "DraftVersion",

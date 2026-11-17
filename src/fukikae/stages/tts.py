@@ -934,7 +934,7 @@ def delivery_passed(
         out["emotion_vector"] = {d.emotion: conf}
     if "instruction" in caps and d.direction:
         out["instruction"] = d.direction
-    if "duration" in caps:
+    if "duration" in caps and slot > 0:  # a typed audition line has no slot (Task 19)
         out["target_seconds"] = round(slot, 4)
     if out.keys() & DELIVERY_CAPS:
         out["emotion_strength"] = card.voice.emotion_strength
@@ -1257,6 +1257,44 @@ def render_for_slot(
         calls += 1
     key, fitted_s = capped(job, cache, key)
     return key, fitted_s, seconds, factor, calls, g
+
+
+@dataclass(frozen=True)
+class RenderedLine:
+    """One line rendered for its slot (`render_line`): the job, the cache key of the wav that
+    plays (pauses capped), its seconds, the first render's seconds, the rate factor, the
+    renders made now (0: all from the cache) and the guarded render."""
+
+    job: RenderJob
+    key: str
+    seconds: float
+    rendered_seconds: float
+    rate_factor: float
+    renders: int
+    guard: GuardedRender
+
+
+def render_line(
+    job: RenderJob,
+    synth: LazySynth,
+    cache: Path,
+    store: CardStore,
+    *,
+    speedup: float,
+    ref_dir: Path | None,
+    rates: SpeechRates | None = None,
+) -> RenderedLine:
+    """The one render path of a prepared line (`prepare_cue`: the card, `delivery_passed`
+    with A3's line gate, the stage's ``cue_key``): `render_for_slot` (the rate estimate and
+    fit, `render_guarded`, the pause cap) into ``cache``. The tts stage renders every cue
+    through it, and studio auditions every line (Task 19), so an audition's render is the
+    stage's, under the stage's keys. ``rates`` is the card's speech rate estimate so far (the
+    stage keeps one per run; an audition starts a fresh one, which is the stage's estimate for
+    a card's first lines and differs only on a backend that takes a rate)."""
+    key, seconds, first, factor, calls, guard = render_for_slot(
+        job, synth, cache, store, speedup, ref_dir, rates
+    )
+    return RenderedLine(job, key, seconds, first, factor, calls, guard)
 
 
 def tag_events(work: Path) -> list[tuple[float, float, str]]:
@@ -1821,7 +1859,8 @@ class TtsStage:
         ref_dir: Path,
         rates: SpeechRates | None = None,
     ) -> tuple[str, float, float, float, int, GuardedRender]:
-        return render_for_slot(job, lazy, cache, store, speedup, ref_dir, rates)
+        r = render_line(job, lazy, cache, store, speedup=speedup, ref_dir=ref_dir, rates=rates)
+        return r.key, r.seconds, r.rendered_seconds, r.rate_factor, r.renders, r.guard
 
     @staticmethod
     def _stripped(job: RenderJob) -> dict[str, Any]:

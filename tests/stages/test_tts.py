@@ -2053,3 +2053,37 @@ def test_an_unmeasurable_gender_mismatch_builds_no_clone_source(ep, monkeypatch,
                         lambda *_, **kw: seen.update(kw) or [])  # fmt: skip
     TtsStage._assign(ep, CFG, CUES, CardStore(ep.workspace_root))
     assert seen["cloning"] == cloning and seen["genders"] == genders
+
+
+def test_stage_output_unchanged_after_render_line_refactor(ep, monkeypatch):
+    """Every spoken cue renders through `render_line` (the path auditions share, Task 19), and
+    the plan records exactly what it returned."""
+    TtsStage(CFG).run(ep, CFG)  # auto-assigns, renders
+    before = (ep.work / "07-tts" / "plan.json").read_bytes()
+    seen: dict[str, tts.RenderedLine] = {}
+    real = tts.render_line
+
+    def spy(job, *a, **kw):
+        out = real(job, *a, **kw)
+        seen[job.cue.id] = out
+        return out
+
+    monkeypatch.setattr(tts, "render_line", spy)
+    TtsStage(CFG).run(ep, CFG)
+    assert (ep.work / "07-tts" / "plan.json").read_bytes() == before
+    plan = {c.cue_id: c for c in _plan(ep).cues if c.key is not None}
+    assert set(seen) == set(plan)
+    for cue_id, got in seen.items():
+        c = plan[cue_id]
+        assert (c.key, c.seconds, c.rate_factor) == (got.key, round(got.seconds, 4),
+                                                     got.rate_factor)  # fmt: skip
+        assert c.passed == got.job.passed and got.renders == 0
+
+
+def test_a_line_with_no_slot_gets_no_target_seconds(monkeypatch):
+    """A typed audition line has no slot: a duration backend gets no target length for it."""
+    monkeypatch.setattr(FakeSynth, "capabilities", frozenset({"duration"}))
+    card = parse_card(_stock("am_adam"))
+    cue = _cue(1, 1, "hello", slot=0.0)
+    assert tts.delivery_passed(cue, card, FakeSynth, 0.0) == {}
+    assert tts.delivery_passed(cue, card, FakeSynth, 2.0) == {"target_seconds": 2.0}

@@ -57,6 +57,29 @@ reference.</li>
 that isn't the character's own speech. Writes no registry row.</li>
 <li><code>GET /api/backends</code>: the clone backends and each one's voice keys, with type
 and range.</li>
+<li><code>POST /api/auditions</code>: queue an audition of a draft version on a line,
+<code>{character, language, version, line}</code>, where <code>line</code> is
+<code>{kind: "real", episode, cue_id}</code> (one of the character's translated cues,
+rendered as the tts stage renders it) or <code>{kind: "typed", text, emotion_from}</code>
+(<code>emotion_from</code>: an optional <code>{episode, cue_id}</code> whose source span is
+the emotion prompt, under the line gate). 202 with the job; 404 for no such draft or version,
+422 when its backend can't render here (never another backend or a stock voice), 503 when
+the queue is full.</li>
+<li><code>GET /api/auditions/&lt;job&gt;</code>: an audition job: <code>queued</code>,
+<code>waiting</code> (for the GPU), <code>loading</code>, <code>running</code>,
+<code>done</code> (its <code>audition</code>, <code>wav_url</code> and, for a line with a
+source span, <code>source_clip</code> under <code>/audio</code>), <code>failed</code> (its
+<code>message</code>) or <code>cancelled</code>.</li>
+<li><code>POST /api/auditions/&lt;job&gt;/cancel</code>: cancel a job (a render already
+running finishes into the cache).</li>
+<li><code>GET /api/gpu</code>: the audition worker: the backend loaded, its device, what it
+is doing, who holds the GPU (<code>holder</code>), the jobs queued and when an idle model
+unloads.</li>
+<li><code>POST /api/gpu/release</code>: cancel the queued and waiting auditions, unload the
+model and let go of the GPU.</li>
+<li><code>GET /audition/&lt;key&gt;.wav</code>: an audition's audio (a job's
+<code>wav_url</code>, or a wav a draft's version lists). Ranges as for
+<code>/audio</code>.</li>
 </ul>
 </main>
 </body>
