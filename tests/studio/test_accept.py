@@ -427,17 +427,37 @@ def test_blind_responses_name_no_wav_the_draft_lists(aud_ws, api):
 
 
 class _Turnstile:
-    """`FakeClone.GATE` letting one render through per `let`."""
+    """`FakeClone.GATE` letting one render through per `let`, and telling the test when a
+    render is parked at it with no permit (`parked`), so the test lets exactly the renders it
+    means to and never banks a permit for one that has not arrived."""
 
     def __init__(self) -> None:
-        self.permits = threading.Semaphore(0)
+        self._cond = threading.Condition()
+        self._permits = 0
+        self._parked = 0
 
     def wait(self, timeout: float | None = None) -> bool:
-        return self.permits.acquire(timeout=timeout)
+        with self._cond:
+            self._parked += 1
+            self._cond.notify_all()
+            try:
+                if not self._cond.wait_for(lambda: self._permits > 0, timeout):
+                    return False
+                self._permits -= 1
+                return True
+            finally:
+                self._parked -= 1
+                self._cond.notify_all()
 
     def let(self, n: int = 1) -> None:
-        for _ in range(n):
-            self.permits.release()
+        with self._cond:
+            self._permits += n
+            self._cond.notify_all()
+
+    def parked(self, timeout: float) -> bool:
+        """Wait for a render held at the gate with no permit for it."""
+        with self._cond:
+            return self._cond.wait_for(lambda: self._parked > self._permits, timeout)
 
 
 @pytest.mark.parametrize("order", [(1, 2), (2, 1)])
@@ -454,12 +474,20 @@ def test_blind_polls_never_reveal_which_label_renders_first(aud_ws, api, order):
     try:
         bodies = [_compare(api, a, b, line, blind=True)[1]]
         jobs = api.server.auditions
-        deadline = time.monotonic() + 20
-        while sum(j.state == "done" for j in jobs._jobs.values()) < 1:
-            gate.let()
-            time.sleep(0.05)
-            assert time.monotonic() < deadline
-        first = next(j for j in jobs._jobs.values() if j.state == "done")
+
+        def done() -> list:
+            with jobs._cond:
+                return [j for j in jobs._jobs.values() if j.state == "done"]
+
+        # The worker is FIFO, so a render parked at the gate while no job is done is the first
+        # side's (its render, or a guard retry of it): let that one through and wait for the
+        # next. The second side reaches the gate only after the first is marked done, so the
+        # first park seen with a job done is the second side's, and it stays held.
+        while not done():
+            assert gate.parked(20), "no render reached the gate"
+            if not done():
+                gate.let()
+        (first,) = done()
         bodies.append(_compare(api, a, b, line, blind=True)[1])
         assert sum(j.state == "done" for j in jobs._jobs.values()) == 1
         gate.let(50)
