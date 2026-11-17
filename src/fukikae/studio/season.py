@@ -709,6 +709,7 @@ def inputs_digest(
     docstring), the target language, the clip count and `SEASON_VERSION`."""
     from fukikae.pitch import VERSION as PITCH_VERSION
     from fukikae.registry.store import Registry
+    from fukikae.studio.cast import cast_digest
 
     w = _workspace(ws)
     episodes: dict[str, Any] = {}
@@ -744,7 +745,7 @@ def inputs_digest(
         "episodes": episodes,
         "registry": registry,
         "source_scan": scan.note,
-        "cast": _file_sha(w.root / "cast.toml"),
+        "cast": cast_digest(w),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -1119,7 +1120,7 @@ def build_season(
     from fukikae.cards.store import CardStore
     from fukikae.registry.store import Registry, alias_key
     from fukikae.studio.apply import row_digest
-    from fukikae.studio.cast import CastError, match_cast, read_cast
+    from fukikae.studio.cast import CastError, mark_ambiguous, match_cast, read_cast
 
     w = _workspace(ws)
     scan = _sources(cfg, sources)
@@ -1162,6 +1163,7 @@ def build_season(
             cards, card_flags = _card_infos(w, reg, store, speaking)
             merges = _merges(index, reg)
             names = _names_evidence(w, eps, reg)
+            matches = mark_ambiguous({cid: match_cast(cast, index[cid]) for cid in speaking})
             for cid in speaking:
                 c = index[cid]
                 per: dict[str, EpisodeSpeech] = {}
@@ -1213,7 +1215,7 @@ def build_season(
                     samples=_spread_samples(w, eps, turns_by_ep, clips),
                     gender=_gender(c, tracks), cards=cards.get(cid, []),
                     suggestions=suggestions, names=ev.lines, flags=flags,
-                    cast=match_cast(cast, c),
+                    cast=matches[cid],
                 ))  # fmt: skip
     doc = SeasonDoc(
         workspace=str(w.root),

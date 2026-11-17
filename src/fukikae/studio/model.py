@@ -244,12 +244,14 @@ class CastMatch(_Strict):
     its external id, its name or one of the entry's aliases (keyed as names keys a subtitle
     Name). ``gender`` is the cast gender the page may offer as a one-click gender decision:
     None when the entry has none, the character already stores it, or the operator stored a
-    gender (operator state beats the cast). ``source`` says where it came from."""
+    gender (operator state beats the cast). ``source`` says where it came from, and
+    ``ambiguous_with`` names the other characters that match the same entry."""
 
     entry: int
     by: Literal["external_id", "name", "alias"]
     gender: Literal["f", "m"] | None
     source: str
+    ambiguous_with: list[int] = []  # other characters matching the same entry
 
 
 class CharacterEntry(_Strict):

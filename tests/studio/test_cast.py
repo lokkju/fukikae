@@ -4,6 +4,7 @@ operator decision (``gender_by = "operator"``). Never a voice (D41), never names
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -154,6 +155,116 @@ def test_an_external_id_match_wins(ws):  # noqa: F811
     assert m is not None and (m.entry, m.by, m.gender) == (3, "external_id", None)
 
 
+def test_a_named_character_with_an_external_id_matches_by_id_first(ws):  # noqa: F811
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_external_id(1, "tmdb:9")  # Lucy, whose name keys entry 0's alias
+    _write(ws.root, CAST + '\n[[cast]]\nname = "Lisanna"\ngender = "f"\nexternal_id = "tmdb:9"\n')
+    m = _entry(_build(ws), 1).cast
+    assert m is not None and (m.entry, m.by) == (3, "external_id")
+
+
+def test_a_name_match_is_skipped_when_the_external_ids_conflict(ws):  # noqa: F811
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_external_id(2, "tmdb:1")  # Natsu
+        reg.set_character_external_id(1, "tmdb:5")  # Lucy: entry 0 carries no id
+    _write(ws.root, CAST.replace('name = "Natsu"\n', 'name = "Natsu"\nexternal_id = "tmdb:2"\n'))
+    doc = _build(ws)
+    assert _entry(doc, 2).cast is None  # same name, another person's id
+    lucy = _entry(doc, 1).cast
+    assert lucy is not None and lucy.by == "alias"  # an entry with no id still matches by name
+
+
+def test_one_entry_matching_several_characters_is_marked_ambiguous(ws):  # noqa: F811
+    with Registry(ws.registry_path) as reg:
+        reg.rename_character(3, "LUCY")
+    _write(ws.root, CAST)
+    doc = _build(ws)
+    a, b = _entry(doc, 1).cast, _entry(doc, 3).cast
+    assert a is not None and b is not None and a.entry == b.entry == 0
+    assert (a.ambiguous_with, b.ambiguous_with) == ([3], [1])
+    natsu = _entry(doc, 2).cast
+    assert natsu is not None and natsu.ambiguous_with == []
+    with Registry(ws.registry_path) as reg:
+        assert all(c.gender is None for c in reg.characters())  # still nothing applied
+
+
+def test_an_equal_non_operator_gender_is_not_offered_again(ws):  # noqa: F811
+    _write(ws.root, CAST)
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_gender(2, "m", by="cast")
+    m = _entry(_build(ws), 2).cast
+    assert m is not None and m.gender is None
+
+
+def test_the_cast_decision_carries_key_and_external_id(ws):  # noqa: F811
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_external_id(1, "tmdb:9")
+    _write(ws.root, CAST)
+    lucy = _entry(_build(ws), 1)
+    d = cast_gender_decision(lucy)
+    assert (d.key, d.external_id) == ("lucy", "tmdb:9")
+
+
+def test_a_stale_cast_decision_is_refused(ws):  # noqa: F811
+    from fukikae.studio.apply import StaleDecision
+
+    _write(ws.root, CAST)
+    d = cast_gender_decision(_entry(_build(ws), 1))
+    with Registry(ws.registry_path) as reg:
+        reg.set_character_gender(1, "m", by="operator")  # the operator got there first
+    with pytest.raises(StaleDecision):
+        apply_decision(ws, d)
+    with Registry(ws.registry_path) as reg:
+        c = next(c for c in reg.characters() if c.id == 1)
+        assert (c.gender, c.gender_by) == ("m", "operator")
+
+
+def test_a_utf8_bom_is_accepted(tmp_path):
+    (tmp_path / "cast.toml").write_bytes(b'\xef\xbb\xbf[[cast]]\nname = "Lucy"\n')
+    (e,) = read_cast(tmp_path)
+    assert (e.name, e.line) == ("Lucy", 1)
+
+
+def test_a_file_not_utf8_is_refused(tmp_path):
+    path = tmp_path / "cast.toml"
+    path.write_bytes(b'[[cast]]\nname = "\xff"\n')
+    with pytest.raises(CastError, match="not UTF-8") as e:
+        read_cast(tmp_path)
+    assert str(path) in str(e.value)
+
+
+def test_the_size_cap_bounds_every_read(ws, monkeypatch):  # noqa: F811
+    from fukikae.config import load_config
+    from fukikae.studio import cast as cast_mod
+    from fukikae.studio.season import inputs_digest
+
+    monkeypatch.setattr(cast_mod, "FILE_CAP", 64)
+    _write(ws.root, '[[cast]]\nname = "Lucy"\n' + "# padding\n" * 20)
+    with pytest.raises(CastError, match="the most is 64"):
+        read_cast(ws.root)
+    reads: list[int] = []
+    real = cast_mod._read_capped
+
+    def counting(path):
+        got = real(path)
+        reads.append(len(got) if got is not None else -1)
+        return got
+
+    monkeypatch.setattr(cast_mod, "_read_capped", counting)
+    inputs_digest(ws, load_config(ws.root, user_config=None))
+    assert reads and max(reads) <= 65  # the digest reads through the same cap
+
+
+def test_a_device_or_fifo_is_refused_without_reading_it(tmp_path):
+    (tmp_path / "cast.toml").symlink_to("/dev/zero")
+    with pytest.raises(CastError, match="not a regular file"):
+        read_cast(tmp_path)
+    (tmp_path / "cast.toml").unlink()
+    os.mkfifo(tmp_path / "cast.toml")
+    with pytest.raises(CastError, match="not a regular file"):
+        read_cast(tmp_path)
+
+
 def test_cast_toml_joins_the_index_inputs(ws):  # noqa: F811
     from fukikae.config import load_config
     from fukikae.studio.season import inputs_digest
@@ -236,7 +347,11 @@ def test_only_the_studio_reads_the_workspace_cast_file():
     readers = set()
     for path in SRC.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
-        if re.search(r"studio\.cast\b|read_cast|cast\.toml", text):
+        if re.search(
+            r"studio\.cast\b|read_cast|cast\.toml|from\s+fukikae\.studio\s+import\s"
+            r"[^\n]*\bcast\b|from\s+\.+\s*import\s[^\n]*\bcast\b",
+            text,
+        ):
             readers.add(path)
     assert readers <= allowed, sorted(str(p.relative_to(SRC)) for p in readers - allowed)
     packs = (SRC / "cards" / "packs.py").read_text(encoding="utf-8")

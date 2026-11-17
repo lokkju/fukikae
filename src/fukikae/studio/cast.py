@@ -28,7 +28,9 @@ identity or eval, and held-out episodes stay blind to them.
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import tomllib
 import unicodedata
 from pathlib import Path
@@ -142,20 +144,57 @@ def _entry(row: Any, where: str, line: int | None) -> tuple[CastEntry, list[str]
     return entry, keys
 
 
+def _read_capped(path: Path) -> bytes | None:
+    """At most ``FILE_CAP + 1`` bytes of ``path``, None when it doesn't exist. Opened without
+    blocking and refused unless it is a regular file (after symlinks), so a FIFO, a device
+    such as ``/dev/zero`` or a huge file never makes a reader wait or read without limit."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise CastError(f"{path}: {e}") from e
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise CastError(f"{path}: not a regular file")
+        chunks: list[bytes] = []
+        left = FILE_CAP + 1
+        while left > 0:
+            chunk = os.read(fd, min(left, 1 << 16))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        return b"".join(chunks)
+    except OSError as e:
+        raise CastError(f"{path}: {e}") from e
+    finally:
+        os.close(fd)
+
+
+def cast_digest(ws: Workspace | Path) -> str | None:
+    """sha256 of what `read_cast` would read (through the same cap), None with no file; a
+    file it can't read hashes its error, so the index still notices a change."""
+    import hashlib
+
+    try:
+        data = _read_capped(cast_path(ws))
+    except CastError as e:
+        return hashlib.sha256(f"error: {e}".encode()).hexdigest()
+    return None if data is None else hashlib.sha256(data).hexdigest()
+
+
 def read_cast(ws: Workspace | Path) -> list[CastEntry]:
     """``<ws>/cast.toml``'s entries in file order (the module docstring); ``[]`` when there
     is no such file. CastError, naming the file and the line where it can, otherwise."""
     path = cast_path(ws)
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
+    data = _read_capped(path)
+    if data is None:
         return []
-    except OSError as e:
-        raise CastError(f"{path}: {e}") from e
     if len(data) > FILE_CAP:
-        raise CastError(f"{path}: {len(data)} bytes; the most is {FILE_CAP}")
+        raise CastError(f"{path}: more than {FILE_CAP} bytes; the most is {FILE_CAP}")
     try:
-        text = data.decode("utf-8")
+        text = data.decode("utf-8-sig")  # a leading BOM (an editor's) is dropped
         raw = tomllib.loads(text)
     except UnicodeDecodeError as e:
         raise CastError(f"{path}: not UTF-8 ({e})") from e
@@ -201,7 +240,8 @@ def read_cast(ws: Workspace | Path) -> list[CastEntry]:
 
 def match_cast(cast: list[CastEntry], c: Character) -> CastMatch | None:
     """The entry ``c`` matches: by external id first, then by its name's key against each
-    entry's name and aliases. Its ``gender`` is offered only when the entry has one, the
+    entry's name and aliases (skipping an entry whose external id differs from ``c``'s, when
+    both carry one). Its ``gender`` is offered only when the entry has one, the
     operator stored none and ``c`` doesn't already store it."""
     from fukikae.registry.store import alias_key
 
@@ -212,6 +252,8 @@ def match_cast(cast: list[CastEntry], c: Character) -> CastMatch | None:
     key = alias_key(c.name) if found is None and c.name else None
     if key is not None:
         for i, e in enumerate(cast):
+            if c.external_id is not None and e.external_id not in (None, c.external_id):
+                continue  # the same name, but another person's id
             if alias_key(e.name) == key:
                 found = (i, "name")
                 break
@@ -227,6 +269,21 @@ def match_cast(cast: list[CastEntry], c: Character) -> CastMatch | None:
         offer = None
     where = f"line {e.line}" if e.line is not None else f"entry {i + 1}"
     return CastMatch(entry=i, by=by, gender=offer, source=f"{CAST_FILE} {where}")
+
+
+def mark_ambiguous(matches: dict[int, CastMatch | None]) -> dict[int, CastMatch | None]:
+    """``matches`` (character id to match) with each match whose entry another character
+    also matches naming those characters (`CastMatch.ambiguous_with`), for the page to say
+    so. Nothing changes otherwise: an ambiguous offer is still only an offer."""
+    by_entry: dict[int, list[int]] = {}
+    for cid, m in matches.items():
+        if m is not None:
+            by_entry.setdefault(m.entry, []).append(cid)
+    out: dict[int, CastMatch | None] = {}
+    for cid, m in matches.items():
+        others = [] if m is None else sorted(x for x in by_entry[m.entry] if x != cid)
+        out[cid] = m.model_copy(update={"ambiguous_with": others}) if m and others else m
+    return out
 
 
 def cast_gender_decision(entry: CharacterEntry) -> GenderDecision:
@@ -261,8 +318,10 @@ __all__ = [
     "CastError",
     "CastMatch",
     "VOICE_KEYS",
+    "cast_digest",
     "cast_gender_decision",
     "cast_path",
+    "mark_ambiguous",
     "match_cast",
     "queue_header",
     "read_cast",
