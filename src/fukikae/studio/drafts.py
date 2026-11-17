@@ -34,6 +34,13 @@ exactly those of a thin card the pipeline itself built for the character
 ``thin_origin``. The tier (floor, short or thin, by seconds) is a separate property: a
 version thin by its seconds is held to the clean rule like any other.
 
+`accept_decision` turns a saved version into the accept the server applies (Task 20): its
+card, references, overrides and audition count, and the digest of the language's card
+assignment taken when the version was made. A second target language's draft opens from the
+character's studio-accepted card first, then any other operator-chosen clone card
+(``base = "derived"``, ``derived_from`` naming the language); an imported or automatic card is
+never a starting point for another language.
+
 Drafts never write the registry. Draft cards go into the content-addressed card store,
 because auditions render them and an accept assigns one from there; putting a card assigns
 it to nobody.
@@ -61,7 +68,7 @@ from fukikae.cards.select import (
     THIN_MAX_S,
     reaches_floor,
 )
-from fukikae.studio.model import Candidate, Draft, DraftVersion, RefSpan
+from fukikae.studio.model import AcceptDecision, Candidate, Draft, DraftVersion, RefSpan
 from fukikae.workspace import Workspace
 
 if TYPE_CHECKING:
@@ -101,6 +108,10 @@ class UnknownCharacter(DraftError):  # noqa: N818 (a 404, not an error of the ca
 
 class NoRegistry(DraftError):  # noqa: N818
     """The workspace has no registry yet."""
+
+
+class UnknownVersion(DraftError):  # noqa: N818 (a 404)
+    """No such draft, or no such version of it."""
 
 
 def _workspace(ws: Workspace | Path) -> Workspace:
@@ -959,6 +970,28 @@ def _defaults(cls: type[Synthesizer]) -> dict[str, Any]:
     return {k: getattr(plain, k) for k in VOICE_PARAMS if k in cls.voice_keys}
 
 
+def version_of(draft: Draft, n: int) -> DraftVersion:
+    """Version ``n`` of the draft; `UnknownVersion` without one."""
+    v = next((v for v in draft.versions if v.n == n), None)
+    if v is None:
+        raise UnknownVersion(f"draft {draft.name} has no version {n}")
+    return v
+
+
+def accept_decision(draft: Draft, n: int) -> AcceptDecision:
+    """The accept of version ``n`` (Task 20): its card, references, overrides and audition
+    count, and the digest of the language's card assignment taken when the version was made
+    (`DraftVersion.digest`), so a pipeline re-pick since makes it stale. Key and external id
+    are left for `fukikae.studio.apply.fill`; a version with no digest gives a decision with
+    none, which `apply_decision` refuses unchecked."""
+    v = version_of(draft, n)
+    return AcceptDecision(
+        op="accept", character=draft.character_id, language=draft.language,
+        card_id=v.card_id, draft=draft.name, version=v.n, references=v.references,
+        overrides=v.overrides, auditions=len(v.auditions), digest=v.digest,
+    )  # fmt: skip
+
+
 # -- opening a draft ------------------------------------------------------------------------
 
 
@@ -1160,6 +1193,8 @@ __all__ = [
     "DraftError",
     "NoRegistry",
     "UnknownCharacter",
+    "UnknownVersion",
+    "accept_decision",
     "accept_problems",
     "add_version",
     "backends",
@@ -1178,5 +1213,6 @@ __all__ = [
     "save_draft",
     "speech_episodes",
     "unready",
+    "version_of",
     "voice_key_spec",
 ]

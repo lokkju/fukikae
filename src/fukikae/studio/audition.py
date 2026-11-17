@@ -400,6 +400,20 @@ class AuditionWorker:
         with self._cond:
             return {j.audition.wav for j in self._jobs.values() if j.audition is not None}
 
+    def latest(
+        self, character: int, language: str, version: int, line: TypedLine | RealLine
+    ) -> AuditionJob | None:
+        """The last job submitted for this draft version and line (equal lines: the same
+        kind, cue or text and emotion prompt), or None; what a compare polls instead of
+        submitting the line again."""
+        with self._cond:
+            for j in reversed(self._jobs.values()):
+                if (j.character, j.language, j.version) == (character, language, version) and (
+                    j.line == line
+                ):
+                    return j.snapshot()
+        return None
+
     # -- checks shared by submit and the worker ------------------------------------------------
 
     def _version(self, character: int, language: str, n: int) -> DraftVersion:
@@ -918,6 +932,69 @@ class AuditionWorker:
                     f.unlink()
 
 
+def cached_lines(
+    ws: Workspace | Path,
+    cfg: Config,
+    character: int,
+    card_id: str,
+    language: str,
+    episodes: list[str],
+) -> dict[str, list[str]]:
+    """Per episode, the character's spoken cues whose render with ``card_id`` is already in
+    the workspace's tts cache under the stage's own ``cue_key`` (prepared as `_prepare`
+    prepares a real line, the line gate included), so the next tts run takes them as cache
+    hits: what an accept's response lists beside the episodes it makes stale. An episode
+    without ``cues.<language>.json`` lists none. Reads only; raises what the card check or
+    a read raises."""
+    from fukikae.artifacts import read_json
+    from fukikae.models import DubCues
+    from fukikae.stages.tts import (
+        GenderGate,
+        TtsStage,
+        check_loaded_card,
+        gender_gate,
+        prepare_cue,
+        tag_events,
+        tts_engines,
+    )
+
+    w = ws if isinstance(ws, Workspace) else Workspace(Path(ws))
+    store = _store(w)
+    card = store.get(card_id)
+    who = f"character {character}"
+    cls = check_loaded_card(store, card, card_id, who, language, tts_engines(cfg))
+    takes_audio = "emotion_audio" in cls.capabilities_for(card.voice.source)
+    operator = TtsStage.operator_state(w.root)[0]
+    cache = w.root / ".fukikae" / "tts-cache"
+    out: dict[str, list[str]] = {}
+    for ep in episodes:
+        work = w.work_dir(ep)
+        path = work / "06-translate" / f"cues.{language}.json"
+        if not path.is_file():
+            out[ep] = []
+            continue
+        spoken = [
+            c for c in read_json(path, DubCues).cues
+            if c.character_id == character and TtsStage._skipped(c) is None
+        ]  # fmt: skip
+        gate = (
+            gender_gate(work, spoken, w.root, operator=operator) if takes_audio and spoken
+            else GenderGate({}, {})
+        )  # fmt: skip
+        events = tag_events(work)
+        vocals = work / "01-separate" / "vocals.wav"
+        hits: list[str] = []
+        for c in spoken:
+            r = prepare_cue(
+                c, card_id, cfg, store, who=who, checked=(card, cls), vocals=vocals,
+                events=events, line=gate.line(c.id), voice=gate.voice(c.id),
+            )  # fmt: skip
+            if (cache / f"{r.key}.wav").is_file():
+                hits.append(c.id)
+        out[ep] = hits
+    return out
+
+
 def _store(ws: Workspace) -> Any:
     from fukikae.cards.store import CardStore
 
@@ -1017,4 +1094,5 @@ __all__ = [
     "NoSuchDraft",
     "QueueFull",
     "auditions_dir",
+    "cached_lines",
 ]

@@ -65,6 +65,23 @@ audio is served at ``/audition/<key>.wav`` (16 hex, the render's cache key) from
 and Range handling, only for the names this server's worker rendered or a draft it served
 lists. `server_close` stops the worker, which unloads its model and releases the lock.
 
+Compare and accept (Task 20). ``GET /api/drafts/<id>/<lang>/compare`` reports two versions
+of the saved draft on one line, pairing auditions by their line (never by ``cue_key``, which
+differs by card): a version's latest audition of the line in the draft, else its latest job's,
+else a new job queued through the worker (never on HEAD; a failed or cancelled side again only
+with ``retry=1``), so the page polls the route and never waits on a render. With ``blind=1``
+the sides are ``A`` and ``B`` (`fukikae.abpair.blind_pair` under a seed drawn per server and
+kept in memory, the slot the draft and line, so a pair keeps its labels either way round) and
+carry nothing that names a version; ``POST .../reveal`` gives the key. ``POST .../accept``
+builds the accept decision from the saved version (`fukikae.studio.drafts.accept_decision`:
+its card, references, overrides, audition count, and the digest of the language's card
+assignment taken when the version was made, so a tts run that re-picked the card since makes
+it stale, 409) and applies it through `apply_decision` under the decisions lock, after a dry
+run that fills its key and external id; ``/api/decisions`` still refuses a raw accept.
+``.../accept/preview`` is the dry run alone. Both add ``cached``, per episode whose tts goes
+stale the character's lines already in the tts cache with that card
+(`fukikae.studio.audition.cached_lines`, worked out outside both locks).
+
 The page itself waits on the design pick (D47); ``static/index.html`` is a placeholder that
 lists `ROUTES`.
 """
@@ -91,8 +108,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from fukikae.abpair import blind_pair
 from fukikae.artifacts import ArtifactVersionError
 from fukikae.media import MediaError
 from fukikae.registry.store import RegistrySchemaError
@@ -108,17 +126,21 @@ from fukikae.studio.apply import (
     apply_decision,
 )
 from fukikae.studio.audition import (
+    FINISHED,
     AuditionJob,
     AuditionRefused,
     AuditionWorker,
     NoSuchDraft,
     QueueFull,
+    cached_lines,
 )
 from fukikae.studio.drafts import (
     MAX_REFERENCES,
     DraftError,
     NoRegistry,
     UnknownCharacter,
+    UnknownVersion,
+    accept_decision,
     add_version,
     backends,
     candidates,
@@ -128,17 +150,23 @@ from fukikae.studio.drafts import (
     load_draft,
     open_draft,
     save_draft,
+    version_of,
 )
 from fukikae.studio.model import (
     IDENTITY_OPS,
+    AcceptDecision,
+    Audition,
     AuditionLine,
     Candidate,
     CharacterEntry,
     Decision,
     Draft,
+    DraftVersion,
     MergeDecision,
+    RealLine,
     RefSpan,
     SeasonDoc,
+    TypedLine,
     ValidationError,
     parse_decision,
 )
@@ -219,6 +247,30 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
         "/api/drafts/<id>/<lang>/versions",
         "a new draft version from {references, backend, params}: its card id, overrides and meter",
     ),
+    (
+        "GET",
+        "/api/drafts/<id>/<lang>/compare",
+        "two versions' auditions of one line (?a=<n>&b=<n>&line=<JSON line>), the missing ones "
+        "submitted; &blind=1 labels them A and B with the versions hidden, &retry=1 submits "
+        "a failed side again",
+    ),
+    (
+        "POST",
+        "/api/drafts/<id>/<lang>/reveal",
+        "the key of a blind compare ({a, b, line}): which version A and B are",
+    ),
+    (
+        "POST",
+        "/api/drafts/<id>/<lang>/accept/preview",
+        "a dry run of accepting a draft version ({version}): what reruns, whether it is stale, "
+        "the accept decision, and the lines already cached",
+    ),
+    (
+        "POST",
+        "/api/drafts/<id>/<lang>/accept",
+        "accept a draft version ({version}) as the character's card for the language: studio, "
+        "locked; 409 when the card assignment changed since the version was made",
+    ),
     ("GET", "/api/backends", "the clone backends and each one's voice keys (type and range)"),
     (
         "POST",
@@ -250,6 +302,10 @@ _LANG = r"([A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8}){0,3})"
 _RANGE = re.compile(r"bytes=([0-9]{0,18})-([0-9]{0,18})")
 _DRAFT = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG)
 _VERSIONS = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG + "/versions")
+_COMPARE = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG + "/compare")
+_REVEAL = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG + "/reveal")
+_ACCEPT = re.compile(r"/api/drafts/([0-9]{1,9})/" + _LANG + "/accept(/preview)?")
+_LINE: TypeAdapter[TypedLine | RealLine] = TypeAdapter(AuditionLine)
 _JOB = re.compile(r"/api/auditions/([0-9a-f]{16})")
 _JOB_CANCEL = re.compile(r"/api/auditions/([0-9a-f]{16})/cancel")
 AUDITION_NAME = re.compile(r"[0-9a-f]{16}\.wav")
@@ -361,6 +417,8 @@ class StudioServer(ThreadingHTTPServer):
         # draft, never the decisions lock) and the audition wavs listed to the page in drafts
         self.auditions = AuditionWorker(self.ws, cfg, drafts_lock=self._drafts_lock)
         self._audition_names: OrderedDict[str, None] = OrderedDict()
+        # blind compares: the labels' seed, drawn per server and kept only in memory
+        self.blind_seed = secrets.randbits(64)
         super().__init__((bind, port), _Handler)
         p = self.server_address[1]
         names = ["127.0.0.1", "localhost"] if _loopback(bind) else [bind]
@@ -691,6 +749,15 @@ class _Handler(BaseHTTPRequestHandler):
         elif m := _CANDIDATES.fullmatch(path):
             self._need(method, get, "GET")
             self._candidates(int(m.group(1)), urlsplit(self.path).query)
+        elif m := _COMPARE.fullmatch(path):
+            self._need(method, get, "GET")
+            self._compare(int(m.group(1)), m.group(2), urlsplit(self.path).query)
+        elif m := _REVEAL.fullmatch(path):
+            self._need(method, method == "POST", "POST")
+            self._reveal(int(m.group(1)), m.group(2))
+        elif m := _ACCEPT.fullmatch(path):
+            self._need(method, method == "POST", "POST")
+            self._accept(int(m.group(1)), m.group(2), preview=m.group(3) is not None)
         elif m := _VERSIONS.fullmatch(path):
             self._need(method, method == "POST", "POST")
             self._version(int(m.group(1)), m.group(2))
@@ -824,6 +891,9 @@ class _Handler(BaseHTTPRequestHandler):
     # -- decisions --------------------------------------------------------------------------
 
     def _preview(self, d: Decision) -> None:
+        self._json(200, self._dry_run(d))
+
+    def _dry_run(self, d: Decision) -> dict[str, Any]:
         """`apply_decision`'s dry run (never creates or migrates a registry; write-time
         refusals included). A stale or digest-less decision is previewed as it would apply
         with the check skipped, and says so; ``decision`` is what to post to apply it."""
@@ -845,20 +915,29 @@ class _Handler(BaseHTTPRequestHandler):
             except DecisionError as e:
                 raise self._refusal(e) from None
         stamped = result.decision if result.decision is not None else d
-        self._json(200, {
+        return {
             "lines": result.lines,
             "invalidations": [{"episode": i.episode, "stage": i.stage}
                               for i in result.invalidations],
             "stale": stale,
             "unchecked": unchecked,
             "decision": stamped.model_dump(mode="json"),
-        })  # fmt: skip
+        }  # fmt: skip
 
     def _apply(self, d: Decision) -> None:
+        self._json(200, self._applied(d))
+
+    def _applied(self, d: Decision, *, previewed: bool = False) -> dict[str, Any]:
+        """Apply ``d`` under the decisions lock and answer with the rebuilt character.
+        ``previewed``: fill its key and external id from a dry run first (an accept, built
+        server-side; its digest is its own and is kept)."""
         s = self.server
         warning: str | None = None
         with s._lock:
             try:
+                if previewed:
+                    filled = apply_decision(s.ws, d, dry_run=True).decision
+                    d = filled if filled is not None else d
                 result = apply_decision(s.ws, d)
             except DecisionError as e:
                 raise self._refusal(e) from None
@@ -882,7 +961,7 @@ class _Handler(BaseHTTPRequestHandler):
         }  # fmt: skip
         if warning is not None:
             body["warning"] = warning
-        self._json(200, body)
+        return body
 
     def _refusal(self, e: DecisionError) -> _Reply:
         s = self.server
@@ -907,7 +986,7 @@ class _Handler(BaseHTTPRequestHandler):
     # -- drafts -----------------------------------------------------------------------------
 
     def _draft_refusal(self, e: DraftError) -> _Reply:
-        if isinstance(e, UnknownCharacter):
+        if isinstance(e, UnknownCharacter | UnknownVersion):
             return _Reply(404, "not-found", str(e))
         if isinstance(e, NoRegistry):
             return _Reply(409, "no-registry", "the workspace has no registry yet")
@@ -1014,6 +1093,190 @@ class _Handler(BaseHTTPRequestHandler):
                  if (n := s.offer(r.episode, r.start, r.end)) is not None}  # fmt: skip
         self._json(200, {"version": version.model_dump(mode="json"),
                          "meter": floor_meter(version.references), "clips": clips})  # fmt: skip
+
+    # -- compare and accept -------------------------------------------------------------------
+
+    def _saved_draft(self, cid: int, lang: str) -> Draft:
+        """The saved draft (never opened here: compare and accept need the versions the page
+        has seen); 404 without one, 409 when it can't be read."""
+        try:
+            with self.server._drafts_lock:
+                draft = load_draft(self.server.ws, cid, language_of(lang))
+        except DraftError as e:
+            raise self._draft_refusal(e) from None
+        except (ValueError, OSError, ArtifactVersionError) as e:
+            raise _Reply(409, "draft-unreadable", f"the saved draft can't be read: {_why(e)}"
+                         ) from None  # fmt: skip
+        if draft is None:
+            raise _Reply(404, "not-found", f"character {cid} has no {lang} draft; GET "
+                         f"/api/drafts/{cid}/{lang} opens one")  # fmt: skip
+        return draft
+
+    def _version_of(self, draft: Draft, n: int) -> DraftVersion:
+        try:
+            return version_of(draft, n)
+        except DraftError as e:
+            raise self._draft_refusal(e) from None
+
+    def _blind_key(
+        self, draft: Draft, a: int, b: int, line: TypedLine | RealLine
+    ) -> dict[str, int]:
+        """Label -> version number for this pair and line (`abpair.blind_pair` under the
+        server's seed): the same two versions on the same line keep their labels, either way
+        round, until the server stops."""
+        slot = f"{draft.name}:{line.model_dump_json()}"
+        _, key = blind_pair(str(a), str(b), self.server.blind_seed, slot)
+        return {label: int(n) for label, n in key.items()}
+
+    def _compare(self, cid: int, lang: str, query: str) -> None:
+        """Two versions' auditions of one line. A side with no audition of the line gets one
+        submitted (never on HEAD, and a failed or cancelled one only with ``retry=1``); the
+        page polls this route until both are done. Pairs by line, never by cue key (which
+        differs by card)."""
+        q = parse_qs(query, keep_blank_values=True)
+
+        def value(key: str) -> str:
+            got = q.get(key)
+            if not got:
+                raise _Reply(400, "bad-query", f"{key} is required")
+            return got[-1]
+
+        def number(key: str) -> int:
+            raw = value(key)
+            if not _NUMBER.fullmatch(raw) or int(raw) < 1:
+                raise _Reply(400, "bad-query", f"{key} must be a version number")
+            return int(raw)
+
+        def flag(key: str) -> bool:
+            raw = q.get(key, ["0"])[-1]
+            if raw not in ("0", "1"):
+                raise _Reply(400, "bad-query", f"{key} is 0 or 1")
+            return raw == "1"
+
+        a, b = number("a"), number("b")
+        if a == b:
+            raise _Reply(400, "bad-query", "a and b must be two different versions")
+        blind, retry = flag("blind"), flag("retry")
+        line = _line(value("line"))
+        draft = self._saved_draft(cid, lang)
+        versions = {n: self._version_of(draft, n) for n in (a, b)}
+        submit = self.command != "HEAD"
+        sides = {n: self._side(draft, versions[n], line, submit=submit, retry=retry)
+                 for n in (a, b)}  # fmt: skip
+        source = next((x.source for x, _ in sides.values()
+                       if x is not None and x.source is not None), None)  # fmt: skip
+        body: dict[str, Any] = {
+            "character": cid, "language": draft.language, "line": line.model_dump(mode="json"),
+            "blind": blind,
+            "source_clip": (self.server.offer(source.episode, source.start, source.end)
+                            if source is not None else None),
+        }  # fmt: skip
+        if blind:
+            key = self._blind_key(draft, a, b, line)
+            body["sides"] = {label: _blind_side(sides[n][1]) for label, n in sorted(key.items())}
+        else:
+            body["sides"] = {"a": sides[a][1], "b": sides[b][1]}
+        self._json(200, body)
+
+    def _side(
+        self, draft: Draft, v: DraftVersion, line: TypedLine | RealLine, *, submit: bool,
+        retry: bool,
+    ) -> tuple[Audition | None, dict[str, Any]]:  # fmt: skip
+        """One version's audition of ``line``: the draft's latest (by line), else its latest
+        job's, else a new job (``state`` ``missing`` on HEAD)."""
+        s = self.server
+        got = next((x for x in reversed(v.auditions) if x.line == line), None)
+        job = (
+            None
+            if got is not None
+            else s.auditions.latest(draft.character_id, draft.language, v.n, line)
+        )
+        if got is None and job is not None and job.state == "done" and job.audition is not None:
+            got = job.audition if job.audition.card_id == v.card_id else None
+        side: dict[str, Any] = {"version": v.n, "state": "missing", "message": None,
+                                "job": None, "audition": None, "wav_url": None}  # fmt: skip
+        if got is not None:
+            s.list_audition(got.wav)
+            side.update(state="done", audition=got.model_dump(mode="json"),
+                        wav_url=f"/audition/{got.wav}")  # fmt: skip
+            return got, side
+        # a pending job is polled, a failed or cancelled one reported unless retry, and a done
+        # one of a replaced card submitted again
+        if job is not None and job.state != "done" and (job.state not in FINISHED or not retry):
+            side.update(state=job.state, message=_PATHS.sub("<path>", job.message or "")
+                        or None, job=job.id)  # fmt: skip
+            return None, side
+        if not submit:
+            return None, side
+        try:
+            jid = s.auditions.submit(draft.character_id, draft.language, v.n, line)
+        except NoSuchDraft as e:
+            raise _Reply(404, "not-found", _PATHS.sub("<path>", str(e))) from None
+        except AuditionRefused as e:
+            raise _Reply(422, "refused", _PATHS.sub("<path>", str(e))) from None
+        except QueueFull as e:
+            raise _busy(str(e)) from None
+        snap = s.auditions.job(jid)
+        side.update(state=snap.state if snap is not None else "queued", job=jid)
+        return None, side
+
+    def _reveal(self, cid: int, lang: str) -> None:
+        body = self._body()
+        try:
+            req = _RevealRequest.model_validate_json(body)
+        except ValidationError as e:
+            raise _Reply(
+                400, "invalid", "not a reveal", detail=json.loads(e.json(include_url=False))
+            ) from None
+        if req.a == req.b:
+            raise _Reply(400, "bad-query", "a and b must be two different versions")
+        draft = self._saved_draft(cid, lang)
+        for n in (req.a, req.b):
+            self._version_of(draft, n)
+        self._json(200, {"key": self._blind_key(draft, req.a, req.b, req.line)})
+
+    def _accept(self, cid: int, lang: str, *, preview: bool) -> None:
+        """Accept a draft version: the decision is built here from the saved version
+        (`drafts.accept_decision`, its digest the one taken when the version was made) and
+        applied through `apply_decision` under the decisions lock, a dry run first. The
+        response adds, per episode whose tts goes stale, the character's lines already in the
+        tts cache with that card (``cached``; None with ``cached_error`` when that can't be
+        worked out)."""
+        body = self._body()
+        try:
+            req = _AcceptRequest.model_validate_json(body)
+        except ValidationError as e:
+            raise _Reply(
+                400, "invalid", "not an accept", detail=json.loads(e.json(include_url=False))
+            ) from None
+        s = self.server
+        draft = self._saved_draft(cid, lang)
+        try:
+            d = accept_decision(draft, req.version)
+        except DraftError as e:
+            raise self._draft_refusal(e) from None
+        if not s.ws.registry_path.is_file():
+            raise _Reply(409, "no-registry", f"{s.ws.root} has no registry yet")
+        if preview:
+            out = self._dry_run(d)
+        else:
+            if d.digest is None:
+                raise _Reply(422, "unchecked", f"draft {draft.name} version {d.version} records "
+                             "no digest of the card assignment it was made against; make a "
+                             "new version to accept")  # fmt: skip
+            out = self._applied(d, previewed=True)
+        out.update(self._cached(d, out["invalidations"]))
+        self._json(200, out)
+
+    def _cached(self, d: AcceptDecision, invalidations: list[dict[str, str]]) -> dict[str, Any]:
+        episodes = sorted({i["episode"] for i in invalidations if i["stage"] == "tts"})
+        s = self.server
+        try:
+            got = cached_lines(s.ws, s.cfg, d.character, d.card_id, d.language, episodes)
+        except Exception as e:  # noqa: BLE001 (a read-only report; the accept stands either way)
+            traceback.print_exc(file=sys.stderr)
+            return {"cached": None, "cached_error": _why(e)}
+        return {"cached": got}
 
     # -- auditions --------------------------------------------------------------------------
 
@@ -1188,6 +1451,49 @@ class _VersionRequest(BaseModel):
     backend: str = Field(min_length=1, max_length=64)
     params: dict[str, Any] = {}
     keep_unlisted: bool = True  # carry the previous version's origin-less references
+
+
+class _AcceptRequest(BaseModel):
+    """``POST /api/drafts/<id>/<lang>/accept`` (and ``/accept/preview``): the version."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: int = Field(ge=1, le=10**6)
+
+
+class _RevealRequest(BaseModel):
+    """``POST /api/drafts/<id>/<lang>/reveal``: the blind compare's two versions and line."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    a: int = Field(ge=1, le=10**6)
+    b: int = Field(ge=1, le=10**6)
+    line: AuditionLine
+
+
+def _line(raw: str) -> TypedLine | RealLine:
+    """A compare's ``line`` query value: an audition line as JSON."""
+    try:
+        return _LINE.validate_json(raw)
+    except ValidationError as e:
+        raise _Reply(
+            400,
+            "bad-query",
+            "line must be an audition line as JSON ({kind: real, episode, "
+            "cue_id} or {kind: typed, text, emotion_from})",
+            detail=json.loads(e.json(include_url=False)),
+        ) from None
+
+
+def _blind_side(side: dict[str, Any]) -> dict[str, Any]:
+    """A compare side with nothing that names its version (number, card, backend, job)."""
+    failed = side["state"] in ("failed", "cancelled")
+    return {
+        "state": side["state"],
+        "wav_url": side["wav_url"],
+        "message": "this side's audition did not finish; compare unblinded to see why"
+        if failed else None,
+    }  # fmt: skip
 
 
 class _AuditionRequest(BaseModel):

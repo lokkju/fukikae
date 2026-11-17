@@ -25,15 +25,16 @@ A spec (TOML) names one or more sets, each a workspace, an episode and the candi
    (characters without enough clean speech for a clone fall back to a stock card, as Task 12
    will; extras get the stage's stock extras), muxed with the video as ``video/sceneNN_X.mkv``.
 
-``write_pack`` blinds it all: per cue (and scene) the candidates are shuffled with
-``random.Random(f"ab-blind:{seed}:{slot}")``, ``seed`` a 64-bit draw from ``secrets`` kept only
-in ``key.toml`` (the spec's seed picks the cues), and written as ``audio/cueNN_A.wav``,
-``cueNN_B.wav``, ...; the references are ``cueNN_ref.wav`` and ``cueNN_ref_en.wav``. Every
-clip is mono 48 kHz (scenes stereo), brought to ``TARGET_LUFS`` (EBU R128 integrated) by one
-linear gain with the true-peak limiter (``mix.normalize``, ruling CD10). ``key.toml`` holds the
-label mapping, the suspect flags and each render's provenance; neither ``index.html`` nor
-``README.txt`` names a backend or links the key. ``verdict.toml`` is the template the operator
-fills, and ``read_verdict`` is how Task 12 reads it back (labels resolved through the key).
+``write_pack`` blinds it all (`fukikae.abpair.blind_order`, shared with the studio): per cue
+(and scene) the candidates are shuffled with ``random.Random(f"ab-blind:{seed}:{slot}")``,
+``seed`` a 64-bit draw from ``secrets`` kept only in ``key.toml`` (the spec's seed picks the
+cues), and written as ``audio/cueNN_A.wav``, ``cueNN_B.wav``, ...; the references are
+``cueNN_ref.wav`` and ``cueNN_ref_en.wav``. Every clip is mono 48 kHz (scenes stereo),
+brought to ``TARGET_LUFS`` (EBU R128 integrated) by one linear gain with the true-peak limiter
+(``mix.normalize``, ruling CD10). ``key.toml`` holds the label mapping, the suspect flags and
+each render's provenance; neither ``index.html`` nor ``README.txt`` names a backend or links
+the key. ``verdict.toml`` is the template the operator fills, and ``read_verdict`` is how
+Task 12 reads it back (labels resolved through the key).
 The folder is owner-only (0700 directories, 0600 files).
 """
 
@@ -44,7 +45,6 @@ import dataclasses
 import html
 import os
 import random
-import string
 import tempfile
 import tomllib
 from collections.abc import Iterator, Mapping, Sequence
@@ -54,6 +54,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+
+from fukikae.abpair import LABELS, blind_order
 
 if TYPE_CHECKING:
     from fukikae.cards.store import CardStore
@@ -65,7 +67,6 @@ if TYPE_CHECKING:
 TARGET_LUFS = -23.0
 RATE = 48000
 PAD_S = 0.3
-LABELS = string.ascii_uppercase
 SAMPLE_PER_CHARACTER = 8  # eval tts's default sample, so its cached renders are found
 SAMPLE_SEED = 0
 SCENE_SECONDS = 75.0
@@ -273,14 +274,6 @@ def select_cues(
             continue
         fill_for(min(open_chars, key=lambda c: (sum(x.character_id == c for x in chosen), c)))
     return sorted(chosen, key=lambda i: (i.episode, i.cue_id))
-
-
-def blind_order(candidates: Sequence[str], *, seed: int, slot: str) -> dict[str, str]:
-    """Label -> candidate for one cue or scene: the names sorted, then shuffled by
-    ``random.Random(f"ab-blind:{seed}:{slot}")``."""
-    order = sorted(candidates)
-    random.Random(f"ab-blind:{seed}:{slot}").shuffle(order)  # noqa: S311 - reproducible
-    return {LABELS[n]: c for n, c in enumerate(order)}
 
 
 # ---- materials and the pack ----------------------------------------------------------------

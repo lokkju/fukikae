@@ -62,6 +62,35 @@ reference.</li>
 <code>{references, backend, params}</code>: its card id, the gated references chosen anyway
 (<code>overrides</code>) and the meter. 422 for a voice key the backend lacks or a reference
 that isn't the character's own speech. Writes no registry row.</li>
+<li><code>GET /api/drafts/&lt;id&gt;/&lt;lang&gt;/compare</code>: two versions of the
+saved draft on one line, <code>?a=&lt;n&gt;&amp;b=&lt;n&gt;&amp;line=&lt;line&gt;</code>
+(<code>line</code> the URL-encoded JSON of an audition line, as <code>POST
+/api/auditions</code> takes it). A version with no audition of that line gets one queued
+(auditions pair by line, never by cue key); the page polls until both sides are
+<code>done</code>. Each side has its <code>state</code>, <code>wav_url</code> and, unblinded,
+its <code>version</code>, <code>job</code> and <code>audition</code>; <code>source_clip</code>
+is a real line's source span under <code>/audio</code>. <code>&amp;blind=1</code> labels the
+sides <code>A</code> and <code>B</code> with nothing naming a version (the labels hold for
+that pair and line until the server stops); <code>&amp;retry=1</code> queues a failed side
+again. HEAD queues nothing. 400 for a bad query or the same version twice, 404 for no saved
+draft or version, 422 when the line can't be auditioned, 503 when the queue is full.</li>
+<li><code>POST /api/drafts/&lt;id&gt;/&lt;lang&gt;/reveal</code>: a blind compare's key,
+<code>{a, b, line}</code> to <code>{key: {A: &lt;n&gt;, B: &lt;n&gt;}}</code>.</li>
+<li><code>POST /api/drafts/&lt;id&gt;/&lt;lang&gt;/accept/preview</code>: a dry run of
+accepting a saved version, <code>{version}</code>: the accept decision the server built,
+what reruns, <code>stale</code> or <code>unchecked</code> when the apply would refuse it for
+that, and <code>cached</code>: per episode whose tts goes stale, the character's lines
+already in the tts cache with the version's card (<code>null</code> with
+<code>cached_error</code> when that can't be worked out). Writes nothing.</li>
+<li><code>POST /api/drafts/&lt;id&gt;/&lt;lang&gt;/accept</code>: accept a saved version,
+<code>{version}</code>, as the character's card for the language (studio, locked: curated
+from then on). The decision is built here from the version (its card, references, overrides,
+audition count, and the digest of the language's card assignment taken when the version was
+made), so a raw <code>accept</code> is never posted to <code>/api/decisions</code>. Answers
+as <code>POST /api/decisions</code> does, plus <code>cached</code>. 409 when the card
+assignment changed since the version was made (a tts run re-picked it, or another accept),
+422 when accept refuses the card (not the character's own clean speech, D41) or the version
+records no digest, 423 while a run or another writer holds the studio lock.</li>
 <li><code>GET /api/backends</code>: the clone backends and each one's voice keys, with type
 and range.</li>
 <li><code>POST /api/auditions</code>: queue an audition of a draft version on a line,
