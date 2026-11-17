@@ -109,6 +109,79 @@ Locked cards and cards an operator chose are never replaced by automatic assignm
 
 **Models and privacy.** `fukikae backends setup <name>` is the only command that downloads: worker environments (`uv sync --locked`) and every pinned model, IndexTTS2's included (`fukikae backends setup indextts2` before the first run). Runs load models from the local cache only, with pyannote's, Hugging Face's and onnxruntime's telemetry turned off for the whole process and for every worker (ruling CD24). Ten older backends (ASR, alignment, diarization, dialogue separation and four embedders) still fetch an unpinned model on a cache miss; pinning them is open work.
 
+## The season studio: identity and voices
+
+`fukikae studio <workspace>` serves one workspace's season for an operator to fix who is who and tune each character's voice until it is right. The intended order for a new season:
+
+```bash
+fukikae run <ws> S01E01 S01E02 ... --to characters   # diarize, names, the registry's characters
+fukikae studio <ws>                                  # identity: names, merges, splits, kinds, genders
+fukikae run <ws> S01E01 S01E02 ... --to translate    # real lines to audition
+fukikae studio <ws>                                  # voices: drafts, auditions, accept
+fukikae run <ws> S01E01 S01E02 ...                   # tts, timefit, mix
+```
+
+The studio's page is waiting on the operator's pick of a design (D47); what exists today is the server's JSON API and `fukikae studio apply`, which applies decisions from a file without the server. Both write through the same function, one registry transaction per decision.
+
+**Serving.** `fukikae studio [--port 8765] [--clips 6] <ws>` builds or loads the season index (`studio/season.json`), then prints the URL and the tunnel line:
+
+```
+studio: http://127.0.0.1:8765/#t=<token>
+from your machine: ssh -L 8765:127.0.0.1:8765 <gpu-host>
+```
+
+It binds 127.0.0.1 only and opens no browser. The token is new each run and rides in the URL's fragment, which a browser never sends; the page sends it as the `X-Fukikae-Token` header, and every `/api`, `/audio`, `/video` and `/audition` request without it gets a 403. There is no cookie and no token in a query string. From a shell, pass the header yourself: `curl -H "X-Fukikae-Token: <token>" http://127.0.0.1:8765/api/season`. POST bodies are `application/json`. `--allow-non-loopback --host <IPv4>` binds one interface address instead; anyone who reaches it with the token can change the registry.
+
+**Decisions.** Every identity edit and every accepted voice is a decision, one JSON object with an `op`:
+
+```json
+{"op": "name", "character": 3, "name": "Janny", "digest": "..."}
+{"op": "alias", "character": 3, "name": "ジャニー", "digest": "..."}
+{"op": "gender", "character": 3, "gender": "f", "digest": "..."}
+{"op": "kind", "character": 12, "kind": "narrator", "digest": "..."}
+{"op": "merge", "keep": 4, "drop": 9, "digest": "..."}
+{"op": "split", "character": 1, "episode": "S00E01", "cluster": "SPEAKER_13", "by": "pitch", "digest": "..."}
+{"op": "lock", "character": 3, "digest": "..."}
+{"op": "reviewed", "character": 5, "digest": "..."}
+```
+
+`fukikae studio apply <ws> FILE [--dry-run] [--force]` applies a file of them in order: JSON lines, a list, or a `{"workspace": ..., "decisions": [...]}` document. `digest` is a hash of the character's registry rows when you made the decision; a decision whose rows have changed since (a run assigned a card, another decision renamed the character) is refused, naming what changed. A character's digest is `digest` on its entry in `studio/season.json` (or `GET /api/characters/<id>`). A merge's digest covers both characters, so take it from `POST /api/decisions/preview`, which answers with the decision stamped with any digest it was missing, ready to post to `POST /api/decisions` or put in a file. A decision with no digest is refused unless `--force`, which skips the check for every decision in the file and says how many went unchecked. The first refusal stops the file and the decisions before it stay applied; `--dry-run` checks the whole file in one transaction that is rolled back and says which episodes and stages each decision would rerun. Every identity decision marks its characters reviewed; `reviewed` marks one without changing anything.
+
+What each one reruns: a name, alias or lock reruns the characters stage of the character's episodes; a merge reruns it for the dropped character's episodes, with their assignments remapped; a gender reruns tts where the character speaks; a kind reruns characters; a pitch split reruns that episode from names on.
+
+- **Gender** is the voice register as heard (`f` or `m`, or `null` to clear), never the character's gender in the story, and the pitch estimate is never stored. An operator gender beats the estimate in the reference gates and the line gate, and an automatic clone card whose references are the other register is re-picked at the next tts run (`re-picked: operator gender`). `fukikae registry gender <ws> <character> f|m|--clear` does the same from the CLI.
+- **Kind**: `narrator` gets its own card, no one-scene reference gate, no gender-gate flag and no merge suggestion beside a dialogue character; `ignored` (crowd walla, a TV in the background, a hallucination asrclean missed) is never translated or rendered, and the mix keeps the original audio under it. `fukikae registry kind <ws> <character> character|narrator|ignored` is the CLI form.
+- **Split by pitch** cuts one diarize cluster in an episode into `<cluster>~voice-f` and `~voice-m` by each turn's median (`male_below` 165 Hz and `female_above` 200 Hz unless the decision gives others), written to `studio/splits/<episode>.json` and applied by the names stage. On the first run after it, the part in the character's stored gender keeps the character (the longer part when none is stored); the other part matches another existing character or becomes a new one, flagged for review. A part keeps whatever identity it has from then on, including an operator merge. A split whose cluster changed under a diarize rerun is skipped and flagged, never applied to the new cluster. `"by": "cluster"` moves the whole cluster to a new actor, as `registry split` does.
+
+**Decision records.** Each decision writes a record to `studio/decisions.jsonl` before its registry transaction commits and a completion record after the stale marks and file changes that follow it. When one of those steps fails or is interrupted, the error says the registry part landed, and `fukikae studio resume <ws>` redoes only what is left. Until it does, `studio apply`, `registry merge` and `split` and `fukikae run` (from the names stage on) refuse and name `studio resume`. Decisions, those registry commands and runs never overlap: each takes `studio/.lock`, and the refusal names who holds it. Replaying `decisions.jsonl` with `studio apply` skips the decisions the registry already has.
+
+**Voices.** Per character and target language, a draft (`studio/drafts/<character>.<language>.json`) holds versions of a clone card: version 1 from the character's current card, else from its accepted card in another language, else from what the automatic rules would pick. Over the API: `GET /api/characters/<id>/candidates` lists the character's turns with every check's verdict; `GET /api/drafts/<id>/<lang>` opens the draft; `POST .../versions` with `{"references": [{"episode", "start", "end"}, ...], "backend": "indextts2", "params": {...}}` makes a version (`GET /api/backends` lists each backend's voice keys); `POST /api/auditions` with `{"character", "language", "version", "line"}`, the line `{"kind": "real", "episode", "cue_id"}` or `{"kind": "typed", "text"}`, queues a render, polled at `GET /api/auditions/<job>`; `GET .../compare?a=&b=&line=` plays two versions on one line, `&blind=1` hiding which is which until `POST .../reveal`; `POST .../accept` with `{"version"}` makes that version the character's card, `studio` and locked, which no automatic rule replaces. Every reference must be the character's own clean speech (inside its turns, overlapping no one), so a version accept would refuse is refused when you make it; the one exception is exactly the references of a thin card the pipeline itself built for the character. Real lines render through the tts stage's own path and cache, so an accepted voice's auditioned lines are already rendered for the next run. The audition worker holds the GPU lock only while its model is loaded, and lets go after 5 minutes idle or on `POST /api/gpu/release`; while a `fukikae run` holds the card, auditions wait and `GET /api/gpu` says who holds it.
+
+**Gates.** `[review]` in `fukikae.toml` makes a run stop for the studio (both off in every profile):
+
+```toml
+[review]
+identity = true     # stop before translate until the episode's main characters are reviewed
+voices = true       # stop before tts until each has a curated, imported or locked card
+min_seconds = 30.0  # characters with less speech in the episode never hold it up
+```
+
+A main character is a `character` or `narrator` with at least `min_seconds` of speech in the episode. `identity` stops for one never reviewed, or with a subtitle-names flag or an impure automatic card its review didn't see; a split suggestion never stops a run. `voices` stops for one with no curated, imported or locked card in the target language, or with a stock card (D41). A stopped episode exits with code 3, lists the characters and names `fukikae studio` and `fukikae studio apply`; in a multi-episode run the other episodes go on, and `fukikae status` shows the run as `stopped`. Reviews and accepted cards are on the registry, so later episodes stop only for characters that are new, newly flagged or still unvoiced.
+
+**Cast list.** An optional hand-written `<ws>/cast.toml` gives the studio names and genders to offer:
+
+```toml
+[[cast]]
+name = "Natsu Dragneel"
+gender = "m"                       # optional, f or m
+external_id = "tmdb:12345"         # optional
+aliases = ["Natsu", "Salamander"]  # optional, for matching only
+```
+
+Nothing from it is applied without a decision, a cast gender is never offered over one you stored, and its aliases never become registry aliases; only the studio reads it. Any other key fails, naming the line, and a key naming a voice is refused (D41).
+
+**Files.** Everything the studio keeps is under `<ws>/studio/`: `season.json` (derived, never edited), `audio/` and `video/` (sample clips, cut when first fetched; video needs the workspace's `source` setting to find the episode's file), `auditions/`, `drafts/`, `splits/`, `decisions.jsonl` and `.lock`. `audio/` and `video/` are caches, and deleting a draft loses only the history of what was tried; `splits/` is an input the names stage reads, and `decisions.jsonl` is what `studio resume` and replays read.
+
 ## Cloning backends
 
 The tag models (SenseVoice, emotion2vec), the managed translator's GGUF and Kokoro run inside fukikae and load their pinned files from the local Hugging Face cache only; fetch them once with `fukikae backends setup sensevoice` (and `emotion2vec`, `openai_compat`; `--workspace <dir>` fetches the models that workspace's config names). Kokoro renders no voice fukikae picks (D41), only a stock card an operator kept from before and `eval tts` baselines, so `fukikae backends setup kokoro` is needed only for those. A run never downloads them, and fukikae turns off pyannote's, Hugging Face's and onnxruntime's telemetry for the whole process.
