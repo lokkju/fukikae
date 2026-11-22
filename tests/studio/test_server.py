@@ -1322,3 +1322,42 @@ def test_stuck_cuts_answer_busy_and_leave_the_index_answering(video_ws, monkeypa
                        for r in busy)  # fmt: skip
     finally:
         gate.set()
+
+
+# --- the character's translated lines (the voice screen's real audition lines) --------------
+
+
+def test_lines_lists_the_characters_spoken_cues_for_the_target_language(studio, ws):  # noqa: F811
+    from fukikae.artifacts import read_json
+    from fukikae.models import DubCues
+    from fukikae.stages.tts import TtsStage
+
+    status, body = studio.json("GET", "/api/characters/1/lines")
+    assert status == 200, body
+    assert body["language"] == "en" and body["character"] == 1
+    from tests.studio.test_season import E1, E2
+
+    want = set()
+    for ep in (E1, E2):
+        path = ws.work_dir(ep) / "06-translate" / "cues.en.json"
+        if path.is_file():
+            for c in read_json(path, DubCues).cues:
+                if c.character_id == 1 and TtsStage._skipped(c) is None:
+                    want.add((ep, c.id))
+    assert want and {(x["episode"], x["cue_id"]) for x in body["lines"]} == want
+    assert body["total"] == len(want)
+    one = body["lines"][0]
+    assert set(one) >= {"episode", "cue_id", "start", "end", "text", "source_text", "source_clip"}
+
+
+def test_lines_pages_and_refuses_a_bad_query(studio):
+    status, body = studio.json("GET", "/api/characters/1/lines?limit=1")
+    assert status == 200 and len(body["lines"]) == 1
+    assert studio.json("GET", "/api/characters/1/lines?limit=0")[0] == 400
+    assert studio.json("GET", "/api/characters/1/lines?language=../x")[0] == 400
+    status, body = studio.json("GET", "/api/characters/1/lines?language=de")
+    assert status == 200 and body["lines"] == [] and body["language"] == "de"
+
+
+def test_lines_needs_the_token(studio):
+    assert studio.request("GET", "/api/characters/1/lines", token=None)[0] == 403

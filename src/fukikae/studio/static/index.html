@@ -54,6 +54,7 @@ candidates (its own speech only), each with its rank, gate verdicts and reasons,
 a time: <code>?offset=</code>, <code>?limit=</code> (200 at most), <code>?gated=1</code> to
 include the refused turns. A candidate's <code>clip</code> is cut when first fetched from
 <code>/audio</code>.</li>
+<li><code>GET /api/characters/&lt;id&gt;/lines</code>: the character's spoken translated cues for a target language (<code>?language=</code>, default the workspace's), the real lines an audition takes, each with its source clip; <code>?offset=</code>, <code>?limit=</code> (500 at most).</li>
 <li><code>GET /api/drafts/&lt;id&gt;/&lt;lang&gt;</code>: the character's voice draft for a
 target language, opened (version 1 from its current card, an accepted card of another
 language, or the automatic proposal) when it has none; with the meter and the clip of each
