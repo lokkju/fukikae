@@ -4,7 +4,7 @@ fukikae: Python CLI that dubs foreign-language TV into English. Spec and plan ar
 
 ## Commands
 - `uv sync`, `uv run pytest`, `uv run ruff check`, `uv run ruff format --check`, `uv run pyright`. uv only, never pip.
-- Markers: `gpu`, `media` (need `FUKIKAE_TEST_MEDIA`; deselected by default), `ffmpeg` (needs only the binary), `slow`.
+- Markers: `gpu`, `media` (need `FUKIKAE_TEST_MEDIA`; deselected by default), `ffmpeg` (needs only the binary), `slow`, `browser` (the studio page in headless Chromium; deselected by default, needs the optional `browser` group: `uv sync --group browser --all-extras`).
 - ffmpeg/ffprobe come from mise (`.mise/config.toml`): `mise exec -- ffprobe -version`. Call them with argument lists.
 
 ## Rules
