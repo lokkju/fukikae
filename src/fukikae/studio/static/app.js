@@ -78,18 +78,22 @@ function App() {
   }, []);
   useEffect(() => { reload(); }, []);
 
-  // A decision's answer: the rebuilt character and the new queue, folded into the index.
+  // A decision's answer: the rebuilt character folded in at once, then the whole index read
+  // again, since a decision touches more than its own row (a merge's survivor and every
+  // character on the episodes it reruns, a split's new characters, which join the queue).
   const applied = useCallback((body) => {
-    if (!body || !body.character || !body.queue) { reload(); return; }
-    setDoc((d) => {
-      if (!d) return d;
-      const known = new Set(body.queue);
-      const characters = d.characters
-        .filter((c) => known.has(c.id))
-        .map((c) => (c.id === body.character.id ? body.character : c));
-      return { ...d, characters, queue: body.queue };
-    });
-  }, []);
+    if (body && body.character && body.queue) {
+      setDoc((d) => {
+        if (!d) return d;
+        const known = new Set(body.queue);
+        const characters = d.characters
+          .filter((c) => known.has(c.id))
+          .map((c) => (c.id === body.character.id ? body.character : c));
+        return { ...d, characters, queue: body.queue.filter((id) => characters.some((c) => c.id === id)) };
+      });
+    }
+    reload();
+  }, [reload]);
 
   const screen = SCREENS.find((s) => s.id === route.screen);
   const ws = doc ? doc.workspace.split("/").filter(Boolean).pop() : "";

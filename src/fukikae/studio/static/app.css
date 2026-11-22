@@ -62,7 +62,9 @@ code, .mono { font-family: var(--f-mono); font-size: 11.5px; }
 .small { font-size: 11.5px; }
 .pad { padding: 16px; }
 .nowrap { white-space: nowrap; }
-.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+/* visually hidden, still read out; .app, .pane and .scroll are positioned, so it stays inside
+   the pane it labels and never stretches the document */
+.sr { position: absolute; top: 0; left: 0; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
 .ja { overflow-wrap: anywhere; }
 .gf { color: var(--g-f); } .gm { color: var(--g-m); } .gu { color: var(--g-u); }
 code.cmd { background: var(--soft); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }
@@ -73,7 +75,7 @@ h4 .dim { text-transform: none; letter-spacing: 0; font-weight: 400; }
 h5 { margin: 10px 0 4px; font-size: 12px; font-weight: 650; }
 
 /* -- the frame -------------------------------------------------------------------------- */
-.app { height: 100vh; height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.app { position: relative; height: 100vh; height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
 .top { display: flex; align-items: center; gap: 14px; padding: 6px 14px; background: var(--panel); border-bottom: 1px solid var(--grid); min-width: 0; }
 .brand { font-weight: 700; }
 .ws { color: var(--dim); max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -90,8 +92,10 @@ nav { display: flex; gap: 2px; flex-wrap: wrap; }
 .screen.planned { align-content: start; }
 .hd { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; min-width: 0; }
 
-.pane { min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); border: 1px solid var(--grid); border-radius: 4px; padding: 10px; }
-.pane > .scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.pane { position: relative; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--panel); border: 1px solid var(--grid); border-radius: 4px; padding: 10px; }
+.pane > .scroll { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; }
+/* a pane's wheel scroll stops at its own ends instead of chaining to the page */
+.scroll, .board, .pending, .accept { overscroll-behavior: contain; }
 .box { background: var(--panel); border: 1px solid var(--grid); border-radius: 4px; padding: 12px; }
 .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
 .check { display: inline-flex; gap: 4px; align-items: center; }
@@ -111,7 +115,7 @@ input.num { width: 9ch; text-align: right; }
 .warnc { color: var(--sev-mid); }
 .pv { font-family: var(--f-mono); font-size: 11px; color: var(--acc); }
 .state { font-family: var(--f-mono); font-size: 11px; color: var(--acc); }
-.state.failed, .state.cancelled { color: var(--sev-hi); }
+.state.failed, .state.cancelled, .state.unknown, .state.unreachable { color: var(--sev-hi); }
 .state.done { color: var(--ok); }
 
 table { border-collapse: collapse; width: 100%; }
@@ -201,7 +205,11 @@ table.tight td { font-size: 12px; }
 .voice-screen { grid-template-rows: auto minmax(0, 1fr); }
 .picker { grid-template-rows: auto minmax(0, 1fr); }
 .vgrid3 { display: grid; grid-template-columns: minmax(230px, 1fr) minmax(0, 2.3fr) minmax(250px, 1fr); gap: 8px; min-height: 0; }
-.center { display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1.25fr); gap: 8px; min-height: 0; min-width: 0; }
+.center { display: grid; grid-template-rows: minmax(0, 1.2fr) minmax(0, 1fr); gap: 8px; min-height: 0; min-width: 0; }
+/* the selected references keep room for a few rows at laptop height */
+.refs > .scroll { min-height: 108px; }
+.refs td.mono { white-space: nowrap; }
+.refs td.mono .clip { vertical-align: middle; margin-right: 4px; }
 .right { display: grid; grid-template-rows: minmax(0, 1fr) auto minmax(0, .8fr); gap: 8px; min-height: 0; min-width: 0; }
 .cand { display: flex; gap: 6px; align-items: flex-start; padding: 4px 0; border-bottom: 1px solid var(--grid); }
 .cand .meta { display: grid; gap: 1px; min-width: 0; flex: 1; }
@@ -209,7 +217,7 @@ table.tight td { font-size: 12px; }
 .cand.chosen { box-shadow: inset 3px 0 0 var(--chosen); padding-left: 4px; }
 .tlwrap { flex: none; }
 .tl { position: relative; height: 70px; border: 1px solid var(--grid); border-radius: 4px; margin: 4px 0 16px; background: var(--bg); }
-.tl .tk { position: absolute; bottom: 4px; width: 4px; border: 0; padding: 0; border-radius: 1px; background: var(--dim); opacity: .45; cursor: pointer; }
+.tl .tk { position: absolute; bottom: 4px; max-height: calc(100% - 8px); width: 4px; border: 0; padding: 0; border-radius: 1px; background: var(--dim); opacity: .45; cursor: pointer; }
 .tl .tk.ok { background: var(--acc); opacity: .85; }
 .tl .tk.ch { background: var(--chosen); opacity: 1; width: 6px; }
 .tl .ax { position: absolute; bottom: -15px; font: 10px var(--f-mono); color: var(--dim); transform: translateX(-50%); }
@@ -231,6 +239,11 @@ table.tight td { font-size: 12px; }
 .keys td:first-child { white-space: nowrap; }
 .keys .row { flex-wrap: nowrap; margin: 0; }
 .keys input[type=range] { width: 90px; }
+
+/* -- a short laptop screen: a flatter timeline leaves the references their rows ------------- */
+@media (max-height: 820px) {
+  .tl { height: 50px; margin-bottom: 14px; }
+}
 
 /* -- narrower than a laptop: one column, and the page scrolls ----------------------------- */
 @media (max-width: 960px) {

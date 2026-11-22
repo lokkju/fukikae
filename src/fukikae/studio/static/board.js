@@ -276,9 +276,16 @@ function Decisions({ c, doc, applied, reload }) {
   const others = doc.characters.filter((x) => x.id !== c.id);
   const byId = new Map(doc.characters.map((x) => [x.id, x]));
   const castEntry = c.cast ? doc.cast[c.cast.entry] : null;
-  const merge = (otherId, keepSelf) => ({
-    op: "merge", keep: keepSelf ? c.id : otherId, drop: keepSelf ? otherId : c.id,
-  });
+  // a merge carries both characters' rows as the index showed them (each its own digest), so
+  // a change to either since the page loaded makes it stale, naming which
+  const merge = (otherId, keepSelf) => {
+    const keep = keepSelf ? c : byId.get(otherId);
+    const drop = keepSelf ? byId.get(otherId) : c;
+    return {
+      op: "merge", keep: keep.id, drop: drop.id, key: keep.key, external_id: keep.external_id,
+      digests: { keep: keep.digest, drop: drop.digest },
+    };
+  };
   const p = pending;
 
   return html`<section class="pane decide">
@@ -367,9 +374,10 @@ function Decisions({ c, doc, applied, reload }) {
         ${p.busy && html`<span class="dim"> · working…</span>`}
         ${p.preview && !p.done && html`<div class="pv">${reruns(p.preview.invalidations)}</div>
           ${p.preview.lines.map((l) => html`<div class="small">${l}</div>`)}
-          ${p.preview.stale && html`<div class="note warn small">Stale: ${p.preview.stale}. Applying will be refused; reload the character first.</div>`}
+          ${p.preview.stale && html`<div class="note warn small">Stale: ${p.preview.stale}. Applying would be refused; reload and decide again.</div>
+            <button class="btn" onClick=${() => { reload(); setPending(null); }}>Reload and dismiss</button>`}
           ${p.preview.unchecked && html`<div class="note warn small">This decision carried no digest; the preview filled it from the registry now.</div>`}
-          <div class="row"><button class="btn pri" onClick=${apply} disabled=${p.busy}>Apply</button><button class="btn" onClick=${() => setPending(null)}>Cancel</button></div>`}
+          <div class="row"><button class="btn pri" onClick=${apply} disabled=${p.busy || Boolean(p.preview.stale)}>Apply</button><button class="btn" onClick=${() => setPending(null)}>Cancel</button></div>`}
         ${p.done && html`<div class="note ok small">Applied. ${reruns(p.done.invalidations)}.
           ${p.done.lines.map((l) => html`<div>${l}</div>`)}
           ${p.done.warning && html`<div>${p.done.warning}</div>`}</div>

@@ -119,6 +119,11 @@ dev = [
     "pre-commit>=3.5.0",
     "types-pyyaml>=6.0.12.20261103",
 ]
+# the studio page's headless browser test (`-m browser`; `uv sync --group browser`, plus a
+# Chromium headless shell: `uv run playwright install chromium-headless-shell`)
+browser = [
+    "playwright>=1.55",
+]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
@@ -134,12 +139,13 @@ packages = ["src/fukikae"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-m 'not gpu and not media and not slow'"
+addopts = "-m 'not gpu and not media and not slow and not browser'"
 markers = [
     "gpu: needs a GPU and FUKIKAE_TEST_MEDIA",
     "media: needs real media from FUKIKAE_TEST_MEDIA",
     "ffmpeg: needs only the ffmpeg binary; skipped when it is not on PATH",
     "slow: slow test",
+    "browser: drives the studio page in headless Chromium; needs the browser dependency group",
 ]
 
 [tool.ruff]

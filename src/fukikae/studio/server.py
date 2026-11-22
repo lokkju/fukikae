@@ -1089,6 +1089,7 @@ class _Handler(BaseHTTPRequestHandler):
         return _Reply(422, "refused", _PATHS.sub("<path>", str(e)))
 
     def _candidates(self, cid: int, query: str) -> None:
+        self._live_character(cid)
         q = parse_qs(query, keep_blank_values=True)
 
         def number(key: str, default: int, lo: int, hi: int) -> int:
@@ -1120,11 +1121,13 @@ class _Handler(BaseHTTPRequestHandler):
         """The character's spoken cues in each ready episode's ``06-translate/cues.<lang>.json``
         (what ``POST /api/auditions`` takes as a real line), in episode and time order, with
         the clip of each cue's source span (cut on first fetch). Read-only; an episode with no
-        cues for the language, or cues that can't be read, is left out."""
+        cues for the language, or cues that can't be read, is left out. A merged-away or
+        unknown character is refused as the draft routes refuse it (`_live_character`)."""
         from fukikae.artifacts import read_json
         from fukikae.models import DubCues
         from fukikae.stages.tts import MIN_REFERENCE_S, TtsStage
 
+        self._live_character(cid)
         q = parse_qs(query, keep_blank_values=True)
 
         def number(key: str, default: int, lo: int, hi: int) -> int:

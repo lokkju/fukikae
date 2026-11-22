@@ -4,7 +4,7 @@
 import { h } from "./vendor/preact.module.js";
 import { useEffect, useRef, useState } from "./vendor/hooks.module.js";
 import htm from "./vendor/htm.module.js";
-import { api, audioUrl, videoUrl, token } from "./token.js";
+import { api, mediaUrl, MediaError, token } from "./token.js";
 
 export const html = htm.bind(h);
 export { token };
@@ -151,45 +151,54 @@ export function gpuText(g) {
 
 // -- media -----------------------------------------------------------------------------------
 
-// Blob URLs by path, the oldest revoked past CACHE_MAX.
+// Blob URLs by media path, each with how many mounted players use it. A URL in use is never
+// revoked; past CACHE_MAX the least recently used unused ones are.
 const CACHE_MAX = 80;
-const blobs = new Map();
+const blobs = new Map(); // path -> {url, users}, oldest use first
 const pending = new Map();
 
-async function fetchBlob(path) {
-  const r = await api(path);
-  if (!r.ok) {
-    let body = null;
-    try { body = await r.json(); } catch (e) { /* not JSON */ }
-    throw new ApiError(r.status, body);
+function evict() {
+  for (const [k, e] of blobs) {
+    if (blobs.size <= CACHE_MAX) return;
+    if (e.users > 0) continue;
+    blobs.delete(k);
+    URL.revokeObjectURL(e.url);
   }
-  return URL.createObjectURL(await r.blob());
 }
 
-// A blob URL for a media path (/audio/..., /video/..., /audition/...), fetched once.
-export function blobUrl(path) {
-  if (blobs.has(path)) {
-    const u = blobs.get(path);
+// A blob URL for a media path (/audio/..., /video/..., /audition/...), fetched once through
+// token.js and held for the caller: every acquire() is paired with one release(path).
+export function acquire(path) {
+  const hit = blobs.get(path);
+  if (hit) {
     blobs.delete(path);
-    blobs.set(path, u);
-    return Promise.resolve(u);
+    blobs.set(path, hit); // most recently used
+    hit.users++;
+    return Promise.resolve(hit.url);
   }
-  if (pending.has(path)) return pending.get(path);
-  let p;
-  if (path.startsWith("/audio/")) p = audioUrl(path.slice(7));
-  else if (path.startsWith("/video/")) p = videoUrl(path.slice(7));
-  else p = fetchBlob(path);
-  p = p.then((u) => {
-    blobs.set(path, u);
-    while (blobs.size > CACHE_MAX) {
-      const [k, old] = blobs.entries().next().value;
-      blobs.delete(k);
-      URL.revokeObjectURL(old);
-    }
-    return u;
-  }).finally(() => pending.delete(path));
-  pending.set(path, p);
-  return p;
+  if (!pending.has(path)) {
+    const p = mediaUrl(path).then((url) => {
+      blobs.set(path, { url, users: 0 });
+      return url;
+    }, (e) => {
+      throw e instanceof MediaError ? new ApiError(e.status, e.body) : e;
+    }).finally(() => pending.delete(path));
+    pending.set(path, p);
+  }
+  return pending.get(path).then(() => {
+    const e = blobs.get(path);
+    if (!e) return acquire(path); // evicted before this caller held it: fetch again
+    e.users++;
+    evict();
+    return e.url;
+  });
+}
+
+// The caller no longer plays the path's URL; unused URLs past CACHE_MAX are revoked.
+export function release(path) {
+  const e = blobs.get(path);
+  if (e) e.users = Math.max(0, e.users - 1);
+  evict();
 }
 
 // One clip plays at a time: starting one pauses the one before.
@@ -214,40 +223,73 @@ function next() {
   while (active < 2 && queue.length) { active++; queue.shift()(); }
 }
 
+// play() refused: autoplay policy, an unplayable clip. Pausing a clip that was starting (one
+// clip at a time) rejects with AbortError, which is not a failure.
+function playFailed(e) {
+  return e && e.name !== "AbortError";
+}
+
 // A sample's player: its video clip (picture and the original audio) when it has one, else its
 // audio clip. Click to play; one at a time. `preload` fetches the video so its first frame shows.
-export function Clip({ video, clip, src, seconds, label, preload = false, small = false }) {
+// The player holds its blob URL while mounted (acquire) and lets go on unmount or a new path.
+export function Clip({ video, clip, media, seconds, label, preload = false, small = false }) {
   const [url, setUrl] = useState(null);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [on, setOn] = useState(false);
   const el = useRef(null);
-  const path = video ? `/video/${video}` : clip ? `/audio/${clip}` : src || null;
+  const held = useRef(null); // the path whose URL this player holds
+  const mounted = useRef(true);
+  const path = video ? `/video/${video}` : clip ? `/audio/${clip}` : media || null;
+  const current = useRef(path);
+  current.current = path;
   const isVideo = Boolean(video);
+
+  // a fresh acquire of p: keep it if it is still this player's path, else give it back
+  function take(p, u) {
+    if (!mounted.current || current.current !== p) { release(p); return false; }
+    if (held.current === p) release(p); // already held once
+    else {
+      if (held.current) release(held.current);
+      held.current = p;
+    }
+    setUrl(u);
+    return true;
+  }
+
+  useEffect(() => () => {
+    mounted.current = false;
+    if (held.current) release(held.current);
+    held.current = null;
+  }, []);
 
   useEffect(() => {
     setUrl(null);
     setErr(null);
+    if (held.current && held.current !== path) { release(held.current); held.current = null; }
     if (!preload || !path || !isVideo) return;
-    let live = true;
-    limited(() => blobUrl(path)).then((u) => live && setUrl(u), (e) => live && setErr(e));
-    return () => { live = false; };
+    limited(() => acquire(path)).then((u) => take(path, u),
+      (e) => mounted.current && current.current === path && setErr(e));
   }, [path, preload]);
+
+  function start() {
+    const v = el.current;
+    if (!v) return;
+    claim(v);
+    v.play().then(() => setErr(null), (e) => { if (playFailed(e)) setErr(e); });
+  }
 
   async function toggle() {
     if (!path) return;
     if (el.current && url) {
-      if (el.current.paused) { claim(el.current); el.current.play().catch(() => {}); }
+      if (el.current.paused) start();
       else el.current.pause();
       return;
     }
     setBusy(true);
     try {
-      const u = await blobUrl(path);
-      setUrl(u);
-      requestAnimationFrame(() => {
-        if (el.current) { claim(el.current); el.current.play().catch(() => {}); }
-      });
+      const u = await acquire(path);
+      if (take(path, u)) requestAnimationFrame(start);
     } catch (e) {
       setErr(e);
     } finally {
@@ -255,15 +297,16 @@ export function Clip({ video, clip, src, seconds, label, preload = false, small 
     }
   }
 
+  const unplayable = () => setErr(new Error("the browser can't play this clip"));
   const title = err ? explain(err).message : (label || (isVideo ? "play the clip" : "play the audio"));
   const dur = seconds != null ? `${seconds.toFixed(1)}s` : "";
   return html`<button class=${cls("clip", isVideo ? "v" : "a", small && "small", on && "on", err && "err")}
       onClick=${toggle} title=${title} aria-label=${title} disabled=${!path}>
-    ${isVideo && url && html`<video ref=${el} src=${url} preload="metadata" playsinline
+    ${isVideo && url && html`<video ref=${el} src=${url} preload="metadata" playsinline onError=${unplayable}
         onPlay=${() => setOn(true)} onPause=${() => setOn(false)} onEnded=${() => setOn(false)}></video>`}
-    ${!isVideo && url && html`<audio ref=${el} src=${url}
+    ${!isVideo && url && html`<audio ref=${el} src=${url} onError=${unplayable}
         onPlay=${() => setOn(true)} onPause=${() => setOn(false)} onEnded=${() => setOn(false)}></audio>`}
-    <span class="pb" aria-hidden="true">${busy ? "…" : on ? "❚❚" : "▶"}</span>
+    <span class="pb" aria-hidden="true">${busy ? "…" : err ? "!" : on ? "❚❚" : "▶"}</span>
     ${dur && html`<span class="dur">${dur}</span>`}
     ${!isVideo && !small && html`<span class="kind">audio</span>`}
   </button>`;
@@ -271,7 +314,7 @@ export function Clip({ video, clip, src, seconds, label, preload = false, small 
 
 // A small play button for a wav path (an audition's /audition/<key>.wav).
 export function Play({ path, label, seconds }) {
-  return html`<${Clip} src=${path} label=${label} seconds=${seconds} small=${true} />`;
+  return html`<${Clip} media=${path} label=${label} seconds=${seconds} small=${true} />`;
 }
 
 // localStorage that may refuse (a private window): conveniences only.

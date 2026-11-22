@@ -844,3 +844,64 @@ def test_merge_reports_a_dropped_lock(ws):
         reg.lock_character(2, True)
     r = apply_decision(ws, decision_for(ws, "merge", keep=1, drop=2))
     assert any("lock" in ln and "character 2" in ln for ln in r.lines)
+
+
+# --- merges carry each character's own row digest (the page's season index rows) ----------
+
+
+def _page_merge(ws: Workspace, keep: int = 1, drop: int = 2, **extra: Any):
+    with reg_of(ws) as reg:
+        digests = {"keep": row_digest(reg, keep), "drop": row_digest(reg, drop)}
+    return parse_decision({"op": "merge", "keep": keep, "drop": drop, "digests": digests,
+                           **extra})  # fmt: skip
+
+
+def test_a_merge_with_per_character_digests_applies_without_a_combined_one(ws):
+    d = _page_merge(ws)
+    assert d.digest is None
+    r = apply_decision(ws, d)
+    assert not r.undigested and not r.unchecked
+    with reg_of(ws) as reg:
+        assert 2 not in {c.id for c in reg.characters()}
+
+
+@pytest.mark.parametrize(("changed", "side"), [(1, "keep"), (2, "drop")])
+def test_a_merge_is_stale_when_either_characters_row_changed(ws, changed, side):
+    d = _page_merge(ws)
+    with reg_of(ws) as reg:
+        reg.rename_character(changed, "Someone")
+    with pytest.raises(StaleDecision, match=f"character {changed} \\({side}\\)") as e:
+        apply_decision(ws, d)
+    other = 2 if changed == 1 else 1
+    assert f"character {other} (" not in str(e.value)  # only the changed one is named
+    assert "Someone" in str(e.value)
+    with reg_of(ws) as reg:
+        assert {1, 2} <= {c.id for c in reg.characters()}
+    assert log_lines(ws) == []
+
+
+def test_a_merge_with_both_digest_forms_checks_both(ws):
+    combined = decision_for(ws, "merge", keep=1, drop=2).digest
+    d = _page_merge(ws, digest=combined)
+    apply_decision(ws, d, dry_run=True)  # both current
+    stale = _page_merge(ws, digest="0" * 64)
+    with pytest.raises(StaleDecision):
+        apply_decision(ws, stale)
+
+
+def test_digests_are_refused_on_anything_but_a_merge():
+    with pytest.raises(ValueError, match="digests"):
+        parse_decision({"op": "lock", "character": 1, "digests": {"keep": "a", "drop": "b"}})
+    with pytest.raises(ValueError):
+        parse_decision({"op": "merge", "keep": 1, "drop": 2, "digests": {"keep": "a"}})
+
+
+def test_fill_keeps_per_character_digests_and_adds_no_combined_one(ws):
+    from fukikae.studio.apply import fill
+    from fukikae.studio.model import MergeDecision
+
+    d = _page_merge(ws)
+    with reg_of(ws) as reg:
+        f = fill(reg, d)
+    assert isinstance(d, MergeDecision) and isinstance(f, MergeDecision)
+    assert f.digests == d.digests and f.digest is None

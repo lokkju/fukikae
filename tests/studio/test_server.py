@@ -849,6 +849,58 @@ def test_preview_of_a_merge_stamps_both_characters(studio, ws):  # noqa: F811
     assert set(body) >= {"lines", "invalidations", "stale", "unchecked", "decision"}
 
 
+def _page_merge(doc: dict, keep: int, drop: int) -> dict:
+    """A merge as the page builds it: each character's row digest from the season index."""
+    digests = {"keep": _entry(doc, keep)["digest"], "drop": _entry(doc, drop)["digest"]}
+    return {"op": "merge", "keep": keep, "drop": drop, "digests": digests}
+
+
+def test_a_page_merge_previews_checked_and_applies_as_previewed(studio, ws):  # noqa: F811
+    doc = _season(studio)
+    sent = _page_merge(doc, 1, 2)
+    status, body = studio.json("POST", "/api/decisions/preview", sent)
+    assert status == 200, body
+    assert body["stale"] is None and body["unchecked"] is False
+    assert body["decision"]["digests"] == sent["digests"] and body["decision"]["digest"] is None
+    status, applied = studio.json("POST", "/api/decisions", body["decision"])
+    assert status == 200, applied
+    with Registry(ws.registry_path) as reg:
+        assert 2 not in {c.id for c in reg.characters()}
+
+
+@pytest.mark.parametrize("renamed", [1, 2])
+def test_a_page_merge_is_stale_when_either_character_changed_after_page_load(studio, ws, renamed):  # noqa: F811
+    doc = _season(studio)  # the page loads
+    with Registry(ws.registry_path) as reg:
+        reg.rename_character(renamed, "Someone")  # another tab, or the CLI
+    sent = _page_merge(doc, 1, 2)
+    status, body = studio.json("POST", "/api/decisions/preview", sent)
+    assert status == 200 and body["stale"], body
+    assert f"character {renamed} (" in body["stale"]
+    assert f"character {3 - renamed} (" not in body["stale"]
+    status, got = studio.json("POST", "/api/decisions", body["decision"])
+    assert status == 409 and got["error"] == "stale", got
+    assert f"character {renamed}" in got["message"]
+    with Registry(ws.registry_path) as reg:
+        assert {1, 2} <= {c.id for c in reg.characters()}
+
+
+@pytest.mark.parametrize("renamed", [1, 2])
+def test_a_page_merge_is_refused_when_either_character_changed_after_its_preview(
+    studio,
+    ws,  # noqa: F811
+    renamed,
+):
+    doc = _season(studio)
+    status, body = studio.json("POST", "/api/decisions/preview", _page_merge(doc, 1, 2))
+    assert status == 200 and not body["stale"], body
+    with Registry(ws.registry_path) as reg:
+        reg.rename_character(renamed, "Someone")
+    status, got = studio.json("POST", "/api/decisions", body["decision"])
+    assert status == 409 and got["error"] == "stale", got
+    assert f"character {renamed} (" in got["message"]
+
+
 def test_preview_runs_the_write_time_refusals(studio):
     status, body = studio.json("POST", "/api/decisions/preview",
                                {"op": "merge", "keep": 1, "drop": 1})  # fmt: skip
@@ -1359,6 +1411,25 @@ def test_lines_pages_and_refuses_a_bad_query(studio):
     assert studio.json("GET", "/api/characters/1/lines?language=../x")[0] == 400
     status, body = studio.json("GET", "/api/characters/1/lines?language=de")
     assert status == 200 and body["lines"] == [] and body["language"] == "de"
+
+
+def test_lines_of_a_merged_character_is_409_naming_the_survivor(studio, ws):  # noqa: F811
+    from fukikae.studio.apply import apply_decision, stamp
+    from fukikae.studio.model import parse_decision
+
+    with Registry(ws.registry_path) as reg:
+        d = stamp(reg, parse_decision({"op": "merge", "keep": 2, "drop": 1}))
+    apply_decision(ws, d)
+    for path in ("/api/characters/1/lines", "/api/characters/1/candidates"):
+        status, got = studio.json("GET", path)
+        assert status == 409 and got["error"] == "character-merged", (path, got)
+        assert got["merged_into"] == 2, got
+
+
+def test_lines_of_an_unknown_character_is_404(studio):
+    for path in ("/api/characters/99/lines", "/api/characters/99/candidates"):
+        status, got = studio.json("GET", path)
+        assert status == 404 and got["error"] == "unknown-character", (path, got)
 
 
 def test_lines_needs_the_token(studio):

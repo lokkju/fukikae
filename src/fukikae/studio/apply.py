@@ -240,9 +240,12 @@ def stamp(reg: Registry, d: Decision) -> Decision:
 
 def fill(reg: Registry, d: Decision) -> Decision:
     """`stamp`, but only for what ``d`` leaves out: a digest it carries is kept (a stale one
-    stays stale), and so are its key and external id."""
+    stays stale), and so are its key and external id. A merge that carries each character's
+    own digest (``digests``, the page's form) gets no combined one: those are what it checks."""
     s = stamp(reg, d)
     keep = ("digest", "key", "external_id")
+    if isinstance(d, MergeDecision) and d.digests is not None:
+        keep = ("key", "external_id")
     return d.model_copy(update={k: getattr(s, k) for k in keep if getattr(d, k) is None})
 
 
@@ -274,15 +277,31 @@ def _describe(reg: Registry, character_id: int, language: str | None) -> str:
     return f"character {character_id}: " + ", ".join(parts)
 
 
+def carries_digest(d: Decision) -> bool:
+    """Whether ``d`` says what it was made against: its ``digest``, or for a merge each
+    character's own (``digests``)."""
+    return d.digest is not None or (isinstance(d, MergeDecision) and d.digests is not None)
+
+
 def _check_digest(reg: Registry, d: Decision) -> None:
     ids, language = _targets(d)
     who = " and ".join(f"character {i}" for i in ids)
-    if d.digest is None:
+    if not carries_digest(d):
         raise UncheckedDecision(
             f"{d.op} of {who} carries no digest of the rows it was made against; "
             "pass --force to apply it as it stands"
         )
-    if d.digest != decision_digest(reg, d):
+    if isinstance(d, MergeDecision) and d.digests is not None:
+        sides = ((d.keep, "keep", d.digests.keep), (d.drop, "drop", d.digests.drop))
+        changed = [(cid, side) for cid, side, want in sides if row_digest(reg, cid) != want]
+        if changed:
+            names = " and ".join(f"character {cid} ({side})" for cid, side in changed)
+            now = "; ".join(_describe(reg, cid, None) for cid, _ in changed)
+            raise StaleDecision(
+                f"{names} changed since this merge decision was made (now {now}); reload "
+                f"{'them' if len(changed) > 1 else 'it'}, or pass --force"
+            )
+    if d.digest is not None and d.digest != decision_digest(reg, d):
         now = "; ".join(_describe(reg, i, language) for i in ids)
         raise StaleDecision(
             f"{who} changed since this {d.op} decision was made (now {now}); reload "
@@ -1758,7 +1777,7 @@ def _stage(
 
 def _preview(d: Decision, lines: list[str], invs: list[Invalidation], force: bool) -> ApplyResult:
     return ApplyResult(
-        lines + preview_lines(invs), invs, unchecked=force, undigested=d.digest is None
+        lines + preview_lines(invs), invs, unchecked=force, undigested=not carries_digest(d)
     )
 
 
@@ -1804,7 +1823,7 @@ def apply_decision(
         done, left, errors = _after_commit(w, rec, d.op, steps)
     if left:
         raise IncompleteDecision(_incomplete(w, d.op, left, errors))
-    return ApplyResult(lines + done, invs, unchecked=force, undigested=d.digest is None)
+    return ApplyResult(lines + done, invs, unchecked=force, undigested=not carries_digest(d))
 
 
 def apply_registry_change(

@@ -63,15 +63,17 @@ def test_no_inline_script_or_style():
     assert '<link rel="stylesheet" href="/static/app.css">' in page
     for name in PAGE_JS:
         js = _text(STATIC / name)
-        for bad in ("innerHTML", "<style", "eval(", "new Function", "document.write"):
-            assert bad not in js, (name, bad)
+        # innerHTML in any case (dangerouslySetInnerHTML too), and the other HTML sinks
+        for bad in ("innerhtml", "outerhtml", "insertadjacenthtml", "<style", "eval(",
+                    "new function", "document.write", "createcontextualfragment"):  # fmt: skip
+            assert bad not in js.lower(), (name, bad)
 
 
 def test_the_token_stays_out_of_cookies_and_queries():
     js = _text(STATIC / "token.js")
     for needed in ("location.hash", "sessionStorage", "history.replaceState",
-                   "X-Fukikae-Token", "export async function api", "export async function audioUrl",
-                   "URL.createObjectURL"):  # fmt: skip
+                   "X-Fukikae-Token", "export async function api", "export function audioUrl",
+                   "export async function mediaUrl", "URL.createObjectURL"):  # fmt: skip
         assert needed in js, needed
     assert "?t=" not in js and "cookie" not in js.lower()
     # the page modules (the vendored files are minified code; token.js reads #t= and &t= in
@@ -84,9 +86,58 @@ def test_the_token_stays_out_of_cookies_and_queries():
     assert not re.search(r"src=\$\{\s*[`\"']/(audio|video|audition)/", _page_js())
 
 
-def test_the_token_helper_fetches_video_into_a_blob_url():
-    js = _text(STATIC / "token.js")
-    assert "export async function videoUrl" in js and "/video/" in js
+def _ours() -> dict[str, str]:
+    """The page modules other than token.js, by name."""
+    return {n: _text(STATIC / n) for n in PAGE_JS if n != "token.js"}
+
+
+def test_only_token_js_fetches_or_stores_the_token():
+    """token.js is the one module that calls fetch() and touches sessionStorage (where the
+    spec keeps the token, this tab only); nothing writes it to localStorage."""
+    token_js = _text(STATIC / "token.js")
+    assert "localStorage" not in token_js
+    assert "fetch(" in token_js
+    for name, js in _ours().items():
+        for bad in ("fetch(", "XMLHttpRequest", "sessionStorage", "EventSource", "WebSocket",
+                    "sendBeacon", "fukikae-studio-token"):  # fmt: skip
+            assert bad not in js, (name, bad)
+        # the localStorage convenience store (lib.js `store`) never sees the token
+        for m in re.finditer(r"(?:localStorage|store)\.set\w*\(([^;]*)", js):
+            assert not re.search(r"\btoken\b", m.group(1)), (name, m.group(0))
+    uses = [(n, m) for n, js in _ours().items() for m in re.findall(r"localStorage\.\w+", js)]
+    assert uses == [("lib.js", "localStorage.getItem"), ("lib.js", "localStorage.setItem")]
+
+
+def test_media_reaches_an_element_only_as_a_blob_url_from_token_js():
+    """Every <audio>/<video> src is the blob URL a player acquired (lib.js `acquire`, which
+    fetches through token.js `mediaUrl`); no module but token.js turns an /audio, /video or
+    /audition path into a fetch or an element's src."""
+    token_js = _text(STATIC / "token.js")
+    assert "export async function mediaUrl" in token_js
+    assert re.search(r"MEDIA = /\^\\/\(audio\|video\|audition\)", token_js)
+    srcs: set[str] = set()
+    for name, js in _ours().items():
+        srcs |= {m.strip() for m in re.findall(r"\bsrc=\$\{([^}]*)\}", js)}
+        assert not re.search(r"\.src\s*=", js), name
+        assert "new Audio" not in js and "<source" not in js, name
+        assert "createObjectURL" not in js, name  # blob URLs are made in token.js only
+        assert "api(" not in js.replace("call(", "") or name == "lib.js", name
+    assert srcs == {"url"}, srcs
+    lib = _text(STATIC / "lib.js")
+    # the player's url state is set only from an acquired blob URL
+    assert sorted(re.findall(r"setUrl\(([^)]*)\)", lib)) == ["null", "u"]
+    assert "mediaUrl(path)" in lib and "api(path)" not in lib
+    assert "return mediaUrl(`/audio/" in token_js and "return mediaUrl(`/video/" in token_js
+
+
+def test_the_page_never_revokes_a_url_a_mounted_player_uses():
+    lib = _text(STATIC / "lib.js")
+    assert lib.count("URL.revokeObjectURL") == 1
+    evict = lib[lib.index("function evict()") : lib.index("export function acquire")]
+    assert "e.users > 0" in evict and "URL.revokeObjectURL" in evict
+    for name, js in _ours().items():
+        if name != "lib.js":
+            assert "revokeObjectURL" not in js, name
 
 
 def test_vendored_files_match_their_recorded_hashes():
@@ -126,8 +177,17 @@ def test_page_has_a_control_for_every_identity_op():
     assert re.search(r"gender:\s*null", js)  # clear
     for kind in ("character", "narrator", "ignored"):
         assert re.search(rf'kind:\s*"{kind}"', js), kind
-    # each is previewed, then the previewed decision is what gets posted
-    assert '"/api/decisions/preview"' in js and "preview.decision" in js
+    # each is previewed, then the previewed decision is what gets posted, exactly: the one
+    # post to /api/decisions sends the preview's returned decision, untouched
+    assert '"/api/decisions/preview"' in js
+    posts = re.findall(r'post\(\s*"/api/decisions"\s*,\s*([^)]*)\)', js)
+    assert posts == ["p.preview.decision"], posts
+    assert len(re.findall(r'"/api/decisions"', _page_js())) == 1
+    assert not re.search(
+        r"preview\.decision\s*(?:\.\w+\s*)?=[^=]|\.\.\.\s*p\.preview\.decision", js
+    )
+    # a merge carries both characters' row digests from the index
+    assert re.search(r"digests:\s*\{\s*keep:\s*keep\.digest,\s*drop:\s*drop\.digest\s*\}", js)
     # an accept is never posted as a raw decision
     assert 'op: "accept"' not in _page_js()
 

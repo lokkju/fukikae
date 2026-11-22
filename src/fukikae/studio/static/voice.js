@@ -11,6 +11,9 @@ import {
 } from "./lib.js";
 
 const PENDING = new Set(["queued", "waiting", "loading", "running"]);
+// A job poll that fails is tried again after 1.2 s, 2.4 s, 4.8 s, then given up on.
+const POLL_MS = 1200;
+const POLL_TRIES = 4;
 const CAND_PAGE = 200;
 
 const spanKey = (r) => `${r.episode}|${Number(r.start).toFixed(3)}|${Number(r.end).toFixed(3)}`;
@@ -194,23 +197,44 @@ export function Voice({ doc, id, lang, gpu, refreshGpu, reloadSeason }) {
   }
 
   // -- jobs: polled while any is pending -----------------------------------------------------
+  // A job the studio no longer knows (404: it restarted since) stops at once as "unknown";
+  // any other failed poll backs off and stops as "unreachable" after POLL_TRIES.
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
+  const backoff = useRef({}); // job id -> {fails, next}
   useEffect(() => {
     const t = setInterval(async () => {
-      const live = Object.values(jobsRef.current).filter((j) => PENDING.has(j.state));
+      const now = Date.now();
+      const live = Object.values(jobsRef.current).filter((j) => PENDING.has(j.state) &&
+        !j.local && (!backoff.current[j.id] || backoff.current[j.id].next <= now));
       if (!live.length) return;
       let finished = false;
       for (const j of live) {
         try {
           const got = await call(`/api/auditions/${j.id}`);
+          delete backoff.current[j.id];
           if (!PENDING.has(got.state)) finished = true;
           setJobs((x) => ({ ...x, [got.id]: got }));
-        } catch (e) { /* the next poll tries again */ }
+        } catch (e) {
+          if (e.status === 404) {
+            delete backoff.current[j.id];
+            setJobs((x) => ({ ...x, [j.id]: { ...j, state: "unknown", error: null,
+              message: "job no longer known: the studio restarted since it was queued; render it again" } }));
+            continue;
+          }
+          const b = backoff.current[j.id] || { fails: 0, next: 0 };
+          b.fails++;
+          b.next = Date.now() + POLL_MS * 2 ** b.fails;
+          backoff.current[j.id] = b;
+          if (b.fails >= POLL_TRIES) {
+            delete backoff.current[j.id];
+            setJobs((x) => ({ ...x, [j.id]: { ...j, state: "unreachable", error: e, message: null } }));
+          }
+        }
       }
       refreshGpu();
       if (finished) loadDraft();
-    }, 1200);
+    }, POLL_MS);
     return () => clearInterval(t);
   }, [loadDraft]);
 
@@ -344,6 +368,10 @@ export function Voice({ doc, id, lang, gpu, refreshGpu, reloadSeason }) {
   };
   const jobList = Object.values(jobs).sort((a, b) => (a.submitted < b.submitted ? 1 : -1));
   const cmpLine = cmp.line ? lineKey(cmp.line) : null;
+  // while a blind pair is open and unrevealed, its two versions' cells on that line (their
+  // play buttons and durations) would tell A from B, so they are hidden
+  const blindOpen = cmp.blind && Boolean(cmp.data) && !cmp.key;
+  const blindHides = (v, l) => blindOpen && cmpLine === lineKey(l) && (v.n === cmp.a || v.n === cmp.b);
   const shownCands = cands.list.filter((x) => showGated || x.rank != null);
 
   return html`<main class="screen voice-screen">
@@ -427,6 +455,7 @@ export function Voice({ doc, id, lang, gpu, refreshGpu, reloadSeason }) {
                   ${l.kind === "typed" && html`<button class="btn small" onClick=${() => { const t = typed.filter((x) => x !== l.text); setTyped(t); store.set(`typed:${id}.${language}`, t); }}>remove</button>`}
                 </div>
                 ${versions.map((v) => {
+                  if (blindHides(v, l)) return html`<div class="lv"><span class="dim small" title="hidden while the blind pair is open; Reveal shows it">blind</span></div>`;
                   const a = auditionFor(v, l);
                   const j = jobFor(v, l);
                   if (a) return html`<div class="lv"><${Play} path=${`/audition/${a.wav}`} seconds=${a.seconds} label=${`v${v.n}`} />${a.suspect && html`<span class="warnc small" title="render guard">${a.suspect}</span>`}${a.gender_gate && html`<span class="small dim" title="the emotion prompt was dropped: the source line is the other register (A3)">A3</span>`}</div>`;
