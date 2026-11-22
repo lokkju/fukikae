@@ -16,8 +16,10 @@ from the character's reference turns in the workspace's episodes
 an automatic clone card whose references the names now contradict is re-picked,
 ``cards.auto.stale_cards``, as is one under the clone floor of 2 clips and 10 s when a better
 pick exists, ``cards.auto.below_floor``, and one with references the A1 reference gates refuse
-when a gate-passing pick exists, ``cards.auto.impure_cards``; one with no better pick is kept
-and flagged in ``run.json``, as is a curated, imported or locked card any of these finds). Every
+when a gate-passing pick exists, ``cards.auto.impure_cards``, and one whose references are
+the other register from the character's operator gender, ``cards.auto.gender_mismatches``; one
+with no better pick is kept and flagged in ``run.json``, as is a curated, imported or locked
+card any of these finds). Every
 speaker with speech gets a clone (A2, D41): below 3 s of gate-passing speech it is cloned from
 its longest turns and flagged as a thin reference, and one with no turn of its own anywhere from
 its own cues' spans. Cues with no character (extras, and clusters the characters stage left for
@@ -87,7 +89,10 @@ side never gates) renders in its own speaker's card with no emotion audio
 ``gender_gate`` in ``plan.json`` and flagged in ``run.json``. Extras clusters are gated
 against their own turns' register; a cluster-less line, cloned from its own span, never is.
 The rule is in `delivery_passed`, so ``eval tts`` holds it too (CD12). ``GATE_VERSION`` and
-the bands are in the stage key.
+the bands are in the stage key. A narrator's (``kind = 'narrator'``) gated lines still pass no
+emotion audio but are not flagged: narration often sits in another register by design. The
+operator's genders and narrators among the speaking characters are in the stage key
+(``operator``, only when any is set, so other workspaces keep their key).
 
 ``[tts]``'s own options go to ``[tts] backend`` when a workspace still names one (it chooses no
 card since D41, and the profiles name none), else to ``[tts] clone_backend``.
@@ -137,7 +142,10 @@ from fukikae.cards.auto import (
     ensure_assignments,
     extras_cards,
     extras_label,
+    gender_mismatches,
     impure_cards,
+    narrators,
+    operator_genders,
     replace_refusal,
     stale_cards,
     stock_cards,
@@ -461,13 +469,7 @@ class LazySynth:
             self._lock.enter_context(gpu_job(self.cfg.gpu_device, self.device, f"tts {inst.name}"))
             try:
                 if self.device.startswith("cuda"):
-                    wait_for_vram(
-                        self.cfg.gpu_device,
-                        inst.vram_mb,
-                        runctx.vram_timeout_s,
-                        query=free_mb,
-                        sleep=_sleep,
-                    )
+                    self.wait_vram(inst)
                 self.inst = inst
                 inst.load()
             except BaseException:
@@ -475,6 +477,14 @@ class LazySynth:
                 self._lock.close()
                 raise
         return self.inst
+
+    def wait_vram(self, inst: Synthesizer) -> None:
+        """Wait, with the card's lock held, until the card has room for ``inst``: the run's
+        VRAM timeout (``runctx``: None waits forever). Studio auditions override it with a
+        finite wait they can cancel."""
+        wait_for_vram(
+            self.cfg.gpu_device, inst.vram_mb, runctx.vram_timeout_s, query=free_mb, sleep=_sleep
+        )
 
     def close(self) -> None:
         try:
@@ -830,10 +840,18 @@ def established_gender(
 
 
 def gender_gate(
-    work: Path, cues: Sequence[DubCue], root: Path, bands: tuple[float, float] = GATE_BANDS
+    work: Path,
+    cues: Sequence[DubCue],
+    pitch_root: Path,
+    bands: tuple[float, float] = GATE_BANDS,
+    *,
+    operator: Mapping[int, Gender] | None = None,
+    workspace: Path | None = None,
 ) -> GenderGate:
-    """The line gate's inputs for an episode (``work``) and its cues: every spoken cue's line
-    class, and its speaker's `established_gender`: a character's from its own turns in
+    """The line gate's inputs for an episode (``work``) and its cues, pitch tracks through the
+    pitch cache under ``pitch_root``: every spoken cue's line class, and its speaker's
+    `established_gender`: a character's operator gender (``operator``, else read from the
+    registry of the workspace at ``workspace``; with neither, none), else from its own turns in
     ``05-characters/assignments.json`` (extras and review clusters left out), an extras
     cluster's from that cluster's turns, either from its own cues' source spans when it has no
     turn there; a cluster-less line's is ``u`` (its clone is the line itself)."""
@@ -845,6 +863,8 @@ def gender_gate(
     asg = read_json(asg_path, Assignments) if asg_path.exists() else None
     turns = list(asg.turns or []) if asg is not None else []
     chars = character_spans(asg) if asg is not None else {}
+    if operator is None:
+        operator = TtsStage.operator_state(workspace)[0] if workspace is not None else {}
 
     def own_lines(same: Any) -> list[tuple[float, float]]:
         return [
@@ -855,12 +875,15 @@ def gender_gate(
 
     speaker: dict[str, str | None] = {}
     spans: dict[str, list[tuple[float, float]]] = {}
+    stored: dict[str, Gender] = {}
     for c in spoken:
         if c.character_id is not None:
             key = f"character {c.character_id}"
             if key not in spans:
                 cid = c.character_id
                 spans[key] = chars.get(cid) or own_lines(lambda x, cid=cid: x.character_id == cid)
+                if cid in operator:
+                    stored[key] = operator[cid]
         else:
             label = extras_label(c)
             if label.startswith(f"{UNKNOWN_EXTRA}~"):
@@ -875,9 +898,9 @@ def gender_gate(
         speaker[c.id] = key
     established: dict[str | None, Gender] = {None: "u"}
     for k, v in spans.items():
-        established[k] = established_gender(vocals, v, root, bands)
+        established[k] = established_gender(vocals, v, pitch_root, bands, stored.get(k))
     voices: dict[str, Gender] = {cue_id: established[k] for cue_id, k in speaker.items()}
-    return GenderGate(line_genders(vocals, spoken, root, bands), voices)
+    return GenderGate(line_genders(vocals, spoken, pitch_root, bands), voices)
 
 
 def delivery_passed(
@@ -913,7 +936,7 @@ def delivery_passed(
         out["emotion_vector"] = {d.emotion: conf}
     if "instruction" in caps and d.direction:
         out["instruction"] = d.direction
-    if "duration" in caps:
+    if "duration" in caps and slot > 0:  # a typed audition line has no slot (Task 19)
         out["target_seconds"] = round(slot, 4)
     if out.keys() & DELIVERY_CAPS:
         out["emotion_strength"] = card.voice.emotion_strength
@@ -1238,6 +1261,44 @@ def render_for_slot(
     return key, fitted_s, seconds, factor, calls, g
 
 
+@dataclass(frozen=True)
+class RenderedLine:
+    """One line rendered for its slot (`render_line`): the job, the cache key of the wav that
+    plays (pauses capped), its seconds, the first render's seconds, the rate factor, the
+    renders made now (0: all from the cache) and the guarded render."""
+
+    job: RenderJob
+    key: str
+    seconds: float
+    rendered_seconds: float
+    rate_factor: float
+    renders: int
+    guard: GuardedRender
+
+
+def render_line(
+    job: RenderJob,
+    synth: LazySynth,
+    cache: Path,
+    store: CardStore,
+    *,
+    speedup: float,
+    ref_dir: Path | None,
+    rates: SpeechRates | None = None,
+) -> RenderedLine:
+    """The one render path of a prepared line (`prepare_cue`: the card, `delivery_passed`
+    with A3's line gate, the stage's ``cue_key``): `render_for_slot` (the rate estimate and
+    fit, `render_guarded`, the pause cap) into ``cache``. The tts stage renders every cue
+    through it, and studio auditions every line (Task 19), so an audition's render is the
+    stage's, under the stage's keys. ``rates`` is the card's speech rate estimate so far (the
+    stage keeps one per run; an audition starts a fresh one, which is the stage's estimate for
+    a card's first lines and differs only on a backend that takes a rate)."""
+    key, seconds, first, factor, calls, guard = render_for_slot(
+        job, synth, cache, store, speedup, ref_dir, rates
+    )
+    return RenderedLine(job, key, seconds, first, factor, calls, guard)
+
+
 def tag_events(work: Path) -> list[tuple[float, float, str]]:
     """The tag stage's event spans for an episode work dir (none when it didn't run)."""
     from fukikae.models import Tags
@@ -1361,8 +1422,40 @@ class TtsStage:
                 "pitch": pitch.VERSION,
                 "line_min_voiced_s": LINE_MIN_VOICED_S,
             },
+            **self._operator_key(ep, cues),
             "version": RENDER_VERSION,
         }
+
+    @staticmethod
+    def operator_state(root: Path) -> tuple[dict[int, Gender], set[int]]:
+        """(character -> operator gender, narrators) from the workspace's registry; empty
+        without one."""
+        path = Workspace(root).registry_path
+        if not path.exists():
+            return {}, set()
+        with Registry(path) as reg:
+            return operator_genders(reg), narrators(reg)
+
+    @classmethod
+    def _operator_key(cls, ep: Episode, cues: list[DubCue]) -> dict[str, Any]:
+        """``{"operator": {character: {gender, kind}}}`` for the speaking characters (a cue to
+        speak, as `_assign` counts them) with an operator gender or the narrator kind (the line
+        gate reads both), or nothing at all when none has, so a workspace without operator
+        state keeps the key it had."""
+        genders, narrating = cls.operator_state(ep.workspace_root)
+        speaking = {
+            c.character_id for c in cues if c.character_id is not None and cls._skipped(c) is None
+        }
+        out: dict[str, dict[str, str]] = {}
+        for cid in sorted(speaking):
+            entry: dict[str, str] = {}
+            if cid in genders:
+                entry["gender"] = genders[cid]
+            if cid in narrating:
+                entry["kind"] = "narrator"
+            if entry:
+                out[str(cid)] = entry
+        return {"operator": out} if out else {}
 
     # -- run -------------------------------------------------------------------------------
 
@@ -1425,8 +1518,11 @@ class TtsStage:
             "emotion_audio" in cls.capabilities_for(card.voice.source)
             for card, cls in checked.values()
         )
+        operator, narrating = self.operator_state(ep.workspace_root)
         gate = (
-            gender_gate(ep.work, spoken, ep.workspace_root) if takes_audio else GenderGate({}, {})
+            gender_gate(ep.work, spoken, ep.workspace_root, operator=operator)
+            if takes_audio
+            else GenderGate({}, {})
         )
         jobs: dict[str, list[RenderJob]] = {}
         for c in spoken:
@@ -1450,6 +1546,8 @@ class TtsStage:
             j for v in jobs.values() for j in v if j.passed.get("emotion_dropped") == GATE_DROPPED
         ]
         for c in [c for c in spoken if any(j.cue.id == c.id for j in gated)]:
+            if c.character_id in narrating:
+                continue  # a narrator's other-band line passes no emotion audio, unflagged
             est = gate.line(c.id)
             assert est is not None and est.median is not None
             whose = "character's" if c.character_id is not None else "cluster's"
@@ -1661,7 +1759,19 @@ class TtsStage:
                 for cid in impure
                 if (a := current.get(cid)) is not None and replace_refusal(a, "auto") is None
             ]
-            work = bool(todo or restock or stale or repickable or repurify)
+            # clone cards whose references are the other class from the operator's gender; one
+            # whose references can't be measured is only flagged, so it costs no search
+            genders = gender_mismatches(
+                Workspace(ep.workspace_root), reg, store, language, speaking
+            )
+            regender = [
+                cid
+                for cid, mm in genders.items()
+                if mm.refs is not None
+                and (a := current.get(cid)) is not None
+                and replace_refusal(a, "auto") is None
+            ]
+            work = bool(todo or restock or stale or repickable or repurify or regender)
             cloning = workspace_cloning(ep.workspace_root, cfg, ep.id, cues=cues) if work else None
             report = ensure_assignments(
                 reg,
@@ -1673,6 +1783,7 @@ class TtsStage:
                 short=short,
                 impure=impure,
                 stock=stock,
+                genders=genders,
                 flags=flags,
             )
             cards: dict[int, str] = {}
@@ -1750,7 +1861,8 @@ class TtsStage:
         ref_dir: Path,
         rates: SpeechRates | None = None,
     ) -> tuple[str, float, float, float, int, GuardedRender]:
-        return render_for_slot(job, lazy, cache, store, speedup, ref_dir, rates)
+        r = render_line(job, lazy, cache, store, speedup=speedup, ref_dir=ref_dir, rates=rates)
+        return r.key, r.seconds, r.rendered_seconds, r.rate_factor, r.renders, r.guard
 
     @staticmethod
     def _stripped(job: RenderJob) -> dict[str, Any]:

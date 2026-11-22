@@ -14,10 +14,19 @@ Writes under ``04c-names/``:
     ``full``), the track chosen and every one tried, the lines, hidden line ids, pieces, labels,
     unvoiced lines, excluded spans, dropped row seconds and alias suggestions.
 ``turns.json``, ``clusters.npz``
-    Only when names were used: the refined diarization (``<cluster>~<slug>`` labels) and the
-    diarize stage's embedding rows moved onto those labels, in the diarize stage's format. A
-    rerun that doesn't use names deletes them, and ``names.inputs.identity_inputs`` then
-    returns ``04-diarize``'s pair.
+    Only when names were used or an operator pitch split relabelled turns
+    (``NamesResult.refined``): the refined diarization (``<cluster>~<slug>`` labels, and
+    ``<cluster>~voice-f`` / ``~voice-m`` for a split) and the diarize stage's embedding rows
+    moved onto those labels, in the diarize stage's format. A rerun that refines nothing
+    deletes them, and ``names.inputs.identity_inputs`` then returns ``04-diarize``'s pair.
+
+Operator pitch splits (``<ws>/studio/splits/<episode>.json``, written by ``fukikae studio
+apply``) are read after subtitle names, whatever the verdict: each unnamed turn (or piece of a
+cut turn) of a split cluster is classified on its own median (``fukikae.pitch``, the split's
+bands, ``LINE_MIN_VOICED_S``) and relabelled ``<cluster>~voice-f`` or ``~voice-m``; turns in
+neither band (``u``) join the part with more seconds. Named sub-clusters are never split. The
+split file's digest joins the stage key, and ``01-separate/vocals.wav`` its inputs, only while
+the file exists, so an episode without one keeps its key.
 
 Evaluation hooks (``[names]``): an episode in ``holdout_episodes`` reads no subtitles at all
 (verdict ``holdout``, and no track copy stays under ``tracks/``); ``hide_fraction`` withholds
@@ -51,10 +60,20 @@ from fukikae.names.align import (
     label_infos,
     refine_clusters,
     refined_turns,
+    split_voices,
+    voice_candidates,
 )
 from fukikae.names.detect import TrackChoice
-from fukikae.names.inputs import DIARIZE_DIR, NAMES_DIR
-from fukikae.names.models import NamedLine, NamesResult, Piece
+from fukikae.names.inputs import (
+    DIARIZE_DIR,
+    NAMES_DIR,
+    PitchSplit,
+    SplitFileError,
+    operator_splits,
+    splits_digest,
+    splits_path,
+)
+from fukikae.names.models import NamedLine, NamesResult, Piece, VoiceSplit
 from fukikae.names.normalize import suggest_aliases
 from fukikae.workspace import Episode, Workspace
 
@@ -64,6 +83,10 @@ log = logging.getLogger(__name__)
 NAMES_VERSION = 1
 MIN_HIDE_LINES = 5  # a key needs this many lines before hide_fraction withholds any
 TRACKS_DIR = "tracks"
+
+
+def _vocals(ep: Episode) -> Path:
+    return ep.work / "01-separate" / "vocals.wav"
 
 
 def hide_lines(lines: list[NamedLine], fraction: float, seed: int, episode: str) -> list[int]:
@@ -243,6 +266,8 @@ class NamesStage:
     def inputs(self, ep: Episode) -> list[Path]:
         d = ep.work / DIARIZE_DIR
         paths = [d / "turns.json", d / "clusters.npz"]
+        if splits_path(ep.workspace_root, ep.id).exists():
+            paths.append(_vocals(ep))  # what a split measures, only while one exists
         try:
             sources = self._sources(ep, self._config(ep))
         except (ConfigError, media.MediaError, OSError):
@@ -257,6 +282,13 @@ class NamesStage:
         thresholds, the hide settings (the seed only when lines are hidden) and the
         candidates. ``min_new_seconds`` (the characters stage's) and other episodes' holdout
         membership stay out, so changing them never reruns it."""
+        key = self._names_key(cfg, ep)
+        digest = splits_digest(ep.workspace_root, ep.id)
+        if digest is not None:  # no split file: the key manifests already hold
+            key["splits"] = digest
+        return key
+
+    def _names_key(self, cfg: Config, ep: Episode) -> dict[str, Any]:
         s = cfg.names
         key: dict[str, Any] = {"version": NAMES_VERSION, "use": s.use}
         if s.use == "off":
@@ -286,6 +318,12 @@ class NamesStage:
 
     def run(self, ep: Episode, cfg: Config) -> None:
         s = cfg.names
+        splits = operator_splits(ep.workspace_root, ep.id)  # a bad file refuses before anything
+        if splits and not _vocals(ep).is_file():
+            raise SplitFileError(
+                f"{ep.id} has a pitch split ({splits_path(ep.workspace_root, ep.id)}) but no "
+                f"{_vocals(ep)} to measure it on; rerun separate first"
+            )
         out = ep.work / NAMES_DIR
         out.mkdir(parents=True, exist_ok=True)
         turns_out, clusters_out = out / "turns.json", out / "clusters.npz"
@@ -328,7 +366,14 @@ class NamesStage:
                 turns_out.unlink(missing_ok=True)
                 clusters_out.unlink(missing_ok=True)
                 raise
-        if not result.used:
+        if splits:
+            try:
+                result = self._split(ep, diar, result, splits, turns_out, clusters_out)
+            except BaseException:
+                turns_out.unlink(missing_ok=True)
+                clusters_out.unlink(missing_ok=True)
+                raise
+        if not result.refined:
             turns_out.unlink(missing_ok=True)
             clusters_out.unlink(missing_ok=True)
         write_json(names_out, result)
@@ -338,6 +383,98 @@ class NamesStage:
             result.verdict,
             f" ({result.reason})" if result.reason else "",
         )
+
+    def _split(
+        self,
+        ep: Episode,
+        diar: Diarization,
+        result: NamesResult,
+        splits: dict[str, PitchSplit],
+        turns_out: Path,
+        clusters_out: Path,
+    ) -> NamesResult:
+        """``result`` with the operator pitch splits applied to its pieces (the diarize turns,
+        one piece each, when names weren't used), and the refined pair rewritten when a split
+        relabelled anything."""
+        from fukikae.pitch import LINE_MIN_VOICED_S, cached_track, classify, summarize
+
+        base = (
+            result.pieces
+            if result.used
+            else [
+                Piece(
+                    start=t.start,
+                    end=t.end,
+                    cluster=t.speaker,
+                    label=t.speaker,
+                    key=None,
+                    line_ids=[],
+                    turn=i,
+                )  # fmt: skip
+                for i, t in enumerate(diar.turns)
+            ]
+        )
+        from fukikae.names.inputs import cluster_fingerprint, describe_fingerprint
+
+        # The fingerprint guard: a split recorded against another shape of the cluster (a
+        # diarize rerun relabelled or reshaped it) is skipped, never applied to what the
+        # label now names; a split file from before fingerprints is applied unchecked.
+        checks: dict[str, str] = {}
+        skipped: dict[str, VoiceSplit] = {}
+        for c, sp in splits.items():
+            if sp.fingerprint is None:
+                checks[c] = "unchecked"
+                continue
+            now = cluster_fingerprint(diar.turns, c)
+            if now == sp.fingerprint:
+                checks[c] = "matched"
+                continue
+            skipped[c] = VoiceSplit(
+                male_below=sp.male_below, female_above=sp.female_above,
+                seconds={"f": 0.0, "m": 0.0, "u": 0.0}, larger=None, labels=[],
+                reason=f"the split was decided on {c} with "
+                f"{describe_fingerprint(sp.fingerprint)}, and the diarization now gives it "
+                f"{describe_fingerprint(now)}: skipped; re-split it in the studio",
+                check="changed",
+            )  # fmt: skip
+        bands = {
+            c: (sp.male_below, sp.female_above) for c, sp in splits.items() if c not in skipped
+        }
+        by_cluster: dict[str, list[int]] = defaultdict(list)
+        for i in voice_candidates(base, bands):
+            by_cluster[base[i].cluster].append(i)
+        genders: dict[int, str] = {}
+        for cluster, idx in by_cluster.items():
+            # one track per cluster over its unnamed pieces: the loudness floor is the
+            # cluster's own, as the season index's bimodal test reads it
+            track = cached_track(
+                ep.workspace_root, _vocals(ep), [(base[i].start, base[i].end) for i in idx]
+            )
+            lo, hi = bands[cluster]
+            for k, i in enumerate(idx):
+                genders[i] = classify(summarize(track, k), lo, hi, LINE_MIN_VOICED_S).gender
+        pieces, info = split_voices(base, bands, genders)
+        info = {c: v.model_copy(update={"check": checks[c]}) for c, v in info.items()}
+        info = dict(sorted({**info, **skipped}.items()))
+        update: dict[str, Any] = {"voice_splits": info}
+        for cluster, v in info.items():
+            log.info(
+                "names %s: pitch split %s: %s",
+                ep.id,
+                cluster,
+                v.reason
+                or f"{v.seconds['m']:.1f} s low, {v.seconds['f']:.1f} s high, "
+                f"{v.seconds['u']:.1f} s between to the {v.larger} part",
+            )
+        if any(v.labels for v in info.values()):
+            rturns = refined_turns(pieces)
+            write_json(turns_out, Diarization(backend=diar.backend, turns=rturns))
+            update["dropped_row_seconds"] = refine_clusters(
+                ep.work / DIARIZE_DIR / "clusters.npz", pieces, rturns, clusters_out
+            )
+            update["pieces"] = pieces
+            update["labels"] = label_infos(pieces, result.visible_lines())
+        return result.model_copy(update=update)
 
     def _attribute(
         self,

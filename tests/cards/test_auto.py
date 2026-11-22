@@ -2444,3 +2444,571 @@ def test_a_stale_repick_under_the_floor_that_picks_the_same_card_flags_once(
     assert "subtitles now name otherwise" in flag and "pick it again" in flag
     assert "below the clone floor (1 clip and 4.2 s" in flag
     reg.close()
+
+
+# -- Task 13: operator gender and narrators ---------------------------------------------------
+
+# Character 1, acoustic only (no names): four 240 Hz turns and three 130 Hz turns, near even
+# (24 s against 18 s), so the estimate gates no pitch; the operator knows he is male.
+MIXED_TURNS = [
+    (0.0, 6.0, "S0", 0.02), (8.0, 14.0, "S0", 0.02), (16.0, 22.0, "S0", 0.02),
+    (24.0, 30.0, "S0", 0.02),
+    (60.0, 66.0, "S0", 0.02), (70.0, 76.0, "S0", 0.02), (80.0, 86.0, "S0", 0.02),
+]  # fmt: skip
+MIXED_HZ = [240.0, 240.0, 240.0, 240.0, 130.0, 130.0, 130.0]
+
+
+def _ws_mixed(tmp_path: Path, turns=MIXED_TURNS, hz=MIXED_HZ):
+    from fukikae.workspace import Workspace
+    from tests.cards.test_select import _voices
+
+    reg, ids = _registry(tmp_path, 1)
+    work = _named_episode(tmp_path / "ws", NAMED_EP, turns, [{"cluster": "S0", "character_id": 1}])
+    _voices(
+        work / "01-separate" / "vocals.wav",
+        [(a, b, f, n) for (a, b, _, n), f in zip(turns, hz, strict=True)],
+        seconds=120.0,
+    )
+    return reg, ids, Workspace(tmp_path / "ws")
+
+
+def _refs_class(ws, store: CardStore, card: str) -> str:
+    from fukikae.pitch import band_seconds, cached_track
+
+    origins = [r.origin or {} for r in store.get(card).voice.references]
+    spans = [(o["start"], o["end"]) for o in origins]
+    secs = band_seconds(
+        cached_track(ws.root, ws.work_dir(NAMED_EP) / "01-separate" / "vocals.wav", spans),
+        (165.0, 200.0),
+    )
+    return max(("m", "f", "u"), key=lambda g: secs[g])
+
+
+def test_gender_mismatches_name_cards_whose_references_are_the_other_class(tmp_path: Path):
+    from fukikae.cards.auto import gender_mismatches
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    assert gender_mismatches(ws, reg, store, "en") == {}  # no operator gender: no reason
+    reg.set_character_gender(1, "f")
+    assert gender_mismatches(ws, reg, store, "en") == {}  # the references agree
+    reg.set_character_gender(1, "m")
+    (mm,) = gender_mismatches(ws, reg, store, "en").values()
+    assert (mm.card_id, mm.operator, mm.refs) == (old, "m", "f")
+    reg.set_character_gender(1, "m", by="cast")  # a cast prior is not the operator's call
+    assert gender_mismatches(ws, reg, store, "en") == {}
+    reg.close()
+
+
+def test_operator_gender_repicks_an_auto_clone_with_other_class_references(tmp_path: Path):
+    from fukikae.cards.auto import GENDER_NOTE, gender_mismatches
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    assert _refs_class(ws, store, old) == "f"
+    reg.set_character_gender(1, "m")
+    flags: list[str] = []
+    (line,) = ensure_assignments(
+        reg, store, CFG, {1: [(0.0, 86.0)]}, cloning=_cloning_ws(ws),
+        genders=gender_mismatches(ws, reg, store, "en"), flags=flags,
+    )  # fmt: skip
+    a = reg.card_for(1, "en")
+    assert a is not None and a.card_id != old and a.by == "auto" and not a.locked
+    assert (a.note or "").startswith(GENDER_NOTE) and line.startswith(f"character 1: {GENDER_NOTE}")
+    assert _refs_class(ws, store, a.card_id or "") == "m"
+    assert [h.card_id for h in reg.card_history(1, "en")] == [old, a.card_id]  # CD1
+    assert flags == []
+    # the next run has nothing to do
+    assert gender_mismatches(ws, reg, store, "en") == {}
+    reg.close()
+
+
+@pytest.mark.parametrize("by", ["assign", "import:Pack", "auto-locked", "studio"])
+def test_operator_gender_only_flags_a_locked_card(tmp_path: Path, by: str):
+    from fukikae.cards.auto import gender_mismatches
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    locked = by in ("auto-locked", "studio")
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)],
+                      by="auto" if by == "auto-locked" else by, locked=locked)  # fmt: skip
+    reg.set_character_gender(1, "m")
+    genders = gender_mismatches(ws, reg, store, "en")
+    assert list(genders) == [1]
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 86.0)]}, cloning=_cloning_ws(ws),
+                               genders=genders, flags=flags)  # fmt: skip
+    assert lines == [] and reg.card_for(1, "en").card_id == old  # type: ignore[union-attr]
+    assert len(reg.card_history(1, "en")) == 1
+    (flag,) = flags
+    assert "operator gender m" in flag and "references are f" in flag
+    assert "voices clone" in flag
+    reg.close()
+
+
+def test_operator_gender_sets_the_register_of_the_reference_gates(tmp_path: Path):
+    """The estimate reads a near-even bimodal register (no pitch gate); the operator's
+    gender picks which part is the character's, so the other part's turns are refused."""
+    from fukikae.cards.auto import character_candidates, impure_cards
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    assert impure_cards(ws, reg, store, "en") == {}
+    assert len(character_candidates(ws, [NAMED_EP], 1)[NAMED_EP]) == 7
+    reg.set_character_gender(1, "m")
+    found = impure_cards(ws, reg, store, "en")
+    assert list(found) == [1] and found[1].gates == "off-register"
+    got = character_candidates(ws, [NAMED_EP], 1, gender="m")[NAMED_EP]
+    assert sorted(p.start for p in got) == [60.0, 70.0, 80.0]
+    reg.close()
+
+
+# Character 1 narrates: three loud turns in one scene, and a quieter one far later.
+NARRATION_TURNS = [
+    (0.0, 6.0, "S0", 0.01), (10.0, 16.0, "S0", 0.01), (20.0, 26.0, "S0", 0.01),
+    (90.0, 96.0, "S0", 0.06),
+]  # fmt: skip
+
+
+def test_narrator_references_may_share_a_scene(tmp_path: Path):
+    reg, _, ws = _ws_mixed(tmp_path, NARRATION_TURNS, [130.0] * 4)
+    picks = _cloning_ws(ws).references(1).picks
+    assert picks is not None and 90.0 in {p.start for p in picks}  # one clip per scene
+    reg.set_character_kind(1, "narrator")
+    picks = _cloning_ws(ws).references(1).picks
+    assert picks is not None and sorted(p.start for p in picks) == [0.0, 10.0, 20.0]
+    reg.close()
+
+
+# -- Task 13 review fixes: operator gender beats name confirmation ---------------------------
+
+NAMED_MIXED = [(a, b, "S0~natsu", n) for a, b, _, n in MIXED_TURNS]
+NATSU_CLUSTER = [{"cluster": "S0~natsu", "character_id": 1, "name": "natsu", "source": "name"}]
+
+
+# confidently f and m (a full CONFIDENCE_ST past each band edge): the class-only gate on
+# name-confirmed turns refuses only those (240 Hz is f, but not confidently)
+NAMED_MIXED_HZ = [260.0, 260.0, 260.0, 260.0, 125.0, 125.0, 125.0]
+
+
+def _ws_named_mixed(tmp_path: Path, hz=NAMED_MIXED_HZ):
+    """Character 1 (Natsu) in a names-used episode: every turn name-confirmed, the turns at
+    ``hz`` (by default four at 260 Hz and three at 125 Hz, near even)."""
+    from fukikae.workspace import Workspace
+    from tests.cards.test_select import _voices
+
+    reg, ids = _registry(tmp_path, 1)
+    reg.name_character(1, "Natsu", "natsu", "en")
+    work = _named_episode(
+        tmp_path / "ws", NAMED_EP, NAMED_MIXED, NATSU_CLUSTER,
+        names=[(a, b, "natsu", False) for a, b, _, _ in NAMED_MIXED],
+    )  # fmt: skip
+    _voices(
+        work / "01-separate" / "vocals.wav",
+        [(a, b, f, n) for (a, b, _, n), f in zip(NAMED_MIXED, hz, strict=True)],
+        seconds=120.0,
+    )
+    return reg, ids, Workspace(tmp_path / "ws")
+
+
+def test_operator_gender_beats_name_confirmation(tmp_path: Path):
+    """Names vouch for identity, not register: without an operator gender the confirmed turns
+    stay ungated; with one, the register gate runs on them with the operator's class (no split
+    flag), and an automatic card cloned from confirmed f turns is re-picked in m."""
+    from fukikae.cards.auto import (
+        GENDER_NOTE,
+        character_candidates,
+        gender_mismatches,
+        impure_cards,
+    )
+
+    reg, _, ws = _ws_named_mixed(tmp_path)
+    store = CardStore(ws.root)
+    assert len(character_candidates(ws, [NAMED_EP], 1)[NAMED_EP]) == 7  # names vouch
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    assert impure_cards(ws, reg, store, "en") == {}
+    reg.set_character_gender(1, "m")
+    gated: dict = {}
+    got = character_candidates(ws, [NAMED_EP], 1, gated=gated, gender="m")[NAMED_EP]
+    assert sorted(p.start for p in got) == [60.0, 70.0, 80.0]
+    assert not gated[NAMED_EP].split  # names vouch for identity: no split flag
+    impure = impure_cards(ws, reg, store, "en")
+    assert list(impure) == [1] and impure[1].gates == "off-register"
+    flags: list[str] = []
+    (line,) = ensure_assignments(
+        reg, store, CFG, {1: [(0.0, 86.0)]}, cloning=_cloning_ws(ws), impure=impure,
+        genders=gender_mismatches(ws, reg, store, "en"), flags=flags,
+    )  # fmt: skip
+    a = reg.card_for(1, "en")
+    assert a is not None and a.card_id != old and a.by == "auto"
+    assert GENDER_NOTE in (a.note or "") and GENDER_NOTE in line
+    assert _refs_class(ws, store, a.card_id or "") == "m"
+    assert flags == []
+    reg.close()
+
+
+def test_operator_gender_with_no_gate_passing_pick_keeps_and_flags(tmp_path: Path):
+    """Every confirmed turn is f and the operator says m: no reference in m passes the gates,
+    so the automatic card is kept and flagged (never a stock voice, never an f re-pick)."""
+    from fukikae.cards.auto import gender_mismatches
+
+    reg, _, ws = _ws_named_mixed(tmp_path, hz=[260.0] * 7)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    reg.set_character_gender(1, "m")
+    genders = gender_mismatches(ws, reg, store, "en")
+    assert list(genders) == [1]
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 86.0)]}, cloning=_cloning_ws(ws),
+                               genders=genders, flags=flags)  # fmt: skip
+    a = reg.card_for(1, "en")
+    assert lines == [] and a is not None and a.card_id == old
+    assert len(reg.card_history(1, "en")) == 1
+    assert store.get(old).voice.source == "clone"
+    (flag,) = flags
+    assert "operator's register passes the gates" in flag and "operator gender m" in flag
+    reg.close()
+
+
+def test_a_gender_repick_that_picks_the_same_card_keeps_the_flag(tmp_path: Path, vocals: Path):
+    from fukikae.cards.auto import GenderMismatch
+
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    cloning = _cloning({a: [(0.0, 5.0, None), (6.0, 11.0, None)]}, vocals)
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 11.0)]}, cloning=cloning)
+    card = reg.card_for(a, "en")
+    assert card is not None and card.card_id is not None
+    reg.set_character_gender(a, "m")
+    flags: list[str] = []
+    lines = ensure_assignments(
+        reg, store, CFG, {a: [(0.0, 11.0)]}, cloning=cloning,
+        genders={a: GenderMismatch(card.card_id, "m", "f")}, flags=flags,
+    )  # fmt: skip
+    assert lines == [] and reg.card_for(a, "en").card_id == card.card_id  # type: ignore[union-attr]
+    assert len(reg.card_history(a, "en")) == 1
+    (flag,) = flags
+    assert "pick it again" in flag and "operator gender m" in flag
+    reg.close()
+
+
+def test_a_stale_repick_with_no_gated_pick_is_not_noted_as_a_gender_repick(
+    tmp_path: Path, vocals: Path
+):
+    """M3: the stale re-pick goes ahead on thin picks (ungated), so its note doesn't claim the
+    operator's gender was met; the gender mismatch is flagged alongside it."""
+    from fukikae.cards.auto import GENDER_NOTE, REPICK_NOTE, GenderMismatch
+
+    reg, (a,) = _registry(tmp_path, 1)
+    store = CardStore(tmp_path / "ws")
+    first = _cloning({a: [(0.0, 5.0, None), (6.0, 11.0, None)]}, vocals)
+    ensure_assignments(reg, store, CFG, {a: [(0.0, 11.0)]}, cloning=first)
+    old = reg.card_for(a, "en").card_id  # type: ignore[union-attr]
+    assert old is not None
+    stale = {a: [{"episode": "S01E12", "start": 6.0, "end": 11.0, "names": ["wendy"]}]}
+    flags: list[str] = []
+    (line,) = ensure_assignments(
+        reg, store, CFG, {a: [(0.0, 11.0)]}, cloning=_cloning({a: [(0.0, 2.0, None)]}, vocals),
+        stale=stale, genders={a: GenderMismatch(old, "m", "f")}, flags=flags,
+    )  # fmt: skip
+    got = reg.card_for(a, "en")
+    assert got is not None and got.card_id != old
+    assert REPICK_NOTE in (got.note or "") and GENDER_NOTE not in (got.note or "")
+    assert GENDER_NOTE not in line
+    assert any("operator's register" in f and "operator gender m" in f for f in flags), flags
+    reg.close()
+
+
+def _clip_card(reg: Registry, store: CardStore, cid: int, hz: float, origin: dict) -> str:
+    from fukikae.cards.card import Card, Reference, Voice
+
+    clip = store.root / "tmp" / f"clip-{hz:g}.wav"
+    clip.parent.mkdir(parents=True, exist_ok=True)
+    write_wav(clip, harmonic(hz, 3.0))
+    ref = Reference(clip=store.add_sidecar(clip, "clip"), transcript="x", language="ja",
+                    origin=origin)  # fmt: skip
+    card = Card(target_language="en", voice=Voice(backend="clonefake", model_revision="rev-9",
+                source="clone", seed=1234, references=(ref,)))  # fmt: skip
+    new = store.put(card)
+    reg.assign_card(cid, "en", new, by="auto", locked=False)
+    return new
+
+
+def test_gender_mismatches_measure_the_clips_when_no_origin_vocals_exist(
+    tmp_path: Path, vocals: Path
+):
+    """M2: a card whose references have no episode vocals here is measured on its own clips,
+    as eval does; one whose clips can't be read either is flagged, never skipped silently."""
+    from fukikae.cards.auto import gender_mismatches
+    from fukikae.workspace import Workspace
+
+    reg, (a,) = _registry(tmp_path, 1)
+    ws = Workspace(tmp_path / "ws")
+    store = CardStore(ws.root)
+    card = _clip_card(reg, store, a, 240.0, {"episode": "S09E99", "start": 0.0, "end": 3.0})
+    reg.set_character_gender(a, "f")
+    assert gender_mismatches(ws, reg, store, "en") == {}
+    reg.set_character_gender(a, "m")
+    (mm,) = gender_mismatches(ws, reg, store, "en").values()
+    assert (mm.card_id, mm.refs) == (card, "f")
+    (ref,) = store.get(card).voice.references
+    store.sidecar_path(ref.clip).unlink()
+    (mm,) = gender_mismatches(ws, reg, store, "en").values()
+    assert (mm.card_id, mm.refs) == (card, None)
+    flags: list[str] = []
+    lines = ensure_assignments(
+        reg, store, CFG, {a: [(0.0, 11.0)]},
+        cloning=_cloning({a: [(0.0, 5.0, None), (6.0, 11.0, None)]}, vocals),
+        genders={a: mm}, flags=flags,
+    )  # fmt: skip
+    assert lines == [] and reg.card_for(a, "en").card_id == card  # type: ignore[union-attr]
+    (flag,) = flags
+    assert "not measurable" in flag and "operator gender m" in flag
+    reg.close()
+
+
+def test_card_status_lines_name_a_gender_mismatch_once(tmp_path: Path, monkeypatch):
+    """M1: an automatic card cloned from f turns of an operator-m character is impure and a
+    gender mismatch: one line naming both, and the re-pick the next tts run makes."""
+    from fukikae.cards.auto import card_status_lines
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    reg.set_character_gender(1, "m")
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    (line,) = card_status_lines(ws, reg, store, [1], "en")
+    assert line.startswith(f"character 1's card {old} (auto)")
+    assert "fail the reference gates" in line and "operator gender m" in line
+    assert line.endswith("the next tts run re-picks it (2 clips, 12.0 s)")
+    reg.lock_card(1, "en", True)
+    (line,) = card_status_lines(ws, reg, store, [1], "en")
+    assert "operator gender m" in line and "kept" in line and "voices clone" in line
+    reg.close()
+
+
+def test_card_status_lines_give_a_gender_only_mismatch_its_own_line(tmp_path: Path, monkeypatch):
+    from fukikae.cards.auto import GENDER_FIX, card_status_lines
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    reg.set_character_gender(1, "m")
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    monkeypatch.setattr("fukikae.cards.auto.impure_cards", lambda *_a, **_k: {})
+    (line,) = card_status_lines(ws, reg, store, [1], "en")
+    assert line == (
+        f"character 1's card {old} (auto) has references in f, against its operator gender m; "
+        "the next tts run re-picks it (2 clips, 12.0 s)"
+    )
+    reg.lock_card(1, "en", True)
+    (line,) = card_status_lines(ws, reg, store, [1], "en")
+    assert line == (
+        f"character 1's card {old} (auto, locked) has references in f, against its operator "
+        f"gender m; kept: {GENDER_FIX}"
+    )
+    reg.close()
+
+
+def test_impure_lines_search_with_the_operator_gender(tmp_path: Path, monkeypatch):
+    """M1: every turn is f and the operator says m; the status line must not promise a re-pick
+    an ungated search would find."""
+    from fukikae.cards.auto import impure_lines
+
+    reg, _, ws = _ws_mixed(tmp_path, hz=[240.0] * 7)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 6.0), (NAMED_EP, 8.0, 14.0)])
+    reg.set_character_gender(1, "m")
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    (line,) = impure_lines(ws, reg, store, [1], "en")
+    assert "no gate-passing reference pick exists" in line
+    reg.close()
+
+
+def test_a_split_gated_by_the_operator_says_so(tmp_path: Path):
+    from fukikae.cards.auto import character_candidates
+    from fukikae.cards.select import SPLIT_OPERATOR_NOTE, reference_report
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    gated: dict = {}
+    character_candidates(ws, [NAMED_EP], 1, gated=gated, gender="m")
+    assert gated[NAMED_EP].split and gated[NAMED_EP].operator
+    assert SPLIT_OPERATOR_NOTE in reference_report([], gated[NAMED_EP])
+    assert "operator" in SPLIT_OPERATOR_NOTE
+    reg.close()
+
+
+# -- Task 13 second review round: class-only gate on name-confirmed turns --------------------
+
+# Erza-like (FT E13): shouted turns above 250 Hz make the estimate's register f at ~270 Hz;
+# her calm alto turns sit at 150 and 175 Hz, and one confirmed turn is clearly m (120 Hz)
+ERZA_HZ = [270.0, 270.0, 270.0, 270.0, 150.0, 175.0, 120.0]
+
+
+def test_name_confirmed_turns_gate_on_the_operator_class_only(tmp_path: Path):
+    """The controller's ruling: for name-confirmed turns of a character with an operator
+    gender, the register gate reads the class only, never the estimate's median, so it keeps
+    the calm alto turns (in the m band but not confidently, and in the unknown band) and still
+    refuses a turn confidently in the other class. The acoustic tier keeps the median."""
+    from fukikae.cards.auto import character_candidates
+
+    reg, _, ws = _ws_named_mixed(tmp_path, hz=ERZA_HZ)
+    reg.set_character_gender(1, "f")
+    got = character_candidates(ws, [NAMED_EP], 1, gender="f")[NAMED_EP]
+    assert sorted(p.start for p in got) == [0.0, 8.0, 16.0, 24.0, 60.0, 70.0]
+    acoustic = character_candidates(ws, [NAMED_EP], 1, acoustic=True, gender="f")[NAMED_EP]
+    assert sorted(p.start for p in acoustic) == [0.0, 8.0, 16.0, 24.0]
+    reg.close()
+
+
+def test_impure_cards_gate_confirmed_references_on_the_operator_class_only(tmp_path: Path):
+    from fukikae.cards.auto import impure_cards
+
+    reg, _, ws = _ws_named_mixed(tmp_path, hz=ERZA_HZ)
+    store = CardStore(ws.root)
+    reg.set_character_gender(1, "f")
+    _auto_clone(reg, store, 1, [(NAMED_EP, 60.0, 66.0), (NAMED_EP, 70.0, 76.0)])
+    assert impure_cards(ws, reg, store, "en") == {}
+    _auto_clone(reg, store, 1, [(NAMED_EP, 70.0, 76.0), (NAMED_EP, 80.0, 86.0)])
+    found = impure_cards(ws, reg, store, "en")
+    assert list(found) == [1] and found[1].gates == "off-register"
+    reg.close()
+
+
+def test_thin_picks_the_operator_register_forced_are_flagged(tmp_path: Path):
+    """I-A: every confirmed turn is clearly m and the operator says f, so the register refuses
+    every gated candidate and a new card falls to the thin tier: flagged on this run as the
+    operator's doing, and its note doesn't call name-confirmed references unconfirmed."""
+    reg, _, ws = _ws_named_mixed(tmp_path, hz=[120.0] * 7)
+    store = CardStore(ws.root)
+    reg.set_character_gender(1, "f")
+    flags: list[str] = []
+    (line,) = ensure_assignments(
+        reg, store, CFG, {1: [(0.0, 86.0)]}, cloning=_cloning_ws(ws), flags=flags
+    )
+    assert "thin reference" in line and "not name-confirmed" not in line
+    (flag,) = flags
+    assert "thin-reference clone" in flag
+    assert "operator's register" in flag and "operator gender f" in flag
+    assert "refused 7" in flag
+    reg.close()
+
+
+def test_thin_picks_without_an_operator_refusal_are_not_blamed_on_it(tmp_path: Path):
+    reg, _, ws = _ws_named_mixed(tmp_path, hz=[120.0] * 7)
+    store = CardStore(ws.root)
+    flags: list[str] = []
+    ensure_assignments(reg, store, CFG, {1: [(0.0, 86.0)]}, cloning=_cloning_ws(ws), flags=flags)
+    assert not any("operator" in f for f in flags), flags
+    reg.close()
+
+
+def test_card_status_lines_promise_no_repick_for_an_unmeasurable_mismatch(
+    tmp_path: Path, monkeypatch
+):
+    """M-A: a below-floor card whose gender mismatch can't be measured is flagged, never
+    re-picked for it, so gated picks that don't beat the card's clips promise no re-pick."""
+    from fukikae.cards.auto import CharacterRefs, GenderMismatch, Shortfall, card_status_lines
+    from fukikae.cards.select import RefPick
+
+    reg, _, ws = _ws_mixed(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 0.0, 5.0), (NAMED_EP, 8.0, 12.0)])
+    reg.set_character_gender(1, "m")
+    found = CharacterRefs(
+        8.0, [RefPick(0.0, 4.0, "x", 20.0), RefPick(8.0, 12.0, "x", 20.0)], NAMED_EP,
+        ws.root, "ja", True, tier="short",
+    )  # fmt: skip
+    monkeypatch.setattr("fukikae.cards.auto.repick_blocker", lambda _cfg: None)
+    monkeypatch.setattr("fukikae.cards.auto.impure_cards", lambda *_a, **_k: {})
+    monkeypatch.setattr("fukikae.cards.auto.stale_cards", lambda *_a, **_k: {})
+    sf = Shortfall(old, (5.0, 4.0))
+    monkeypatch.setattr(
+        "fukikae.cards.auto.below_floor",
+        lambda _r, _s, chars, _l: {1: sf} if 1 in list(chars) else {},
+    )
+    monkeypatch.setattr(
+        "fukikae.cards.auto.gender_mismatches",
+        lambda *_a, **_k: {1: GenderMismatch(old, "m", None)},
+    )
+    monkeypatch.setattr("fukikae.cards.auto._search", lambda *_a, **_k: found)
+    (line,) = card_status_lines(ws, reg, store, [1], "en")
+    assert "can't be measured" in line and "below the clone floor" in line
+    assert "re-picks" not in line and "no better reference pick exists" in line
+    reg.close()
+
+
+# ---- a pitch split: the keeper's card from the other part's turns (Task 15 re-review) ----
+
+SPLIT_TURNS = [
+    (0.0, 5.0, "S0~voice-m", 0.02),
+    (10.0, 15.0, "S0~voice-m", 0.02),
+    (20.0, 25.0, "S0~voice-f", 0.001),  # the other part: loudest, never the keeper's now
+    (30.0, 35.0, "S0~voice-f", 0.02),
+    (50.0, 55.0, "S0~voice-m", 0.03),
+]
+SPLIT_CLUSTERS = [
+    {"cluster": "S0~voice-m", "character_id": 1, "split": "kept"},
+    {"cluster": "S0~voice-f", "character_id": 2, "split": "new"},
+]
+
+
+def _ws_split(tmp_path: Path) -> tuple[Registry, Any]:
+    from fukikae.workspace import Workspace
+
+    reg, _ = _registry(tmp_path, 3)
+    _named_episode(tmp_path / "ws", NAMED_EP, SPLIT_TURNS, SPLIT_CLUSTERS)
+    return reg, Workspace(tmp_path / "ws")
+
+
+def test_the_keepers_auto_card_from_the_other_parts_turns_is_repicked(tmp_path: Path):
+    from fukikae.cards.auto import stale_cards
+
+    reg, ws = _ws_split(tmp_path)
+    store = CardStore(ws.root)
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 20.0, 25.0), (NAMED_EP, 1.0, 4.0)])
+    stale = stale_cards(ws, reg, store, [1, 2], "en")
+    assert [(r["start"], r["split"]) for r in stale[1]] == [(20.0, "S0~voice-f")]
+    assert 2 not in stale
+    ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]},
+                       cloning=_cloning_ws(ws), stale=stale)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id != old and cur.by == "auto"
+    assert "pitch split" in (cur.note or "")
+    origins = [r.origin for r in store.get(cur.card_id or "").voice.references]
+    assert all(_inside_o(o, [(0, 5), (10, 15), (50, 55)]) for o in origins)
+    assert stale_cards(ws, reg, store, [1], "en") == {}
+    reg.close()
+
+
+def test_a_reference_under_10_percent_in_the_other_part_is_not_stale(tmp_path: Path):
+    from fukikae.cards.auto import stale_cards
+
+    reg, ws = _ws_split(tmp_path)
+    store = CardStore(ws.root)
+    _auto_clone(reg, store, 1, [(NAMED_EP, 15.0, 20.4)])  # 0.4 of 5.4 s: 7%
+    assert stale_cards(ws, reg, store, [1], "en") == {}
+    reg.close()
+
+
+@pytest.mark.parametrize("by", ["assign", "import:Pack", "auto-locked"])
+def test_a_curated_keeper_card_from_the_other_part_is_only_flagged(tmp_path, by):
+    from fukikae.cards.auto import stale_cards
+
+    reg, ws = _ws_split(tmp_path)
+    store = CardStore(ws.root)
+    locked = by == "auto-locked"
+    old = _auto_clone(reg, store, 1, [(NAMED_EP, 30.0, 35.0)],
+                      by="auto" if locked else by, locked=locked)  # fmt: skip
+    stale = stale_cards(ws, reg, store, [1], "en")
+    flags: list[str] = []
+    lines = ensure_assignments(reg, store, CFG, {1: [(0.0, 55.0)]},
+                               cloning=_cloning_ws(ws), stale=stale, flags=flags)  # fmt: skip
+    cur = reg.card_for(1, "en")
+    assert cur is not None and cur.card_id == old and lines == []
+    (line,) = flags
+    assert "pitch split" in line and "S0~voice-f" in line and "voices clone" in line
+    reg.close()

@@ -390,6 +390,27 @@ def _before_stock(before: Path, store: CardStore) -> set[str]:
     return out
 
 
+def _operator_genders(root: Path, scratch: Path) -> dict[int, Any]:
+    """`cards.auto.operator_genders` over a copy of the workspace's registry made under
+    ``scratch`` (the registry opens read-write, so the workspace's own is never opened)."""
+    import shutil
+    import tempfile
+
+    from fukikae.cards.auto import operator_genders
+    from fukikae.registry.store import Registry
+    from fukikae.workspace import Workspace
+
+    path = Workspace(root).registry_path
+    if not path.exists():
+        return {}
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=scratch) as tmp:
+        for f in path.parent.glob(path.name + "*"):
+            shutil.copy2(f, Path(tmp) / f.name)
+        with Registry(Path(tmp) / path.name) as reg:
+            return dict(operator_genders(reg))
+
+
 def _gate_owner(root: Path, scratch: Path) -> Callable[[str], int | None]:
     """`cards.auto.key_owner` over a copy of the workspace's registry made under ``scratch``
     on first use (the registry opens read-write, so the workspace's own is never opened)."""
@@ -493,7 +514,7 @@ def measure(
         confirmed_labels,
         reference_gates,
     )
-    from fukikae.cards.select import reference_gating, speaker_register
+    from fukikae.cards.select import operator_register, reference_gating, speaker_register
     from fukikae.stages import tts
     from fukikae.stages.mix import mix_settings
     from fukikae.workspace import Workspace
@@ -529,7 +550,10 @@ def measure(
                 cards[cid] = None
         return cards[cid]
 
-    gate = tts.gender_gate(work, cues, cache)
+    # the operator's genders as the pipeline reads them, from a scratch copy of the registry,
+    # read once: the line gate and the reference purity register both take them
+    operator = _operator_genders(root, pitch.cache_dir(cache) / "registry")
+    gate = tts.gender_gate(work, cues, cache, operator=operator)
 
     # -- per cue ---------------------------------------------------------------------------
     renders: dict[str, Path] = {}
@@ -637,6 +661,8 @@ def measure(
         cid = int(label.split()[1]) if label.startswith("character ") else None
         own = char_spans.get(cid, []) if cid is not None else spans
         register = speaker_register(vocals, own, bands, cache) if own and vocals.exists() else None
+        if register is not None and cid is not None:  # the operator's call, as impure_cards
+            register = operator_register(register, operator.get(cid))
         confirmed: list[tuple[float, float]] = []
         if cid is not None and names is not None and asg is not None:
             labels = confirmed_labels(asg, cid, owner)
@@ -679,6 +705,7 @@ def measure(
                     vocals, (float(o["start"]), float(o["end"])), own_spans=own,
                     confirmed_spans=confirmed, register=register, song_like=song_mask,
                     song_spans=songs, bands=bands, pitch_root=cache,
+                    operator=operator.get(cid) if cid is not None else None,
                 )  # fmt: skip
                 gates = list(refused)
             loud = round(s.loud_voiced_fraction, 3)

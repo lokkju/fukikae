@@ -436,7 +436,7 @@ def even_bimodal(seconds: Mapping[str, float]) -> bool:
 _DIGESTS: dict[tuple[str, int, int], str] = {}
 
 
-def _file_digest(path: Path) -> str:
+def file_digest(path: Path) -> str:
     """sha256 of the file's bytes, memoized per process by (path, size, mtime)."""
     st = path.stat()
     memo = (str(path.resolve()), st.st_size, st.st_mtime_ns)
@@ -449,6 +449,9 @@ def _file_digest(path: Path) -> str:
             h.update(chunk)
     _DIGESTS[memo] = h.hexdigest()
     return _DIGESTS[memo]
+
+
+_file_digest = file_digest
 
 
 def cache_dir(root: Path) -> Path:

@@ -331,3 +331,50 @@ def test_run_episodes_shows_each_episode_and_thread_in_the_status(tmp_path):
     final = progress.read_status(root)
     assert final is not None and final["state"] == "finished"
     assert [e["position"] for e in final["episodes"]] == ["done", "done"]
+
+
+# --- gates (Task 21) ------------------------------------------------------------------------
+
+
+def test_a_gate_stops_before_its_stage_and_only_when_it_would_run(ep, cfg):
+    from fukikae.job import ReviewRequired
+
+    counts: dict = {}
+    calls: list[str] = []
+
+    def hold(e, _cfg):
+        calls.append(e.id)
+        return ["character 1: never reviewed"]
+
+    with pytest.raises(ReviewRequired) as got:
+        run_stages(ep, cfg, [FakeA(counts), FakeB(counts)], gates={"b": hold})
+    assert counts == {"a": 1}
+    assert (got.value.episode, got.value.stage, got.value.reasons) == (
+        "e1", "b", ["character 1: never reviewed"],
+    )  # fmt: skip
+    assert got.value.ran == ["a"]
+    assert run_stages(ep, cfg, [FakeA(counts), FakeB(counts)], gates={"b": lambda _e, _c: []}) == [
+        "b"
+    ]
+    # b is up to date now: its gate is not asked
+    calls.clear()
+    assert run_stages(ep, cfg, [FakeA(counts), FakeB(counts)], gates={"b": hold}) == []
+    assert calls == []
+
+
+def test_run_episodes_stops_only_the_gated_episode(tmp_path):
+    from fukikae.job import ReviewRequired
+
+    eps = _eps(tmp_path, 3)
+    cfg = make_cfg(eps[0].workspace_root, "x")
+    Head.started_e2 = threading.Event()
+    Head.started_e2.set()
+    counts: dict = {}
+    events: list[str] = []
+    stages = [Head(counts, events), Tail(counts, events)]
+    gates = {"a": lambda e, _c: ["held"] if e.id == "e2" else []}
+    results = run_episodes(eps, cfg, stages, tail=("b",), gates=gates)
+    assert isinstance(results["e2"].error, ReviewRequired)
+    assert results["e2"].ran == []
+    assert {e: results[e].ran for e in ("e1", "e3")} == {"e1": ["a", "b"], "e3": ["a", "b"]}
+    assert "tail e2" not in events

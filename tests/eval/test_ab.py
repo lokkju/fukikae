@@ -364,3 +364,31 @@ def test_tts_ab_reuses_the_stage_fitted_render(tmp_path):
     r = _Renderer().render(Candidate("kokoro"), job, None, ws, None, work=work)  # type: ignore[arg-type]
     assert r.renders_made == 0 and r.key == final and r.rate_factor == 1.15
     assert r.path == cache / f"{final}.wav" and r.seconds == 1.9
+
+
+def test_eval_ab_output_unchanged_after_the_move():
+    """The blind labelling moved to `fukikae.abpair` (R1: the studio is pipeline code and may
+    not import eval); eval tts-ab uses it, and its labels are the ones written before the
+    move."""
+    from fukikae import abpair
+
+    assert ab.blind_order is abpair.blind_order and ab.LABELS == abpair.LABELS
+    assert ab.blind_order(CANDS, seed=3, slot="cue01") == {
+        "A": "qwen3_tts", "B": "kokoro", "C": "cosyvoice3", "D": "indextts2",
+        "E": "qwen3_tts:xvector",
+    }  # fmt: skip
+    assert ab.blind_order(CANDS, seed=3, slot="scene01") == {
+        "A": "kokoro", "B": "qwen3_tts:xvector", "C": "cosyvoice3", "D": "indextts2",
+        "E": "qwen3_tts",
+    }  # fmt: skip
+
+
+def test_blind_pair_is_the_two_way_blind_order():
+    from fukikae import abpair
+
+    pair, key = abpair.blind_pair("v1", "v2", 99, slot="x")
+    assert key == abpair.blind_order(["v1", "v2"], seed=99, slot="x")
+    assert pair == (key["A"], key["B"])
+    assert abpair.blind_pair("v2", "v1", 99, slot="x") == (pair, key)  # order-free
+    with pytest.raises(ValueError, match="two different"):
+        abpair.blind_pair("v1", "v1", 99)

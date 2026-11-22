@@ -88,7 +88,8 @@ def test_gather_set_gates_lines_like_the_stage(tmp_path, monkeypatch):
     spec = ab.SetSpec(**{**spec.__dict__, "candidates": (ab.Candidate("fakeclone"),)})
     built: list[list[str]] = []
 
-    def gate(_work, cues, _root):
+    def gate(_work, cues, root, *, workspace=None):
+        assert workspace == root  # the operator genders come from the workspace itself
         built.append([c.id for c in cues])
         f = GenderEstimate("f", 1.0, 260.0, 1.0)
         return tts_stage.GenderGate({"c0001": f}, {"c0001": "m"})
@@ -115,7 +116,8 @@ def test_scene_gates_lines_like_the_stage(tmp_path, monkeypatch):
     )
     built: list[int] = []
 
-    def gate(_work, cues, _root):
+    def gate(_work, cues, root, *, workspace=None):
+        assert workspace == root  # the operator genders come from the workspace itself
         built.append(len(cues))
         f = GenderEstimate("f", 1.0, 260.0, 1.0)
         return tts_stage.GenderGate({"c0003": f}, {"c0003": "m"})
