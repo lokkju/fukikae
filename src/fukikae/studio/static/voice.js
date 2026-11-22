@@ -15,6 +15,9 @@ const CAND_PAGE = 200;
 
 const spanKey = (r) => `${r.episode}|${Number(r.start).toFixed(3)}|${Number(r.end).toFixed(3)}`;
 const span = (c) => ({ episode: c.episode, start: c.start, end: c.end });
+// An audition line as the API takes it (the grid's rows carry display fields beside it).
+const plainLine = (l) => (l.kind === "real" ? { kind: "real", episode: l.episode, cue_id: l.cue_id }
+  : { kind: "typed", text: l.text, emotion_from: l.emotion_from || null });
 export const lineKey = (l) =>
   l.kind === "real" ? `r|${l.episode}|${l.cue_id}` : `t|${l.text}|${l.emotion_from ? l.emotion_from.episode + "/" + l.emotion_from.cue_id : ""}`;
 
@@ -147,7 +150,6 @@ export function Voice({ doc, id, lang, gpu, refreshGpu, reloadSeason }) {
     if (!language) return;
     setBody(null); setSel(null);
     loadDraft();
-    call("/api/backends").then((b) => setBackends(b.backends), () => setBackends([]));
     call(`/api/characters/${id}/candidates?gated=1&limit=${CAND_PAGE}`).then(
       (b) => setCands({ list: b.candidates, total: b.total, eligible: b.eligible, err: null }),
       (e) => setCands({ list: [], total: 0, eligible: 0, err: e }));
@@ -156,6 +158,18 @@ export function Voice({ doc, id, lang, gpu, refreshGpu, reloadSeason }) {
       (e) => setLines({ list: [], total: 0, err: e }));
     setTyped(store.get(`typed:${id}.${language}`, []));
   }, [id, language]);
+
+  // the backends, asked again while the server's background check hasn't answered for one
+  useEffect(() => {
+    let live = true, timer = null, tries = 0;
+    const ask = () => call("/api/backends").then((b) => {
+      if (!live) return;
+      setBackends(b.backends);
+      if (b.backends.some((x) => !x.checked) && ++tries < 40) timer = setTimeout(ask, 3000);
+    }, () => live && setBackends([]));
+    ask();
+    return () => { live = false; clearTimeout(timer); };
+  }, []);
 
   // the working selection, backend and keys start from the latest version
   useEffect(() => {
@@ -200,7 +214,8 @@ export function Voice({ doc, id, lang, gpu, refreshGpu, reloadSeason }) {
     return () => clearInterval(t);
   }, [loadDraft]);
 
-  async function audition(v, line) {
+  async function audition(v, l) {
+    const line = plainLine(l);
     try {
       const b = await post("/api/auditions", { character: id, language, version: v.n, line });
       setJobs((x) => ({ ...x, [b.job.id]: { ...b.job, error: null } }));
@@ -406,7 +421,7 @@ export function Voice({ doc, id, lang, gpu, refreshGpu, reloadSeason }) {
               </div>`)}
               ${allLines.map((l) => html`
                 <div class=${cls("lc", cmpLine === lineKey(l) && "on")}>
-                  <label class="check"><input type="radio" name="cmpline" checked=${cmpLine === lineKey(l)} onChange=${() => setCmp((x) => ({ ...x, line: { kind: l.kind, ...(l.kind === "real" ? { episode: l.episode, cue_id: l.cue_id } : { text: l.text, emotion_from: null }) }, data: null }))} />
+                  <label class="check"><input type="radio" name="cmpline" checked=${cmpLine === lineKey(l)} onChange=${() => setCmp((x) => ({ ...x, line: plainLine(l), data: null }))} />
                   ${l.kind === "typed" ? html`<span class="dim">typed</span> ${l.text}` : html`<span class="mono small">${l.episode} ${l.cue_id}</span> ${l._l.text}`}</label>
                   ${l.kind === "real" && html`<div class="row small">${l._l.source_clip && html`<${Clip} clip=${l._l.source_clip} small=${true} label="the source line" />`}<span class="ja dim">${l._l.source_text}</span></div>`}
                   ${l.kind === "typed" && html`<button class="btn small" onClick=${() => { const t = typed.filter((x) => x !== l.text); setTyped(t); store.set(`typed:${id}.${language}`, t); }}>remove</button>`}
