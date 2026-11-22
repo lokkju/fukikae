@@ -13,6 +13,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import re
+import unicodedata
+from collections import Counter
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -38,6 +40,60 @@ LANGUAGE_NAMES = {
     "it": "Italian",
     "pt": "Portuguese",
 }
+
+
+# The scripts a target language is written in (#38). A letter of any other known script in a
+# rendering means the model answered in another language: Qwen3 slips into Chinese on runs of
+# Japanese lines. A language missing here is not checked.
+# Latin targets allow Greek too: names such as "μ's" are written in it.
+_LATIN = frozenset({"Latin", "Greek"})
+LANGUAGE_SCRIPTS: dict[str, frozenset[str]] = {
+    **dict.fromkeys(
+        ("en", "de", "es", "fr", "it", "pt", "nl", "sv", "da", "no", "fi", "pl", "cs", "tr",
+         "id", "vi"),
+        _LATIN,
+    ),
+    "ja": frozenset({"Han", "Kana", "Latin"}),
+    "zh": frozenset({"Han", "Latin"}),
+    "ko": frozenset({"Hangul", "Han", "Latin"}),
+    "ru": frozenset({"Cyrillic", "Latin"}),
+    "uk": frozenset({"Cyrillic", "Latin"}),
+}  # fmt: skip
+# Unicode name prefixes of the scripts the check knows; a letter of any other (an ordinal
+# indicator, a modifier letter) is never counted against a rendering.
+_SCRIPT_PREFIXES = (
+    ("CJK", "Han"), ("IDEOGRAPHIC", "Han"), ("HIRAGANA", "Kana"), ("KATAKANA", "Kana"),
+    ("HALFWIDTH KATAKANA", "Kana"), ("HANGUL", "Hangul"), ("HALFWIDTH HANGUL", "Hangul"),
+    ("LATIN", "Latin"), ("FULLWIDTH LATIN", "Latin"), ("CYRILLIC", "Cyrillic"),
+    ("GREEK", "Greek"), ("ARABIC", "Arabic"), ("HEBREW", "Hebrew"), ("THAI", "Thai"),
+    ("DEVANAGARI", "Devanagari"),
+)  # fmt: skip
+
+
+def _script(ch: str) -> str | None:
+    name = unicodedata.name(ch, "")
+    for prefix, script in _SCRIPT_PREFIXES:
+        if name.startswith(prefix):
+            return script
+    return None
+
+
+def script_problem(text: str, language: str) -> str | None:
+    """Why ``text`` is not written in ``language``'s scripts, or None when it is (or when the
+    language's scripts are unknown). One letter of another known script is enough: a stray
+    Han name in an English line is spoken as gibberish just the same."""
+    allowed = LANGUAGE_SCRIPTS.get(language)
+    if allowed is None:
+        return None
+    found = Counter(s for ch in text if ch.isalpha() and (s := _script(ch)) is not None)
+    foreign = sorted(s for s in found if s not in allowed)
+    if not foreign:
+        return None
+    n = sum(found[s] for s in foreign)
+    return (
+        f"{n} of {sum(found.values())} letter(s) in {', '.join(foreign)} script, "
+        f"not {_lang(language)}"
+    )
 
 
 class RequestCue(BaseModel):
@@ -68,6 +124,9 @@ class TranslateRequest(BaseModel):
     previous: list[tuple[str, str]]
     styles: dict[str, StyleNote]
     glossary: dict[str, str]
+    # The retry after an answer in the wrong language (#38): an insistent instruction, and
+    # greedy sampling on backends that take a temperature.
+    strict: bool = False
 
 
 class Rendering(BaseModel):
@@ -148,9 +207,20 @@ def _system(req: TranslateRequest) -> str:
             "same meaning as a natural spoken line of at most `budget` characters, in the "
             "speaker's voice."
         )
+    strict = []
+    if req.strict:
+        fields = "`text` and `literal`" if req.mode == "translate" else "`text`"
+        # condense mode's source is the target: never tell the model to avoid the target
+        others = ", ".join(dict.fromkeys(x for x in (src, "Chinese") if x != tgt))
+        strict = [
+            f"Write every {fields} only in {tgt}, in {tgt}'s own writing system: never in "
+            f"{others} or any other language, and spell names the way {tgt} speakers would. "
+            f"An answer with any word outside {tgt} is rejected."
+        ]
     return "\n\n".join(
         [
             task,
+            *strict,
             "When a cue contains the source side of a FIXED RENDERINGS entry, use its target "
             "side exactly. Follow each speaker's style notes for wording only.",
             "For a cue whose `marked` is true, also give `direction`: a short delivery tag of "

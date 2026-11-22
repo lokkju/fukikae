@@ -157,9 +157,27 @@ def test_cue_in_singing_span_is_skipped_as_song():
 def test_windows_break_on_gap_and_size():
     cues = [_cue(1, 0, 1), _cue(2, 1.5, 2), _cue(3, 5, 6), _cue(4, 6.1, 7)]
     assert [[c.id for c in w] for w in windows(cues)] == [["c0001", "c0002"], ["c0003", "c0004"]]
-    many = [_cue(i, i, i + 0.5) for i in range(1, 30)]
+    many = [_cue(i, i, i + 0.5, source_text=f"line {i}") for i in range(1, 60)]
     sizes = [len(w) for w in windows(many, max_cues=12)]
-    assert sizes == [12, 12, 5]
+    assert sum(sizes) == 59 and max(sizes) <= 12
+    assert all(s >= 4 for s in sizes[:-1])  # no tiny window but the last
+
+
+def _texts(ws: list[list[DubCue]]) -> list[tuple[str, ...]]:
+    return [tuple(c.source_text for c in w) for w in ws]
+
+
+def test_window_boundaries_survive_an_inserted_line():
+    """#41: boundaries come from each cue's own text, so one new line moves only the windows
+    around it, never every window after it (which would re-translate the rest)."""
+    texts = [f"line {i}" for i in range(80)]
+    before = _texts(windows([_cue(i, i, i + 0.5, source_text=t) for i, t in enumerate(texts)]))
+    texts.insert(5, "a new line")
+    after = _texts(windows([_cue(i, i, i + 0.5, source_text=t) for i, t in enumerate(texts)]))
+    changed = [w for w in after if w not in before]
+    assert len(before) >= 10
+    assert len(changed) <= 3 and any("a new line" in w for w in changed)
+    assert after[-(len(after) - 3) :] == before[-(len(after) - 3) :]  # all the rest unchanged
 
 
 def test_is_marked():

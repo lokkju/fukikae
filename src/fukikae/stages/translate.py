@@ -23,6 +23,22 @@ only that window (``error = "translate: backend: ..."``), and the stage goes on;
 windows in a row stop it. A prompt too large for the context is sent again without the
 previous lines, then in halves.
 
+A rendering with a letter outside the target language's scripts (``translation.
+script_problem``: Han or Kana in an English line, #38) sends its whole window once more as a
+strict request (an insistent instruction, no previous lines, greedy sampling); a line still in
+the wrong language gets ``error = "translate: wrong language: ..."`` and no ``text``, so tts
+never speaks it, and a window with a failed line is never the next window's context. An
+over-budget retry in the wrong language is ignored.
+
+Every validated answer is cached by request content (`fukikae.translate_cache`, #41), the
+wrong-language ones and their strict retries included, and the backend starts
+only on the first request the cache can't answer, so a rerun with unchanged inputs makes no
+request, starts no server and writes the same cues byte for byte; a changed line re-requests
+its own window, and the next one only if the changed window's rendering changed. Windows cut
+at points chosen by each cue's text (`cues.windows`), so one changed line doesn't shift the
+windows after it. ``[translate] cache = false`` reads no entry but still writes each answer
+(it is no key input), so one such run refreshes the entries, wrong-language ones included.
+
 ``[translate] source``: ``asr`` builds cues from the transcript; ``subs`` is the subtitle-first
 path: cues come from target-language subtitles (``media.find_target_subtitles``: ``[subs] file``,
 whose ``{episode}`` is replaced by the episode id, then ``[subs] track``, a sidecar, an embedded
@@ -43,12 +59,14 @@ subtitle path when subtitles are found, else the ASR path. Stage settings (``max
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
 import math
 import time
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -78,6 +96,7 @@ from fukikae.registry.store import Registry
 from fukikae.stages.language import LanguageResult
 from fukikae.subtitles import RULES, read_cues
 from fukikae.transcripts import transcript_path
+from fukikae.translate_cache import TranslationCache
 from fukikae.translation import (
     PromptTooLargeError,
     Rendering,
@@ -86,13 +105,14 @@ from fukikae.translation import (
     TranslateBackendError,
     TranslateFormatError,
     TranslateRequest,
+    script_problem,
 )
 from fukikae.workspace import Episode, Workspace
 
 log = logging.getLogger(__name__)
 _sleep = time.sleep
 
-STAGE_KEYS = ("max_speed", "source", "subs_condense", "subs_filter")
+STAGE_KEYS = ("max_speed", "source", "subs_condense", "subs_filter", "cache")
 SOURCES = ("auto", "asr", "subs")
 DEFAULT_MAX_SPEED = 1.25
 RETRY_BUDGET = 0.85
@@ -100,7 +120,25 @@ RETRY_BUDGET = 0.85
 # one bad window is marked and skipped, but a dead endpoint shouldn't mark a whole episode.
 MAX_BACKEND_FAILURES = 3
 # Bump when the prompt or the cue rules change what the stage writes for the same inputs.
-PROMPT_VERSION = 3
+# 4: greedy seeded sampling, the language check and its strict retry, text-chosen windows.
+PROMPT_VERSION = 4
+WRONG_LANGUAGE = "translate: wrong language: "
+# Backend options that change how a request is sent, never what comes back: not part of the
+# cache's fingerprint, so a longer timeout reuses every answer.
+CACHE_IGNORED_OPTIONS = frozenset({"timeout_s", "vram_mb", "gpu_index", "binary", "api_key_env"})
+
+
+class _LazyTranslator:
+    """The backend, started by ``start`` on the first request the cache can't answer."""
+
+    def __init__(self, start: Callable[[], Translator]) -> None:
+        self._start = start
+        self._backend: Translator | None = None
+
+    def translate(self, req: TranslateRequest) -> dict[str, Rendering]:
+        if self._backend is None:
+            self._backend = self._start()
+        return self._backend.translate(req)
 
 
 def backend_cps(name: str | None, language: str) -> float:
@@ -154,6 +192,7 @@ class TranslateStage:
         self.tags = tags
         self.cfg = cfg
         self._probes: dict[tuple[str, int, int], media.ProbeResult] = {}
+        self._cache = TranslationCache(None, {})
 
     # -- configuration -------------------------------------------------------------------
 
@@ -201,6 +240,7 @@ class TranslateStage:
             "source": source,
             "subs_condense": bool(stage.get("subs_condense", True)),
             "subs_filter": [r for r in RULES if r in rules],
+            "cache": bool(stage.get("cache", True)),
         }
         return BackendConfig(bc.backend, options), settings
 
@@ -551,28 +591,52 @@ class TranslateStage:
             # condense is English to shorter English: the glossary maps source-language terms
             mode, src, glossary = "condense", target, {}
         started = time.monotonic()
+        cache_dir = ep.workspace_root / ".fukikae" / "translate-cache"
+        self._cache = TranslationCache(
+            cache_dir,
+            {
+                "backend": bc.backend,
+                "options": {
+                    k: v for k, v in sorted(bc.options.items()) if k not in CACHE_IGNORED_OPTIONS
+                },
+                "identity": identity_key("translate", bc),
+                "prompt_version": PROMPT_VERSION,
+            },
+            read=settings["cache"],
+        )
         if todo:
-            options = {**bc.options, "gpu_index": cfg.gpu_device}
-            device = device_string(cfg)
-            backend = create("translate", BackendConfig(bc.backend, options), device)
-            # Only a managed server takes GPU memory here; an external endpoint takes none.
-            managed = getattr(backend, "mode", "managed") == "managed"
-            # Ruling CD15: a managed server holds the card's lock from before the VRAM check
-            # until it is stopped; the lock's scan names a llama-server left by a dead run.
-            with gpu_job(cfg.gpu_device, device if managed else "cpu", "translate llama-server"):
-                if device.startswith("cuda") and managed and backend.vram_mb > 0:
-                    wait_for_vram(
-                        cfg.gpu_device,
-                        backend.vram_mb,
-                        runctx.vram_timeout_s,
-                        query=free_mb,
-                        sleep=_sleep,
-                    )
-                try:
+            with contextlib.ExitStack() as stack:
+
+                def start() -> Translator:
+                    options = {**bc.options, "gpu_index": cfg.gpu_device}
+                    device = device_string(cfg)
+                    backend = create("translate", BackendConfig(bc.backend, options), device)
+                    # Only a managed server takes GPU memory; an external endpoint takes none.
+                    managed = getattr(backend, "mode", "managed") == "managed"
+                    # Ruling CD15: a managed server holds the card's lock from before the VRAM
+                    # check until it is stopped; the lock's scan names a llama-server left by
+                    # a dead run.
+                    stack.enter_context(
+                        gpu_job(cfg.gpu_device, device if managed else "cpu",
+                                "translate llama-server")
+                    )  # fmt: skip
+                    if device.startswith("cuda") and managed and backend.vram_mb > 0:
+                        wait_for_vram(
+                            cfg.gpu_device,
+                            backend.vram_mb,
+                            runctx.vram_timeout_s,
+                            query=free_mb,
+                            sleep=_sleep,
+                        )
+                    stack.callback(backend.unload)
                     backend.load()
+                    return cast(Translator, backend)
+
+                try:
                     self._translate_all(
-                        cast(Translator, backend), todo, styles, glossary, src, target, mode
-                    )
+                        cast(Translator, _LazyTranslator(start)),
+                        todo, styles, glossary, src, target, mode,
+                    )  # fmt: skip
                 except TranslateBackendError as e:
                     if not subs:
                         raise
@@ -582,8 +646,6 @@ class TranslateStage:
                     for c in todo:
                         if c.text is None or c.error is not None or c.text == c.source_text:
                             c.error = c.error or f"translate: backend: {e}"
-                finally:
-                    backend.unload()
         if subs:
             self._keep_subtitle_lines(todo)
         for c in spoken:
@@ -592,6 +654,14 @@ class TranslateStage:
                 c.over_budget = c.overrun > 0
         over = sum(1 for c in spoken if c.over_budget)
         failed = sum(1 for c in spoken if c.error is not None)
+        wrong = sum(1 for c in spoken if (c.error or "").startswith(WRONG_LANGUAGE))
+        cache = self._cache
+        if wrong:
+            log.warning(
+                "translate %s: %d line(s) still in the wrong language; their answers are "
+                "cached in %s, and one run with [translate] cache = false asks again and "
+                "refreshes them", ep.id, wrong, cache_dir,
+            )  # fmt: skip
         if subs:
             condensed = sum(1 for c in todo if c.text != c.source_text)
             log.info(
@@ -602,9 +672,10 @@ class TranslateStage:
             )  # fmt: skip
         else:
             log.info(
-                "translate %s: %d cue(s), %d skipped, %d over budget, %d failed, %.0f s",
-                ep.id, len(cues), len(cues) - len(spoken), over, failed,
-                time.monotonic() - started,
+                "translate %s: %d cue(s), %d skipped, %d over budget, %d failed (%d wrong "
+                "language), %d of %d request(s) from the cache, %.0f s",
+                ep.id, len(cues), len(cues) - len(spoken), over, failed, wrong, cache.hits,
+                cache.hits + cache.misses, time.monotonic() - started,
             )  # fmt: skip
         out = ep.work / "06-translate" / f"cues.{target}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -629,6 +700,7 @@ class TranslateStage:
         target: str,
         budgets: dict[str, int] | None = None,
         mode: str = "translate",
+        strict: bool = False,
     ) -> TranslateRequest:
         speakers = {c.speaker: styles[c.character_id] for c in window if c.character_id in styles}
         return TranslateRequest(
@@ -648,16 +720,63 @@ class TranslateStage:
             previous=previous,
             styles=speakers,
             glossary={k: v for k, v in glossary.items() if any(k in c.source_text for c in window)},
+            strict=strict,
         )
 
-    @staticmethod
-    def _ask(backend: Translator, req: TranslateRequest) -> dict[str, Rendering]:
+    def _call(self, backend: Translator, req: TranslateRequest) -> dict[str, Rendering]:
+        """The cached answer to ``req``, else the backend's, cached. An answer in the wrong
+        language is cached too: sampling is greedy, so asking again on the next run would get
+        it again, and its strict retry is cached beside it, so an unchanged rerun reaches the
+        same outcome with no request at all."""
+        got = self._cache.get(req)
+        if got is not None:
+            return got
+        got = backend.translate(req)
+        self._cache.put(req, got)
+        return got
+
+    def _ask(self, backend: Translator, req: TranslateRequest) -> dict[str, Rendering]:
         """One retry on a format or backend error; the second error propagates."""
         try:
-            return backend.translate(req)
+            return self._call(backend, req)
         except (TranslateFormatError, TranslateBackendError) as e:
             log.warning("translate: %s; asking once more", e)
-            return backend.translate(req)
+            return self._call(backend, req)
+
+    def _strict_retry(
+        self,
+        backend: Translator,
+        cues: list[DubCue],
+        got: dict[str, Rendering],
+        styles: dict[int, StyleNote],
+        glossary: dict[str, str],
+        src: str,
+        target: str,
+        mode: str,
+    ) -> dict[str, Rendering | str]:
+        """Each cue's rendering, or why it is in the wrong language after one strict retry of
+        the whole window (#38). Lines the first answer got right keep that answer."""
+        bad = {c.id: p for c in cues if (p := script_problem(got[c.id].text, target))}
+        if not bad:
+            return dict(got)
+        log.warning("translate: %d of %d line(s) (%s) came back in the wrong language (%s); "
+                    "asking again, strictly", len(bad), len(cues),
+                    ", ".join(bad), next(iter(bad.values())))  # fmt: skip
+        req = self._request(cues, styles, glossary, [], src, target, mode=mode, strict=True)
+        try:
+            again = self._ask(backend, req)
+        except (TranslateFormatError, TranslateBackendError, PromptTooLargeError) as e:
+            log.warning("translate: the strict retry failed (%s)", e)
+            again = {}
+        out: dict[str, Rendering | str] = {}
+        for c in cues:
+            if c.id not in bad:
+                out[c.id] = got[c.id]
+                continue
+            r = again.get(c.id)
+            problem = script_problem(r.text, target) if r is not None else bad[c.id]
+            out[c.id] = r if r is not None and problem is None else cast(str, problem)
+        return out
 
     def _render(
         self,
@@ -693,22 +812,28 @@ class TranslateStage:
             for c in cues:
                 c.error = f"translate: backend: {e}"
             return
+        checked = self._strict_retry(backend, cues, got, styles, glossary, src, target, mode)
         for c in cues:
-            r = got[c.id]
+            r = checked[c.id]
+            if isinstance(r, str):
+                c.literal, c.text, c.error = None, None, WRONG_LANGUAGE + r
+                continue
             c.literal, c.text = r.literal, r.text
             c.delivery.direction = r.direction
-        long = [c for c in cues if len(cast(str, c.text)) > c.budget]
+        long = [c for c in cues if c.text is not None and len(c.text) > c.budget]
         if not long:
             return
         tight = {c.id: math.floor(c.budget * RETRY_BUDGET) for c in long}
         retry = self._request(long, styles, glossary, previous, src, target, tight, mode)
         try:
-            again = backend.translate(retry)
+            again = self._call(backend, retry)
         except (TranslateFormatError, TranslateBackendError, PromptTooLargeError) as e:
             log.warning("translate: over-budget retry failed (%s); keeping the first", e)
             again = {}
         for c in long:
             r = again.get(c.id)
+            if r is not None and script_problem(r.text, target) is not None:
+                r = None  # #38: a shorter line in another language is no rendering
             # keep the shorter rendering; anything still long is left to time fitting
             if r is not None and len(r.text) < len(cast(str, c.text)):
                 c.literal, c.text = r.literal, r.text

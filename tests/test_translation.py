@@ -10,6 +10,7 @@ from fukikae.translation import (
     build_messages,
     parse_response,
     response_schema,
+    script_problem,
 )
 
 
@@ -156,3 +157,34 @@ def test_special_tokens_in_style_never_reach_the_prompt():
     for m in (system, user):
         assert "<|" not in m["content"] and "|>" not in m["content"]
     assert "rough" in user["content"] and "I'm all fired up!" in user["content"]
+
+
+@pytest.mark.parametrize(
+    ("text", "language", "bad"),
+    [
+        ("What the hell is this? Anyway, we're going in.", "en", False),
+        ("Señor, ¿qué pasa? 1ª vez", "es", False),
+        ("21... OK!", "en", False),
+        ("这到底是什么，总之不能投资就只能加入啦", "en", True),
+        ("Sancho 桑丘", "en", True),  # one stray name in Han is still not English
+        ("なんだこれは", "en", True),
+        ("что", "en", True),
+        ("μ's live tonight", "en", False),  # Greek letters in names pass a Latin target
+        ("Σοφία kommt", "de", False),
+        ("なんだこれは、漢字もカタカナも", "ja", False),
+        ("这到底是什么", "zh", False),
+        ("anything at all 这", "xx", False),  # a language with no known script: no check
+    ],
+)
+def test_script_problem_flags_letters_outside_the_targets_scripts(text, language, bad):
+    problem = script_problem(text, language)
+    assert (problem is not None) == bad
+    if bad and language == "en" and "桑" in text:
+        assert "Han" in (problem or "")
+
+
+def test_strict_request_insists_on_the_target_language():
+    plain = build_messages(_req())[0]["content"]
+    strict = build_messages(_req(strict=True))[0]["content"]
+    assert "only in English" not in plain
+    assert "only in English" in strict and "never in Japanese" in strict
