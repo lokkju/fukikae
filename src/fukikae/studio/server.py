@@ -351,9 +351,11 @@ _CONTENT_TYPES = {
     ".svg": "image/svg+xml",
     ".txt": "text/plain; charset=utf-8",
 }
+# media-src takes blob: because a clip, video or audition is fetched with the token header and
+# played from a blob URL (an <audio> or <video> element can't send a header); nothing else does
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-    "media-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+    "media-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; "
     "frame-ancestors 'none'"
 )
 

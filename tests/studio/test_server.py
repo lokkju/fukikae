@@ -1361,3 +1361,54 @@ def test_lines_pages_and_refuses_a_bad_query(studio):
 
 def test_lines_needs_the_token(studio):
     assert studio.request("GET", "/api/characters/1/lines", token=None)[0] == 403
+
+
+# --- the page's files under the CSP -----------------------------------------------------------
+
+
+def _csp(headers: dict[str, str]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for part in headers["content-security-policy"].split(";"):
+        words = part.split()
+        if words:
+            out[words[0]] = words[1:]
+    return out
+
+
+def test_the_page_is_served_under_the_csp(studio):
+    status, headers, body = studio.request("GET", "/", token=None)
+    assert status == 200 and b'src="/static/app.js"' in body
+    csp = _csp(headers)
+    assert csp["default-src"] == ["'self'"]
+    assert csp["script-src"] == ["'self'"] and csp["style-src"] == ["'self'"]
+    # clips and auditions are fetched with the token header and played from blob URLs
+    assert csp["media-src"] == ["'self'", "blob:"]
+    assert "'unsafe-inline'" not in headers["content-security-policy"]
+
+
+@pytest.mark.parametrize(
+    ("path", "ctype"),
+    [
+        ("/static/app.js", "text/javascript"),
+        ("/static/lib.js", "text/javascript"),
+        ("/static/board.js", "text/javascript"),
+        ("/static/voice.js", "text/javascript"),
+        ("/static/token.js", "text/javascript"),
+        ("/static/app.css", "text/css"),
+        ("/static/vendor/preact.module.js", "text/javascript"),
+        ("/static/vendor/hooks.module.js", "text/javascript"),
+        ("/static/vendor/htm.module.js", "text/javascript"),
+    ],
+)
+def test_the_pages_files_are_served_without_the_token(studio, path, ctype):
+    status, headers, body = studio.request("GET", path, token=None)
+    assert status == 200 and body
+    assert headers["content-type"].startswith(ctype)
+    assert headers["x-content-type-options"] == "nosniff"
+    assert "set-cookie" not in headers
+
+
+def test_vendor_metadata_is_not_a_page_file(studio):
+    # VERSIONS has no suffix the server types; it is served as bytes, never run
+    status, headers, _ = studio.request("GET", "/static/vendor/VERSIONS", token=None)
+    assert status == 200 and headers["content-type"] == "application/octet-stream"
