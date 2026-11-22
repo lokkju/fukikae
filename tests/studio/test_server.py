@@ -214,7 +214,9 @@ def test_audio_without_the_token_header_is_refused(studio):
 
 def test_the_static_shell_needs_no_token_and_holds_no_data(studio, ws):  # noqa: F811
     doc = _season(studio)
-    for path in ("/", "/static/index.html", "/static/token.js"):
+    shell = ("/", "/static/index.html", "/static/token.js", "/static/app.js", "/static/lib.js",
+             "/static/board.js", "/static/voice.js", "/static/app.css")  # fmt: skip
+    for path in shell:
         status, headers, body = studio.request("GET", path, token=None)
         assert status == 200, path
         assert "set-cookie" not in headers
@@ -225,7 +227,7 @@ def test_the_static_shell_needs_no_token_and_holds_no_data(studio, ws):  # noqa:
     status, headers, page = studio.request("GET", "/", token=None)
     assert headers["content-type"].startswith("text/html")
     assert "default-src 'self'" in headers["content-security-policy"]
-    assert b"/api/season" in page and b"/static/token.js" in page
+    assert b"/static/app.js" in page and b"/static/token.js" in page
     assert b"<script>" not in page  # no inline script: the CSP allows none
 
 
