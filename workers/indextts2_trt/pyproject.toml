@@ -59,7 +59,7 @@ dependencies = [
     # TensorRT-LLM 0.21 imports `from cuda import cuda, cudart`, which cuda-python 13 dropped
     "cuda-python==12.9.0",
     # TensorRT-LLM pulls datasets, whose latest pyarrow needs NumPy 2; TensorRT-LLM needs NumPy 1
-    "pyarrow==19.0.1",
+    "pyarrow==23.0.1",
 ]
 
 [tool.uv]
