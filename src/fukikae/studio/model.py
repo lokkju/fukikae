@@ -60,10 +60,22 @@ class GenderDecision(_Base):
     gender: Literal["f", "m"] | None
 
 
+class MergeDigests(_Strict):
+    """Each merged character's own `fukikae.studio.apply.row_digest`, as the season index
+    showed it (`CharacterEntry.digest`): what the page knows of both rows when it builds a
+    merge. Either row changed since makes the merge stale, naming that character."""
+
+    keep: str
+    drop: str
+
+
 class MergeDecision(_Base):
     op: Literal["merge"]
     keep: int  # character ids; their actors are merged
     drop: int
+    # the page's form: both rows' own digests, checked beside (or instead of) ``digest``, the
+    # combined digest a `fukikae studio apply` file carries
+    digests: MergeDigests | None = None
 
 
 class SplitDecision(_Base):

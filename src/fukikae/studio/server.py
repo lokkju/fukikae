@@ -213,6 +213,7 @@ MAX_HANDLERS = 16  # connections handled at once; past that, a prompt 503
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CANDIDATES = 200  # candidates per page at most
 DEFAULT_CANDIDATES = 50
+MAX_LINES_PAGE = 500  # translated lines per page at most (`/api/characters/<id>/lines`)
 MAX_OFFERED = 20000  # clip names offered for lazy cutting, oldest forgotten first
 MAX_CUTS = 2  # video clips cut at once (each ffmpeg uses every core)
 CUT_WAIT_S = 20.0  # how long a /video request waits for its name's cut or a cut slot: 503 after
@@ -251,6 +252,13 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
         "/api/characters/<id>/candidates",
         "the character's reference candidates with their verdicts, a page at a time "
         "(?offset=, ?limit= up to 200, ?gated=1 to include refused turns)",
+    ),
+    (
+        "GET",
+        "/api/characters/<id>/lines",
+        "the character's spoken translated cues (real audition lines) for a target language "
+        "(?language=, default the workspace's), each with its source clip, a page at a time "
+        "(?offset=, ?limit= up to 500)",
     ),
     (
         "GET",
@@ -319,6 +327,7 @@ ROUTES: tuple[tuple[str, str, str], ...] = (
 _SEGMENT = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*")
 _CHARACTER = re.compile(r"/api/characters/([0-9]{1,9})")
 _CANDIDATES = re.compile(r"/api/characters/([0-9]{1,9})/candidates")
+_LINES = re.compile(r"/api/characters/([0-9]{1,9})/lines")
 _NUMBER = re.compile(r"[0-9]{1,10}")  # ASCII digits only (str.isdigit takes any script's)
 _LANG = r"([A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8}){0,3})"
 _RANGE = re.compile(r"bytes=([0-9]{0,18})-([0-9]{0,18})")
@@ -342,9 +351,11 @@ _CONTENT_TYPES = {
     ".svg": "image/svg+xml",
     ".txt": "text/plain; charset=utf-8",
 }
+# media-src takes blob: because a clip, video or audition is fetched with the token header and
+# played from a blob URL (an <audio> or <video> element can't send a header); nothing else does
 _CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-    "media-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+    "media-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; "
     "frame-ancestors 'none'"
 )
 
@@ -827,6 +838,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif m := _CANDIDATES.fullmatch(path):
             self._need(method, get, "GET")
             self._candidates(int(m.group(1)), urlsplit(self.path).query)
+        elif m := _LINES.fullmatch(path):
+            self._need(method, get, "GET")
+            self._lines(int(m.group(1)), urlsplit(self.path).query)
         elif m := _COMPARE.fullmatch(path):
             self._need(method, get, "GET")
             self._compare(int(m.group(1)), m.group(2), urlsplit(self.path).query)
@@ -1075,6 +1089,7 @@ class _Handler(BaseHTTPRequestHandler):
         return _Reply(422, "refused", _PATHS.sub("<path>", str(e)))
 
     def _candidates(self, cid: int, query: str) -> None:
+        self._live_character(cid)
         q = parse_qs(query, keep_blank_values=True)
 
         def number(key: str, default: int, lo: int, hi: int) -> int:
@@ -1101,6 +1116,56 @@ class _Handler(BaseHTTPRequestHandler):
             "eligible": sum(c.rank is not None for c in got), "offset": offset, "limit": limit,
             "candidates": [c.model_dump(mode="json") for c in page],
         })  # fmt: skip
+
+    def _lines(self, cid: int, query: str) -> None:
+        """The character's spoken cues in each ready episode's ``06-translate/cues.<lang>.json``
+        (what ``POST /api/auditions`` takes as a real line), in episode and time order, with
+        the clip of each cue's source span (cut on first fetch). Read-only; an episode with no
+        cues for the language, or cues that can't be read, is left out. A merged-away or
+        unknown character is refused as the draft routes refuse it (`_live_character`)."""
+        from fukikae.artifacts import read_json
+        from fukikae.models import DubCues
+        from fukikae.stages.tts import MIN_REFERENCE_S, TtsStage
+
+        self._live_character(cid)
+        q = parse_qs(query, keep_blank_values=True)
+
+        def number(key: str, default: int, lo: int, hi: int) -> int:
+            raw = q.get(key, [str(default)])[-1]
+            if not _NUMBER.fullmatch(raw) or not lo <= int(raw) <= hi:
+                raise _Reply(400, "bad-query", f"{key} must be a whole number {lo} to {hi}")
+            return int(raw)
+
+        offset = number("offset", 0, 0, 10**9)
+        limit = number("limit", 100, 1, MAX_LINES_PAGE)
+        try:
+            language = language_of(q.get("language", [self.server.cfg.target_language])[-1])
+        except DraftError as e:
+            raise _Reply(400, "bad-query", str(e)) from None
+        found: list[tuple[str, Any]] = []
+        for ep in self._season().episodes:
+            if not ep.ready:
+                continue
+            path = self.server.ws.work_dir(ep.id) / "06-translate" / f"cues.{language}.json"
+            if not path.is_file():
+                continue
+            try:
+                cues = read_json(path, DubCues).cues
+            except (OSError, ValueError, ArtifactVersionError):
+                continue
+            found += [(ep.id, c) for c in cues
+                      if c.character_id == cid and TtsStage._skipped(c) is None]  # fmt: skip
+        page = found[offset : offset + limit]
+        out = []
+        for ep_id, c in page:
+            a, b = c.delivery.reference
+            clip = self.server.offer(ep_id, a, b) if b - a >= MIN_REFERENCE_S else None
+            out.append({
+                "episode": ep_id, "cue_id": c.id, "start": c.start, "end": c.end,
+                "text": c.text, "source_text": c.source_text, "source_clip": clip,
+            })  # fmt: skip
+        self._json(200, {"character": cid, "language": language, "total": len(found),
+                         "offset": offset, "limit": limit, "lines": out})  # fmt: skip
 
     def _draft_body(self, draft: Draft) -> dict[str, Any]:
         clips: dict[str, str] = {}

@@ -214,7 +214,9 @@ def test_audio_without_the_token_header_is_refused(studio):
 
 def test_the_static_shell_needs_no_token_and_holds_no_data(studio, ws):  # noqa: F811
     doc = _season(studio)
-    for path in ("/", "/static/index.html", "/static/token.js"):
+    shell = ("/", "/static/index.html", "/static/token.js", "/static/app.js", "/static/lib.js",
+             "/static/board.js", "/static/voice.js", "/static/app.css")  # fmt: skip
+    for path in shell:
         status, headers, body = studio.request("GET", path, token=None)
         assert status == 200, path
         assert "set-cookie" not in headers
@@ -225,7 +227,7 @@ def test_the_static_shell_needs_no_token_and_holds_no_data(studio, ws):  # noqa:
     status, headers, page = studio.request("GET", "/", token=None)
     assert headers["content-type"].startswith("text/html")
     assert "default-src 'self'" in headers["content-security-policy"]
-    assert b"/api/season" in page and b"/static/token.js" in page
+    assert b"/static/app.js" in page and b"/static/token.js" in page
     assert b"<script>" not in page  # no inline script: the CSP allows none
 
 
@@ -847,6 +849,58 @@ def test_preview_of_a_merge_stamps_both_characters(studio, ws):  # noqa: F811
     assert set(body) >= {"lines", "invalidations", "stale", "unchecked", "decision"}
 
 
+def _page_merge(doc: dict, keep: int, drop: int) -> dict:
+    """A merge as the page builds it: each character's row digest from the season index."""
+    digests = {"keep": _entry(doc, keep)["digest"], "drop": _entry(doc, drop)["digest"]}
+    return {"op": "merge", "keep": keep, "drop": drop, "digests": digests}
+
+
+def test_a_page_merge_previews_checked_and_applies_as_previewed(studio, ws):  # noqa: F811
+    doc = _season(studio)
+    sent = _page_merge(doc, 1, 2)
+    status, body = studio.json("POST", "/api/decisions/preview", sent)
+    assert status == 200, body
+    assert body["stale"] is None and body["unchecked"] is False
+    assert body["decision"]["digests"] == sent["digests"] and body["decision"]["digest"] is None
+    status, applied = studio.json("POST", "/api/decisions", body["decision"])
+    assert status == 200, applied
+    with Registry(ws.registry_path) as reg:
+        assert 2 not in {c.id for c in reg.characters()}
+
+
+@pytest.mark.parametrize("renamed", [1, 2])
+def test_a_page_merge_is_stale_when_either_character_changed_after_page_load(studio, ws, renamed):  # noqa: F811
+    doc = _season(studio)  # the page loads
+    with Registry(ws.registry_path) as reg:
+        reg.rename_character(renamed, "Someone")  # another tab, or the CLI
+    sent = _page_merge(doc, 1, 2)
+    status, body = studio.json("POST", "/api/decisions/preview", sent)
+    assert status == 200 and body["stale"], body
+    assert f"character {renamed} (" in body["stale"]
+    assert f"character {3 - renamed} (" not in body["stale"]
+    status, got = studio.json("POST", "/api/decisions", body["decision"])
+    assert status == 409 and got["error"] == "stale", got
+    assert f"character {renamed}" in got["message"]
+    with Registry(ws.registry_path) as reg:
+        assert {1, 2} <= {c.id for c in reg.characters()}
+
+
+@pytest.mark.parametrize("renamed", [1, 2])
+def test_a_page_merge_is_refused_when_either_character_changed_after_its_preview(
+    studio,
+    ws,  # noqa: F811
+    renamed,
+):
+    doc = _season(studio)
+    status, body = studio.json("POST", "/api/decisions/preview", _page_merge(doc, 1, 2))
+    assert status == 200 and not body["stale"], body
+    with Registry(ws.registry_path) as reg:
+        reg.rename_character(renamed, "Someone")
+    status, got = studio.json("POST", "/api/decisions", body["decision"])
+    assert status == 409 and got["error"] == "stale", got
+    assert f"character {renamed} (" in got["message"]
+
+
 def test_preview_runs_the_write_time_refusals(studio):
     status, body = studio.json("POST", "/api/decisions/preview",
                                {"op": "merge", "keep": 1, "drop": 1})  # fmt: skip
@@ -1322,3 +1376,112 @@ def test_stuck_cuts_answer_busy_and_leave_the_index_answering(video_ws, monkeypa
                        for r in busy)  # fmt: skip
     finally:
         gate.set()
+
+
+# --- the character's translated lines (the voice screen's real audition lines) --------------
+
+
+def test_lines_lists_the_characters_spoken_cues_for_the_target_language(studio, ws):  # noqa: F811
+    from fukikae.artifacts import read_json
+    from fukikae.models import DubCues
+    from fukikae.stages.tts import TtsStage
+
+    status, body = studio.json("GET", "/api/characters/1/lines")
+    assert status == 200, body
+    assert body["language"] == "en" and body["character"] == 1
+    from tests.studio.test_season import E1, E2
+
+    want = set()
+    for ep in (E1, E2):
+        path = ws.work_dir(ep) / "06-translate" / "cues.en.json"
+        if path.is_file():
+            for c in read_json(path, DubCues).cues:
+                if c.character_id == 1 and TtsStage._skipped(c) is None:
+                    want.add((ep, c.id))
+    assert want and {(x["episode"], x["cue_id"]) for x in body["lines"]} == want
+    assert body["total"] == len(want)
+    one = body["lines"][0]
+    assert set(one) >= {"episode", "cue_id", "start", "end", "text", "source_text", "source_clip"}
+
+
+def test_lines_pages_and_refuses_a_bad_query(studio):
+    status, body = studio.json("GET", "/api/characters/1/lines?limit=1")
+    assert status == 200 and len(body["lines"]) == 1
+    assert studio.json("GET", "/api/characters/1/lines?limit=0")[0] == 400
+    assert studio.json("GET", "/api/characters/1/lines?language=../x")[0] == 400
+    status, body = studio.json("GET", "/api/characters/1/lines?language=de")
+    assert status == 200 and body["lines"] == [] and body["language"] == "de"
+
+
+def test_lines_of_a_merged_character_is_409_naming_the_survivor(studio, ws):  # noqa: F811
+    from fukikae.studio.apply import apply_decision, stamp
+    from fukikae.studio.model import parse_decision
+
+    with Registry(ws.registry_path) as reg:
+        d = stamp(reg, parse_decision({"op": "merge", "keep": 2, "drop": 1}))
+    apply_decision(ws, d)
+    for path in ("/api/characters/1/lines", "/api/characters/1/candidates"):
+        status, got = studio.json("GET", path)
+        assert status == 409 and got["error"] == "character-merged", (path, got)
+        assert got["merged_into"] == 2, got
+
+
+def test_lines_of_an_unknown_character_is_404(studio):
+    for path in ("/api/characters/99/lines", "/api/characters/99/candidates"):
+        status, got = studio.json("GET", path)
+        assert status == 404 and got["error"] == "unknown-character", (path, got)
+
+
+def test_lines_needs_the_token(studio):
+    assert studio.request("GET", "/api/characters/1/lines", token=None)[0] == 403
+
+
+# --- the page's files under the CSP -----------------------------------------------------------
+
+
+def _csp(headers: dict[str, str]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for part in headers["content-security-policy"].split(";"):
+        words = part.split()
+        if words:
+            out[words[0]] = words[1:]
+    return out
+
+
+def test_the_page_is_served_under_the_csp(studio):
+    status, headers, body = studio.request("GET", "/", token=None)
+    assert status == 200 and b'src="/static/app.js"' in body
+    csp = _csp(headers)
+    assert csp["default-src"] == ["'self'"]
+    assert csp["script-src"] == ["'self'"] and csp["style-src"] == ["'self'"]
+    # clips and auditions are fetched with the token header and played from blob URLs
+    assert csp["media-src"] == ["'self'", "blob:"]
+    assert "'unsafe-inline'" not in headers["content-security-policy"]
+
+
+@pytest.mark.parametrize(
+    ("path", "ctype"),
+    [
+        ("/static/app.js", "text/javascript"),
+        ("/static/lib.js", "text/javascript"),
+        ("/static/board.js", "text/javascript"),
+        ("/static/voice.js", "text/javascript"),
+        ("/static/token.js", "text/javascript"),
+        ("/static/app.css", "text/css"),
+        ("/static/vendor/preact.module.js", "text/javascript"),
+        ("/static/vendor/hooks.module.js", "text/javascript"),
+        ("/static/vendor/htm.module.js", "text/javascript"),
+    ],
+)
+def test_the_pages_files_are_served_without_the_token(studio, path, ctype):
+    status, headers, body = studio.request("GET", path, token=None)
+    assert status == 200 and body
+    assert headers["content-type"].startswith(ctype)
+    assert headers["x-content-type-options"] == "nosniff"
+    assert "set-cookie" not in headers
+
+
+def test_vendor_metadata_is_not_a_page_file(studio):
+    # VERSIONS has no suffix the server types; it is served as bytes, never run
+    status, headers, _ = studio.request("GET", "/static/vendor/VERSIONS", token=None)
+    assert status == 200 and headers["content-type"] == "application/octet-stream"
