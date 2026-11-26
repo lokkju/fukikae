@@ -52,7 +52,7 @@ dependencies = [
     # The ONNX exporters as of upstream's verification (2026-08-04, inside its onnx<1.21 range):
     # onnx-ir 1.x wraps the version converter's refusal in an error torch 2.7 doesn't catch, and
     # older onnxscript can't translate the DiT's reflect pad with a symbolic width.
-    "onnx==1.20.1",
+    "onnx==1.22.0",
     "onnxscript==0.7.1",
     "onnx-ir==0.2.1",
     "polygraphy==0.49.26",
